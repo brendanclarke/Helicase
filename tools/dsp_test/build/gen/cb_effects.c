@@ -3,6 +3,8 @@
 
 #define EFFECT_LANE_NONE                 0xFFu
 
+#define EFFECT_TYPE_CRUMPBIT             2u
+
 typedef struct {
     float *l;
     float *r;
@@ -12,7 +14,13 @@ typedef struct {
 } effect_io_t;
 
 typedef struct {
-    void (*init)(void *rt, const fxbuf_handoff_t *handoff);
+    /*
+     * S095 P1 (SD2): init receives the live share, so a buffer user can
+     * seat, pack an outgoing tail and clear its rings in the foreground
+     * before the first render block (the manager calls it between blocks).
+     */
+    void (*init)(void *rt, const fxbuf_handoff_t *handoff,
+                 const fx_share_t *share);
     void (*export_handoff)(const void *rt, fxbuf_handoff_t *out);
     void (*write_param)(void *rt, uint8_t index, uint8_t value);
     void (*process)(void *rt, effect_io_t *io);

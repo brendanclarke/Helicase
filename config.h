@@ -958,6 +958,8 @@
 ** their integer waveform ID for that block to bound CPU cost. This keeps user
 ** samples eligible for interpolation while preventing every modulated voice
 ** from doubling oscillator render work at once. */
+/* S095 P1: one of the two is locked while an Effect type-change feed runs
+   (effects_feedSlotLock()). */
 #define OSC_WAVE_INTERP_MAX_ACTIVE 2u
 
 

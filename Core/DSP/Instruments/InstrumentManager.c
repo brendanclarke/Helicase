@@ -2033,7 +2033,13 @@ uint8_t instrumentManager_itpFadeSlotAvailable(uint8_t exclude_slot)
             continue;
         count = (uint8_t)(count + instrumentManager_slotHasActiveItpFade(slot));
     }
-    return (uint8_t)(count < OSC_WAVE_INTERP_MAX_ACTIVE);
+    /*
+     * S095 P1 (plan §5.7): one slot fewer while an Effect feed runs; a fade
+     * already running keeps its slot until it ends (<= 132 samples), the
+     * accepted residual of D19.
+     */
+    return (uint8_t)(count < (uint8_t)(OSC_WAVE_INTERP_MAX_ACTIVE -
+                                       effects_feedSlotLock()));
 }
 
 void instrumentManager_calcSlotAsync(uint8_t slot)

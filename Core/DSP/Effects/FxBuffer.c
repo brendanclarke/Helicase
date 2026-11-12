@@ -53,7 +53,7 @@ _Static_assert(FXBUF_VOICE_UNIT_COUNT <= 16u,
 _Static_assert(FXBUF_VOICE_UNIT_COUNT ==
                    FXBUF_VOICE_SLOT_COUNT * FXBUF_VOICE_UNITS_PER_SLOT,
                "12 units = 6 slots x 2 (user decision A29)");
-_Static_assert(sizeof(fxbuf_handoff_t) == 180u,
+_Static_assert(sizeof(fxbuf_handoff_t) == 196u,
                "handoff size is recorded in STORAGE_SRAM_MANIFEST.md; update both");
 
 /*
@@ -74,7 +74,7 @@ typedef struct {
 
 static fxbuf_state_t fxbuf_state;
 
-/* Handoff record (SRAM1 .bss, 180 B); audio contents remain in the arena. */
+/* Handoff record (SRAM1 .bss, 196 B since S095 P1, D18); audio contents remain in the arena. */
 static fxbuf_handoff_t fxbuf_handoffRecord;
 
 #if DEV_MODE_DIAGNOSTIC
@@ -113,7 +113,12 @@ static void fxbuf_notifyIfShareChanged(uint32_t before_bytes)
         fxbuf_state.on_share_changed(&share);
 }
 
-/* Reset every handoff field to the safe boot state: no valid audio. */
+/*
+ * Reset every handoff field to the safe boot state: no valid audio.
+ * S095 P1: the memset also clears the segment description (wrap bytes 0,
+ * speed/dry/gain 0, sides 0); the loop below sets the 16 position pairs to
+ * FXBUF_OFFSET_NONE, which is what "no segment" means to a reader.
+ */
 static void fxbuf_handoffResetAll(void)
 {
     uint8_t i;
@@ -414,6 +419,20 @@ fxbuf_handoff_t *fxbuf_handoffBeginExit(void)
     h->effect_channels = 0u;
     h->effect_bits = 0u;
     h->effect_rate_hz = 0u;
+    /*
+     * S095 P1 (D24): a fresh exit describes no segments until the outgoing
+     * type's export_handoff fills them (the position loop below clears
+     * slots 12..15). Without this, a type that exports none (StereoFilter,
+     * OFF) would leave the previous owner's wrap domain and gains behind,
+     * and an entering type would feed stale audio.
+     */
+    h->effect_wrap_offset = 0u;
+    h->effect_wrap_bytes = 0u;
+    h->effect_speed_uq15 = 0u;
+    h->effect_dry_uq15 = 0u;
+    h->effect_feed_gain_uq15 = 0u;
+    h->effect_stride = 0u;
+    h->effect_seg_sides = 0u;
     for (i = FXBUF_HANDOFF_EFFECT_POINTER_BASE;
          i < FXBUF_HANDOFF_POINTER_COUNT; i++) {
         h->read_offset[i] = FXBUF_OFFSET_NONE;

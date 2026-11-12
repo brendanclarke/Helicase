@@ -22,6 +22,10 @@
 /* S074: CrumpBit (`cbt`), the first buffer-using Effect type. */
 #include "CrumpBitParameters.h"
 #include "CrumpBitEffect.h"
+/* S095 P1: the Space kit (the arena prefix, the feed and the drain). */
+#include "SpaceKit.h"
+#include "SpaceParameters.h"
+#include "SpaceEffect.h"
 #include <string.h>
 
 _Static_assert(EFFECT_TYPE_OFF == FXBUF_EFFECT_TYPE_NONE,
@@ -58,6 +62,8 @@ typedef union {
      * Its audio lives in the FxBuffer share, not in this union.
      */
     CrumpBitRuntime crump_bit;
+    /* S095 P1: the Space types (Delay, Reverb, Echo), <= 100 B (SD13). */
+    SpaceRuntime space;
 } effects_runtime_t;
 
 static INDTCMZ effects_runtime_t effects_runtime;
@@ -135,12 +141,69 @@ static const effect_registry_entry_t effects_registry[EFFECT_TYPE_COUNT] = {
         (uint16_t)sizeof(CrumpBitRuntime),
         CRUMPBIT_LOOP_MIN_SHARE_BYTES, CRUMPBIT_LOOP_MAX_BYTES
     },
+    /*
+     * S095 P1: Delay (`dly`), Reverb (`rvb`), Echo (`ech`). Stereo in and
+     * out. Every one is an elastic buffer user (D2): it plays in the whole
+     * usable share above the arena prefix (§S18). buffer_min_bytes is the
+     * minimum share, buffer_pref_bytes the arena (declarative, as
+     * CrumpBit's). No sub-types: one fixed lane row each
+     * (plan §4, lanes 14/15 = the common vol and pan). The default layout
+     * places rows 3.. on SELECT 2.. (menuEffects.c, no select_layout); each
+     * type's ui hooks label its times, ratios, states and pitches (one
+     * hook set per type: format_value3 receives no type id).
+     */
+    {
+        space_delayToken3, space_delayAbbrev5, space_delayFull8,
+        EFFECT_IO_STEREO_IN | EFFECT_IO_STEREO_OUT,
+        space_delayDescriptors, SPACE_DELAY_PARAM_COUNT,
+        { EFFECT_LANE_MORPH_SOURCE,
+          SPACE_DLY_MIX, SPACE_DLY_TIME, SPACE_DLY_FEEDBACK, SPACE_DLY_TONE,
+          SPACE_DLY_DEGRADE, SPACE_DLY_WOW, SPACE_DLY_XFEED, SPACE_DLY_SPREAD,
+          SPACE_DLY_REVERSE, SPACE_DLY_HOLD, SPACE_DLY_HEADS, SPACE_DLY_DUCK,
+          EFFECT_COMMON_PARAM_LEVEL, EFFECT_COMMON_PARAM_PAN,
+          EFFECT_LANE_NONE },
+        NULL, &space_delayOps, &space_delayUi,
+        (uint16_t)sizeof(SpaceRuntime),
+        SPACE_MIN_SHARE_BYTES, SK_ARENA_PREF_BYTES
+    },
+    {
+        space_reverbToken3, space_reverbAbbrev5, space_reverbFull8,
+        EFFECT_IO_STEREO_IN | EFFECT_IO_STEREO_OUT,
+        space_reverbDescriptors, SPACE_REVERB_PARAM_COUNT,
+        { EFFECT_LANE_MORPH_SOURCE,
+          SPACE_RVB_MIX, SPACE_RVB_DECAY, SPACE_RVB_FREEZE, SPACE_RVB_SHIMMER,
+          SPACE_RVB_INTERVAL, SPACE_RVB_DETUNE, SPACE_RVB_ENV, SPACE_RVB_DUCK,
+          SPACE_RVB_LOW_SHELF, SPACE_RVB_HIGH_SHELF, SPACE_RVB_PREDELAY,
+          SPACE_RVB_MOD, SPACE_RVB_WIDTH,
+          EFFECT_COMMON_PARAM_LEVEL, EFFECT_COMMON_PARAM_PAN },
+        NULL, &space_reverbOps, &space_reverbUi,
+        (uint16_t)sizeof(SpaceRuntime),
+        SPACE_MIN_SHARE_BYTES, SK_ARENA_PREF_BYTES
+    },
+    {
+        space_echoToken3, space_echoAbbrev5, space_echoFull8,
+        EFFECT_IO_STEREO_IN | EFFECT_IO_STEREO_OUT,
+        space_echoDescriptors, SPACE_ECHO_PARAM_COUNT,
+        { EFFECT_LANE_MORPH_SOURCE,
+          SPACE_ECH_MIX, SPACE_ECH_TIME, SPACE_ECH_FEEDBACK, SPACE_ECH_TONE,
+          SPACE_ECH_DEGRADE, SPACE_ECH_WOW, SPACE_ECH_TO_REVERB,
+          SPACE_ECH_BLEND, SPACE_ECH_DECAY, SPACE_ECH_LOW_SHELF, SPACE_ECH_HEADS,
+          SPACE_ECH_DUCK, SPACE_ECH_ROUTING,
+          EFFECT_COMMON_PARAM_LEVEL, EFFECT_COMMON_PARAM_PAN },
+        NULL, &space_echoOps, &space_echoUi,
+        (uint16_t)sizeof(SpaceRuntime),
+        SPACE_MIN_SHARE_BYTES, SK_ARENA_PREF_BYTES
+    },
 };
 
 _Static_assert(sizeof(StereoFilterRuntime) <= sizeof(effects_runtime_t),
                "Effect runtime union must hold StereoFilter");
 _Static_assert(sizeof(CrumpBitRuntime) <= sizeof(effects_runtime_t),
                "Effect runtime union must hold CrumpBit");
+_Static_assert(sizeof(SpaceRuntime) <= sizeof(effects_runtime_t),
+               "Effect runtime union must hold the Space types");
+_Static_assert(sizeof(SpaceRuntime) <= 100u,
+               "the Space runtime stays inside the 100 B union (SD13)");
 /*
  * RAM guard (S074; 100 B since S091 P4): the DTCM union size is recorded in
  * STORAGE_SRAM_MANIFEST.md. A larger member grows .dtcmz and shrinks the
@@ -160,8 +223,11 @@ _Static_assert(sizeof(effects_runtime_t) == 100u,
  * The state is SRAM1-resident and exactly 80 bytes: active runtime type and
  * Scene, a force-write flag, one last-applied byte per common type domain,
  * live FX step/selection state, and the common return settings consumed by the
- * mixer's FX return. The spare `reserved` byte keeps the layout; the former
- * held Morph latch was removed (S081 §5.3, one-step Morph lane).
+ * mixer's FX return. `reserved` (S095 P1) holds two flags and no longer pads:
+ * bit 0 EFFECTS_STATE_FEED_LOCK (one interpolation slot locked while a
+ * type-change feed runs, plan §5.7) and bit 1 EFFECTS_STATE_DRAIN (the runtime
+ * type is draining its tail into OFF, plan §5.5). The former held Morph latch
+ * was removed (S081 §5.3, one-step Morph lane).
  * scene_index is the Scene whose Effect record effects_service() reads every
  * render block. effects_activateScene() sets it for a real Scene change;
  * effects_rebindSourceScene() moves it to Scene 17 at the background-load
@@ -186,6 +252,23 @@ _Static_assert(sizeof(effects_state_t) == 80u,
 _Static_assert(STEP_SCALE_COUNT == EFFECT_SEQ_SCALE_COUNT &&
                STEP_SCALE_DEFAULT == EFFECT_SEQ_SCALE_DEFAULT,
                "Pattern and FX scale contracts must remain identical");
+
+/*
+ * effects_state.reserved flags (S095 P1).
+ *
+ * EFFECTS_STATE_FEED_LOCK: set by sk_feedBegin() (through
+ * effects_setFeedSlotLock()) when an entering type starts a feed; cleared on
+ * the feed's last block, when a share change ends the feed, and whenever a
+ * type exits (effects_switchRuntime()).
+ * EFFECTS_STATE_DRAIN: set when a buffer-using type is switched to OFF
+ * (D25); while it is set, runtime_type is the draining type, the logical
+ * type is OFF (effects_logicalType()), effects_service() resolves no rows,
+ * and effects_process() runs the draining type on a muted input under the
+ * drain envelope. Cleared at the drain's end, by a switch back to the
+ * draining type, or by a switch to another type.
+ */
+#define EFFECTS_STATE_FEED_LOCK   0x01u
+#define EFFECTS_STATE_DRAIN       0x02u
 
 static effects_state_t effects_state;
 
@@ -1849,6 +1932,39 @@ static void *effects_runtimeMember(void)
 }
 
 /*
+ * Drain and logical-type helpers (S095 P1 plan §5.5, D25; SD4).
+ *
+ * effects_draining(): 1 while the runtime type drains into OFF.
+ * effects_logicalType(): the type the user and the record see, OFF while
+ * draining, else the runtime type. Every reader outside this file
+ * (effects_activeType(): menu, MIDI Learn) and the rebind test use it, so a
+ * draining tail is never offered the draining type's rows.
+ */
+static inline uint8_t effects_draining(void)
+{
+    return (uint8_t)((effects_state.reserved & EFFECTS_STATE_DRAIN) != 0u);
+}
+
+static inline effect_type_id_t effects_logicalType(void)
+{
+    return effects_draining() ? (effect_type_id_t)EFFECT_TYPE_OFF
+                              : effects_state.runtime_type;
+}
+
+uint8_t effects_feedSlotLock(void)
+{
+    return (uint8_t)(effects_state.reserved & EFFECTS_STATE_FEED_LOCK);
+}
+
+void effects_setFeedSlotLock(uint8_t on)
+{
+    if (on)
+        effects_state.reserved |= EFFECTS_STATE_FEED_LOCK;
+    else
+        effects_state.reserved &= (uint8_t)~EFFECTS_STATE_FEED_LOCK;
+}
+
+/*
  * Export the live type's arena description into a fresh handoff snapshot.
  *
  * What: begins a new FxBuffer handoff record (share bounds and unit owners
@@ -1857,11 +1973,14 @@ static void *effects_runtimeMember(void)
  * export_handoff. Why: the handoff must be current both when a type exits
  * (type switch) and when a same-type Scene switch keeps the runtime alive
  * (S074 gap 1). Inputs: effects_state.runtime_type and the runtime union.
+ * S095 P1: returns the record just written, so the drain's end can clear
+ * FXBUF_STATE_EFFECT_WRITTEN on it (F2: a tail heard to its end is not fed
+ * again). export_handoff only describes (SD3).
  * Output: the handoff record. No runtime or arena byte changes. Callers:
  * effects_switchRuntime(), effects_activateScene(). Affiliates:
  * fxbuf_handoffBeginExit(), crumpBit_exportHandoff().
  */
-static void effects_exportHandoff(void)
+static fxbuf_handoff_t *effects_exportHandoff(void)
 {
     const effect_registry_entry_t *entry =
         effects_registryEntry(effects_state.runtime_type);
@@ -1873,29 +1992,71 @@ static void effects_exportHandoff(void)
         ((entry && entry->io_flags != 0u) ? 1u : 0u);
     if (entry && entry->ops && entry->ops->export_handoff)
         entry->ops->export_handoff(effects_runtimeMember(), handoff);
+    return handoff;
 }
 
 /*
- * Switch the live runtime type through the FxBuffer handoff.
+ * Switch the live Effect runtime to another type (S074; S095 P1 drain and
+ * share).
  *
- * The outgoing type exports its arena state, the manager clears only its
- * control union, and the incoming type initializes from the handoff. The next
- * effects_service() pass forces every descriptor into the fresh runtime.
+ * What, in order:
+ * 1. an unknown id becomes OFF;
+ * 2. while draining (D25): a switch back to the draining type cancels the
+ *    drain and keeps the runtime and its tail (as a same-type Scene switch);
+ *    a switch to OFF again leaves the drain running;
+ * 3. into OFF from a type that has a buffer (export_handoff non-NULL, SD11)
+ *    and is not already OFF: the drain starts (sk_drainBegin() resets its
+ *    counters in the arena control block) and nothing else changes; the
+ *    runtime keeps rendering on a muted input until its tail ends;
+ * 4. otherwise the outgoing type (or the draining one) exports its live
+ *    handoff, both reserved flags clear (its feed and drain end with it), the
+ *    union is zeroed, and the incoming type's init receives the handoff and
+ *    the share (SD2), so it can seat, pack the old tail and clear its rings
+ *    before the next block.
+ * Why: plan §5 (feed-through, D20-D22) and §5.5 (drain, D25); the order keeps
+ * the handoff a description of the old arena at the moment init reads it.
+ * Inputs: incoming type id. Outputs: effects_runtime, effects_state.
+ * Callers: effects_activateScene(), effects_changeTypeScene().
+ * Affiliates: sk_drainBegin(), effects_drainProcess(), fxbuf_handoff().
  */
 static void effects_switchRuntime(effect_type_id_t incoming)
 {
     const effect_registry_entry_t *new_entry = effects_registryEntry(incoming);
+    const effect_registry_entry_t *old_entry =
+        effects_registryEntry(effects_state.runtime_type);
+    fx_share_t share;
 
     if (!new_entry) {
         incoming = EFFECT_TYPE_OFF;
         new_entry = effects_registryEntry(EFFECT_TYPE_OFF);
     }
+    fxbuf_effectShare(&share);
+    if (effects_draining()) {
+        if (incoming == effects_state.runtime_type) {
+            /* Back to the draining type: its runtime and tail stay live. */
+            effects_state.reserved &= (uint8_t)~EFFECTS_STATE_DRAIN;
+            effects_state.force_all = 1u;
+            return;
+        }
+        if (incoming == EFFECT_TYPE_OFF)
+            return;   /* still OFF: the drain carries on */
+    } else if (incoming == EFFECT_TYPE_OFF &&
+               effects_state.runtime_type != EFFECT_TYPE_OFF &&
+               old_entry && old_entry->ops &&
+               old_entry->ops->export_handoff &&
+               sk_drainBegin(&share, effects_state.runtime_type)) {
+        effects_state.reserved |= EFFECTS_STATE_DRAIN;
+        return;
+    }
     /* The outgoing type describes its arena use before the union clears. */
-    effects_exportHandoff();
+    (void)effects_exportHandoff();
+    effects_state.reserved &=
+        (uint8_t)~(EFFECTS_STATE_DRAIN | EFFECTS_STATE_FEED_LOCK);
     memset(&effects_runtime, 0, sizeof(effects_runtime));
     effects_state.runtime_type = incoming;
     if (new_entry && new_entry->ops && new_entry->ops->init)
-        new_entry->ops->init(effects_runtimeMember(), fxbuf_handoff());
+        new_entry->ops->init(effects_runtimeMember(), fxbuf_handoff(), &share);
+    sk_idleReset(&share);
     effects_state.force_all = 1u;
 }
 
@@ -1954,8 +2115,13 @@ void effects_activateScene(uint8_t scene_index)
          * content stay live, so a CrumpBit tail keeps ringing into the new
          * Scene's settings. The handoff is refreshed without init, so share
          * bounds, unit owners and type positions describe the arena as it is.
+         * S095 P1: a Scene of the draining type ends the drain (the tail
+         * keeps ringing into the new Scene's settings, as any same-type
+         * switch). A Scene whose type is OFF reaches effects_switchRuntime()
+         * instead, which leaves the drain running.
          */
-        effects_exportHandoff();
+        effects_state.reserved &= (uint8_t)~EFFECTS_STATE_DRAIN;
+        (void)effects_exportHandoff();
     }
     /*
      * Scene rule (S072_ST8 D3): the new Scene's lane locks begin at its next
@@ -2003,7 +2169,9 @@ uint8_t effects_rebindSourceScene(uint8_t scene_index)
     if (!record)
         return 0u;
     type = effects_registryEntry(record->type) ? record->type : EFFECT_TYPE_OFF;
-    if (type != effects_state.runtime_type)
+    /* S095 P1: while draining, the logical type (OFF) is what the Scene
+     * record must match; the draining runtime is left untouched. */
+    if (type != effects_logicalType())
         return 0u;
     effects_state.scene_index = scene_index;
     return 1u;
@@ -2095,6 +2263,18 @@ void effects_service(void)
      */
     effects_seqConsume(record);
     active_step = effects_seqStepFor(record);
+    /*
+     * S095 P1 (D25, SD12): while draining, the record is OFF's and its rows
+     * mean nothing to the draining type. The FX latch above is still
+     * consumed (the FX clock stays aligned, MEMORY: FX sequence = master
+     * clock), then every row, including the return route/level/pan, stays
+     * at the outgoing Scene's values. This also skips the descriptor loop's
+     * cost (≈ 142 cycles a row) for the drain's length.
+     */
+    if (effects_draining()) {
+        effects_state.force_all = 0u;
+        return;
+    }
     step = (active_step != EFFECT_SEQ_STEP_NONE)
         ? &record->steps[active_step] : NULL;
     /*
@@ -2191,22 +2371,110 @@ void effects_service(void)
     effects_state.force_all = 0u;
 }
 
-void effects_process(effect_io_t *io)
+/*
+ * One drain block (S095 P1 plan §5.5, D25, F2, F3).
+ *
+ * What:
+ * 1. zero the block's input (both bus channels): the draining type hears
+ *    silence, so it plays only what is already in its buffer;
+ * 2. run the draining type's process at its frozen rows;
+ * 3. sk_drainStep() scales the output by the envelope (1.0 until the last
+ *    500 ms of the 6 s ceiling, then linear to 0) and returns 1 when the
+ *    drain is over (the block peak stayed below -80 dBFS for 14 blocks, or
+ *    the ceiling was reached);
+ * 4. at the end: export the final handoff, clear FXBUF_STATE_EFFECT_WRITTEN
+ *    (F2: no later feed of a tail already heard), zero the union and make
+ *    the runtime OFF; effects_activeIoFlags() then returns 0 and the mixer
+ *    drops the bus from the next block.
+ * Why: an exact tail costs exactly the draining type's own budget, which
+ * it already fits (the skipped descriptor loop frees ≈ 2,000-3,000 more).
+ * Cost: the zeroing (64 stores) plus sk_drainStep() (≈ 6 per frame: two
+ * multiplies, two abs/max) per block.
+ * Inputs: the draining entry, io. Outputs: io, effects_state, the handoff.
+ * Caller: effects_process(). Affiliates: sk_drainBegin(), sk_drainStep().
+ */
+static __attribute__((noinline)) void effects_drainProcess(
+    const effect_registry_entry_t *entry, effect_io_t *io)
+{
+    uint32_t n;
+
+    for (n = 0u; n < io->frames; n++) {
+        io->l[n] = 0.0f;
+        if (io->r)
+            io->r[n] = 0.0f;
+    }
+    entry->ops->process(effects_runtimeMember(), io);
+    if (sk_drainStep(io)) {
+        fxbuf_handoff_t *h = effects_exportHandoff();
+
+        h->state_flags &= (uint8_t)~FXBUF_STATE_EFFECT_WRITTEN;
+        effects_state.reserved = 0u;
+        memset(&effects_runtime, 0, sizeof(effects_runtime));
+        effects_state.runtime_type = EFFECT_TYPE_OFF;
+        effects_state.force_all = 1u;
+    }
+}
+
+/*
+ * Process one Effect block (S095 P1: with the drain and the stopped-
+ * transport idle).
+ *
+ * What: the live type's process on the mixer's normalized bus. While
+ * draining (D25), effects_drainProcess() zeroes the input first, runs the
+ * draining type, scales its output by the drain envelope and ends the drain
+ * when the tail is done: -80 dBFS held for 10 ms, or the 6 s ceiling (D16,
+ * F3).
+ * Why: into OFF the outgoing type keeps rendering its own exact tail; no
+ * emulation (plan §5.5).
+ * Inputs: io (the mixer's bus, the share). Output: io in place.
+ * Caller: mixer_calcNextSampleBlock() after effects_service().
+ */
+/* Out of line (S095 P1): the mixer's code keeps its shape (elf_p4_check). */
+__attribute__((noinline)) void effects_process(effect_io_t *io)
 {
     const effect_registry_entry_t *entry =
         effects_registryEntry(effects_state.runtime_type);
 
-    /* The mixer calls this after effects_service() in the same block; `off` has
-     * no process hook and the mixer skips the bus entirely for it. */
-    if (entry && entry->ops && entry->ops->process && io)
+    if (!entry || !entry->ops || !entry->ops->process || !io)
+        return;
+    if (effects_draining()) {
+        effects_drainProcess(entry, io);
+        return;
+    }
+    {
+        /*
+         * S095 P1 (§S18, user): with the transport stopped every type keeps
+         * processing until its input and output stay below -90 dBFS, then
+         * its return ramps to 0 over 1 s (the mixer, sk_idleGain()) and it
+         * stops processing until audio comes back (sk_idleBefore()).
+         */
+        const uint8_t running = seq_isRunning();
+
+        if (sk_idleBefore(io, running))
+            return;
         entry->ops->process(effects_runtimeMember(), io);
+        if (!running)
+            sk_idleAfter(io);
+    }
 }
 
+/* The Effect return's idle gain (1, or the stopped-transport ramp to 0). */
+float effects_returnGain(void)
+{
+    fx_share_t share;
+
+    fxbuf_effectShare(&share);
+    return sk_idleGain(&share);
+}
+
+/* S095 P1 (SD4): the logical type, OFF while a drain runs. */
 effect_type_id_t effects_activeType(void)
 {
-    return effects_state.runtime_type;
+    return effects_logicalType();
 }
 
+/* S095 P1: while draining, runtime_type is the draining type, so its io flags
+ * keep the mixer's return path until the drain ends. */
 uint8_t effects_activeIoFlags(void)
 {
     const effect_registry_entry_t *entry =

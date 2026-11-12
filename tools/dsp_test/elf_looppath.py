@@ -60,6 +60,33 @@ def disassembly(elf):
                           text=True).stdout
 
 
+# Jump tables (S095 P1): the targets of each `tbb`/`tbh`, by its address.
+# objdump prints a table as data lines (.byte/.short/.word) after the
+# instruction; rows() decodes them so successors() follows the table instead
+# of falling through into it (the S095 P1 crumpBit_process layout placed
+# out-of-line code after its engine switch's table, and the fall-through read
+# as a loop).
+JUMP_TABLES = {}
+
+
+def _table_targets(addr, op, data):
+    """Branch targets of a tbb/tbh at addr from its table's data lines
+    [(address, directive, value)]: the table's bytes in address order, read
+    as bytes (tbb) or little-endian halfwords (tbh); target = addr + 4 +
+    2 x entry."""
+    raw = bytearray()
+    for _, d, v in sorted(data):
+        n = {'.byte': 1, '.short': 2, '.word': 4}.get(d)
+        if n is None:
+            continue
+        raw += int(v, 16).to_bytes(n, 'little')
+    if op.startswith('tbh'):
+        entries = [raw[k] | (raw[k + 1] << 8) for k in range(0, len(raw) - 1, 2)]
+    else:
+        entries = list(raw)
+    return [addr + 4 + 2 * e for e in entries]
+
+
 def rows(elf, sym):
     text = disassembly(elf)
     m = re.search(r'^[0-9a-f]+ <' + re.escape(sym) + SUFFIX +
@@ -67,10 +94,26 @@ def rows(elf, sym):
     if not m:
         sys.exit(f'elf_looppath.py: {sym} not found')
     out = []
+    table = None
     for line in m.group('body').splitlines():
         p = re.match(r'\s*([0-9a-f]+):\s+(\S+)\s*(.*)', line)
-        if p and not p.group(2).startswith('.'):
-            out.append((int(p.group(1), 16), p.group(2), p.group(3)))
+        if not p:
+            continue
+        if p.group(2).startswith('.'):
+            if table is not None:
+                v = re.match(r'(0x[0-9a-f]+)', p.group(3))
+                if v:
+                    table[2].append((int(p.group(1), 16), p.group(2),
+                                     v.group(1)))
+            continue
+        if table is not None:
+            JUMP_TABLES[table[0]] = _table_targets(*table)
+            table = None
+        out.append((int(p.group(1), 16), p.group(2), p.group(3)))
+        if p.group(2).startswith(('tbb', 'tbh')):
+            table = (int(p.group(1), 16), p.group(2), [])
+    if table is not None:
+        JUMP_TABLES[table[0]] = _table_targets(*table)
     return out
 
 
@@ -85,7 +128,10 @@ def is_return(op, ops):
 
 
 def successors(r, idx, i):
-    _, op, ops = r[i]
+    addr, op, ops = r[i]
+    if op.startswith(('tbb', 'tbh')) and addr in JUMP_TABLES:
+        # A jump table: its targets, never a fall-through into the data.
+        return sorted({idx[t] for t in JUMP_TABLES[addr] if t in idx})
     if BRANCH.match(op):
         out = []
         t = target(ops)

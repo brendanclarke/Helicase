@@ -58,10 +58,12 @@ OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
         instrument_manager samples sampleoptimize run_modes special_tags \
         stock_tables voicefold fold_tables pwm_tables crumpbit crumpbit_tables \
         crumpbit_elf_check crumpbit_cpu_check alkaline alkaline_tables \
-        elf_p4_snapshot elf_p4_check seq_steplen lfo lfo_rate_table alk_post_tables
+        elf_p4_snapshot elf_p4_check seq_steplen lfo lfo_rate_table alk_post_tables \
+        space space_cpu_check
 all: oscillator modulation voice_control sequencer seq_steplen instrument_manager samples \
      sampleoptimize run_modes special_tags stock_tables voicefold fold_tables pwm_tables \
-     crumpbit crumpbit_tables alkaline alkaline_tables alk_post_tables lfo lfo_rate_table
+     crumpbit crumpbit_tables alkaline alkaline_tables alk_post_tables lfo lfo_rate_table \
+     space
 
 $(GEN):
 	mkdir -p $(GEN)
@@ -641,6 +643,8 @@ CB_GEN := $(GEN)/cb_fxbuf.c $(GEN)/cb_efftypes.c $(GEN)/cb_effects.c \
           $(GEN)/cb_params.c \
           $(GEN)/cb_stepscale.c $(GEN)/cb_stepscale.h \
           $(GEN)/cb_tables.h $(GEN)/cb_tables.c $(GEN)/cb_midipitch.c \
+          $(GEN)/SpaceKit.host.h $(GEN)/SpaceKit.host.c \
+          $(GEN)/SpaceKitDsp.host.c \
           $(GEN)/CrumpBitEffect.host.h $(GEN)/CrumpBitEffect.host.c
 crumpbit: | $(GEN)
 	$(EX) --src $(ROOT)/Core/DSP/Effects/FxBuffer.h \
@@ -650,11 +654,17 @@ crumpbit: | $(GEN)
 	  --macro FXBUF_VOICE_UNIT_BYTES --macro FXBUF_EFFECT_POINTER_COUNT \
 	  --macro FXBUF_HANDOFF_POINTER_COUNT \
 	  --macro FXBUF_HANDOFF_EFFECT_POINTER_BASE \
-	  --macro FXBUF_STATE_EFFECT_WRITTEN --out $(GEN)/cb_fxbuf.c
+	  --macro FXBUF_STATE_EFFECT_WRITTEN \
+	  --macro FXBUF_SEG_SIDE_L --macro FXBUF_SEG_SIDE_R \
+	  --macro FXBUF_SEG_SIDE_BOTH --macro FXBUF_SEG_SIDE_MASK \
+	  --macro FXBUF_SEG_SIDE_SHIFT --macro FXBUF_UQ15_ONE \
+	  --macro FXBUF_OFFSET_NONE --out $(GEN)/cb_fxbuf.c
 	$(EX) --src $(ROOT)/Core/DSP/Effects/EffectTypes.h \
-	  --macro EFFECT_SEQ_LANE_COUNT --out $(GEN)/cb_efftypes.c
+	  --macro EFFECT_SEQ_LANE_COUNT --macro EFFECT_TYPE_OFF \
+	  --out $(GEN)/cb_efftypes.c
 	$(EX) --src $(ROOT)/Core/DSP/Effects/EffectsManager.h \
 	  --macro EFFECT_LANE_MORPH_SOURCE --macro EFFECT_LANE_NONE \
+	  --macro EFFECT_TYPE_CRUMPBIT \
 	  --typedef effect_io_t --typedef effect_type_ops_t \
 	  --out $(GEN)/cb_effects.c
 	$(EX) --src $(ROOT)/Core/DSP/Effects/CrumpBit/CrumpBitParameters.h \
@@ -684,6 +694,12 @@ crumpbit: | $(GEN)
 	$(EX) --src $(ROOT)/Core/Sequencer/StepScale.c \
 	  --object stepScale_q8Table --func stepScale_ticksQ8 \
 	  --out $(GEN)/cb_stepscale.c
+	$(EX) --src $(ROOT)/Core/DSP/Effects/Space/SpaceKit.h --body \
+	  --out $(GEN)/SpaceKit.host.h
+	$(EX) --src $(ROOT)/Core/DSP/Effects/Space/SpaceKit.c --body \
+	  --out $(GEN)/SpaceKit.host.c
+	$(EX) --src $(ROOT)/Core/DSP/Effects/Space/SpaceKitDsp.c --body \
+	  --out $(GEN)/SpaceKitDsp.host.c
 	$(EX) --src $(ROOT)/Core/DSP/Effects/CrumpBit/CrumpBitEffect.h --body \
 	  --out $(GEN)/CrumpBitEffect.host.h
 	$(EX) --src $(ROOT)/Core/DSP/Effects/CrumpBit/CrumpBitEffect.c --body \
@@ -989,8 +1005,39 @@ crumpbit_elf_check:
 # 163.9); `dly`/`cmb`/`pit` 1 lower. The cap moves from S091 P5's 170 to 181,
 # inside the Effect's cycle share (16,634 per block,
 # S094_P2_ALKALINE_SAVINGS.md §21, §23).
+# S095 P1 (S095_P1_IMPLEMENTATION.md §S18): steady cap 184 (the prefix,
+# seat fast path and LTO re-layout: `grn` 181.5 -> 183.7 with the fixed
+# jump-table tool), and --feed-cap 204: each sub-type plus the type-change
+# feed (sk_feedMix) or the growth wait after it, whichever is dearer. The
+# feed fits the Effect's own share; nothing is taken from Advanced.
+# S095 P1 (§S18): the Space types' host laws (modules/space.c) on the real
+# DSP (SpaceEffect.c with the kit and CrumpBit's `dly` curve), after the
+# crumpbit target's extractions.
+space: crumpbit
+	$(EX) --src $(ROOT)/Core/DSP/Effects/EffectsManager.h \
+	  --macro EFFECT_TYPE_DELAY --macro EFFECT_TYPE_REVERB \
+	  --macro EFFECT_TYPE_ECHO --out $(GEN)/sp_types.c
+	$(EX) --src $(ROOT)/Core/DSP/Effects/Space/SpaceParameters.h \
+	  --typedef space_delay_param_t --typedef space_reverb_param_t \
+	  --typedef space_echo_param_t --macro SPACE_HEADS_STOPS \
+	  --macro SPACE_FREEZE_SHIMMER --macro SPACE_FREEZE_OFF \
+	  --macro SPACE_HEADS_DEFAULT --macro SPACE_ROUTING_E2R \
+	  --macro SPACE_ROUTING_R2E --macro SPACE_ROUTING_LOOP \
+	  --macro SPACE_INTERVAL_ROW_MIN --macro SPACE_INTERVAL_ROW_MAX \
+	  --out $(GEN)/sp_params.c
+	$(EX) --src $(ROOT)/Core/DSP/Effects/Space/SpaceEffect.h --body \
+	  --out $(GEN)/SpaceEffect.host.h
+	$(EX) --src $(ROOT)/Core/DSP/Effects/Space/SpaceEffect.c --body \
+	  --out $(GEN)/SpaceEffect.host.c
+	$(HOSTCC) $(HOSTFLAGS) modules/space.c -o build/space -lm
+	./build/space
+
+# S095 P1 (§S18): the Space types' instructions per frame (space_cpu.py).
+space_cpu_check:
+	python3 space_cpu.py --elf $(ROOT)/build/lxr02.elf
+
 crumpbit_cpu_check:
-	python3 crumpbit_cpu.py --elf $(ROOT)/build/lxr02.elf --cap 181
+	python3 crumpbit_cpu.py --elf $(ROOT)/build/lxr02.elf --cap 184 --feed-cap 204
 
 # ---------------------------------------------------------------------------
 # S094 P4: dump the shipped pwm and stock waves for the PWM investigation.

@@ -1,0 +1,6 @@
+dly: loop 109 + filter 31 + (engine 140 + process 225 + manager 193) / 32 = 157.4
+cmb: loop 109 + filter 31 + (engine 105 + process 225 + manager 104) / 32 = 153.6
+pit: loop 106 + filter 31 + (engine 210 + process 225 + manager 104) / 32 = 153.8
+grn: loop 114 + filter 31 + (engine 840 + process 225 + manager 104) / 32 = 181.5
+rvb: loop 131 + filter 31 + (engine 252 + process 225 + manager 104) / 32 = 180.2
+crumpbit_cpu.py: FAIL worst 181.5 > cap 181

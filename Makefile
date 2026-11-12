@@ -40,6 +40,7 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/DSP/Effects \
           -ICore/DSP/Effects/StereoFilter \
           -ICore/DSP/Effects/CrumpBit \
+          -ICore/DSP/Effects/Space \
           -ICore/Bank/Scene \
           -ICore/Bank/Scene/Pattern \
           -ICore/Sequencer \
@@ -120,6 +121,8 @@ SRCS = \
   Core/DSP/Effects/StereoFilter/StereoFilterParameters.c \
   Core/DSP/Effects/CrumpBit/CrumpBitParameters.c \
   Core/DSP/Effects/CrumpBit/CrumpBitTables.c \
+  Core/DSP/Effects/Space/SpaceKit.c \
+  Core/DSP/Effects/Space/SpaceParameters.c \
   Core/MIDI/MidiBuffer.c \
   Core/MIDI/MidiDin.c \
   Core/MIDI/MidiTransport.c \
@@ -165,6 +168,8 @@ DSP_SRCS = \
   Core/DSP/Instruments/HiHat/HiHat.c \
   Core/DSP/Effects/StereoFilter/StereoFilterEffect.c \
   Core/DSP/Effects/CrumpBit/CrumpBitEffect.c \
+  Core/DSP/Effects/Space/SpaceKitDsp.c \
+  Core/DSP/Effects/Space/SpaceEffect.c \
   Core/DSPAudio/lfo.c \
   Core/DSPAudio/lfoRateTable.c \
   Core/DSPAudio/mixer.c \
@@ -258,6 +263,21 @@ $(BUILD)/Core/DSP/Effects/StereoFilter/StereoFilterEffect.o: Core/DSP/Effects/St
 # CrumpBit DSP (S074) runs with the fast-math policy like StereoFilter; its
 # descriptor, layout and page-hook source stays an ordinary -O2 source in SRCS.
 $(BUILD)/Core/DSP/Effects/CrumpBit/CrumpBitEffect.o: Core/DSP/Effects/CrumpBit/CrumpBitEffect.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+
+# S095 P1: the Space kit's per-frame half (the feed read, the drain envelope)
+# runs with the fast-math policy like CrumpBit. Its init-time half
+# (SpaceKit.c) is an ordinary -O2 source in SRCS: a per-file -Os was tried
+# and has no effect under -flto (the link step re-optimizes at -O2; the image
+# was byte-identical).
+$(BUILD)/Core/DSP/Effects/Space/SpaceKitDsp.o: Core/DSP/Effects/Space/SpaceKitDsp.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+
+# S095 P1: the Space types' DSP and ops, the fast-math policy like CrumpBit;
+# their descriptors and page text (SpaceParameters.c) stay in SRCS.
+$(BUILD)/Core/DSP/Effects/Space/SpaceEffect.o: Core/DSP/Effects/Space/SpaceEffect.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
 

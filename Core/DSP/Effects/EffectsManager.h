@@ -62,10 +62,19 @@
  * Registry ids are append-only; persisted identity is the three-byte token.
  * EFFECT_TYPE_CRUMPBIT (S074): the first buffer-using type (`cbt`, 8-bit
  * data lines and an 8-bit tape delay in the FxBuffer share).
+ * S095 P1: the Space types, clean counterparts to CrumpBit, sharing one
+ * kit (Core/DSP/Effects/Space/): EFFECT_TYPE_DELAY (`dly`, true-stereo
+ * 16-bit varispeed tape), EFFECT_TYPE_REVERB (`rvb`, half-rate plate with
+ * shimmer), EFFECT_TYPE_ECHO (`ech`, a mono tape into the plate). The
+ * tokens are the persisted identity (AutoSave, `.fx`, MIDI Learn); the ids
+ * only index the registry.
  */
 #define EFFECT_TYPE_STEREO_FILTER        1u
 #define EFFECT_TYPE_CRUMPBIT             2u
-#define EFFECT_TYPE_COUNT                3u
+#define EFFECT_TYPE_DELAY                3u
+#define EFFECT_TYPE_REVERB               4u
+#define EFFECT_TYPE_ECHO                 5u
+#define EFFECT_TYPE_COUNT                6u
 
 /* Extra descriptor capability flags used by Effect-specific owners. */
 #define EFFECT_PARAM_FLAG_WIDE8              0x01u
@@ -221,6 +230,9 @@ typedef struct effect_select_layout {
  * only type-specific indices (3..63); EffectsManager owns common indices 0..2.
  * process handles one normalized block. buffer_changed and effective_max are
  * optional hooks for types affected by a changing FxBuffer share.
+ * S095 P1: init also receives the share (SD2); export_handoff must not
+ * modify the arena (it also runs for a live runtime on a same-type Scene
+ * switch).
  * S091 P3:
  * - effective_max receives the live runtime (NULL when the caller has none,
  *   e.g. a page edit of a Scene whose type is not live), so a type with
@@ -231,7 +243,13 @@ typedef struct effect_select_layout {
  *   Every lane reader goes through effects_laneTable(record).
  */
 typedef struct {
-    void (*init)(void *rt, const fxbuf_handoff_t *handoff);
+    /*
+     * S095 P1 (SD2): init receives the live share, so a buffer user can
+     * seat, pack an outgoing tail and clear its rings in the foreground
+     * before the first render block (the manager calls it between blocks).
+     */
+    void (*init)(void *rt, const fxbuf_handoff_t *handoff,
+                 const fx_share_t *share);
     void (*export_handoff)(const void *rt, fxbuf_handoff_t *out);
     void (*write_param)(void *rt, uint8_t index, uint8_t value);
     void (*process)(void *rt, effect_io_t *io);
@@ -622,6 +640,35 @@ void effects_service(void);
 void effects_process(effect_io_t *io);
 effect_type_id_t effects_activeType(void);
 uint8_t effects_activeIoFlags(void);
+/*
+ * The Effect return's idle gain (S095 P1, §S18): 1 while the transport runs
+ * or the Effect sounds; with the transport stopped and the Effect below
+ * -90 dBFS, it ramps to 0 over 1 s and the Effect stops processing.
+ * Caller: mixer_calcNextSampleBlock() (the return gains). Affiliates:
+ * SpaceKit.h sk_idleBefore(), sk_idleAfter().
+ */
+float effects_returnGain(void);
 const effects_common_runtime_t *effects_commonRuntime(void);
+
+/*
+ * The feed slot lock (S095 P1 plan §5.7, D19).
+ *
+ * What: effects_feedSlotLock() is 1 while an Effect type-change feed runs,
+ * else 0; OSC_WAVE_INTERP_MAX_ACTIVE - effects_feedSlotLock() is the number
+ * of interpolation slots (wavetable blends and itp fades) granted per block.
+ * effects_setFeedSlotLock() is the Space kit's writer: set by sk_feedBegin()
+ * at init, cleared on the feed's last block or when a share change ends the
+ * feed. The manager also clears it when a type exits.
+ * Why: a feed adds work to the Effect for its length (one tape pass, or one
+ * pass of a reverb's lines, at most 6 s); one interpolation slot pays for it
+ * (≈ 880 cycles a block), the rest comes from Advanced.
+ * Storage: bit 0 of effects_state.reserved (0 B new RAM).
+ * Context: foreground only (render and the type-switch path, both in the
+ * main loop).
+ * Accessors: modNode_interpClaim(), instrumentManager_itpFadeSlotAvailable()
+ * (readers); sk_feedBegin(), sk_feedEnd() (writers).
+ */
+uint8_t effects_feedSlotLock(void);
+void effects_setFeedSlotLock(uint8_t on);
 
 #endif /* EFFECTS_MANAGER_H_ */

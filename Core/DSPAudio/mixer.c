@@ -1240,6 +1240,9 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		 * left side. Mono output keeps its existing constant-power law. Inputs:
 		 * fx_pan 0..127 and fx_level. Outputs: gainL/gainR.
 		 */
+		/* S095 P1: the stopped-transport idle ramps the return (§S18). */
+		const float fx_idle = effects_returnGain();
+
 		if (fx_stereo_out) {
 			gainL = fx_level * ((fx_pan <= 63u) ? 1.0f
 					: (float)(127u - fx_pan) / 64.0f);
@@ -1249,6 +1252,8 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 			gainL = fx_level * squareRootLut[127u - fx_pan];
 			gainR = fx_level * squareRootLut[fx_pan];
 		}
+		gainL *= fx_idle;
+		gainR *= fx_idle;
 		mixer_addFxReturnToOutput(fx_route, mixer_fx_bus.f[0],
 				fx_stereo_out ? mixer_fx_bus.f[1] : 0,
 				gainL, gainR, &output[pos], &output[pos+1],

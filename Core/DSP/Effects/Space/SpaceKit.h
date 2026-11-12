@@ -1,0 +1,383 @@
+/*
+ * Core/DSP/Effects/Space/SpaceKit.h
+ *
+ *  Created on: 12.11.2026
+ * ------------------------------------------------------------------------------------------------------------------------
+ *  Copyright 2026 Brendan Clarke
+ *  brendanpaulclarke@gmail.com
+ *  https://www.brendanclarke.com
+ * ------------------------------------------------------------------------------------------------------------------------
+ *  This file is part of the LXR02 Open-Source software.
+ * ------------------------------------------------------------------------------------------------------------------------
+ *  Redistribution and use of the LXR02 Open-Source, hardware driver code, or any derivative works are permitted
+ *  provided that the following conditions are met:
+ *
+ *       - The code may not be sold, nor may it be used in a commercial product or activity.
+ *
+ *       - Redistributions that are modified from the original source must include the complete
+ *         source code, including the source code for all components used by a binary built
+ *         from the modified sources. However, as a special exception, the source code distributed
+ *         need not include anything that is normally distributed (in either source or binary form)
+ *         with the major components (compiler, kernel, and so on) of the operating system on which
+ *         the executable runs, unless that component itself accompanies the executable.
+ *
+ *       - Redistributions must reproduce the above copyright notice, this list of conditions and the
+ *         following disclaimer in the documentation and/or other materials provided with the distribution.
+ * ------------------------------------------------------------------------------------------------------------------------
+ *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+ *   INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ *   DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ *   SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+ *   WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ *   USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * ------------------------------------------------------------------------------------------------------------------------
+ */
+
+/*
+ * Space kit (S095 P1): what every FX buffer user shares.
+ *
+ * What:
+ * - the arena prefix: the first SK_PREFIX_BYTES (512 B) of the Effect share,
+ *   reserved by every buffer-using type (CrumpBit, Delay, Reverb, Echo).
+ *   Bytes 0..63 are the control block sk_ctl_t (the type-change
+ *   feed, the drain); bytes 64..511 are the live type's state header (the
+ *   Space types' filters and LFOs; CrumpBit uses none). No type writes audio
+ *   below offset 512, so the prefix is never part of an outgoing tail and it
+ *   never moves (S095_P1_IMPLEMENTATION.md SD1);
+ * - the type-change feed (plan §5, D20-D24; S095 P1 rework): read the
+ *   handoff's first segment in place (sk_feedBegin()), tell the incoming
+ *   type where the tail ends so its write heads start there and move away
+ *   (sk_feedEnd()), cut the tail where one of those heads would overwrite
+ *   it before it is read (sk_feedLimit()), play it into the new wet at its
+ *   own speed (sk_feedMix()), end it on a share cut (sk_feedCut()). Every
+ *   buffer user seats in the whole usable share; nothing moves to make room
+ *   for a tail;
+ * - the drain into OFF (plan §5.5, D25): sk_drainBegin(), sk_drainStep();
+ * - the export helpers that write the D24 segment description.
+ * Why one kit: every buffer user must hand over to every other in one
+ * format and pay for the feed the same way (plan §2.2).
+ * Build: SpaceKit.c (init-time and per-change code) compiles for size;
+ * SpaceKitDsp.c (sk_feedMix(), sk_drainStep(), the per-block paths) with
+ * the DSP fast-math policy (Makefile).
+ * Context: foreground only. Init, export and share changes run between
+ * render blocks; the per-block functions run inside effects_process() in
+ * the main loop.
+ * Accessors: CrumpBitEffect.c, SpaceEffect.c, EffectsManager.c (drain).
+ * Affiliates: FxBuffer.h (the handoff contract), plan
+ * S095_P1_FX_DELAY_RVB_ECHO.md §3, §5; S095_P1_IMPLEMENTATION.md S6.
+ */
+#ifndef SPACE_KIT_H_
+#define SPACE_KIT_H_
+
+#include <stdint.h>
+#include "EffectsManager.h"
+#include "FxBuffer.h"
+
+/* Rates (plan §2.3): tapes and the dry path at the codec rate. */
+#define SK_FS                  44108.0f
+#define SK_FRAMES_MAX          32u     /* OUTPUT_DMA_SIZE, one Effect block */
+
+/*
+ * The arena prefix (SD1): control block + type state header. 512 B is a
+ * multiple of FXBUF_ALIGN_BYTES; all audio starts at or above it.
+ */
+#define SK_PREFIX_BYTES        512u
+#define SK_CTL_BYTES           64u
+#define SK_STATE_BYTES         (SK_PREFIX_BYTES - SK_CTL_BYTES)   /* 448 */
+
+/*
+ * The arena this build links (link_budget.py: FXBUF 126,656 B). Declarative
+ * buffer_pref_bytes of the buffer users and the base of CrumpBit's longest
+ * loop; every buffer user uses the live share.
+ */
+#define SK_ARENA_PREF_BYTES    126656u
+
+/* Control-block owner stamp: 'S','K' in the high half, the type id low. */
+#define SK_CTL_MAGIC           0x534B0000u
+#define SK_CTL_MAGIC_MASK      0xFFFF0000u
+
+/* Feed limits (plan §5.3, D16): the 20 ms end fade, the 6 s ceiling. */
+#define SK_FEED_FADE_MAX       882u      /* samples at 44,108 Hz */
+#define SK_FEED_CEIL_FRAMES    264648u   /* 6 s of output frames */
+#define SK_DRY_RAMP_BLOCKS     14u
+
+/*
+ * Stopped-transport idle (§S18, user): -90 dBFS held 10 ms, then a 1 s ramp
+ * of the return to 0, then no processing until the input passes -90 dBFS
+ * again or the transport runs.
+ */
+#define SK_IDLE_QUIET          3.1623e-5f  /* -90 dBFS */
+#define SK_IDLE_QUIET_BLOCKS   14u
+#define SK_IDLE_RAMP_BLOCKS    1378u       /* 1 s / 32 frames */
+
+/* Drain (D25, F3): -80 dBFS held 10 ms, or 6 s with a 500 ms final fade. */
+#define SK_DRAIN_QUIET         1.0e-4f
+#define SK_DRAIN_QUIET_BLOCKS  14u
+#define SK_DRAIN_BLOCKS        8270u     /* 6 s / 32 frames */
+#define SK_DRAIN_FADE_BLOCKS   689u      /* 500 ms / 32 frames */
+
+/* Feed flags (sk_ctl_t.flags). */
+#define SK_FEED_S16            0x01u     /* int16 samples (else int8) */
+#define SK_FEED_FADE           0x02u     /* fades over its last 1/fade_inv */
+
+/*
+ * The arena control block (SD1), share offset 0, 64 B, DTCM.
+ *
+ * What: everything a buffer user must keep across blocks that its 100 B
+ * runtime cannot hold:
+ * - magic: SK_CTL_MAGIC | the owner's Effect type id, written by the
+ *   owner's init; the kit trusts the block only for that owner, so
+ *   a stale block left by an earlier type is never read as live;
+ * - end: the share offset one past the head's newest frame (the outgoing
+ *   type's write head): the incoming type starts its write heads there;
+ * - the feed (plan §5.4; S095 P1 rework: ONE mono head, a stepped read):
+ *   wrap_off/wrap_elems (where the head wraps: the outgoing tape or loop, or
+ *   the packed window), pos (the element it reads next), left (samples still
+ *   to read), stride (elements per sample), phase/step_q16 (the Q16 read
+ *   phase and source samples per output frame: speed x rate / 44,108),
+ *   gain (sample code -> wet-normalized level), fade_inv (1 / the end-fade
+ *   length in samples; 1.0 without SK_FEED_FADE, the last block's own
+ *   ramp to 0), flags (SK_FEED_*), feeding (1 while the head reads);
+ * - drain_blocks/drain_quiet: the drain envelope's age and its quiet count;
+ * - dry_from_q7/dry_blocks: the incoming dry ramp's origin (0..128) and the
+ *   blocks it has left;
+ * - idle/idle_q/idle_n/idle_g: the stopped-transport idle (sk_idleBefore(),
+ *   sk_idleAfter()): processing off, quiet blocks, ramp blocks, the return
+ *   gain. The manager's for every type (EffectsManager.c).
+ * Why in the arena: CrumpBit's runtime is full (100 B, asserted), the union
+ * cannot grow, and the handoff record must stay a pure description (SD3).
+ * The arena is Effect-owned DTCM: zero-wait and no new RAM.
+ * Lifetime: written by the entering type's init (sk_feedBegin()); updated by
+ * its process and buffer_changed; rewritten by the next type's init.
+ * Accessors: every function below.
+ */
+typedef struct {
+    uint32_t magic;
+    uint32_t end;
+    uint32_t wrap_off;
+    uint32_t wrap_elems;
+    uint32_t pos;
+    uint32_t left;
+    uint32_t phase;
+    uint32_t step_q16;
+    float    gain;
+    float    fade_inv;
+    uint16_t drain_blocks;
+    uint8_t  stride;
+    uint8_t  flags;
+    uint8_t  feeding;
+    uint8_t  drain_quiet;
+    uint8_t  dry_from_q7;
+    uint8_t  dry_blocks;
+    uint8_t  idle;
+    uint8_t  idle_q;
+    uint16_t idle_n;
+    float    idle_g;
+    uint8_t  spare[8];
+} sk_ctl_t;
+
+_Static_assert(sizeof(sk_ctl_t) == SK_CTL_BYTES,
+               "the arena control block is 64 B (SD1)");
+_Static_assert((SK_PREFIX_BYTES % FXBUF_ALIGN_BYTES) == 0u,
+               "audio above the prefix stays 32-byte aligned");
+
+/* The control block of a share (the arena bottom; the share starts at 0). */
+static inline sk_ctl_t *sk_ctl(const fx_share_t *share)
+{
+    return (sk_ctl_t *)(void *)share->base;
+}
+
+/* The type state header (bytes 64..511), for the Space types' unions. */
+static inline void *sk_state(const fx_share_t *share)
+{
+    return (void *)(share->base + SK_CTL_BYTES);
+}
+
+/*
+ * The usable share above the prefix, in bytes (0 if none). The share is a
+ * multiple of 32 B (fx_share_t contract), so this is too.
+ */
+static inline __attribute__((always_inline)) uint32_t sk_usableBytes(const fx_share_t *share)
+{
+    return (share->bytes > SK_PREFIX_BYTES) ? share->bytes - SK_PREFIX_BYTES
+                                            : 0u;
+}
+
+/*
+ * 1 when the share's control block belongs to `owner` (its init ran). A
+ * share without a base (a page or host query with no arena) is never owned.
+ */
+static inline __attribute__((always_inline)) uint8_t sk_owned(const fx_share_t *share, uint8_t owner)
+{
+    return (uint8_t)(share->base != 0 && share->bytes >= SK_PREFIX_BYTES &&
+                     sk_ctl(share)->magic == (SK_CTL_MAGIC | (uint32_t)owner));
+}
+
+/* 1 while a feed runs for `owner`. */
+static inline uint8_t sk_feeding(const fx_share_t *share, uint8_t owner)
+{
+    return (uint8_t)(sk_owned(share, owner) && sk_ctl(share)->feeding != 0u);
+}
+
+/*
+ * Begin life in the arena (plan §5.3, D24, SD3, SD6; S095 P1 rework: the
+ * feed is the first segment only, read in place).
+ *
+ * What, at the entering type's init (foreground, between blocks):
+ * 1. write the control block: owner stamp, the dry ramp from the outgoing
+ *    dry gain;
+ * 2. no feed when handoff or share is NULL, when the record has no written
+ *    Effect audio, no segment, or a wrap domain outside the usable share
+ *    or shorter than 64 samples;
+ * 3. the head is the record's first segment (a tape's L or mono head, a
+ *    plate's or CrumpBit `rvb`'s first line), read where it lies. A source
+ *    of several lines plays one at double gain (one line of a reverb's four
+ *    is about half its wet); the record still describes them all (D24);
+ * 4. the head is clamped to the 6 s ceiling (a clamped head fades over
+ *    min(882, a quarter of its length), as does a ring line); the slot lock
+ *    is set while it reads.
+ * The incoming type then seats in the whole usable share, starts its write
+ * heads at sk_feedEnd() and calls sk_feedLimit() with them.
+ * Inputs: share, handoff, owner type id. Output: the control block.
+ * Callers: every buffer user's init. Affiliates: sk_feedMix().
+ */
+void sk_feedBegin(const fx_share_t *share, const fxbuf_handoff_t *h,
+                  uint8_t owner);
+
+/*
+ * Where the tail ends: the share offset one past its newest frame, while a
+ * feed runs for `owner`; else 0. A type whose line holds it starts its write
+ * index there (wp = (end - line base) / unit), so its writes move away from
+ * the tail and reach its start only after a whole lap of the line.
+ */
+uint32_t sk_feedEnd(const fx_share_t *share, uint8_t owner);
+
+/*
+ * One of the incoming type's write heads (share-relative bytes): it writes
+ * forward from `at` through [lo, hi), wrapping at hi to lo, `rate` bytes per
+ * output frame at most. rate 0: [lo, hi) is overwritten now (a ring the type
+ * clears at init).
+ */
+typedef struct {
+    uint32_t at;
+    uint32_t lo;
+    uint32_t hi;
+    uint32_t rate;
+} sk_writer_t;
+
+/*
+ * Cut the tail before the first sample a write head would overwrite before
+ * the feed reads it (S095 P1 rework, replacing the seat that moved out of
+ * the tail's way).
+ *
+ * What: from the head's current state (its next sample, the samples left,
+ * its step), each sample's read frame is linear in its address within the
+ * tail's (at most two) unwrapped pieces, and each writer's first write is
+ * linear within its (at most two) pieces: one solve per pair gives the
+ * first address where the write lands less than two blocks after the read.
+ * The head is cut there and fades over min(882, a quarter of what is left);
+ * a head cut to 0 ends the feed (the slot lock clears).
+ * When: at init, after the type has chosen its write heads, and again
+ * whenever its write heads change during a feed (CrumpBit's sub-type
+ * entry).
+ * Inputs: share, owner, writers, count. Output: the control block.
+ * Callers: crumpBit_feedLimit(), the Space inits. Affiliates: host law CB25.
+ */
+void sk_feedLimit(const fx_share_t *share, uint8_t owner,
+                  const sk_writer_t *w, uint32_t n);
+
+/*
+ * Play the next block of the feed into a type's output (plan §5.4; S095 P1
+ * rework: the old tail is heard, not injected into the new loop).
+ *
+ * What: one pass of frames outputs: y = the head's sample x gain x its end
+ * fade x the type's wet mix (ramped mix0 -> mix1 across the block, so the
+ * tail is heard at the NEW mix, plan §5.3 step 5), added to l[] and r[]
+ * (l and r distinct). The Q16 phase advances by the step per output; its
+ * carry moves the head by carry x stride (a stepped, nearest-sample read: a
+ * varispeed tape or the half-rate plate keeps its pitch at no extra cost).
+ * The ramp and the fade are one linear gain across the block. The block is
+ * split at most once, where the head wraps, so the frame loop has no wrap
+ * test. When the head ends the feed ends: feeding = 0, the slot lock clears.
+ * With mix 0 the head still reads (silently), so it stays with the music.
+ * Inputs: the share (seated: base set, checked by the caller), owner, l, r,
+ * frames, the block's mix ramp.
+ * Output: l[], r[] (+=); 1 while the feed still runs, else 0. Cost: one
+ * frame loop, the gate's feed term (crumpbit_cpu.py --feed-cap).
+ * Callers: crumpBit_process(), the Space processes.
+ */
+uint8_t sk_feedMix(const fx_share_t *share, uint8_t owner, float *l, float *r,
+                   uint32_t frames, float mix0, float mix1);
+
+/*
+ * A share change during a feed (plan §3.3 shrink, D14, D26): if the new
+ * share no longer holds every head's remaining bytes, the feed ends at once
+ * (the cut bytes may now be a voice unit's) and the slot lock clears.
+ * Called first by every buffer user's buffer_changed. Output: 1 when the
+ * feed was cut.
+ */
+uint8_t sk_feedCut(const fx_share_t *share, uint8_t owner);
+
+/*
+ * The incoming dry ramp (plan §5.3 step 5): this block's dry origin d0 and
+ * end d1, between the outgoing dry (ctl->dry_from_q7 / 128) and the type's
+ * own target, over SK_DRY_RAMP_BLOCKS blocks; both are the target when no
+ * ramp runs. The caller ramps its dry gain d0 -> d1 inside the block.
+ */
+void sk_dryRamp(const fx_share_t *share, uint8_t owner, float target,
+                float *d0, float *d1);
+
+/*
+ * Export helpers (D24). sk_exportBegin() writes the wrap domain, format and
+ * gains; sk_exportSeg() adds segment i (start, end: share-relative bytes of
+ * the oldest sample's frame and one past the newest; side) and sets
+ * FXBUF_STATE_EFFECT_WRITTEN; a zero-length segment is skipped. The caller
+ * clamps start to its valid history first. They write only the record,
+ * never the arena (SD3).
+ */
+void sk_exportBegin(fxbuf_handoff_t *out, uint32_t wrap_off,
+                    uint32_t wrap_bytes, uint8_t bits, uint8_t stride,
+                    uint16_t rate_hz, float speed, float dry, float gain);
+void sk_exportSeg(fxbuf_handoff_t *out, uint8_t i, uint32_t start,
+                  uint32_t end, uint8_t side);
+
+/* Clear a byte range of the share (foreground: the rings at init, SD6). */
+void sk_clear(const fx_share_t *share, uint32_t off, uint32_t bytes);
+
+/*
+ * The drain (D25, F3). sk_drainBegin(): 1 when the share's control block is
+ * owned by `owner` (the outgoing buffer user; a stale block never starts a
+ * drain), then resets its counters; 0 otherwise (the switch cuts, as for
+ * StereoFilter, SD11). sk_drainStep(): per drain block, scales io by the
+ * envelope (1.0, then linear to 0 over the last SK_DRAIN_FADE_BLOCKS of
+ * SK_DRAIN_BLOCKS), tracks the block peak, and returns 1 when the drain is
+ * over (the peak stayed below SK_DRAIN_QUIET for SK_DRAIN_QUIET_BLOCKS, or
+ * the ceiling was reached).
+ * Callers: effects_switchRuntime(), effects_drainProcess().
+ */
+uint8_t sk_drainBegin(const fx_share_t *share, uint8_t owner);
+uint8_t sk_drainStep(effect_io_t *io);
+
+/*
+ * The stopped-transport idle (§S18, user: "processing continues until there
+ * is almost no output, then a 1 s ramp down, then off"), for every Effect.
+ * sk_idleBefore(): with the transport running, or no prefix, resets and
+ * returns 0. While idle: if the block's input is above SK_IDLE_QUIET the
+ * Effect wakes (returns 0, process runs); else the outputs are zeroed and it
+ * returns 1 (process is skipped). sk_idleAfter(): after process, with the
+ * transport stopped (the caller's test): SK_IDLE_QUIET_BLOCKS blocks whose
+ * output stays below SK_IDLE_QUIET start the ramp (any input shows in a
+ * type's output), louder audio cancels it; the ramp's end sets idle. The
+ * meter reads four samples a block (sk_peak4()). sk_idleGain(): the
+ * return gain, 1 down to 0 over the ramp (the mixer applies it, ramped
+ * across its block). Callers: effects_process(); mixer (the gain).
+ */
+uint8_t sk_idleBefore(effect_io_t *io, uint8_t running);
+void sk_idleAfter(const effect_io_t *io);
+float sk_idleGain(const fx_share_t *share);
+/* Awake at full return (every runtime switch: StereoFilter never writes the block). */
+void sk_idleReset(const fx_share_t *share);
+float sk_peak4(const effect_io_t *io);
+
+#endif /* SPACE_KIT_H_ */

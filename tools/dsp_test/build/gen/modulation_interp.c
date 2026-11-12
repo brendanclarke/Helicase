@@ -43,9 +43,45 @@ void modNode_resetTargets()
 	 * Why:        a fade must never be cut mid-blend, and two fades already fill
 	 *             the two-slot budget. The sum is at most 2 + 2 (uint8_t).
 	 */
-	modNode_interpReserved =
-		(uint8_t)(modNode_waveInterpActiveCount + modNode_itpReserved);
-	modNode_waveInterpActiveCount = 0u;
+	/*
+	 * S095 P1 (plan §5.7, D19): the Effect feed's slot lock, as a phantom
+	 * grant.
+	 *
+	 * What:       while an Effect type-change feed runs,
+	 *             effects_feedSlotLock() is 1. The block then starts with one
+	 *             slot already granted (the active count = lock), and last
+	 *             block's holders may keep at most OSC_WAVE_INTERP_MAX_ACTIVE -
+	 *             lock slots (the reserve is capped). modNode_interpClaim()'s
+	 *             two paths, unchanged, then grant at most one slot: the
+	 *             sticky path only from the capped reserve, the newcomer only
+	 *             while grants + reserve stay under the maximum. Last block's
+	 *             own grants are the active count less this lock (the phantom
+	 *             it held), never below 0.
+	 * Why here:   one test per block, not one per claim. A test inside
+	 *             modNode_interpClaim() stopped it inlining into the ITCM
+	 *             wavetable-blend functions and changed their loops (the
+	 *             first S095 P1 build; elf_p4_check).
+	 * Edge:       the lock changes only between blocks (an Effect init) or
+	 *             in the Effect's own process (a feed's last block), so in the
+	 *             one block after a change the phantom may be counted once too
+	 *             often or not at all: one sticky holder steps for a block, or
+	 *             one newcomer waits a block. Never more slots than allowed.
+	 * Inputs:     the active count, modNode_itpReserved, the lock.
+	 * Outputs:    modNode_interpReserved, modNode_waveInterpActiveCount.
+	 * Affiliates: effects_feedSlotLock(), instrumentManager_itpFadeSlotAvailable().
+	 */
+	{
+		const uint8_t lock = effects_feedSlotLock();
+		/* grants: last block's real grants (its phantom removed). */
+		const uint8_t grants = (modNode_waveInterpActiveCount > lock)
+			? (uint8_t)(modNode_waveInterpActiveCount - lock) : 0u;
+		const uint8_t cap = (uint8_t)(OSC_WAVE_INTERP_MAX_ACTIVE - lock);
+		uint8_t reserve = (uint8_t)(grants + modNode_itpReserved);
+
+		/* Capped only while locked: with no feed this is the S087 rule. */
+		modNode_interpReserved = (lock && reserve > cap) ? cap : reserve;
+		modNode_waveInterpActiveCount = lock;
+	}
 	for(i=0;i<6;i++)
 		modNode_restoreTarget(&velocityModulators[i]);
 	instrumentManager_visitRuntimeLfoNodes(modNode_restoreLfoPair, 0);

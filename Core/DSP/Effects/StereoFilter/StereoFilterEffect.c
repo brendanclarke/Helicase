@@ -38,11 +38,15 @@ static void stereoFilter_linkCoefficients(StereoFilterRuntime *rt)
  * forced resolution writes the retained descriptor image. This type never
  * claims the shared arena, so the handoff is intentionally unused.
  */
-static void stereoFilter_init(void *rt_void, const fxbuf_handoff_t *handoff)
+static void stereoFilter_init(void *rt_void, const fxbuf_handoff_t *handoff,
+                              const fx_share_t *share)
 {
     StereoFilterRuntime *rt = (StereoFilterRuntime *)rt_void;
 
     (void)handoff;
+    /* S095 P1 (SD2): the share is unused; StereoFilter has no buffer, so a
+     * change into or out of it cuts any tail, as before (SD11). */
+    (void)share;
     SVF_init(&rt->left);
     SVF_init(&rt->right);
     SVF_reset(&rt->left);

@@ -1,0 +1,22 @@
+python3 elf_looppath.py --elf ../../build/lxr02.elf \
+	  --sym crumpBit_runDelay --max 109
+crumpBit_runDelay: loop head 0x8071944: longest 109 (vdiv 0), shortest 109, paths 1
+python3 elf_looppath.py --elf ../../build/lxr02.elf \
+	  --sym crumpBit_runComb --max 109
+crumpBit_runComb: loop head 0x80791a6: longest 109 (vdiv 0), shortest 109, paths 1
+python3 elf_looppath.py --elf ../../build/lxr02.elf \
+	  --sym crumpBit_runPitch --max 106
+crumpBit_runPitch: loop head 0x8071ed0: longest 106 (vdiv 0), shortest 106, paths 1
+python3 elf_looppath.py --elf ../../build/lxr02.elf \
+	  --sym crumpBit_runGrain --cond-heads --in-range --top 2 --max 114
+crumpBit_runGrain: loop head 0x8072eee: longest 114 (vdiv 0), shortest 110, paths 4
+crumpBit_runGrain: loop head 0x8072afa: longest 109 (vdiv 0), shortest 105, paths 4
+python3 elf_looppath.py --elf ../../build/lxr02.elf \
+	  --sym crumpBit_runReverb --max 131
+crumpBit_runReverb: loop head 0x8073618: longest 131 (vdiv 0), shortest 131, paths 1
+python3 elf_looppath.py --elf ../../build/lxr02.elf \
+	  --sym crumpBit_process --top 2 --max 31
+crumpBit_process: loop head 0x8066550: longest 31 (vdiv 0), shortest 31, paths 1
+python3 elf_looppath.py --elf ../../build/lxr02.elf \
+	  --sym crumpBit_process --top 2 --rank 2 --max 16
+crumpBit_process: loop head 0x8066550: longest 31 (vdiv 0), shortest 31, paths 1

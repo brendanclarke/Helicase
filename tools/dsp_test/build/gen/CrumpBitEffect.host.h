@@ -14,11 +14,12 @@
 #define CRUMP_BIT_EFFECT_H_
 
 
+
 /*
  * CrumpBit loop geometry (S074_CRUMPBIT_EFFECT.md §3.4; elastic since S091
  * P2 §5.1; retuned in S091 P3 N1).
  *
- * CRUMPBIT_DELAY_CURVE_MAX: the longest delay, 126,654 samples (2.871 s at
+ * CRUMPBIT_DELAY_CURVE_MAX (S091; S095 P1 values below): the longest delay, 126,654 samples (2.871 s at
  * 44,108 Hz; S091 P6: row 127 of the `dly` delay-time curve, t_max of
  * crumpBit_delayCurve(); it was crumpBit_rateTable[127]): the arena less one
  * 32 B granule and the 2-sample interpolation guard. S091 P3 grew the
@@ -40,10 +41,24 @@
  * Affiliates: FxBuffer.h FXBUF_VOICE_UNIT_*, tools/plots/gen_crumpbit_tables.py
  * (RATE_MAX), tools/diagnostic_tools/link_budget.py (FXBUF size).
  */
-#define CRUMPBIT_DELAY_CURVE_MAX       126654.0f
-#define CRUMPBIT_LOOP_MAX_BYTES        126656u
+/*
+ * S095 P1 (SD1): the share's first SK_PREFIX_BYTES (512 B) are the arena
+ * prefix every buffer user reserves (the control block for the type-change
+ * feed and the drain); the loop lives above it. So:
+ * CRUMPBIT_LOOP_MAX_BYTES: the longest loop, the arena (126,656 B) less the
+ * prefix: 126,144 B, a multiple of 32.
+ * CRUMPBIT_DELAY_CURVE_MAX: the loop less the 2-sample guard: 126,142
+ * samples (2.860 s at 44,108 Hz; was 126,654, 2.871 s). Row 127 of the `dly`
+ * curve still fits the full arena, and the Space Delay's top (its own 512 B
+ * prefix, the 1/4 speed floor) is the same 2.86 s: one truncation law for
+ * every tape (D3).
+ * CRUMPBIT_LOOP_MIN_SHARE_BYTES: the share with all twelve voice units
+ * claimed, 73,664 B (unchanged; declarative buffer_min_bytes).
+ */
+#define CRUMPBIT_DELAY_CURVE_MAX       126142.0f
+#define CRUMPBIT_LOOP_MAX_BYTES        (SK_ARENA_PREF_BYTES - SK_PREFIX_BYTES)
 #define CRUMPBIT_LOOP_MIN_SHARE_BYTES                                   \
-    (CRUMPBIT_LOOP_MAX_BYTES -                                          \
+    (SK_ARENA_PREF_BYTES -                                              \
      FXBUF_VOICE_UNIT_COUNT * FXBUF_VOICE_UNIT_BYTES)
 
 /*
@@ -223,7 +238,10 @@ typedef struct {
  *   block start, so they have no origin to keep;
  * - primed: 0 until the first block of a tape sub-type starts its glide on
  *   the target (S091 P5: also `pit`'s window glide);
- * - drv_reserved: the deferred output-filter drive row's byte (plan OQ6);
+ * - feed_bits (S095 P1; was drv_reserved, the deferred output-filter drive
+ *   row's spare byte, never written): CRUMPBIT_FEED_RUN while a type-change
+ *   feed plays (sk_feedMix()), CRUMPBIT_FEED_LIMIT when the engine's write
+ *   heads changed and the feed must be limited again (crumpBit_feedLimit());
  * - pit_fine: row 23 (S091 P5 follow-up), `pit`'s fine pitch, in one of the
  *   two padding bytes S1 freed (the runtime stays 100 B);
  * - filter_bal: row 22 (S091 P4), the output filter's stereo balance; it
@@ -268,7 +286,7 @@ typedef struct {
     uint8_t filter_type_prev;  /* stage 4 ramp origin */
     uint8_t filter_reso_prev;  /* stage 4 ramp origin */
     uint8_t primed;            /* tape glide primed */
-    uint8_t drv_reserved;      /* deferred drive row (plan OQ6) */
+    uint8_t feed_bits;         /* S095 P1: CRUMPBIT_FEED_* */
     uint8_t filter_bal;        /* row 22, shared: filter balance (P4) */
     uint8_t pit_fine;          /* row 23, pit: fine pitch (P5 follow-up) */
     union {
@@ -314,6 +332,20 @@ float crumpBit_delaySamples(uint8_t rate, uint16_t bpm);
  * clamp).
  */
 float crumpBit_shareMaxSamples(const fx_share_t *share);
+
+/*
+ * The `dly` knob limit (S091 P6; exported S095 P1, plan §5.6 item 4).
+ *
+ * What: the largest row of the `dly` delay-time curve whose delay fits
+ * max_samples at bpm, by eight fixed probes of the curve (no table).
+ * Why exported: the Space Delay and Echo `tim` rows play the same curve and
+ * must stop at the same row for the same capacity (D3), so they call this
+ * search instead of copying it.
+ * Inputs: the longest delay the caller's seat holds (samples), bpm.
+ * Output: 0..127.
+ * Callers: crumpBit_subtypeRateLimit() (`dly`), space_timeLimit().
+ */
+uint8_t crumpBit_delayLimit(float max_samples, uint16_t bpm);
 
 /*
  * Sub-engine helpers shared with the page (S091 P3).

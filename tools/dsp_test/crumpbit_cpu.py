@@ -33,7 +33,18 @@ What:       measures the linked firmware ELF and prints, per sub-type, the
             Makefile passes the cap measured with the SVF back in `grn`/`rvb`,
             under the Effect's cycle share, S094_P2_ALKALINE_SAVINGS.md §21).
 Why:        the cap is a gate, not a manual calculation (plan Q15).
-Inputs:     --elf PATH, optional --cap N (default 170).
+            S095 P1 (§S18): --feed-cap adds the type-change feed to each
+            sub-type's total, worst case: sk_feedMix's longest frame loop
+            (its int16 or int8 form, one mono head, a stepped read added
+            straight into the wet) + its per-block path / 32; it fails when
+            a sub-type's feed total is above --feed-cap. The feed's limit
+            against the write heads (crumpBit_feedLimit()) runs once per
+            init or sub-type entry, like crumpBit_enter(), and is not a
+            steady or feed-block cost.
+            The jump-table fix in elf_looppath.py (S095 P1) also made the
+            per-block paths through switch tables real: the baseline's `grn`
+            reads 181.5 with it (180.8 before).
+Inputs:     --elf PATH, optional --cap N (default 170), --feed-cap N.
 Outputs:    one line per sub-type with its terms and total; exit 1 when a
             total is above the cap, or when crumpBit_process() does not have
             exactly one frame loop (the method no longer applies).
@@ -85,6 +96,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--elf', required=True)
     ap.add_argument('--cap', type=float, default=170.0)
+    ap.add_argument('--feed-cap', type=float, default=None)
     a = ap.parse_args()
     proc = longest_loop(a.elf, 'crumpBit_process')
     if len(proc) != 1:
@@ -92,6 +104,14 @@ def main():
                  f'loops, expected 1 (the SVF, S094 P2 AS-13)')
     effmax = B.block_path(a.elf, 'crumpBit_effectiveMax')[0]
     worst = 0.0
+    feed_worst = 0.0
+    feed = 0.0
+    if a.feed_cap is not None:
+        head = max(l for l, _, _ in longest_loop(a.elf, 'sk_feedMix'))
+        per_block = B.block_path(a.elf, 'sk_feedMix')[0]
+        feed = head + per_block / FRAMES
+        print(f'feed: mix {head} + per block {per_block} / {FRAMES} = '
+              f'{feed:.1f}')
     for name, sym, rank, limit in SUBTYPES:
         loop = longest_loop(a.elf, sym)[0][0]
         filt = proc[rank - 1][0]
@@ -100,13 +120,22 @@ def main():
         process = B.block_path(a.elf, 'crumpBit_process', rank)[0]
         total = loop + filt + (engine + process + manager) / FRAMES
         worst = max(worst, total)
+        feed_worst = max(feed_worst, total + feed)
         print(f'{name}: loop {loop} + filter {filt} + (engine {engine} + '
               f'process {process} + manager {manager}) / {FRAMES} = '
-              f'{total:.1f}')
+              f'{total:.1f}' + (f'; with the feed {total + feed:.1f}'
+                                if a.feed_cap is not None else ''))
     if worst > a.cap:
         print(f'crumpbit_cpu.py: FAIL worst {worst:.1f} > cap {a.cap:g}')
         sys.exit(1)
     print(f'crumpbit cpu: worst {worst:.1f} <= cap {a.cap:g}')
+    if a.feed_cap is not None:
+        if feed_worst > a.feed_cap:
+            print(f'crumpbit_cpu.py: FAIL feed worst {feed_worst:.1f} > '
+                  f'feed cap {a.feed_cap:g}')
+            sys.exit(1)
+        print(f'crumpbit cpu: feed worst {feed_worst:.1f} <= feed cap '
+              f'{a.feed_cap:g}')
 
 
 if __name__ == '__main__':

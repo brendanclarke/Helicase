@@ -48,6 +48,10 @@ static void modNode_restoreLfoPair(void* a, void* b, void* c)
     (void)a; (void)b; (void)c;
 }
 
+/* S095 P1: the Effect feed slot lock (plan §5.7, D19). */
+static uint8_t mod_feed_lock;
+uint8_t effects_feedSlotLock(void) { return mod_feed_lock; }
+
 #include "modulation_interp.c"
 
 static int failures;
@@ -136,6 +140,42 @@ int main(void)
         expect(modNode_interpClaim(&d) == 0u,
                "L6: two fades leave no wavetable slot");
         modNode_setItpReserved(0u);
+    }
+
+    /*
+     * L7 (S095 P1, plan L-1): with the feed lock set, at most one slot is
+     * granted per block (the lock is a phantom grant placed by
+     * modNode_resetTargets()): a newcomer takes the one slot, others are
+     * refused; two holders of the last block keep only one between them;
+     * with the lock cleared, two are granted again from the second block.
+     */
+    {
+        memset(&a, 0, sizeof(a));
+        memset(&b, 0, sizeof(b));
+        memset(&c, 0, sizeof(c));
+        modNode_setWaveInterpEnabled(1u);
+        mod_feed_lock = 1u;
+        modNode_resetTargets();
+        expect(modNode_interpClaim(&a) == 1u, "L7: locked block grants a");
+        expect(modNode_interpClaim(&b) == 0u, "L7: locked block refuses b");
+        expect(modNode_interpClaim(&c) == 0u, "L7: locked block refuses c");
+        /*
+         * Unlocked: in the first block the phantom still counts as last
+         * block's grant (the documented one-block edge: holder a keeps its
+         * slot, newcomer b waits); from the next block both are granted.
+         */
+        mod_feed_lock = 0u;
+        modNode_resetTargets();
+        expect(modNode_interpClaim(&a) == 1u, "L7: unlocked block keeps a");
+        modNode_resetTargets();
+        expect(modNode_interpClaim(&a) == 1u, "L7: unlocked grants a");
+        expect(modNode_interpClaim(&b) == 1u, "L7: unlocked grants b");
+        /* Two holders when the lock arrives: only one keeps its slot. */
+        mod_feed_lock = 1u;
+        modNode_resetTargets();
+        expect((uint8_t)(modNode_interpClaim(&a) + modNode_interpClaim(&b)) == 1u,
+               "L7: locked block keeps one of two holders");
+        mod_feed_lock = 0u;
     }
 
     printf("modulation failures: %d\n", failures);

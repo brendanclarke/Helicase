@@ -1,0 +1,6 @@
+dly: loop 109 + filter 31 + (engine 140 + process 219 + manager 175) / 32 = 156.7
+cmb: loop 109 + filter 31 + (engine 105 + process 219 + manager 86) / 32 = 152.8
+pit: loop 106 + filter 31 + (engine 210 + process 219 + manager 86) / 32 = 153.1
+grn: loop 114 + filter 31 + (engine 840 + process 219 + manager 86) / 32 = 180.8
+rvb: loop 131 + filter 31 + (engine 252 + process 219 + manager 86) / 32 = 179.4
+crumpbit cpu: worst 180.8 <= cap 181

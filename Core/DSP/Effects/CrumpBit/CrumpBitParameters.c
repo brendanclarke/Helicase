@@ -462,7 +462,7 @@ static void crumpBit_formatGrainTime(uint8_t cc, char *out)
  * Inputs: the shown row (already clamped to the share's limit), 3-char out.
  * Caller: crumpBit_uiFormatValue3().
  */
-static void crumpBit_formatDelayTime(uint8_t row, char *out)
+void crumpBit_formatDelayRow(uint8_t row, char *out)
 {
     uint32_t k;
 
@@ -589,7 +589,7 @@ static uint8_t crumpBit_uiFormatValue3(uint8_t index, uint8_t value,
             break;
         default:
             /* S091 P6: `dly`'s delay-time curve (stop name, else row). */
-            crumpBit_formatDelayTime(shown, out);
+            crumpBit_formatDelayRow(shown, out);
             return 1u;
         }
         if (shown != value) {

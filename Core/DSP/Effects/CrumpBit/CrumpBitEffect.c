@@ -34,6 +34,26 @@
 #include "MidiPitch.h"          /* midiPitch_detune(): `pit` fine (S091 P5) */
 #include <math.h>
 #include <string.h>           /* memset(): crumpBit_enter() */
+#include "FxBuffer.h"         /* fxbuf_handoff_t fields (S095 P1) */
+
+/*
+ * The feed gains of CrumpBit's tails (S095 P1, D24: effect_feed_gain_uq15,
+ * uQ1.15): one 8-bit code / 128 is CrumpBit's wet scale, so a tape or line
+ * tail is 1.0; the `rvb` wet is about half the sum of a side's two lanes
+ * (mid 1/4 + side 1/4 at the default width), so 0.5.
+ */
+#define CRUMPBIT_FEED_GAIN_TAPE       1.0f
+#define CRUMPBIT_FEED_GAIN_RVB        0.5f
+
+/*
+ * rt->feed_bits (S095 P1): CRUMPBIT_FEED_RUN while a type-change feed plays
+ * (crumpBit_init() sets it, crumpBit_process() clears it when sk_feedMix()
+ * ends); CRUMPBIT_FEED_LIMIT when the engine's write heads are new (init,
+ * a sub-type entry) and the feed must be cut where they would overwrite it
+ * (crumpBit_feedLimit(), once, after the block's seat).
+ */
+#define CRUMPBIT_FEED_RUN             0x01u
+#define CRUMPBIT_FEED_LIMIT           0x02u
 
 /*
  * Private DSP constants (S074_CRUMPBIT_EFFECT.md §3).
@@ -413,7 +433,8 @@ float crumpBit_delaySamples(uint8_t rate, uint16_t bpm)
 float crumpBit_shareMaxSamples(const fx_share_t *share)
 {
     /* len: the loop length this share seats (crumpBit_seat()'s rule). */
-    uint32_t len = share ? share->bytes : 0u;
+    /* S095 P1 (SD1): the usable share above the arena prefix. */
+    uint32_t len = share ? sk_usableBytes(share) : 0u;
 
     if (len > CRUMPBIT_LOOP_MAX_BYTES)
         len = CRUMPBIT_LOOP_MAX_BYTES;
@@ -475,8 +496,8 @@ static CRUMPBIT_NOINLINE uint8_t crumpBit_tableLimit(const float *table,
  * Callers: crumpBit_subtypeRateLimit() (the manager's effective_max, the
  * page clamp and label). Affiliates: crumpBit_delayRow(), host law CB1.
  */
-static CRUMPBIT_NOINLINE uint8_t crumpBit_delayLimit(float max_samples,
-                                                     uint16_t bpm)
+CRUMPBIT_NOINLINE uint8_t crumpBit_delayLimit(float max_samples,
+                                             uint16_t bpm)
 {
     crumpbit_delay_curve_t c;
     /* m: the search bound; count: the rows (from 0 up) known below m. */
@@ -500,9 +521,9 @@ static CRUMPBIT_NOINLINE uint8_t crumpBit_delayLimit(float max_samples,
 float crumpBit_grainMaxSamples(const fx_share_t *share)
 {
     /* half: one `grn` line, half the seated share (plan §3.3.2). */
-    const uint32_t half = (share ? ((share->bytes > CRUMPBIT_LOOP_MAX_BYTES)
-                                        ? CRUMPBIT_LOOP_MAX_BYTES
-                                        : share->bytes) : 0u) / 2u;
+    const uint32_t usable = share ? sk_usableBytes(share) : 0u;
+    const uint32_t half = ((usable > CRUMPBIT_LOOP_MAX_BYTES)
+                               ? CRUMPBIT_LOOP_MAX_BYTES : usable) / 2u;
 
     return (half < CRUMPBIT_GRAIN_LINE_MIN)
         ? 0.0f : (float)(half - CRUMPBIT_LOOP_GUARD);
@@ -644,8 +665,12 @@ static uint32_t crumpBit_seat(CrumpBitRuntime *rt, uint32_t len)
     const uint8_t tape = (uint8_t)(rt->active_subtype != CRUMPBIT_SUBTYPE_PITCH);
 
     if (len != t->length) {
-        if (t->length != 0u && t->write_pos < len) {
-            /* Tail kept: only the samples written since the last wrap count. */
+        /*
+         * Tail kept: only the samples written since the last wrap count.
+         * S095 P1: a fresh seat (length 0, valid 0) keeps the start index
+         * init chose (the feed's tail end); nothing unwritten is heard.
+         */
+        if (t->write_pos < len) {
             if (t->valid > t->write_pos)
                 t->valid = t->write_pos;
         } else {
@@ -731,17 +756,41 @@ static inline const uint8_t *crumpBit_dataLinesFor(const CrumpBitRuntime *rt)
  *
  * What: the manager has already zeroed the union. This marks the loop
  * unseated and unprimed, so the first block seats the loop, mutes every
- * unwritten sample through `valid`, and starts the delay at its target. The
- * handoff is not adopted in v1: re-entering CrumpBit never plays a previous
- * owner's tail. Nothing is cleared in bulk. Inputs: runtime and handoff.
- * Output: runtime ready for write_param(). Caller: effects_switchRuntime().
- * Affiliates: crumpBit_seat(), FXBUF_STATE_EFFECT_WRITTEN.
+ * unwritten sample through `valid`, and starts the delay at its target.
+ * S095 P1: the previous owner's tail plays through the Space kit's feed
+ * (sk_feedBegin(), sk_feedMix()). Nothing is cleared in bulk.
+ * Inputs: runtime, handoff, the live share. Output: runtime ready for
+ * write_param(). Caller: effects_switchRuntime().
+ * Affiliates: crumpBit_seat(), crumpBit_feedLimit(), SpaceKit.h.
  */
-static void crumpBit_init(void *rt_void, const fxbuf_handoff_t *handoff)
+static __attribute__((cold)) void crumpBit_init(void *rt_void,
+                                                const fxbuf_handoff_t *handoff,
+                                                const fx_share_t *share)
 {
     CrumpBitRuntime *rt = (CrumpBitRuntime *)rt_void;
+    /* end: the old tail's end (share offset), 0 without a feed. */
+    uint32_t end;
 
-    (void)handoff;
+    /*
+     * S095 P1 (plan §5.3; §S18): enter through the kit. sk_feedBegin() reads
+     * the outgoing type's first segment in place and sets the slot lock
+     * while it plays. The loop starts writing where the tail ends, so its
+     * writes move away from it; the first block's seat then limits the
+     * feed against the engine's write heads (CRUMPBIT_FEED_LIMIT). The
+     * loop's bytes are not cleared: `valid` mutes every unwritten byte, as
+     * before (SD6).
+     */
+    sk_feedBegin(share, handoff, EFFECT_TYPE_CRUMPBIT);
+    end = sk_feedEnd(share, EFFECT_TYPE_CRUMPBIT);
+    /*
+     * The incoming dry ramp (plan §5.3 step 5) through CrumpBit's own mix
+     * stage: its law is out = h + mix (wet - h), so dry = 1 - mix. The first
+     * block ramps from the row whose dry equals the outgoing dry (one block,
+     * CrumpBit's existing mix ramp, instead of the Space types' 10 ms).
+     */
+    if (handoff && (handoff->state_flags & FXBUF_STATE_EFFECT_WRITTEN) != 0u)
+        rt->mix_prev = (uint8_t)(127u - (((uint32_t)handoff->effect_dry_uq15 *
+                                          127u + 0x4000u) >> 15));
     /*
      * The manager zeroed the union: every sub-type state is unseated
      * (length 0) and the active engine is `dly` (0). The forced resolution
@@ -749,8 +798,9 @@ static void crumpBit_init(void *rt_void, const fxbuf_handoff_t *handoff)
      * first block like any switch (crumpBit_enter()).
      */
     rt->u.tap.length = 0u;
-    rt->u.tap.write_pos = 0u;
+    rt->u.tap.write_pos = (end > SK_PREFIX_BYTES) ? end - SK_PREFIX_BYTES : 0u;
     rt->u.tap.valid = 0u;
+    rt->feed_bits = end ? (CRUMPBIT_FEED_RUN | CRUMPBIT_FEED_LIMIT) : 0u;
     rt->primed = 0u;
     /*
      * AC-coupling memory (S091 R4): the previous code of each channel. The
@@ -827,56 +877,102 @@ static void crumpBit_bytePosition(const CrumpBitRuntime *rt, uint32_t *pos,
 }
 
 /*
- * Describe the loop in the handoff when CrumpBit is exited or refreshed.
+ * Describe CrumpBit's valid audio when it is exited or refreshed (S095 P1,
+ * D24).
  *
- * What: records 1 channel, 8 bits, 44,108 Hz, the write position and integer
- * read position in pointer slot 12 (FXBUF_HANDOFF_EFFECT_POINTER_BASE), and
- * FXBUF_STATE_EFFECT_WRITTEN when any sample was written. Positions are
- * share-relative, which is arena-relative because the share starts at the
- * arena bottom. Inputs: runtime and the fresh handoff record. Output: the
- * Effect fields of the record. Callers: EffectsManager's handoff helper.
- * Affiliates: fxbuf_handoff_t.
+ * What: the wrap domain is the loop above the prefix (or, `grn`, its
+ * delay half); bits 8,
+ * 44,108 Hz, speed 1.0 (CrumpBit's tape glide moves the read head, never the
+ * write speed), dry = 1 - mix, gain CRUMPBIT_FEED_GAIN_*. Segments, each start
+ * clamped to `valid`:
+ * - `dly`, `cmb`: the pending repeat [wp - delay, wp), BOTH, stride 1;
+ * - `pit`: the window [wp - W, wp), BOTH, stride 1;
+ * - `grn`: its delay line's pending tap [wp - tap_d, wp) in the delay half;
+ * - `rvb`: the four FDN lines, lane k = [wp - d_k, wp) words (x 4 bytes),
+ *   stride 4, lanes 0 and 2 to L, 1 and 3 to R.
+ * No arena byte is written (SD3: a same-type Scene switch exports a live
+ * runtime). Inputs: runtime, the fresh record. Output: the record.
+ * Callers: effects_exportHandoff(). Affiliates: sk_exportBegin(),
+ * sk_exportSeg(), FxBuffer.h read rule.
  */
-static void crumpBit_exportHandoff(const void *rt_void, fxbuf_handoff_t *out)
+static __attribute__((cold)) void crumpBit_exportHandoff(const void *rt_void,
+                                                        fxbuf_handoff_t *out)
 {
     const CrumpBitRuntime *rt = (const CrumpBitRuntime *)rt_void;
-    float rp;
+    /*
+     * The active engine's line in one form: base (share-relative bytes),
+     * len/wp/valid (in the engine's unit: bytes, or words for `rvb`), d[k]
+     * (each segment's samples behind the write index), n segments.
+     */
+    uint32_t base;
+    uint32_t len;
+    uint32_t wp;
+    uint32_t valid;
+    uint32_t d[4];
+    uint32_t unit = 1u;
+    uint32_t n = 1u;
+    float gain = CRUMPBIT_FEED_GAIN_TAPE;
+    uint32_t k;
 
     if (!rt || !out)
         return;
-    out->effect_channels = 1u;
-    out->effect_bits = 8u;
-    out->effect_rate_hz = (uint16_t)CRUMPBIT_SAMPLE_RATE_HZ;
-    /*
-     * S091 P3: only the tape sub-types describe a read head; the others
-     * report their write position as the read position. Nobody adopts the
-     * Effect pointers today (CrumpBit itself never does).
-     */
-    if (rt->active_subtype == CRUMPBIT_SUBTYPE_DELAY ||
-        rt->active_subtype == CRUMPBIT_SUBTYPE_COMB) {
-        const CrumpBitTapState *t = &rt->u.tap;
+    /* The loop starts above the arena prefix (SD1). */
+    base = SK_PREFIX_BYTES;
+    switch (rt->active_subtype) {
+    case CRUMPBIT_SUBTYPE_REVERB: {
+        const float size = crumpBit_reverbSize[(rt->rate > 127u) ? 127u
+                                                                 : rt->rate];
 
-        if (t->length == 0u)
-            return;
-        rp = (float)t->write_pos - t->delay;
-        rp += (rp < 0.0f) ? (float)t->length : 0.0f;
-        out->write_offset[FXBUF_HANDOFF_EFFECT_POINTER_BASE] = t->write_pos;
-        out->read_offset[FXBUF_HANDOFF_EFFECT_POINTER_BASE] =
-            (uint32_t)rp % t->length;
-        if (t->valid != 0u)
-            out->state_flags |= FXBUF_STATE_EFFECT_WRITTEN;
-        return;
+        len = rt->u.rvb.length;
+        wp = rt->u.rvb.write_pos;
+        valid = rt->u.rvb.valid;
+        d[0] = (uint32_t)((float)CRUMPBIT_RVB_BASE0 * size);
+        d[1] = (uint32_t)((float)CRUMPBIT_RVB_BASE1 * size);
+        d[2] = (uint32_t)((float)CRUMPBIT_RVB_BASE2 * size);
+        d[3] = (uint32_t)((float)CRUMPBIT_RVB_BASE3 * size);
+        unit = 4u;
+        n = 4u;
+        gain = CRUMPBIT_FEED_GAIN_RVB;
+        break;
     }
-    {
-        /* pos/valid: the active engine's write byte and written bytes. */
-        uint32_t pos;
-        uint32_t written;
+    case CRUMPBIT_SUBTYPE_GRAIN:
+        /* The delay half: the line after the record line. */
+        len = rt->u.grn.length;
+        base += len;
+        wp = rt->u.grn.write_pos;
+        valid = rt->u.grn.valid;
+        d[0] = rt->u.grn.tap_d;
+        break;
+    case CRUMPBIT_SUBTYPE_PITCH:
+        len = rt->u.pit.length;
+        wp = rt->u.pit.write_pos;
+        valid = rt->u.pit.valid;
+        d[0] = (uint32_t)rt->u.pit.window;
+        break;
+    default:
+        len = rt->u.tap.length;
+        wp = rt->u.tap.write_pos;
+        valid = rt->u.tap.valid;
+        /* Whole samples behind the head, the read's lower neighbour. */
+        d[0] = (uint32_t)(rt->u.tap.delay + 0.999f);
+        break;
+    }
+    if (len == 0u || valid == 0u || d[0] == 0u)
+        return;
+    sk_exportBegin(out, base, len * unit, 8u, (uint8_t)unit,
+                   (uint16_t)CRUMPBIT_SAMPLE_RATE_HZ, 1.0f,
+                   (float)(127u - ((rt->mix_raw > 127u) ? 127u : rt->mix_raw)) /
+                       127.0f, gain);
+    for (k = 0u; k < n; k++) {
+        /* At most the valid history, and len - 1 (a whole ring reads empty). */
+        uint32_t dk = (d[k] > valid) ? valid : d[k];
 
-        crumpBit_bytePosition(rt, &pos, &written);
-        out->write_offset[FXBUF_HANDOFF_EFFECT_POINTER_BASE] = pos;
-        out->read_offset[FXBUF_HANDOFF_EFFECT_POINTER_BASE] = pos;
-        if (written != 0u)
-            out->state_flags |= FXBUF_STATE_EFFECT_WRITTEN;
+        dk = (dk >= len) ? len - 1u : dk;
+        sk_exportSeg(out, (uint8_t)k, base + ((wp + len - dk) % len) * unit,
+                     base + wp * unit,
+                     (n == 1u) ? FXBUF_SEG_SIDE_BOTH
+                               : ((k & 1u) ? FXBUF_SEG_SIDE_R
+                                           : FXBUF_SEG_SIDE_L));
     }
 }
 
@@ -2868,6 +2964,67 @@ static void crumpBit_enter(CrumpBitRuntime *rt, uint8_t next, uint32_t bytes)
         }
         break;
     }
+    /* S095 P1: new write heads; a running feed is limited against them. */
+    if (rt->feed_bits & CRUMPBIT_FEED_RUN)
+        rt->feed_bits |= CRUMPBIT_FEED_LIMIT;
+}
+
+/*
+ * Limit a running type-change feed against the active engine's write heads
+ * (S095 P1, §S18; SpaceKit.h sk_feedLimit()).
+ *
+ * What: describes where this engine writes next, share-relative, in its
+ * loop above the prefix: `dly`/`cmb`/`pit` one byte per frame from
+ * write_pos; `grn` the record and delay half-lines, one byte each per frame
+ * from write_pos (freeze redirects the record write into the delay half,
+ * which the second head already covers); `rvb` one 4-byte word per frame.
+ * The kit cuts the tail before the first sample one of them would
+ * overwrite before it is read.
+ * When: in the first seated block after init or a sub-type entry, before
+ * the engine writes (CRUMPBIT_FEED_LIMIT). Out of line and cold: once per
+ * change, never in a steady block.
+ * Inputs: runtime (seated), share. Output: the control block's head.
+ * Caller: crumpBit_process().
+ */
+static CRUMPBIT_NOINLINE __attribute__((cold)) void crumpBit_feedLimit(
+    CrumpBitRuntime *rt, const fx_share_t *share)
+{
+    const uint32_t base = SK_PREFIX_BYTES;
+    sk_writer_t w[2];
+    uint32_t n = 1u;
+    uint32_t len;
+
+    rt->feed_bits &= (uint8_t)~CRUMPBIT_FEED_LIMIT;
+    switch (rt->active_subtype) {
+    case CRUMPBIT_SUBTYPE_GRAIN:
+        len = rt->u.grn.length;
+        w[0].at = base + rt->u.grn.write_pos;
+        w[0].lo = base;
+        w[0].hi = base + len;
+        w[0].rate = 1u;
+        w[1].at = w[0].at + len;
+        w[1].lo = base + len;
+        w[1].hi = base + 2u * len;
+        w[1].rate = 1u;
+        n = 2u;
+        break;
+    case CRUMPBIT_SUBTYPE_REVERB:
+        len = rt->u.rvb.length;
+        w[0].at = base + 4u * rt->u.rvb.write_pos;
+        w[0].lo = base;
+        w[0].hi = base + 4u * len;
+        w[0].rate = 4u;
+        break;
+    default:
+        len = rt->u.tap.length;
+        w[0].at = base + rt->u.tap.write_pos;
+        w[0].lo = base;
+        w[0].hi = base + len;
+        w[0].rate = 1u;
+        break;
+    }
+    if (len != 0u)
+        sk_feedLimit(share, EFFECT_TYPE_CRUMPBIT, w, n);
 }
 
 /*
@@ -2923,7 +3080,8 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
     if (!rt || !io || !io->l || !io->share || !io->share->base ||
         io->frames == 0u)
         return;
-    bytes = io->share->bytes;
+    /* S095 P1 (SD1): the loop lives above the arena prefix. */
+    bytes = sk_usableBytes(io->share);
     bytes = (bytes > CRUMPBIT_LOOP_MAX_BYTES) ? CRUMPBIT_LOOP_MAX_BYTES : bytes;
     /* 1. A changed sub-type is entered on this block (reinterpretation). */
     if (rt->subtype != rt->active_subtype)
@@ -2932,12 +3090,15 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
     blk.len = crumpBit_seatActive(rt, bytes);
     if (blk.len == 0u)
         return;
+    /* S095 P1: new write heads during a feed limit it, before they write. */
+    if (rt->feed_bits & CRUMPBIT_FEED_LIMIT)
+        crumpBit_feedLimit(rt, io->share);
 
     /* 3. Shared per-block work. */
     blk.frames = io->frames;
     blk.left = io->l;
     blk.right = io->r ? io->r : io->l;
-    blk.base = (int8_t *)io->share->base;
+    blk.base = (int8_t *)io->share->base + SK_PREFIX_BYTES;
     /* Data lines (X2): the table for this block's `bof`/`biv`. */
     blk.lines = crumpBit_dataLinesFor(rt);
     /* Ramp step per frame: the block's ramps land on their targets. */
@@ -2955,6 +3116,17 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
     case CRUMPBIT_SUBTYPE_REVERB: crumpBit_runReverb(rt, &blk); break;
     default:                      crumpBit_runDelay(rt, &blk);  break;
     }
+    /*
+     * S095 P1 (plan §5.4; §S18): a running type-change feed plays the old
+     * tail into this block's wet at the mix ramp, ahead of the output SVF,
+     * which filters it like CrumpBit's own wet. It is not written into the
+     * loop (heard, not repeated): one pass, only in feed blocks. CrumpBit's
+     * bus is stereo (EFFECT_IO_STEREO_OUT), so right is its own channel.
+     */
+    if ((rt->feed_bits & CRUMPBIT_FEED_RUN) &&
+        !sk_feedMix(io->share, EFFECT_TYPE_CRUMPBIT, blk.left, blk.right,
+                    blk.frames, blk.mix, mix_to))
+        rt->feed_bits = 0u;
     rt->mix_prev = rt->mix_raw;
 
     /*
@@ -3077,10 +3249,13 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
  * Inputs: runtime and new share. Output: runtime seat fields.
  * Caller: effects_onShareChanged().
  */
-static void crumpBit_bufferChanged(void *rt_void, const fx_share_t *share)
+static __attribute__((cold)) void crumpBit_bufferChanged(void *rt_void,
+                                                        const fx_share_t *share)
 {
-    const uint32_t bytes = share ? share->bytes : 0u;
+    /* S095 P1: a share cut that reaches the feed's tail ends it (D14). */
+    const uint32_t bytes = share ? sk_usableBytes(share) : 0u;
 
+    (void)sk_feedCut(share, EFFECT_TYPE_CRUMPBIT);
     (void)crumpBit_seatActive((CrumpBitRuntime *)rt_void,
                               (bytes > CRUMPBIT_LOOP_MAX_BYTES)
                                   ? CRUMPBIT_LOOP_MAX_BYTES : bytes);

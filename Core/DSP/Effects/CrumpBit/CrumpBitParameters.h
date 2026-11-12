@@ -214,6 +214,15 @@ extern const char crumpBit_abbrev5[];
 extern const char crumpBit_full8[];
 
 /*
+ * The `dly` delay-time label of a row (S091 P6; exported S095 P1): a
+ * StepScale stop's name, else the row number. Shared with the Space Delay
+ * and Echo `tim` (D3: the same curve shows the same labels).
+ * Callers: crumpBit_uiFormatValue3(), space_delayFormatValue3(),
+ * space_echoFormatValue3().
+ */
+void crumpBit_formatDelayRow(uint8_t row, char *out);
+
+/*
  * Effect-page layout and hooks.
  *
  * crumpBit_layout places the overlay (home) and pages 2..4 on SELECT 2

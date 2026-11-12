@@ -120,6 +120,27 @@
 #define FXBUF_STATE_VOICE_WRITTEN      0x02u
 
 /*
+ * Handoff segment sides and the unsigned Q1.15 unit (S095 P1, D24).
+ *
+ * What: FXBUF_SEG_SIDE_* are the 2-bit codes in effect_seg_sides, one per
+ * Effect segment i (bits 2i..2i+1): the segment is a left (L), right (R) or
+ * mono (BOTH, fed to both sides) part of the outgoing Effect's tail.
+ * FXBUF_UQ15_ONE is 1.0 in the unsigned Q1.15 fields (effect_speed_uq15,
+ * effect_dry_uq15, effect_feed_gain_uq15), so 0x8000 = 1.0 and the range is
+ * 0 .. 1.99997.
+ * Why: an entering type must be able to read the outgoing tail exactly,
+ * without knowing the outgoing type's engine (plan §5.2, D24).
+ * Accessors: every buffer-using Effect's export_handoff (writes), the Space
+ * kit sk_feedBegin() (reads).
+ */
+#define FXBUF_SEG_SIDE_L       0u
+#define FXBUF_SEG_SIDE_R       1u
+#define FXBUF_SEG_SIDE_BOTH    2u
+#define FXBUF_SEG_SIDE_MASK    3u
+#define FXBUF_SEG_SIDE_SHIFT(i_) (2u * (uint32_t)(i_))
+#define FXBUF_UQ15_ONE         0x8000u
+
+/*
  * One contiguous Effect share.
  *
  * What: base pointer, arena-relative offset, and byte length of the region an
@@ -144,11 +165,37 @@ typedef struct {
  * (arena-relative byte offsets: [0..11] voice units, [12..15] Effect).
  * Written-content flags say which regions hold real audio.
  *
+ * S095 P1 (D24): the Effect slots [12..15] are SEGMENTS of the outgoing
+ * Effect's valid audio, one per slot i = 0..3 at FXBUF_HANDOFF_EFFECT_POINTER_
+ * BASE + i:
+ * - read_offset[12 + i]:  the segment's OLDEST valid byte;
+ * - write_offset[12 + i]: one past its NEWEST byte;
+ * - both FXBUF_OFFSET_NONE: no segment i.
+ * Read rule, the same for every segment of every type: read forward from
+ * start to end, oldest first; step effect_stride bytes per sample at
+ * effect_speed_uq15 x effect_rate_hz / 44,108 samples per output frame; the
+ * sample is at byte lane (i x effect_bits / 8) mod effect_stride of each
+ * step; a position reaching effect_wrap_offset + effect_wrap_bytes continues
+ * at effect_wrap_offset; length = (end - start) mod effect_wrap_bytes. Every
+ * byte inside a segment is valid audio (the exporter clamps the start to what
+ * it has written); a zero-length segment is not exported. effect_seg_sides
+ * says which side each segment feeds; the summed segments of one side x
+ * effect_feed_gain_uq15 are the outgoing type's wet-normalized tail (before
+ * its mix). effect_dry_uq15 is its dry gain at exit.
+ * The record only describes: an exporter never moves or rewrites audio (the
+ * same-type Scene switch exports a live runtime). Any re-ordering the entering
+ * type needs is its own (the Space kit's sk_feedBegin()).
+ *
  * Why: Phase 5 has no system-wide buffer disposal, even across a type change
  * (user decision F6). Buffers persist; the entering owner decides whether to
  * adopt or dispose of them. This record is the only information exchange for
  * that decision. Offsets instead of pointers keep it meaningful if the arena
  * moves between builds.
+ * Size: 196 B (S095 P1: +16 B, D18), SRAM1 .bss, FxBuffer-owned.
+ * Accessors: fxbuf_handoffBeginExit() (writable, at an exit),
+ * fxbuf_handoff() (read-only), the types' export_handoff/init ops.
+ * Affiliates: FXBUF_SEG_SIDE_*, FXBUF_UQ15_ONE, SpaceKit.h sk_feedBegin(),
+ * STORAGE_SRAM_MANIFEST.md.
  */
 typedef struct {
     uint32_t effect_share_offset;
@@ -163,6 +210,27 @@ typedef struct {
     uint8_t  effect_bits;
     uint8_t  state_flags;
     uint8_t  unit_owner_slot[FXBUF_VOICE_UNIT_COUNT];
+    /*
+     * S095 P1 segment description (D24; +16 B, D18). wrap_*: the arena
+     * region the segments live in (the outgoing tape, loop or ring), so a
+     * reader wraps exactly where the writer did. 0 bytes = no segments.
+     */
+    uint32_t effect_wrap_offset;
+    uint32_t effect_wrap_bytes;
+    /* Read speed of the recorded audio, uQ1.15 (0x8000 = 1.0): a tape's
+     * speed v at exit (varispeed, plan §4.1), so the feed keeps the recorded
+     * pitch; 1.0 for CrumpBit and for rings. */
+    uint16_t effect_speed_uq15;
+    /* The outgoing dry gain at exit, uQ1.15: the incoming dry ramps from it
+     * over 10 ms (plan §5.3 step 5). */
+    uint16_t effect_dry_uq15;
+    /* Gain from one side's summed segments to the outgoing wet level,
+     * uQ1.15 (the outgoing type's wet-normalization constant). */
+    uint16_t effect_feed_gain_uq15;
+    /* Bytes from one sample of a segment to the next: 1, 2 or 4. */
+    uint8_t  effect_stride;
+    /* Two bits per segment: FXBUF_SEG_SIDE_L / _R / _BOTH. */
+    uint8_t  effect_seg_sides;
 } fxbuf_handoff_t;
 
 /*
