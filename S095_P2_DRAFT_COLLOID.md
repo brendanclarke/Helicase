@@ -9,6 +9,11 @@
     oscillator with `spr`/`mot`, lightweight amp and filter ADSRs, the
     sustain switch, mixer-level pan, the 1,024-point sine as step 0);
     re-checked against the tree after S095 P1 (§H.2).
+  - **Session-start check (2026-11-12, S095 P2):** §H.2 re-verified on
+    `b7f7eec4`. Three questions for the user, **C-D19 to C-D21 (§H.7)**,
+    must be answered before the schedule (§H.4 step 3). Two corrections
+    are made in the body: the future note-off hook (§4) and the wave-row
+    shape (§2.3, §8).
   - Where sections disagree, **§H wins, then §U, then the body.**
   - **No firmware code is changed by this document.** Figures marked *measured* come
   from standalone scratch spikes compiled with the Makefile's DSP flags and
@@ -157,6 +162,16 @@
   - C-D10 the 1,024-point sine as step 0;
   - C-D11 the mixer-level pan;
   - every other recommendation in §12: C-D4…C-D7, C-D9, C-D12…C-D18.
+- **Decided (user, 2026-11-12, after the session-start check, §H.7):
+  the recommendations accepted.**
+  - **C-D19:** sustain holds only while the transport runs
+    (`sus && seq_isRunning()`); stopped hits play A-D-R;
+  - **C-D20:** the platform's `typ` (wav/wtb/pwm) / `wav` / `pos` shape,
+    with one spread row `psp`;
+  - **C-D21:** PWM is the Rec pulse only.
+- **The schedule is written:** `S095_P2_IMPLEMENTATION.md`, verified in a
+  scratch export of `b7f7eec4` (its §C). Where it departs from this draft,
+  its §B says why, and it wins.
 - **Open, decided by measurement (not by asking):** **C-D2, the oscillator
   count.** Spike and measure 12 plain / 6 PWM against Basic 19,620, falling
   back to 10 plain (§6.1).
@@ -194,7 +209,7 @@
 | **0** | 1,024-point sine across the board (§12 C-D10): regenerate the table, shift 20 → 22 at the readers, LFO read | host goldens regenerated and passing (`oscillator`, `pwm`, `lfo`, `alkaline`, and the rest of `make -C tools/dsp_test all`); `elf_p4_check` against a **fresh snapshot** (the oscillator dumps change by the shift constant only, the loop counts do not); flash −6,144 B ± LTO noise; one listening check | the change and its records in `tools/dsp_test/baselines/s095p2/` |
 | 1 | **Spike** (a scratch copy outside the tree, §U.6): the oscillator pair loops with the S term (§2.1) and the shipped PWM read, both filter loops, the stereo mixer functions against the `QADD` loops, a stub voice with the per-block positions and both envelopes | linked loop counts (`elf_looppath.py --cond-heads --in-range`); per-block path (`elf_blockpath.py`); the mixer gate (`elf_p4_check`, 0 grew); ITCM and flash | measured counts per mode; the **C-D2** proposal |
 | 2 | **Device run** of the stub voice (one flash): cold, dearest, stereo send, with the probe | ≤ 19,620 cycles per block at the proposed count | C-D2 settled; the cycles per instruction recorded |
-| 3 | **Schedule**: `S095_P2_IMPLEMENTATION.md`, citing every change by file and line, as `S095_P1_IMPLEMENTATION.md` | the user approves it | the schedule |
+| 3 | **Schedule**: `S095_P2_IMPLEMENTATION.md`, citing every change by file and line, as `S095_P1_IMPLEMENTATION.md` | C-D19 to C-D21 answered (§H.7); the user approves it | the schedule |
 | 4 | Registry and type (append-only), an empty voice | builds; `check_special_tags.py`; the Instrument Load lists `Colloid`; Scene save and load round-trip | |
 | 5 | Oscillators and filters | host laws (§11 step 3); linked loop counts equal to the spike's | |
 | 6 | Mixer stereo path | `elf_p4_check` mixer 0 grew; the stereo dry and send laws | |
@@ -238,6 +253,156 @@
   - nothing needed goes in `build/`;
   - no `.claude` auto-memory.
 - **Device runs:** one flash per question.
+
+### H.7 Session-start check (2026-11-12, S095 P2, tree `b7f7eec4`)
+
+**Re-verified, unchanged:**
+
+- **Link budget** (`tools/diagnostic_tools/link_budget.py` on
+  `build/lxr02.elf`): flash 711,036 / 753,664 B; ITCM 14,032 / 16,384 B;
+  DTCM statics 4,396 B; FX arena 126,656 B. These are §H.2's figures.
+- **Slot reserve** (`nm -S`): `runtime_slots` is 7,584 B, which is
+  6 × 1,264 B. So 2 × `sizeof(DrumVoice)` is still 1,264 B after S094.
+- **`sine_table`** (`nm -S`): 8,194 B.
+- **Every anchor in §H.2's table** is at the line given there.
+- `seq_isRunning()` (`sequencer.h:522`) is the running-flag accessor that
+  the S095 P1 Effect idle already reads from DSP code
+  (`EffectsManager.c:2451`). The Colloid's stop edge (§4) reads it too.
+- **A step with automation but no trigger still queues its entries**
+  (`PATTERN_DYNAMIC_STACK.md` §6, "When a step's entries are queued").
+  The step reset at the next trigger restores the base value. So a `sus`
+  off lock on a step with no hit ends the note there, and the next note
+  finds `sus` back at its base. C-D8 works as designed.
+
+**Three questions for the user. C-D21 is needed before the step 1 spike;
+all three are needed before the schedule (step 3):**
+
+- **C-D19: a held note started while the transport is stopped.**
+  - **The fact:** pads (`buttonHandler.c:1062-1079`), MIDI notes
+    (`MidiNotes.c:90`) and the preview (`seq_previewVoice()`) all trigger
+    through `seq_triggerVoice()`, running or stopped. MIDI note-off goes
+    only to `buttonHandler_overlayMidiNoteOff()` (`MidiNotes.c:69-70`).
+    Nothing reaches an engine.
+  - **The consequence:** with `sus` on, a stopped-transport hit holds
+    until one of three things happens: the next hit on that track, a menu
+    `sus` off, or a later start then stop. §4's stop edge does not help,
+    because the transport was never running. The Colloid is the first type
+    that can hold without end. The Alkaline gate always ends, by step
+    length.
+  - **(a) Recommended:** sustain holds only while the transport runs. The
+    effective switch is `sus && seq_isRunning()`, read once per block (the
+    stop edge reads the flag already). 0 B and about 2 instructions per
+    block. Stopped hits play A-D-R.
+  - **(b)** A release path now. MIDI note-off and pad release would queue a
+    release to the engine, drained in the main loop like the trigger ring.
+    This touches `MidiNotes.c`, `buttonHandler.c` and `MidiVoiceControl.c`,
+    and needs a few bytes of RAM (sign-off).
+  - **(c)** As drafted: the note holds until one of the three events above.
+- **C-D20: the shape of the `typ`, `wav` and `pos` rows.**
+  - **The draft:** `typ` is `wav`/`pwm`. `wav` is one list (`Saw Rec Tri
+    Sin w01..wNN`). `pos`/`wsp` are the frame centre and spread, and
+    `pwd`/`pws` the width centre and spread: 8 OSC cells.
+  - **The platform pattern (Alkaline, S093 P8 and S094 P4):**
+    - `typ` is `wav`/`wtb`/`pwm`, named by `alkTypeNames` (tag
+      `ONOFF_TAG_ALK_TYPE`, `MenuText.h:240-253`);
+    - the `wav` list is keyed by `typ`. `instrumentManager_waveDomainMax()`
+      (`InstrumentManager.c:852`) and `menu_formatWaveCell()`
+      (`menu.c:12185`) each have a type branch. The LFO and velocity
+      ranges, the menu clamp, the automation display and the `typ` switch
+      clamp all follow from those two;
+    - `pos` is the pulse width under `pwm` (Drum and Alkaline).
+  - **Recommended: follow the platform pattern.**
+    - `typ`: `wav`/`wtb`/`pwm`, reusing tag 3's names (no new tag).
+    - `wav`: under `wav` it lists Saw Rec Tri Sin; under `wtb`, wNN; under
+      `pwm`, the C-D21 forms.
+    - `pos`: the frame centre under `wtb` (latched at the trigger, C-D4)
+      and the width under `pwm` (read every block). It shows `---` under
+      `wav`, where the oscillators are free-running.
+    - One spread row, `psp` (`col_pos_spread`), spreads frames under `wtb`
+      and widths under `pwm`.
+    - The OSC page becomes `coa fin wav typ` / `pos psp`, with 2 cells
+      free. Two fewer rows than the draft.
+    - The helpers gain a Colloid branch beside the Alkaline's. This is the
+      same work as the draft's, but the result keeps the existing meaning
+      of `wav` and `pos` for LFO, Morph and automation. With the combined
+      list, an LFO or Morph sweep of `wav` would cross from `Sin` into
+      `w01`.
+- **C-D21: the PWM forms.**
+  - The Alkaline's `pwm` offers three: Saw (summed), Sqr (differenced) and
+    Tri (warp).
+  - The draft gives the Colloid one: the saw-row difference, a Rec pulse
+    on the `oscPwmDRec` law.
+  - Each extra form is its own loop set (pair store, pair add, single),
+    about 500 B of ITCM. This is an *estimate*: §7.2 gives ≈ 900 B for
+    all six loops, and the three plain loops are ≈ 360 B (from the
+    measured 144 B and 140 B pairs). The PWM pair alone measured 208 B.
+  - The +1 KB ITCM line holds the plain loops and **one** PWM form.
+  - **Recommended:** Rec only. Under `pwm`, `wav` shows `Rec` as its one
+    entry. A second form would need an ITCM sign-off above +1 KB.
+
+**Corrections made in the body:**
+
+- **§4, §4.2: the later MIDI note-off release cannot hook
+  `voiceControl_noteOff()`.** `seq_triggerVoice()` calls it before every
+  note-on (`sequencer.c:2126`; the preview at `:2180`), in TIM3 as well as
+  the foreground. A release there would fire on every hit, and from an
+  ISR. The release needs its own queued path (C-D19 (b)).
+- **§2.3, §8:** the combined `wav` list and the `pwd`/`pws` rows are
+  marked as pending C-D20.
+- **§5: the pan law's consequence is recorded (C-D11 is unchanged).**
+
+**For step 0 (the sine), checked in the tree:**
+
+- **Readers:**
+  - `Oscillator.c` has 21 `sine_table` references in `calcSineBlock()`,
+    `calcSine()`, `calcFmSineBlock()`, `calcFmSine()`, the sync sine
+    (`:746`), the ring sine (`:875`) and `osc_pwmReadS()` (`:3785-3791`);
+  - the float readers change `>> 20`, `& 0xfffff` and `x 2^-20` to
+    `>> 22`, `& 0x3fffff` and `x 2^-22`;
+  - `osc_pwmReadS()` changes `ps >> 20` and `(ps >> 5) & 0x7FFF` to
+    `>> 22` and `(ps >> 7) & 0x7FFF`. Its range comment "|b − a| <= 51"
+    becomes **202** (measured on the decimated table); the product still
+    fits int32;
+  - `lfo.c:94` changes `>> 20` to `>> 22`.
+- **Tables and their notes:** `wavetable.h:43` (`TABLESIZE`) and its
+  notes, and `wavetable.c`'s data and its "top 12 bits" note.
+- **Host:** `osc_host.h:37-38`. `tools/dsp_test/Makefile:1054` extracts
+  the table from `wavetable.c`, so it needs no edit.
+  `tools/dsp_test/spike/` is the frozen retry kit and is not edited.
+- **The data:** the shipped table is not an exact formula. 4,005 of its
+  4,097 entries differ from `round(−32767 cos)`, and entry 1,024 is 12.
+  **Decimating it by 4** keeps every shared point. Any phase on a
+  multiple of 2^22 then reads bit-identically to today. (A choice for the
+  implementer, recorded here.)
+- The linker script names `sine_table` in a comment only
+  (`STM32F765VIHx_FLASH.ld:60`), with no placement.
+
+**Integration sites (every Alkaline special case outside its engine; each
+needs a Colloid case or a deliberate default):** `InstrumentManager.c`:
+
+| Line | Function |
+|---:|---|
+| `:75` | registry |
+| `:210`, `:226` | union, assert |
+| `:295` | the runtime accessor |
+| `:852` | `waveDomainMax` |
+| `:1472` | `runtimeInstance` |
+| `:1492` | `runtimeLfo` |
+| `:1563` | `runtimeInit` |
+| `:1592` | `ampEnvelopeQuiet` |
+| `:1707` | `resetRuntimeSlotFromScene` |
+| `:1825` | `runtimePan` |
+| `:1857` | `runtimeVolume` |
+| `:2088` | async |
+| `:2125` | sync |
+| `:2263` | `triggerTrack` |
+| `:2395` | `osc` |
+| `:2446` | `oscBySelector` |
+| `:3868` | `IM_SPECIAL_INSTRUMENT_DRIVE` |
+| `:3951` | `IM_SPECIAL_OSC_TYPE` |
+
+Outside it: `menu.c:12185` (`menu_formatWaveCell()`) and
+`storageTypes.h:142` (`STORAGE_INSTRUMENT_ALK`).
 
 ## U. S095 update (2026-11-11): what changed since this draft, and what the next session does
 
@@ -593,6 +758,9 @@ spike measures it (§U.6).
 
 ### 2.3 Waves and the wavetable spread
 
+- *(Pending C-D20, §H.7: the recommended shape is the platform's, with
+  `typ` `wav`/`wtb`/`pwm` and the `wav` list keyed by `typ`. The
+  combined list below is the draft's form.)*
 - **`wav`** lists `Saw Rec Tri`, then `w01..wNN` (the installed
   wavetables). The stock rows are the band-limited `[11][1024]` tables.
   - A user wavetable frame is 1,024 points, 16-bit (S093 P8), not
@@ -622,7 +790,8 @@ spike measures it (§U.6).
 
 ### 2.4 PWM
 
-- `typ` = `wav` / `pwm`.
+- `typ` = `wav` / `pwm` *(pending C-D20: `wav`/`wtb`/`pwm`, with `pos`
+  and one spread row in place of `pwd`/`pws`; the forms are C-D21, §H.7)*.
 - Under `pwm` every oscillator plays the band-limited two-read pulse (the
   saw-row difference of `DRAFT_PWM_IMPLEMENTATION.md` §1.1, form D), with:
   - `pwd`: the centre width, read every block (an LFO on it moves every
@@ -797,8 +966,14 @@ measured*).
   keeps processing until its output stays below −90 dBFS, so the
   Colloid's release tails into a reverb or delay are heard in full before
   the Effect idles.
-- **MIDI note-off, later:** the same release, driven by
-  `voiceControl_noteOff()` when a keyboard path is added.
+- **A hit while the transport is stopped** (a pad, a MIDI note, the
+  preview) has no stop edge to release it. With `sus` on it would hold
+  until the next hit. **C-D19 (§H.7)**; recommended: `sus` holds only
+  while the transport runs.
+- **MIDI note-off, later:** the same release, through its **own queued
+  path** when a keyboard path is added. *(Corrected 2026-11-12, §H.7: not
+  `voiceControl_noteOff()`, which `seq_triggerVoice()` calls before every
+  note-on, `sequencer.c:2126`, from TIM3 as well.)*
 
 ### 4.1 Lightweight ADSR (both envelopes; user, 2026-11-12)
 
@@ -848,8 +1023,9 @@ measured*).
   Colloid in slot 6 plays the alternate hit as an ordinary hit. No change is
   needed.
 - **Later option (not proposed now):** a MIDI note-off release path
-  (`voiceControl_noteOff()` → `instrumentManager` → `Colloid_release()`)
-  for keyboard play. It drives the same release as `sus` off. *(The
+  (a queued release, drained in the main loop → `instrumentManager` →
+  `Colloid_release()`; not `voiceControl_noteOff()`, §H.7) for keyboard
+  play. It drives the same release as `sus` off. *(The
   former `hold` gate option is what `sus` now is, C-D8.)*
 
 ---
@@ -869,6 +1045,17 @@ The mixer renders each slot into one mono stack block (`sampleData`,
 | SRR | none (`instrumentManager_slotUsesSrr()` default 0; brief) |
 | `pan` row | **The mixer-level pan, unchanged** (user, C-D11): the platform `instrument_pan` row (`DTYPE_PM63`, 63 = centre) and the mixer's existing law. The Colloid adds no pan row and no stereo law. Its own stereo picture is set by `spr`/`mot` (§2.6); the mixer pan places that picture |
 
+- **What C-D11 means in level (2026-11-12, from `mixer.c:1185-1196`):**
+  - the mixer's gains are constant-power, `squareRootLut[127 − pan]` /
+    `squareRootLut[pan]`;
+  - at the centre, L and R each take the same gain a mono voice gets. A
+    Colloid at `spr` 0 (L = R) is therefore exactly as loud as a mono
+    voice;
+  - towards an edge it acts as a balance: at a hard pan the far channel,
+    and the oscillators placed on that side, are dropped.
+  - The Effect return uses a different law for its stereo output (unity at
+    the centre, `mixer.c:1246-1250`). It is not used for the voice, so
+    that a Colloid matches the mono voices at the centre.
 - **Cost (*measured*, before `QADD`; re-measure, §U.5):** the shipped mono dry loop (DAC1 stereo case) is
   42; the stereo form is **44** (+2). The send is about the same again
   (*estimate* +2).
@@ -1044,7 +1231,7 @@ ITCM reserves if needed. *(Superseded, §U.5, §H.2: ITCM is 14,032 /
 
 | Page (SELECT index) | Cells | Rows |
 |---|---|---|
-| 0 OSC | `coa fin wav typ` / `pos wsp pwd pws` | `osc1_pitch_coarse`, `osc1_pitch_fine`, `osc1_wave`, `osc1_type`, `osc1_position`, `col_wt_spread`, `col_pw_width`, `col_pw_spread` |
+| 0 OSC | `coa fin wav typ` / `pos wsp pwd pws` *(C-D20 recommended: `coa fin wav typ` / `pos psp`)* | `osc1_pitch_coarse`, `osc1_pitch_fine`, `osc1_wave`, `osc1_type`, `osc1_position`, `col_wt_spread`, `col_pw_width`, `col_pw_spread` *(C-D20 recommended: the first five, then `col_pos_spread`)* |
 | 1 AEG | `atk dec slv rel` / `sus lgt` | `col_attack`, `col_decay`, `col_sustain_level`, `col_release`, `col_sustain` (on/off, C-D8), `col_tie` |
 | 2 mod | `dst amt` / `por pmd` | velocity rows; `col_glide`, `col_glide_mode` |
 | 3 FM (unison) | `int dtn spr mot` | `col_interval`, `col_detune`, `col_spread`, `col_motion` (2026-11-12; `ste` removed) |
@@ -1074,7 +1261,7 @@ ITCM reserves if needed. *(Superseded, §U.5, §H.2: ITCM is 14,032 /
 |---|---|
 | 1 Enum and registry | `INSTRUMENT_TYPE_COL` after `INSTRUMENT_TYPE_ALK`, before `UNKNOWN` (`InstrumentManager.h` l. 89–90); a designated row `"col"`, `".col"`, label `"Colloid"` (7 cells; Load Morph shows `ColloMrp`), directory `"Colloid"` (7 characters), **`INSTRUMENT_FLAG_BASIC`** (2026-11-12; a type with no class flag is not selectable, S094 P2 §22). Type-sized arrays grow by one (e.g. `menu_instrumentLoadIndex[]`, `menu.c:1729`: +2 B, `.bss`) |
 | 2 Files | `Core/DSP/Instruments/Colloid/ColloidVoice.c/.h`, `ColloidParameters.c/.h`, and a control/table file if needed. **Templates:** the Alkaline (`Core/DSP/Instruments/Alkaline/`: `AlkalineVoice.c/.h` for the noinline renders and the wavetable bind, `AlkalineParameters.c/.h` for the rows and pages, `AlkalineControl.c/.h` for the control-rate conversions, `AlkalineTables.c/.h` for generated tables) |
-| 3 Runtime | union member + assert (`:195-232`); `instrumentManager_colloidRuntime()`; a case in every §3.2 dispatcher; `ampEnvelopeQuiet()` branch (l. 1572); **no** `seq_trackStepSamples()` argument (no length parameter, C-D8; the Alkaline's call at `:2274` is untouched); `instrumentManager_slotRight()` (new) |
+| 3 Runtime | union member + assert (`:195-232`); `instrumentManager_colloidRuntime()`; a case in every §3.2 dispatcher (the full site list, from the Alkaline's cases, is in §H.7); `ampEnvelopeQuiet()` branch (l. 1572); **no** `seq_trackStepSamples()` argument (no length parameter, C-D8; the Alkaline's call at `:2274` is untouched); `instrumentManager_slotRight()` (new) |
 | 4 Build | include path; parameters in `SRCS`; voice in `DSP_SRCS` with an explicit `-Ofast` rule (the pattern rule covers only `Core/DSPAudio/`) |
 | 5 Host proof | `check_special_tags.py` `TABLES['COL']` (`:21-32` hold the five today); the tag gate; an `init.col` generator and check, after `tools/alkaline/make_init_alk.py` and its `tools/dsp_test/Makefile` target; a host module `tools/dsp_test/modules/colloid.c` after `modules/alkaline.c` (the extracted-source pattern of `make alkaline`) |
 | 6 Storage | append-only token (the `.hcnames` header accepts an older header as a leading part); AutoSave stores `col`; `SD_CARD/Instrument/Colloid/init.col` (as `SD_CARD/Instrument/Alkaline/init.alk`). The boot directory trim enumerates every `/Instrument` subdirectory (`filesystem_trimInstrumentTreeBlocking()`, `filesystem.c:24251`), so the new folder is covered |
@@ -1173,6 +1360,15 @@ still set by measurement.
 | **C-D16** | `spr` / `mot` in series (mono) filter mode | No effect, shown `---` (the filter chain is mono). The alternative, positions after the filters, would need two series chains: Advanced-class cost |
 | **C-D17** | Filter envelope routing | One bipolar `fam` on **both** cutoffs, A and B keeping their knob offsets. The alternative, separate amounts per filter, costs one row and nothing per sample |
 | **C-D18** | Envelope rows shared with velocity | Velocity reaches the envelopes only through the existing velocity `dst` targets (the amp level, `fam`); no new velocity rows |
+
+**Decided (user, 2026-11-12: the recommendations accepted; the detail is
+in §H.7):**
+
+| # | Question | Recommendation |
+|---|---|---|
+| **C-D19** | What releases a held note started while the transport is stopped (a pad, a MIDI note, the preview) | `sus` holds only while the transport runs (`sus && seq_isRunning()`, per block; 0 B). Stopped hits play A-D-R. A queued note-off release path comes later |
+| **C-D20** | The `typ` / `wav` / `pos` row shape | The platform pattern: `typ` `wav`/`wtb`/`pwm` (tag 3's names); `wav` keyed by `typ`; `pos` = the frame centre (`wtb`) or the width (`pwm`); one spread row `psp`. 6 OSC cells, not 8 |
+| **C-D21** | The PWM forms | Rec (the saw-row difference on `oscPwmDRec`) only. Each further form is ≈ 500 B of ITCM (*estimate*, §H.7), above the +1 KB line |
 
 ### C-D10: a 1,024-point sine across the board (the user's question)
 
@@ -1275,6 +1471,11 @@ for (i = 0; i < 32; i++) {
 - 2026-11-12: the Basic list in `S094_P2_ALKALINE_SAVINGS.md` §21 (a
   sixth Basic type and its measured worst), and the per-oscillator stereo
   position and two-envelope design in the new engine section.
+- Found at the session-start check (2026-11-12), already out of date
+  whether or not P2 is adopted: `MEMORY.md` says "`OSC_SAMPLE_START`
+  stays **6**" (the Alkaline rule) and "`OSC_SAMPLE_START` is 6 (S093
+  P3)". The tree has **5** (`Oscillator.h:69`) since S094 P1 S2 removed
+  CRASH (`50c7436d`).
 - Step 0 (the sine): `INSTRUMENTS_DSP_REFERENCE.md`'s table sizes and the
   sine read (`phase >> 22`), `STORAGE_SRAM_MANIFEST.md`'s flash table list,
   and any note that the sine is 4,096 points.
