@@ -1,0 +1,2 @@
+elf_loops: 96 baseline loops, 96 exact, 0 renamed, 0 missing; 96 loops now
+elf_hotloops: 55 hot loops equal, 4 shrank, 0 grew (20 other fragments not compared)

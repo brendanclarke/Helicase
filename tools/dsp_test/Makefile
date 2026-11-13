@@ -59,11 +59,11 @@ OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
         stock_tables voicefold fold_tables pwm_tables crumpbit crumpbit_tables \
         crumpbit_elf_check crumpbit_cpu_check alkaline alkaline_tables \
         elf_p4_snapshot elf_p4_check seq_steplen lfo lfo_rate_table alk_post_tables \
-        space space_cpu_check
+        space space_cpu_check colloid colloid_tables colloid_cpu_check
 all: oscillator modulation voice_control sequencer seq_steplen instrument_manager samples \
      sampleoptimize run_modes special_tags stock_tables voicefold fold_tables pwm_tables \
      crumpbit crumpbit_tables alkaline alkaline_tables alk_post_tables lfo lfo_rate_table \
-     space
+     space colloid colloid_tables
 
 $(GEN):
 	mkdir -p $(GEN)
@@ -352,6 +352,7 @@ run_modes: | $(GEN)
 special_tags:
 	cd $(ROOT) && python3 tools/dsp_test/check_special_tags.py
 	cd $(ROOT) && python3 tools/alkaline/make_init_alk.py --check
+	cd $(ROOT) && python3 tools/colloid/make_init_col.py --check
 
 stock_tables:
 	cd $(ROOT) && python3 tools/plots/gen_stock_tables.py --check
@@ -500,6 +501,216 @@ alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
 
 alkaline_tables:
 	cd $(ROOT) && python3 tools/alkaline/gen_alk_tables.py --check
+
+# ---------------------------------------------------------------------------
+# S095 P2: the Colloid.
+#
+# What:       colloid builds modules/colloid.c on the real ColloidTables.c,
+#             ColloidOsc.c and ColloidVoice.c (extracted, the ITCM section
+#             removed), the real stock tables and PWM width table and the
+#             real catalogue code, and runs laws CO-OSC .. CO-WTB; then eight
+#             break builds, each of which must fail its law:
+#               side   the second oscillator's position from the low half
+#                      (SMLAWB for SMLAWT)                       -> CO-OSC
+#               frac   a 16-bit fraction (>> 6, >> 16)           -> CO-OSC
+#               sus    the sustain stage ignores the switch      -> CO-EG
+#               snap   the ramp does not start on the target     -> CO-SVF
+#               wlaw   w(f) held at 1                            -> CO-W
+#               slew   the pwm width jumps                       -> CO-PWM
+#               latch  wtb frames follow pos mid-note            -> CO-WTB
+#               mx     the right side panned by panL (step 2)   -> MX-ST
+#               rng    a hardware read per oscillator draw      -> CO-RND
+#             S095 P3 (legato removed with the tie row):
+#               slew0  slw 0 slews instead of landing            -> CO-SLEW
+#               group  every oscillator on the root's group      -> CO-INT
+#               fold   the pwm width fold without the modulo     -> CO-PWM
+#               rte    the right filter ignores fro              -> CO-RTE
+#               tone   a k-form tone, not exact when open        -> CO-POST
+#               sign   Saw played as Rec                         -> CO-PWM
+#             colloid_tables checks ColloidTables.c against its generator;
+#             colloid_cpu_check prints the linked counts (colloid_cpu.py),
+#             against COL_BASE when given.
+# Accessors:  make -C tools/dsp_test colloid | colloid_tables |
+#             colloid_cpu_check [COL_COUNT=10] [COL_BASE=baselines/s095p2/colloid_cpu.txt].
+COL := $(ROOT)/Core/DSP/Instruments/Colloid
+COL_GEN := $(GEN)/ColloidTables.host.h $(GEN)/ColloidTables.host.c \
+           $(GEN)/ColloidOsc.host.h $(GEN)/ColloidOsc.host.c \
+           $(GEN)/ColloidVoice.host.h $(GEN)/ColloidVoice.host.c
+COL_COUNT ?= 12
+colloid: $(GEN)/Oscillator.host.h $(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables.host.c \
+	$(GEN)/oscPwmWarp.host.h | $(GEN)
+	$(EX) --src $(ALK)/AlkalineControl.h --body --out $(GEN)/AlkalineControl.host.h
+	$(EX) --src $(ALK)/AlkalinePostTables.h --body --out $(GEN)/AlkalinePostTables.host.h
+	$(EX) --src $(ALK)/AlkalinePostTables.c --body --out $(GEN)/AlkalinePostTables.host.c
+	for f in ColloidTables.h ColloidTables.c ColloidOsc.h ColloidOsc.c ColloidVoice.h ColloidVoice.c; do \
+	  $(EX) --src $(COL)/$$f --body --out $(GEN)/$${f%.*}.host.$${f##*.} || exit 1; \
+	done
+	for t in sine_table sawTable triTable recTable; do \
+	  $(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object $$t --out $(GEN)/col_$$t.raw.c && \
+	  sed "s/const int16_t $$t/int16_t $$t/" $(GEN)/col_$$t.raw.c > $(GEN)/col_$$t.c || exit 1; \
+	done
+	$(EX) --src $(ROOT)/Core/DSPAudio/mixer.c --func mixer_addVoiceInt16ToOutput \
+	  --func mixer_addVoiceInt16ToOutputAndFx --func mixer_addVoiceStereoToOutput \
+	  --func mixer_addVoiceStereoToOutputAndFx --out $(GEN)/col_mixer_funcs.c
+	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c $(CAT_HOST_SRC) -o build/colloid -lm
+	./build/colloid
+	mkdir -p build/break_col_side
+	sed 's/busS\[n\] = col_smlawt(s1, posPair, col_smulwb(s0, posPair));/busS[n] = col_smlawb(s1, posPair, col_smulwb(s0, posPair));/' \
+	  $(GEN)/ColloidOsc.host.c > build/break_col_side/ColloidOsc.host.c
+	@grep -q 'col_smlawb(s1, posPair, col_smulwb' build/break_col_side/ColloidOsc.host.c || \
+	  { echo "colloid_break_side: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_side $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_side -lm
+	@if ./build/colloid_break_side >/dev/null 2>&1; then \
+	  echo "colloid_break_side: FAILED (the second position from the low half not caught)"; exit 1; \
+	else echo "colloid_break_side: caught (law CO-OSC fails as expected)"; fi
+	mkdir -p build/break_col_frac
+	sed 's/return a + (((row\[na\] - a) \* (int32_t)((ph >> 7) \& 0x7FFFu)) >> 15);/return a + (((row[na] - a) * (int32_t)((ph >> 6) \& 0xFFFFu)) >> 16);/' \
+	  $(GEN)/ColloidOsc.host.c > build/break_col_frac/ColloidOsc.host.c
+	@grep -q '(ph >> 6) \& 0xFFFFu)) >> 16' build/break_col_frac/ColloidOsc.host.c || \
+	  { echo "colloid_break_frac: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_frac $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_frac -lm
+	@if ./build/colloid_break_frac >/dev/null 2>&1; then \
+	  echo "colloid_break_frac: FAILED (a 16-bit fraction not caught)"; exit 1; \
+	else echo "colloid_break_frac: caught (law CO-OSC fails as expected)"; fi
+	mkdir -p build/break_col_sus
+	sed 's/if (!susOn)/if (0)/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_sus/ColloidVoice.host.c
+	@grep -q 'if (0)' build/break_col_sus/ColloidVoice.host.c || \
+	  { echo "colloid_break_sus: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_sus $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_sus -lm
+	@if ./build/colloid_break_sus >/dev/null 2>&1; then \
+	  echo "colloid_break_sus: FAILED (a sustain that ignores the switch not caught)"; exit 1; \
+	else echo "colloid_break_sus: caught (law CO-EG fails as expected)"; fi
+	mkdir -p build/break_col_snap
+	sed 's/	f->a1 = f->t1;/	(void)0;/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_snap/ColloidVoice.host.c
+	@grep -q '(void)0;' build/break_col_snap/ColloidVoice.host.c || \
+	  { echo "colloid_break_snap: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_snap $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_snap -lm
+	@if ./build/colloid_break_snap >/dev/null 2>&1; then \
+	  echo "colloid_break_snap: FAILED (a ramp that does not start on its target not caught)"; exit 1; \
+	else echo "colloid_break_snap: caught (law CO-SVF fails as expected)"; fi
+	mkdir -p build/break_col_wlaw
+	sed 's/\* (1.0f \/ COL_W_OCTAVES));/* (1.0f \/ COL_W_OCTAVES)) * 0.0f + 1.0f;/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_wlaw/ColloidVoice.host.c
+	@grep -q '0.0f + 1.0f' build/break_col_wlaw/ColloidVoice.host.c || \
+	  { echo "colloid_break_wlaw: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_wlaw $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_wlaw -lm
+	@if ./build/colloid_break_wlaw >/dev/null 2>&1; then \
+	  echo "colloid_break_wlaw: FAILED (w(f) held at 1 not caught)"; exit 1; \
+	else echo "colloid_break_wlaw: caught (law CO-W fails as expected)"; fi
+	mkdir -p build/break_col_slew
+	sed 's/if (dw > OSC_PWM_SLEW_STEPS)/if (0)/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_slew/ColloidVoice.host.c
+	@grep -q 'if (0)' build/break_col_slew/ColloidVoice.host.c || \
+	  { echo "colloid_break_slew: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_slew $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_slew -lm
+	@if ./build/colloid_break_slew >/dev/null 2>&1; then \
+	  echo "colloid_break_slew: FAILED (a pwm width that jumps not caught)"; exit 1; \
+	else echo "colloid_break_slew: caught (law CO-PWM fails as expected)"; fi
+	mkdir -p build/break_col_latch
+	sed 's/const uint32_t fr = (voice->frame\[i\] < frames) ? voice->frame\[i\] : (frames - 1u);/const uint32_t fr = (osc->position * (frames - 1u)) \/ 127u;/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_latch/ColloidVoice.host.c
+	@grep -q 'osc->position \* (frames' build/break_col_latch/ColloidVoice.host.c || \
+	  { echo "colloid_break_latch: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_latch $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_latch -lm
+	@if ./build/colloid_break_latch >/dev/null 2>&1; then \
+	  echo "colloid_break_latch: FAILED (frames that follow pos mid-note not caught)"; exit 1; \
+	else echo "colloid_break_latch: caught (law CO-WTB fails as expected)"; fi
+	mkdir -p build/break_col_mx
+	sed 's/(sample_mx_t)((float)smR \* panR)/(sample_mx_t)((float)smR * panL)/' \
+	  $(GEN)/col_mixer_funcs.c > build/break_col_mx/col_mixer_funcs.c
+	@grep -q 'smR \* panL' build/break_col_mx/col_mixer_funcs.c || \
+	  { echo "colloid_break_mx: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_mx $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_mx -lm
+	@if ./build/colloid_break_mx >/dev/null 2>&1; then \
+	  echo "colloid_break_mx: FAILED (a right side panned by panL not caught)"; exit 1; \
+	else echo "colloid_break_mx: caught (law MX-ST fails as expected)"; fi
+	mkdir -p build/break_col_rng
+	sed 's/voice->rnd\[i\] = (int16_t)(col_rngNext(\&rng) >> 16);/voice->rnd[i] = GetRngValue();/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_rng/ColloidVoice.host.c
+	@grep -q 'voice->rnd\[i\] = GetRngValue();' build/break_col_rng/ColloidVoice.host.c || \
+	  { echo "colloid_break_rng: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_rng $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_rng -lm
+	@if ./build/colloid_break_rng >/dev/null 2>&1; then \
+	  echo "colloid_break_rng: FAILED (per-oscillator RNG reads not caught)"; exit 1; \
+	else echo "colloid_break_rng: caught (law CO-RND fails as expected)"; fi
+
+	mkdir -p build/break_col_slew0
+	sed 's/step = (voice->slew == 0u) ? 1.0e9f/step = (voice->slew == 0u) ? 1.0e-3f/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_slew0/ColloidVoice.host.c
+	@grep -q '1.0e-3f' build/break_col_slew0/ColloidVoice.host.c || \
+	  { echo "colloid_break_slew0: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_slew0 $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_slew0 -lm
+	@if ./build/colloid_break_slew0 >/dev/null 2>&1; then \
+	  echo "colloid_break_slew0: FAILED (a slw 0 that slews not caught)"; exit 1; \
+	else echo "colloid_break_slew0: caught (law CO-SLEW fails as expected)"; fi
+	mkdir -p build/break_col_group
+	sed 's/iv\[COL_GROUP(i)\]/iv[0]/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_group/ColloidVoice.host.c
+	@grep -q 'base + iv\[0\]' build/break_col_group/ColloidVoice.host.c || \
+	  { echo "colloid_break_group: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_group $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_group -lm
+	@if ./build/colloid_break_group >/dev/null 2>&1; then \
+	  echo "colloid_break_group: FAILED (every oscillator on the root not caught)"; exit 1; \
+	else echo "colloid_break_group: caught (law CO-INT fails as expected)"; fi
+	mkdir -p build/break_col_fold
+	sed 's/int32_t v = (pos + (int32_t)((float)rnd \* scale)) % 254;/int32_t v = pos + (int32_t)((float)rnd * scale);/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_fold/ColloidVoice.host.c
+	@grep -q 'int32_t v = pos + (int32_t)((float)rnd \* scale);' build/break_col_fold/ColloidVoice.host.c || \
+	  { echo "colloid_break_fold: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_fold $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_fold -lm
+	@if ./build/colloid_break_fold >/dev/null 2>&1; then \
+	  echo "colloid_break_fold: FAILED (a width fold without the modulo not caught)"; exit 1; \
+	else echo "colloid_break_fold: caught (law CO-PWM fails as expected)"; fi
+	mkdir -p build/break_col_rte
+	sed 's/cutR = col_clamp01(voice->cut + voice->cutOfs - 63.0f \/ 127.0f);/cutR = col_clamp01(voice->cut);/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_rte/ColloidVoice.host.c
+	@grep -q 'cutR = col_clamp01(voice->cut);' build/break_col_rte/ColloidVoice.host.c || \
+	  { echo "colloid_break_rte: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_rte $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_rte -lm
+	@if ./build/colloid_break_rte >/dev/null 2>&1; then \
+	  echo "colloid_break_rte: FAILED (a right filter that ignores fro not caught)"; exit 1; \
+	else echo "colloid_break_rte: caught (law CO-RTE fails as expected)"; fi
+	mkdir -p build/break_col_tone
+	sed 's/tzL = ol + tc \* (tzL - ol);/tzL = tzL + (1.0f - tc) * (ol - tzL);/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_tone/ColloidVoice.host.c
+	@grep -q 'tzL = tzL + (1.0f - tc)' build/break_col_tone/ColloidVoice.host.c || \
+	  { echo "colloid_break_tone: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_tone $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_tone -lm
+	@if ./build/colloid_break_tone >/dev/null 2>&1; then \
+	  echo "colloid_break_tone: FAILED (a k-form tone not caught)"; exit 1; \
+	else echo "colloid_break_tone: caught (law CO-POST fails as expected)"; fi
+	mkdir -p build/break_col_sign
+	sed 's/const int32_t sign = (form == COL_PWM_SAW) ? 1 : -1;/const int32_t sign = -1;/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_sign/ColloidVoice.host.c
+	@grep -q 'const int32_t sign = -1;' build/break_col_sign/ColloidVoice.host.c || \
+	  { echo "colloid_break_sign: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_sign $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_sign -lm
+	@if ./build/colloid_break_sign >/dev/null 2>&1; then \
+	  echo "colloid_break_sign: FAILED (Saw played as Rec not caught)"; exit 1; \
+	else echo "colloid_break_sign: caught (law CO-PWM fails as expected)"; fi
+
+colloid_tables:
+	cd $(ROOT) && python3 tools/colloid/gen_col_tables.py --check
+
+colloid_cpu_check:
+	python3 colloid_cpu.py --elf $(FW_ELF) --count $(COL_COUNT) $(if $(COL_BASE),--baseline $(COL_BASE))
 
 # S094 P1 S4: the post-filter and A3 tables (generator mirror and neutral
 # entries).

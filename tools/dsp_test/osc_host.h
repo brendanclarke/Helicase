@@ -34,7 +34,7 @@
 #define OSC_WAVE_INTERP_MAX_ACTIVE 2u
 
 /* wavetable.h (writable on the host) */
-#define TABLESIZE 4096
+#define TABLESIZE 1024   /* S095 P2 step 0: the 1,024-point sine */
 extern int16_t sine_table[TABLESIZE + 1];
 extern int16_t sawTable[11][1024];
 extern int16_t triTable[11][1024];

@@ -1,0 +1,48 @@
+/*
+ * ColloidTables.h - the Colloid's constant tables (S095 P2; S095 P3).
+ *
+ * What:       the sizes and the declarations of the tables that
+ *             tools/colloid/gen_col_tables.py writes into ColloidTables.c:
+ *               colEgK[r]           the envelope's per-block one-pole
+ *                                   coefficient for time row r (0..127);
+ *               colDetC[o]          oscillator o's detune coefficient,
+ *                                   -1..+1: the twelve P2 magnitudes, laid
+ *                                   out so that every pitch group (o mod 4,
+ *                                   S095 P3 F4) has a low, a near-centre and
+ *                                   a high member and the six pwm
+ *                                   oscillators balance;
+ *               colHome[o]          oscillator o's home stereo position,
+ *                                   -1..+1: every group has members on both
+ *                                   sides and the six pwm oscillators
+ *                                   balance;
+ *               colMotK[o]          oscillator o's motion rate ratio,
+ *                                   0.71..1.37 (no two in step).
+ * Why:        constants instead of exp/log in the control path: the
+ *             per-block cost stays a table read (S089/S093 CPU rules), and one
+ *             generator owns every value (gen_col_tables.py --check). S095 P3
+ *             F4 removed the interval sets (colRatio, colIntervals,
+ *             colIntervalCount, colMember): the three literal intervals are
+ *             applied in log2 with the slewed pitch (ColloidVoice.c).
+ * Inputs:     none (immutable flash data).
+ * Accessors:  ColloidVoice.c.
+ * Affiliates: tools/colloid/gen_col_tables.py (the source of every value);
+ *             S095_P2_DRAFT_COLLOID.md §2.6, §4.1; S095_P3_COLLOID_FOLLOW_UPS.md
+ *             F4.
+ */
+#ifndef COLLOIDTABLES_H_
+#define COLLOIDTABLES_H_
+
+#include <stdint.h>
+
+/* The oscillator arrays' size: the most a Colloid renders (C-D2: 12, or 10
+ * if the device gate fails; ColloidVoice.h COL_OSC_COUNT). */
+#define COL_OSC_MAX           12u
+/* One envelope coefficient per 0..127 time byte. */
+#define COL_EG_ROWS           128u
+
+extern const float   colEgK[COL_EG_ROWS];
+extern const float   colDetC[COL_OSC_MAX];
+extern const float   colHome[COL_OSC_MAX];
+extern const float   colMotK[COL_OSC_MAX];
+
+#endif /* COLLOIDTABLES_H_ */

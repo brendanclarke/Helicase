@@ -1,0 +1,7 @@
+62 symbols
+osc_pwmWsPlainBlock: [24] -> [23]
+osc_pwmWsFmBlock: [30] -> [29]
+osc_pwmWsFmRampBlock: [31] -> [30]
+osc_pwmWsRingBlock: [33] -> [32]
+osc_pwmWsSyncBlock: [36] -> [35]
+no loop longer

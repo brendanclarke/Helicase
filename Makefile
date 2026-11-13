@@ -37,6 +37,7 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/DSP/Instruments/Cymbal \
           -ICore/DSP/Instruments/HiHat \
           -ICore/DSP/Instruments/Alkaline \
+          -ICore/DSP/Instruments/Colloid \
           -ICore/DSP/Effects \
           -ICore/DSP/Effects/StereoFilter \
           -ICore/DSP/Effects/CrumpBit \
@@ -116,6 +117,7 @@ SRCS = \
   Core/DSP/Instruments/Cymbal/CymbalParameters.c \
   Core/DSP/Instruments/HiHat/HiHatParameters.c \
   Core/DSP/Instruments/Alkaline/AlkalineParameters.c \
+  Core/DSP/Instruments/Colloid/ColloidParameters.c \
   Core/DSP/Effects/FxBuffer.c \
   Core/DSP/Effects/EffectsManager.c \
   Core/DSP/Effects/StereoFilter/StereoFilterParameters.c \
@@ -159,6 +161,9 @@ DSP_SRCS = \
   Core/DSP/Instruments/Alkaline/AlkalineTables.c \
   Core/DSP/Instruments/Alkaline/AlkalinePostTables.c \
   Core/DSP/Instruments/Alkaline/AlkalineVoice.c \
+  Core/DSP/Instruments/Colloid/ColloidOsc.c \
+  Core/DSP/Instruments/Colloid/ColloidTables.c \
+  Core/DSP/Instruments/Colloid/ColloidVoice.c \
   Core/DSP/Instruments/Cymbal/CymbalVoice.c \
   Core/DSPAudio/Decay.c \
   Core/DSPAudio/DiodeLadder.c \
@@ -253,6 +258,29 @@ $(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineSquareTable.o: Core/DSP/Instrumen
 $(BUILD)/Core/DSP/Instruments/Alkaline/AlkalinePostTables.o: Core/DSP/Instruments/Alkaline/AlkalinePostTables.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
+# S095 P2: the Colloid engine, its oscillator loops and its tables are DSP:
+# -Ofast like the Alkaline (the measured counts and the constant-cost loops
+# assume it). ColloidParameters.c stays in SRCS (-O2), as the other tables.
+#
+# -fno-lto on these three objects (S095 P2, measured): with them in the LTO
+# unit, the larger program shifted LTO's partitioning and ten Drum-family PWM
+# loops (osc_pwmWt/Ws Fm, FmRamp, Ring, Sync; osc_smpFm, smpFmRamp) were
+# re-laid as predicated forms, 1 to 3 instructions longer per sample, though
+# their source is unchanged. Outside the LTO unit the Colloid leaves every
+# other engine's code generation as it was: every oscillator loop equal to
+# the step 0 image, the mixer 0 grew, the Alkaline ladder loops equal. The
+# Colloid loses nothing it needs from LTO: its entry points are noinline
+# calls from InstrumentManager, and its helpers are its own. Cost: +544 B of
+# flash and +24 B of ITCM against the LTO build.
+$(BUILD)/Core/DSP/Instruments/Colloid/ColloidVoice.o: Core/DSP/Instruments/Colloid/ColloidVoice.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+$(BUILD)/Core/DSP/Instruments/Colloid/ColloidOsc.o: Core/DSP/Instruments/Colloid/ColloidOsc.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+$(BUILD)/Core/DSP/Instruments/Colloid/ColloidTables.o: Core/DSP/Instruments/Colloid/ColloidTables.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 
 # StereoFilter DSP runs with the fast-math policy; registry/descriptor control
 # sources remain ordinary -O2 sources in SRCS.

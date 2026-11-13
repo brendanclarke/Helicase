@@ -1,0 +1,5 @@
+shrank mixer_calcNextSampleBlock base#25 hot 30 -> now#25 hot 14: ldrsh.w r5, [r8, #72] @ 0x48 ; vmov s15, r5 ; vcvt.f32.s32 s15, s15 ; vmul.f32 s15, s15, s0 ; vcvt.s32.f32 s15, s15 ; vmov r5, s15 ; strh.w r5, [r1, #2]! ; cmp 
+shrank mixer_calcNextSampleBlock base#54 hot 23 -> now#48 hot 22: vmov s15, lr ; cmp.w r0, lr, lsr #20 ; mov.w r1, lr, lsr #20 ; mov.w r3, #0 ; vcvt.f32.u32 s13, s15 ; bcc.n +58 ; ldrsb r3, [r4, r1] ; cmp lr, r5 ; mov.w r3, r3
+shrank mixer_calcNextSampleBlock base#64 hot 23 -> now#48 hot 22: vmov s15, lr ; cmp.w r0, lr, lsr #20 ; mov.w r1, lr, lsr #20 ; mov.w r3, #0 ; vcvt.f32.u32 s13, s15 ; bcc.n +58 ; ldrsb r3, [r4, r1] ; cmp lr, r5 ; mov.w r3, r3
+shrank mixer_calcNextSampleBlock base#65 hot 23 -> now#48 hot 22: vmov s15, lr ; cmp.w r0, lr, lsr #20 ; mov.w r1, lr, lsr #20 ; mov.w r3, #0 ; vcvt.f32.u32 s13, s15 ; bcc.n +58 ; ldrsb r3, [r4, r1] ; cmp lr, r5 ; mov.w r3, r3
+elf_hotloops: 55 hot loops equal, 4 shrank, 0 grew (20 other fragments not compared)

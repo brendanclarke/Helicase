@@ -267,6 +267,49 @@ static const char alkWaveNames[][4] = {
     {3}, {"Saw"},{"Sqr"},{"Tri"},
 };
 /*
+ * DTYPE_ON_OFF tags for the Colloid's selectors (S095 P2; S095 P3 F9).
+ *
+ * What:       ONOFF_TAG_COL_ROUTE 5 (rte, colRouteNames),
+ *             ONOFF_TAG_COL_FILT_TYPE 6 (typ, colFiltTypeNames). The rows'
+ *             dtype byte is DTYPE_ON_OFF | (tag << 4). Tags 1-3 stay
+ *             (osc1_run, voice_chain, the Alkaline/Colloid typ); 4, 7 and
+ *             8-15 free (S095 P3 removed P2's int (4) and pmd (7) lists; 5 was
+ *             fmd's and now names the route).
+ * Why:        every DTYPE_MENU id is taken (S078); menu.c resolves the name
+ *             table per tag in menu_onoffTagNames(), so display, clamp,
+ *             automation range and the step-edit line follow the count.
+ * Accessors:  ColloidParameters.c (ROW_SELECT_ONOFF rows); menu.c
+ *             menu_onoffTagNames().
+ * Affiliates: COL_RTE_COUNT, COL_FT_COUNT (ColloidVoice.h): the counts are
+ *             asserted in menu.c.
+ */
+#define ONOFF_TAG_COL_ROUTE        5u
+#define ONOFF_TAG_COL_FILT_TYPE    6u
+/*
+ * Colloid name tables (S095 P2; S095 P3). [0] = count, then 3-character
+ * names (menu.c copies exactly 3 characters, so shorter names are
+ * space-padded).
+ *
+ * colRouteNames      rte (S095 P3 F9): str (stereo: the right filter is the
+ *                    left's type plus the offsets), then the type of the
+ *                    second filter of a mono series route: LP BP HP Nch Pek
+ *                    (COL_RTE_STR, 1 + COL_FT_*).
+ * colFiltTypeNames   typ: LP BP HP Nch Pek (COL_FT_*).
+ * colWaveNames       the osc1_wave cell under typ wav: Saw Rec Tri Sin
+ *                    (COL_WAVE_*); under pwm the cell takes the shared pwm
+ *                    branch (waveformNames: Sin Tri Saw Rec, S095 P3 F2;
+ *                    menu_formatWaveCell()).
+ */
+static const char colRouteNames[][4] = {
+    {6}, {"str"},{"LP "},{"BP "},{"HP "},{"Nch"},{"Pek"},
+};
+static const char colFiltTypeNames[][4] = {
+    {5}, {"LP "},{"BP "},{"HP "},{"Nch"},{"Pek"},
+};
+static const char colWaveNames[][4] = {
+    {4}, {"Saw"},{"Rec"},{"Tri"},{"Sin"},
+};
+/*
  * Wavefolder type names: the wav cell under WFd (S089 P2).
  *
  * What:       foldTypeNames: [0] = count (8), then the 3-character codes;

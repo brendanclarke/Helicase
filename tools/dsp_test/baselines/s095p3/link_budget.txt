@@ -1,0 +1,10 @@
+S095 P3 (Colloid follow-ups), linked image build/lxr02.elf, 2026-11-13
+Flash : 720,068 / 753,664 B used, headroom 33,596 B (after the headroom fix, 2026-11-13)
+  P2 (step 2 + RNG fix): 717,516 B; P3 net +2,552 B; against the P2 line
+  (711,036 + 8,192 = 719,228 B): 840 B over -> sign-off asked.
+ITCM  : _eitcm 0x3b80 = 15,232 B (P2 14,904; +328 B: the warp pair 0x90 + 0x8c,
+        the signed pwm pairs +20 / +20, the veneers); signed off to +700 B past
+        the P2 line (Q12), so the cap is 15,756 B.
+Voice : sizeof(ColloidVoice) = 1,112 B (P2 1,032); the slot reserve is 1,264 B.
+RAM   : .bss unchanged (the voice lives in the union slot).
+Colloid symbols (bytes, hex): colloid_instrument_display_label 00000008; Colloid_isQuiet 0000000c; col_wtbBind 00000048; colloid_menu_pages 00000080; col_warpAdd 0000008c; col_warpStore 00000090; col_oscPairStore 000000aa; col_oscPairAdd 000000b6; Colloid_setOscType 000000c8; col_pwmPairStore 00000110; col_egStep 00000114; col_pwmPairAdd 0000011a; col_pspK 00000154; Colloid_calcVoiceSyncBlock 000001d8; Colloid_triggerVoice 000001d8; col_svfControl 000001f4; col_renderSer 0000028c; col_renderPar 00000304; Colloid_initVoice 00000330; Colloid_calcVoiceAsync 000004ae; colloid_param_descriptors 00000578; col_oscControl 000008b0; 

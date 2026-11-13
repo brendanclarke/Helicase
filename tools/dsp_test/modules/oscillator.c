@@ -104,8 +104,8 @@ static void group(const char *name, void (*run)(void))
 /* -------------------------------------------------------------- tables -- */
 static void fill_sine(void)
 {
-    for (unsigned i = 0u; i < 4097u; ++i)
-        sine_table[i] = (int16_t)lrint(32767.0 * sin(2.0 * M_PI * (double)i / 4096.0));
+    for (unsigned i = 0u; i < 1025u; ++i)
+        sine_table[i] = (int16_t)lrint(32767.0 * sin(2.0 * M_PI * (double)i / 1024.0));   /* S095 P2: 1,024 points */
 }
 
 static void fill_random(int16_t t[11][1024], uint32_t *s)
@@ -481,9 +481,9 @@ static void render_bent(OscInfo *osc, int16_t *buf)
 static int16_t expected_sample(uint8_t waveform, uint32_t phase)
 {
     if (waveform == SINE) {
-        const uint32_t itg = phase >> 20;
+        const uint32_t itg = phase >> 22;
         int16_t out = sine_table[itg];
-        const float frac = (phase & 0x000FFFFFu) * 9.5367431640625e-07f;
+        const float frac = (phase & 0x003FFFFFu) * 2.384185791015625e-07f;
         out += frac * (sine_table[itg + 1u] - out);
         return out;
     }

@@ -89,7 +89,7 @@ int main(void)
         int16_t sine[1024];
 
         for (unsigned i = 0u; i < 1024u; ++i)
-            sine[i] = sine_table[i * 4u];
+            sine[i] = sine_table[i];   /* S095 P2: the table is 1,024 points */
         pd_row("wav", "Sin", sine);
     }
     pd_row("alk", "Sqr", alkSqrTable[PD_ROW]);

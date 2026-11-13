@@ -1,0 +1,2 @@
+shrank mixer_calcNextSampleBlock base#25 hot 30 -> now#28 hot 14: ldrsh.w r5, [r6, #72] @ 0x48 ; vmov s15, r5 ; vcvt.f32.s32 s15, s15 ; vmul.f32 s15, s15, s0 ; vcvt.s32.f32 s15, s15 ; vmov r5, s15 ; strh.w r5, [r1, #2]! ; cmp 
+elf_hotloops: 58 hot loops equal, 1 shrank, 0 grew (20 other fragments not compared)

@@ -1,0 +1,162 @@
+#types	drm	snr	cym	hat	alk	col
+AlkalnSt	001
+AlkxTime	002
+FluxTime	-
+FluxTime	-
+FluxTime	-
+FluxMax	-
+Barf	-
+FluxTime	-
+Barf	-
+FluxTime	-
+FluxTime	-
+Electro	-
+Eris	-
+AlkxTime	-
+808ceebe	-
+808cb	-
+Pop	-
+Hard	-
+Flux	-
+Flux	-
+Flux	-
+Flux	-
+Flux	-
+Flux	-
+Beatmstr	-
+Hard	-
+Hard	-
+Hard	-
+Hard	-
+Hard	-
+Hard	-
+Hard	-
+Hard	-
+init	@	col
+init   2	-	alk
+808cbd1	@	drm
+init	@	alk
+init	@	col
+808cbh1	@	hat
+chipd3 1	-	drm
+fluxd2 2	-	drm
+brezeld3	-	drm
+chips1 4	-	snr
+fluxc1 5	-	cym
+fluxh1 6	-	hat
+chipd3 1	-	drm
+brezeld2	-	drm
+brezeld3	-	drm
+chips1 4	-	snr
+fluxc1 5	-	cym
+fluxh1 6	-	hat
+chipd3 1	-	drm
+brezeld2	-	drm
+brezeld3	-	drm
+chips1 4	-	snr
+fluxc1 5	-	cym
+fluxh1 6	-	hat
+chipd3 1	-	drm
+fluxd2 2	-	drm
+brezeld3	-	drm
+chips1 4	-	snr
+fluxc1 5	-	cym
+fluxh1 6	-	hat
+chipd3 1	-	drm
+fluxd2 2	-	drm
+brezeld3	-	drm
+chips1 4	-	snr
+fluxc1 5	-	cym
+fluxh1 6	-	hat
+chipd3 1	-	drm
+fluxd2 2	-	drm
+brezeld3	-	drm
+barfd3 4	-	snr
+fluxc1 5	-	cym
+beatmsh6	-	hat
+beatmsd1	-	drm
+beatmsd2	-	drm
+beatmsd3	-	drm
+beatmss4	-	snr
+beatmsc5	-	cym
+beatmsh6	-	hat
+brezeld1	-	drm
+hardd2 2	-	drm
+hardd1 3	-	drm
+hards1 4	-	snr
+hardc1 5	-	cym
+hardh1 6	-	hat
+brezeld1	-	drm
+init   2	-	alk
+dirtd1 3	-	drm
+hards1 4	-	snr
+hardc1 5	-	cym
+hardh1 6	-	hat
+hardd1 1	-	drm
+hardd2 2	-	drm
+hardd3 3	-	drm
+hards1 4	-	snr
+hardc1 5	-	cym
+hardh1 6	-	hat
+hardd1 1	-	drm
+hardd2 2	-	drm
+hardd3 3	-	drm
+hards1 4	-	snr
+hardc1 5	-	cym
+hardh1 6	-	hat
+init	@	alk
+init   2	-	drm
+808cbd1	@	drm
+hards1 4	-	snr
+hardc1 5	-	cym
+hardh1 6	-	hat
+hardd1 1	-	drm
+hardd2 2	-	drm
+hardd3 3	-	drm
+hards1 4	-	snr
+hardc1 5	-	cym
+hardh1 6	-	hat
+hardd1 1	-	drm
+hardd2 2	-	drm
+hardd3 3	-	drm
+hards1 4	-	snr
+hardc1 5	-	cym
+hardh1 6	-	hat
+hardd1 1	-	drm
+hardd2 2	-	drm
+hardd3 3	-	drm
+hards1 4	-	snr
+hardc1 5	-	cym
+hardh1 6	-	hat
+Empty	@	R
+Empty	@
+Empty	@
+Empty	@
+Empty	@
+Empty	@
+Empty	@
+Barf	@
+Empty	@
+Empty	@
+Electro	@
+Eris	@
+Empty	@
+808ceebe	@
+808cb	@
+Pop	@
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-

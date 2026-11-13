@@ -27,7 +27,7 @@ float lfo_calc(Lfo *lfo)
 	{
 	//---
 		case LFO_SINE:
-			return ((sine_table[(lfo->phase>>20)]/32767.f) + 1)/2.f;
+			return ((sine_table[(lfo->phase>>22)]/32767.f) + 1)/2.f;   /* S095 P2: the 1,024-point sine (top 10 bits) */
 		break;
 	//---
 		case LFO_TRI:

@@ -61,7 +61,7 @@ typedef struct {
 } Lfo;
 
 /* host stand-ins for what lfo_calc() reads */
-int16_t sine_table[4097];
+int16_t sine_table[1025];   /* S095 P2: the 1,024-point sine + guard */
 int16_t GetRngValue(void) { return 0; }
 static uint16_t host_bpm = 120u;
 uint16_t seq_getBpm(void) { return host_bpm; }

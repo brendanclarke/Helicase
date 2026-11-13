@@ -1,0 +1,4 @@
+plain12-par: loops 243 + per block 2117/32 = 309.2
+plain12-ser: loops 233 + per block 2116/32 = 299.1
+pwm6-par: loops 213 + per block 1374/32 = 255.9
+pwm6-ser: loops 203 + per block 1373/32 = 245.9

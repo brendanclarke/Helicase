@@ -87,6 +87,18 @@ typedef enum {
      *             report). New types are appended only.
      */
     INSTRUMENT_TYPE_ALK,
+    /*
+     * S095 P2: the Colloid type (token "col"), before UNKNOWN.
+     *
+     * What:       value 5; UNKNOWN moves from 5 to 6.
+     * Why:        appended (the standing rule, as the Alkaline in S093 P4):
+     *             no stored value changes meaning; every type-sized array
+     *             (menu_instrumentLoadIndex[], menu.c: +2 B .bss) and every
+     *             `type >= INSTRUMENT_TYPE_UNKNOWN` guard follow; the
+     *             .hcnames header written before the addition is a leading
+     *             part of the new list and is accepted.
+     */
+    INSTRUMENT_TYPE_COL,
     INSTRUMENT_TYPE_UNKNOWN
 } instrument_type_t;
 
@@ -834,6 +846,34 @@ uint8_t instrumentManager_slotFoldType(uint8_t slot);
 void instrumentManager_calcSlotAsync(uint8_t slot);
 void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
                                          uint8_t size);
+/*
+ * The slot's right output block, for a stereo engine (S095 P2, draft §5).
+ *
+ * What:       the Colloid's voice->right (32 int16, written by its sync
+ *             block in the same call that fills the mixer's left buffer), or
+ *             NULL for every other type and for an empty slot.
+ * Why:        the mixer renders one mono stack block per slot (sampleData);
+ *             the right block lives inside the voice (the slot reserve), so a
+ *             stereo voice costs no new RAM. noinline keeps the call out of
+ *             mixer_calcNextSampleBlock()'s register allocation.
+ * Inputs:     slot 0..5. Outputs: a borrowed pointer valid until the next
+ *             render of the slot, or NULL.
+ * Accessors:  mixer_calcNextSampleBlock() (once per slot per block, after
+ *             instrumentManager_calcSlotSyncBlock()).
+ */
+const int16_t *instrumentManager_slotRight(uint8_t slot) __attribute__((noinline));
+/*
+ * Whether an instrument cell has no effect in the slot's current mode
+ * (S095 P2, C-D16, C-D20).
+ *
+ * What:       for a Colloid slot, colloidParameters_cellInactive() (pos and
+ *             psp under typ wav; spr and mot in fmd ser); 0 for every other
+ *             type.
+ * Why:        the compact cell shows "---" (menu_formatCellValue3()).
+ * Inputs:     slot 0..5, the cell's descriptor.
+ * Accessors:  menu.c menu_formatCellValue3().
+ */
+uint8_t instrumentManager_cellInactive(uint8_t slot, const ParamDescriptor *descriptor);
 uint8_t instrumentManager_runtimePan(uint8_t slot);
 /*
  * Read the current slot instrument's channel volume for the mixer.

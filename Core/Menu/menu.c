@@ -66,6 +66,7 @@
 #include "modulationNode.h"
 #include "Oscillator.h"
 #include "AlkalineVoice.h"     /* S094 P4: ALK_WAVE_COUNT (the name assert) */
+#include "ColloidVoice.h"      /* S095 P2: COL_WAVE_COUNT, the COL_* counts (the name asserts) */
 #include "transientGenerator.h"   /* S087 P3: transient list with user one-shots */
 #include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* (name asserts) */
 #include <string.h>
@@ -6460,6 +6461,18 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         menuEffects_formatValue3(&cell->fx, valueAsText))
         return;
 
+    /*
+     * S095 P2: a cell with no effect in its slot's current mode shows "---"
+     * (instrumentManager_cellInactive(): a Colloid's pos/psp under typ wav,
+     * spr/mot in fmd ser). The value is still edited and stored; it takes
+     * effect when the mode changes.
+     */
+    if (cell && cell->kind == MENU_CELL_INSTRUMENT &&
+        instrumentManager_cellInactive(cell->slot, cell->descriptor)) {
+        memcpy(valueAsText, menuText_dash, 3);
+        return;
+    }
+
     /* Per-track play mode shows its 0..5 name (S078 §4.1). */
     if (cell && cell->kind == MENU_CELL_STATIC &&
         cell->static_param == PAR_TRACK_PLAY_MODE) {
@@ -12190,6 +12203,20 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
         return;
     }
     /*
+     * S095 P2 (C-D20): a Colloid slot's osc1 under wav lists Saw, Rec, Tri,
+     * Sin (colWaveNames). S095 P3 F2: under pwm it takes the shared pwm
+     * branch below (Sin, Tri, Saw, Rec: the platform's list and order); under
+     * wtb the shared catalogue branch (wNN, the table name).
+     */
+    if (isOsc1 && type == OSC_TYPE_WAV &&
+        instrumentManager_runtimeType(cell->slot) == INSTRUMENT_TYPE_COL) {
+        if (value < COL_WAVE_COUNT) {
+            memcpy(nameDst, colWaveNames[value + 1u], 3u);
+            memcpy(codeDst, colWaveNames[value + 1u], 3u);
+        }
+        return;
+    }
+    /*
      * S094 P1 S3: osc1 under pwm names Sin, Tri, Saw, Rec.
      *
      * What:       value 0..OSC_PWM_WAVE_COUNT - 1 maps to a stock name; an
@@ -12398,6 +12425,9 @@ static const char (*menu_onoffTagNames(uint8_t tag))[4]
     switch (tag) {
     case ONOFF_TAG_VOICE_CHAIN: return voiceChainNames;
     case ONOFF_TAG_ALK_TYPE:    return alkTypeNames;
+    /* S095 P2: the Colloid's selectors (MenuText.h ONOFF_TAG_COL_*) */
+    case ONOFF_TAG_COL_ROUTE:      return colRouteNames;      /* S095 P3 F9 */
+    case ONOFF_TAG_COL_FILT_TYPE:  return colFiltTypeNames;
     default:                    return oscRunNames;
     }
 }
@@ -12553,6 +12583,14 @@ _Static_assert((sizeof(alkWaveNames) / sizeof(alkWaveNames[0])) - 1u ==
  * AlkalineVoice.h) */
 _Static_assert((sizeof(alkTypeNames) / sizeof(alkTypeNames[0])) - 1u == 3u,
                "alkTypeNames must list wav, wtb and pwm");
+/* S095 P2: the Colloid name tables list every value of their voice-side
+ * enumerations (ColloidVoice.h, ColloidTables.h). */
+_Static_assert((sizeof(colWaveNames) / sizeof(colWaveNames[0])) - 1u == COL_WAVE_COUNT,
+               "colWaveNames must list Saw, Rec, Tri and Sin");
+_Static_assert((sizeof(colRouteNames) / sizeof(colRouteNames[0])) - 1u == COL_RTE_COUNT,
+               "colRouteNames must list str and every filter type (S095 P3)");
+_Static_assert((sizeof(colFiltTypeNames) / sizeof(colFiltTypeNames[0])) - 1u == COL_FT_COUNT,
+               "colFiltTypeNames must list every filter type");
 _Static_assert((sizeof(foldTypeNames) / sizeof(foldTypeNames[0])) - 1u ==
                    VOICE_FOLD_COUNT &&
                (sizeof(foldTypeLongNames) / sizeof(foldTypeLongNames[0])) - 1u ==

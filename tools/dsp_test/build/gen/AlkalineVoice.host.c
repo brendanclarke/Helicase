@@ -36,9 +36,10 @@
  *             carries more RMS than a flat pulse of the same peak: measured
  *             on rows 3 and 5, square 3.74 / 3.86 V RMS against the saw
  *             difference's 2.66 / 2.69 V, ratio 1.41 / 1.43 (1.09 on row 1).
- *             1.40 makes pos 64 under pwm about as loud as Sqr under wav into
- *             the ladder. Saw under pwm keeps the saw's own scale (its sum at
- *             pos 64 is the octave-up saw at the same peak).
+ *             1.40 makes pos 0 under pwm (S094 P4; pos 64 under the S094 P1
+ *             law) about as loud as Sqr under wav into the ladder. Saw under
+ *             pwm keeps the saw's own scale (its sum at pos 0 is the
+ *             octave-up saw at the same peak).
  * Accessors:  alk_renderPwm().
  */
 #define ALK_PWM_SQR_SCALE_V  (ALK_SAW_SCALE_V * 1.40f)

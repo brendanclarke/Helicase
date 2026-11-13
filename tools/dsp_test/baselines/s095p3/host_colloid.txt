@@ -1,0 +1,31 @@
+colloid CO-OSC  failures: 0
+colloid CO-POS  failures: 0
+colloid CO-W    failures: 0
+colloid CO-MOT  failures: 0
+colloid CO-INT  failures: 0
+colloid CO-SLEW failures: 0
+colloid CO-EG   failures: 0
+colloid CO-AMP  failures: 0
+colloid CO-SVF  failures: 0
+colloid CO-SER  failures: 0
+colloid CO-RTE  failures: 0
+colloid CO-POST failures: 0
+colloid CO-PWM  failures: 0
+colloid CO-WTB  failures: 0
+colloid MX-ST   failures: 0
+colloid CO-RND  failures: 0
+colloid_break_side: caught (law CO-OSC fails as expected)
+colloid_break_frac: caught (law CO-OSC fails as expected)
+colloid_break_sus: caught (law CO-EG fails as expected)
+colloid_break_snap: caught (law CO-SVF fails as expected)
+colloid_break_wlaw: caught (law CO-W fails as expected)
+colloid_break_slew: caught (law CO-PWM fails as expected)
+colloid_break_latch: caught (law CO-WTB fails as expected)
+colloid_break_mx: caught (law MX-ST fails as expected)
+colloid_break_rng: caught (law CO-RND fails as expected)
+colloid_break_slew0: caught (law CO-SLEW fails as expected)
+colloid_break_group: caught (law CO-INT fails as expected)
+colloid_break_fold: caught (law CO-PWM fails as expected)
+colloid_break_rte: caught (law CO-RTE fails as expected)
+colloid_break_tone: caught (law CO-POST fails as expected)
+colloid_break_sign: caught (law CO-PWM fails as expected)

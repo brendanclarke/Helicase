@@ -123,11 +123,11 @@ INITCM void calcSineBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const 
 		int16_t oscOut;
 
 		const uint32_t index =  oscPhase;
-		uint32_t  itg	= index>>20;
+		uint32_t  itg	= index>>22;
 
 		#if INTERPOLATE_OSC
 			oscOut = sine_table[itg++];
-			const float frac = (index & 0xfffff) * 0.00000095367431640625f;
+			const float frac = (index & 0x3fffff) * 0.0000002384185791015625f;
 			oscOut += frac*(sine_table[itg] - oscOut);
 		#else
 			oscOut = sine_table[itg];
@@ -145,11 +145,11 @@ int16_t calcSine(OscInfo* osc)
 	int16_t oscOut;
 
 	const uint32_t index =  oscPhase;
-	uint32_t  itg	= index>>20;
+	uint32_t  itg	= index>>22;
 
 #if INTERPOLATE_OSC
 	oscOut = sine_table[itg++];
-	float frac	= (index & 0xfffff) * 0.00000095367431640625f;
+	float frac	= (index & 0x3fffff) * 0.0000002384185791015625f;
 	oscOut += frac*(sine_table[itg] - oscOut);
 #else
 	oscOut = sine_table[itg];
@@ -170,11 +170,11 @@ INITCM void calcFmSineBlock(OscInfo* osc, int16_t* modBuffer, int16_t* buf, uint
 		int16_t oscOut ;
 
 		const uint32_t index =  oscPhase + (((uint32_t)(modBuffer[i]*osc->fmMod))<<17);
-		uint32_t  itg	= index>>20;
+		uint32_t  itg	= index>>22;
 
 	#if INTERPOLATE_FM_OSC
 		oscOut = sine_table[itg++];
-		const float frac	= (index & 0xfffff) * 0.00000095367431640625f;
+		const float frac	= (index & 0x3fffff) * 0.0000002384185791015625f;
 		oscOut += frac*(sine_table[itg] - oscOut);
 	#else
 		oscOut = sine_table[itg];
@@ -191,11 +191,11 @@ int16_t calcFmSine(OscInfo* osc, OscInfo* modOsc)
 	int16_t oscOut ;
 
 	const uint32_t index =  oscPhase + (((uint32_t)(modOsc->output*osc->fmMod))<<17);
-	uint32_t  itg	= index>>20;
+	uint32_t  itg	= index>>22;
 
 #if INTERPOLATE_FM_OSC
 	oscOut = sine_table[itg++];
-	const float frac	= (index & 0xfffff) * 0.00000095367431640625f;
+	const float frac	= (index & 0x3fffff) * 0.0000002384185791015625f;
 	oscOut += frac*(sine_table[itg] - oscOut);
 #else
 	oscOut = sine_table[itg];
@@ -718,8 +718,8 @@ OSC_S085_LOOP uint32_t osc_buildSyncList(uint32_t clock, const uint32_t clockInc
 /*
  * Sine slave under sync (S085 P1).
  *
- * What:       calcSineBlock()'s read and interpolation (4,096-point table,
- *             <<20 phase); the store is oscOut (gain 1, D3); the phase
+ * What:       calcSineBlock()'s read and interpolation (1,024-point table,
+ *             <<22 phase; S095 P2); the store is oscOut (gain 1, D3); the phase
  *             update goes through osc_syncPull().
  * Inputs:     osc, over[size], ratioQ16, depthQ30, buf[size], size.
  * Outputs:    buf; osc->phase.
@@ -739,10 +739,10 @@ static OSC_S085_LOOP void calcSineSyncBlock(OscInfo* osc, const uint32_t* over,
 		int16_t oscOut;
 
 		const uint32_t index =  oscPhase;
-		uint32_t  itg	= index>>20;
+		uint32_t  itg	= index>>22;
 
 		oscOut = sine_table[itg++];
-		const float frac = (index & 0xfffff) * 0.00000095367431640625f;
+		const float frac = (index & 0x3fffff) * 0.0000002384185791015625f;
 		oscOut += frac*(sine_table[itg] - oscOut);
 
 		osc->phase = osc_syncPull(oscPhase + osc->phaseInc, over[i],
@@ -868,10 +868,10 @@ static OSC_S085_LOOP void calcSineRingBlock(OscInfo* osc, const int16_t* modBuf,
 		int16_t oscOut;
 
 		const uint32_t index =  oscPhase;
-		uint32_t  itg	= index>>20;
+		uint32_t  itg	= index>>22;
 
 		oscOut = sine_table[itg++];
-		const float frac = (index & 0xfffff) * 0.00000095367431640625f;
+		const float frac = (index & 0x3fffff) * 0.0000002384185791015625f;
 		oscOut += frac*(sine_table[itg] - oscOut);
 
 		osc->phase = oscPhase + osc->phaseInc;
@@ -3642,7 +3642,7 @@ void __attribute__((noinline, noclone)) osc_renderTypedFmRamp(
 /* The three forms of a pwm block (osc_pwmPlan_t.form). */
 #define OSC_PWM_FORM_D   0u   /* two-read: Saw (sum), Rec (difference) */
 #define OSC_PWM_FORM_WT  1u   /* warp on a 1,024-point table row: Tri */
-#define OSC_PWM_FORM_WS  2u   /* warp on the 4,096-point sine: Sin */
+#define OSC_PWM_FORM_WS  2u   /* warp on the 1,024-point sine: Sin */
 
 /*
  * One pwm block's constants (S094 P1 S3).
@@ -3772,21 +3772,23 @@ static inline __attribute__((always_inline)) int32_t osc_pwmReadT(
 }
 
 /*
- * Read the 4,096-point sine at psi, integer interpolation (S094 P1 S3).
+ * Read the 1,024-point sine at psi, integer interpolation (S094 P1 S3;
+ * S095 P2 step 0: 1,024 points).
  *
- * What:       a = sine_table[psi >> 20], b = the next point (the table's
- *             guard point 4,096 makes the last one safe, as calcSineBlock()),
- *             f = (psi >> 5) & 0x7FFF; returns a + ((b - a) x f >> 15).
- * Range:      |b - a| <= 51 (measured).
+ * What:       a = sine_table[psi >> 22], b = the next point (the table's
+ *             guard point 1,024 makes the last one safe, as calcSineBlock()),
+ *             f = (psi >> 7) & 0x7FFF; returns a + ((b - a) x f >> 15).
+ * Range:      |b - a| <= 202 (measured on the 1,024-point table);
+ *             202 x 32,767 < 2^31.
  * Accessors:  the WS loops.
  */
 static inline __attribute__((always_inline)) int32_t osc_pwmReadS(
 	const uint32_t ps)
 {
-	const uint32_t ia = ps >> 20;
+	const uint32_t ia = ps >> 22;
 	const int32_t a = sine_table[ia];
 
-	return a + (((sine_table[ia + 1u] - a) * (int32_t)((ps >> 5) & 0x7FFFu)) >> 15);
+	return a + (((sine_table[ia + 1u] - a) * (int32_t)((ps >> 7) & 0x7FFFu)) >> 15);
 }
 
 /*
@@ -3799,7 +3801,8 @@ static inline __attribute__((always_inline)) int32_t osc_pwmReadS(
  *             so the combined value is interpolated once.
  * Why:        reading B at ph - w (not + w) makes the difference high for the
  *             first w of the cycle, as the stock Rec is (plan finding 2);
- *             p = 64 gives a band-limited square of the Rec orientation.
+ *             pos 0 (d = 512; S094 P4) gives a band-limited square of the Rec
+ *             orientation.
  * Range:      |d1 - d0| <= 2 x 32,767 = 65,534 and 65,534 x 32,767 < 2^31.
  * Accessors:  the D loops.
  */

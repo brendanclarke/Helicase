@@ -1,0 +1,2 @@
+P3 fix BP (reported)   shaper in: rms 0.211 peak 0.90 clamped 0.000%   out: peak 29055 int16-clipped 0.000%
+P3 fix LP              shaper in: rms 0.211 peak 0.90 clamped 0.000%   out: peak 32767 int16-clipped 0.129%

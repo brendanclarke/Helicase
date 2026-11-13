@@ -1,6 +1,8 @@
 # S095 P2 — Colloid: implementation schedule
 
-- **Status:** not yet implemented. Written 2026-11-12 from
+- **Status:** steps 0-2 implemented and host-gated (2026-11-12); steps 3
+  and 4 need the device and your ear (§9.3). See §9 for the notes kept at
+  each step. Written 2026-11-12 from
   `S095_P2_DRAFT_COLLOID.md` (the plan; its §H wins over its body) with every
   user decision C-D1…C-D21 in force (§A).
 - **Tree:** branch `dev-ph7-alkaline`, `b7f7eec4` ("s095 p1 space fx in and
@@ -104,7 +106,7 @@ checked in §C:
 | Step 0 loops | the sine readers' loops unchanged in length; the five PWM sine-warp loops (`osc_pwmWs*`) **1 shorter** each; the mixer 59 hot loops equal |
 | Step 0 host | `make -C tools/dsp_test all` exit 0 (47 break builds caught) |
 | Step 1 `make all` | flash **713,572 B (+8,680 B; running +2,536 B)**; ITCM **14,880 B (+848 B)**; mixer 58 equal, 1 shrank, 0 grew |
-| Step 2 `make all` | flash **716,820 B (+3,248 B; running +5,784 B)**; mixer **55 equal, 4 shrank, 0 grew**; the oscillator loops 95 of 96 exact and `osc_wtbFmBlendRampBlock` the same length (74), two stack offsets moved |
+| Step 2 `make all` | flash **716,820 B (+3,248 B; running +5,784 B)**; mixer **55 equal, 4 shrank, 0 grew**. *Corrected during implementation (§9.1): this check compared loop text only and missed real growth. Compared by length, the step 1 image had ten Drum-family PWM loops 1-3 longer and the step 2 image `osc_smpFmBlock` +1. With the Colloid engine compiled `-fno-lto` (§9.1) every oscillator loop is equal, at 714,116 B (step 1) and 717,372 B (step 2).* |
 | RAM | `.data` 420 B and `.bss` 419,564 B unchanged; `runtime_slots` 7,584 B unchanged; `sizeof(ColloidVoice)` **1,032 B** (≤ 1,264, asserted); `menu_instrumentLoadIndex[]` 10 → 12 B inside existing padding |
 | Host | `make -C tools/dsp_test all` exit 0: `special tags OK (249 rows, 0 mismatches)`, `init.col matches the table (47 rows)`, the Colloid's CO-OSC…CO-WTB 0 failures, its 8 break builds caught, `ColloidTables.c matches` |
 | `COL_OSC_COUNT` 10 | compiles; every host law passes |
@@ -3457,19 +3459,33 @@ Anchor (line 161 today): `Core/DSP/Instruments/Alkaline/AlkalineVoice.c \`
 
 Anchor (line 255 today): `$(CC) -c $(CFLAGS_DSP) $< -o $@`
 
+*As implemented (§9.1): the three recipes carry `-fno-lto`, and the comment
+explains why.*
+
 ```make
 # S095 P2: the Colloid engine, its oscillator loops and its tables are DSP:
 # -Ofast like the Alkaline (the measured counts and the constant-cost loops
 # assume it). ColloidParameters.c stays in SRCS (-O2), as the other tables.
+#
+# -fno-lto on these three objects (S095 P2, measured): with them in the LTO
+# unit, the larger program shifted LTO's partitioning and ten Drum-family PWM
+# loops (osc_pwmWt/Ws Fm, FmRamp, Ring, Sync; osc_smpFm, smpFmRamp) were
+# re-laid as predicated forms, 1 to 3 instructions longer per sample, though
+# their source is unchanged. Outside the LTO unit the Colloid leaves every
+# other engine's code generation as it was: every oscillator loop equal to
+# the step 0 image, the mixer 0 grew, the Alkaline ladder loops equal. The
+# Colloid loses nothing it needs from LTO: its entry points are noinline
+# calls from InstrumentManager, and its helpers are its own. Cost: +544 B of
+# flash and +24 B of ITCM against the LTO build.
 $(BUILD)/Core/DSP/Instruments/Colloid/ColloidVoice.o: Core/DSP/Instruments/Colloid/ColloidVoice.c | $(BUILD)
 	@mkdir -p $(dir $@)
-	$(CC) -c $(CFLAGS_DSP) $< -o $@
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 $(BUILD)/Core/DSP/Instruments/Colloid/ColloidOsc.o: Core/DSP/Instruments/Colloid/ColloidOsc.c | $(BUILD)
 	@mkdir -p $(dir $@)
-	$(CC) -c $(CFLAGS_DSP) $< -o $@
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 $(BUILD)/Core/DSP/Instruments/Colloid/ColloidTables.o: Core/DSP/Instruments/Colloid/ColloidTables.c | $(BUILD)
 	@mkdir -p $(dir $@)
-	$(CC) -c $(CFLAGS_DSP) $< -o $@
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 ```
 
 
@@ -4710,6 +4726,8 @@ are defined inside the function bodies.
 |---|---:|---:|---:|---:|---:|
 | Flash (B) | −6,144 | +8,680 | +3,248 | **+5,784** | ≤ +8,192 |
 | ITCM (B) | 0 | +848 | 0 | **+848** (14,880 / 16,384) | ≤ +1,024 |
+| *As implemented (§9): flash* | −6,144 | +9,224 | +3,256 | ***+6,336*** (717,372) | ≤ +8,192 |
+| *As implemented: ITCM* | 0 | +872 | 0 | ***+872*** (14,904 / 16,384) | ≤ +1,024 |
 | `.data` / `.bss` (B) | 0 | 0 | 0 | **0** | 0 |
 | DTCM statics (B) | 0 | 0 | 0 | 0 (4,396) | — |
 
@@ -4780,3 +4798,549 @@ the slot loop `:1136`, `:1167`, `:1185`. `Makefile`: `:39`, `:118`, `:161`,
 `.PHONY` `:62`, `all` `:66`, `special_tags` `:354`, `alkaline_tables` `:502`.
 `check_special_tags.py` `TABLES` `:31`. `storageTypes.h` `:142`.
 `MenuText.h` `:268`.
+
+---
+
+## 9. Implementation notes (kept at each step)
+
+Tree at the start: `61c4b778` ("S095 P2 colloid pre-implementation"), which
+differs from `b7f7eec4` only in the two P2 documents, so every line number
+above holds. Each step was applied by the anchor-checked patch scripts verified
+in the scratch export (§C): they assert each cited line's number and text
+before editing, and they carry the comment blocks quoted above verbatim.
+
+### 9.0 Step 0: the 1,024-point sine (done, 2026-11-12)
+
+- **Before the step:** `make all` (flash 711,036 B, ITCM 14,032 B); the P4
+  snapshot `make -C tools/dsp_test elf_p4_snapshot
+  P4BASE=baselines/s095p2/pre`; `baselines/s095p2/link_budget_before.txt`.
+- **Applied:** S0.1-S0.5 exactly as written. The table was decimated by the
+  snippet (1,025 values, guard = point 0 = -32,767); then the comment edits.
+  Files: `wavetable.h`, `wavetable.c`, `Oscillator.c` (12 reads, 4 comments),
+  `lfo.c`, `osc_host.h`, `modules/oscillator.c`, `modules/lfo.c`,
+  `modules/pwm_dump.c`.
+- **Gates (all pass):**
+  - `make all`: 0 errors, no new warning; **flash 704,892 B (-6,144 B)**,
+    ITCM 14,032 B (`baselines/s095p2/link_budget_step0.txt`);
+  - oscillator loops by length against the pre-step image
+    (`baselines/s095p2/step0_loop_lengths.txt`, 62 symbols): no loop longer;
+    the five sine-warp loops one shorter each (`osc_pwmWsPlainBlock` 24 -> 23,
+    `FmBlock` 30 -> 29, `FmRampBlock` 31 -> 30, `RingBlock` 33 -> 32,
+    `SyncBlock` 36 -> 35), the `>> 22` / `>> 7` pair folding one shift;
+  - mixer: 59 hot loops equal, 0 grew (`baselines/s095p2/step0_mixer.txt`);
+  - `make -C tools/dsp_test all` exit 0, 47 break builds caught.
+- **Open for the device (yours):** the one listening check (a Drum `sin`, an
+  FM carrier, a sine LFO on pitch). It can share the step 1 flash.
+- **Note:** `elf_p4_check` compares loop *text*, so after this step it
+  reports the thirteen changed sine loops as "missing" by design; the gate is
+  their length (above). Later steps compare against this step's image.
+
+### 9.1 Step 1: the Colloid engine and type (done, 2026-11-12)
+
+- **Applied:** S1.1-S1.53 by the anchor-checked patch (every cited line's
+  number and text asserted first). `ColloidTables.c` and `init.col` were
+  produced by their generators in the tree (`gen_col_tables.py`,
+  `make_init_col.py`) and are byte-identical to the files quoted in S1.3 and
+  S1.11. `instrumentManager_slotRight()` is in, unused until step 2
+  (`--gc-sections` drops it).
+- **First build:** flash 713,572 B, ITCM 14,880 B, as in the scratch trial.
+  Every warning was a pre-existing one; none is in new or touched code.
+- **Gate failure found and fixed.** Oscillator loops compared **by length**
+  (`elf_looppath.py`, all 62 P4 symbols, against the step 0 image) showed ten
+  Drum-family loops longer: `osc_pwmWtFmBlock` / `osc_pwmWsFmBlock` 30/29 ->
+  32/31, the `FmRamp` pair +2, the `Ring` pair +2, the `Sync` pair +3,
+  `osc_smpFmBlock` 42 -> 43, `osc_smpFmRampBlock` 43 -> 44.
+  `elf_p4_check` agreed (20 loop dumps missing, 8 loops merged away).
+  - **What it was:** the source of those functions is unchanged. GCC compiled
+    `osc_pwmWarp()`'s select as an IT block instead of a duplicated-tail
+    branch. The function got smaller (54 vs 56 instructions) but each loop
+    iteration got longer.
+  - **Ruled out:** the dispatch switches' guessed frequencies (moving the
+    Colloid case into a `__builtin_expect` branch changed nothing);
+    `size == 32` propagation (both images have it); IPA profile propagation
+    (`-fno-ipa-profile` gave a byte-identical image).
+  - **Confirmed:** it follows LTO partitioning (`-flto-partition=one` moved a
+    different set of loops).
+  - **Fix (S1.17 amended):** the three Colloid engine objects are compiled
+    `-fno-lto` (Makefile comment block). Every other engine's LTO unit then
+    compiles as before.
+  - **Cost of the fix:** +544 B flash, +24 B ITCM. The Colloid's own counts
+    are 0.3 better (no LTO re-layout of its loops).
+  - **Lesson for the reference documents:** a length check on every P4
+    oscillator symbol belongs in each step's gate; `elf_loopdump --compare`
+    alone compares text, and the scratch §C row relied on it (corrected
+    there).
+- **Gates after the fix (all pass):**
+  - `make all`: flash **714,116 B** (step +9,224 B; **running +3,080 B**);
+    ITCM **14,904 B (+872 B)**; `.data` 420 B, `.bss` 419,564 B unchanged
+    (`baselines/s095p2/link_budget_step1.txt`);
+  - oscillator loops by length against step 0: no loop longer
+    (`step1_loop_lengths.txt`); `elf_p4_check` against the step 0 snapshot
+    (`baselines/s095p2/step0/`): **96 of 96 exact**
+    (`step1_p4_check.txt`);
+  - mixer: 58 equal, 1 shrank, 0 grew (`step1_mixer.txt`);
+  - Alkaline ladder loops (`DiodeLadder_renderB2Osc`, `B2Osc2`, `B2OscPwm`,
+    `B2OscPwmWt`) equal; `space_cpu.py` identical; `crumpbit_cpu.py` within
+    its `--cap 184` (worst 182.7, base 182.9; `pit`'s per-block path +1
+    instruction and `grn`'s -6, the remaining LTO noise);
+  - `make -C tools/dsp_test all` exit 0: `special tags OK (249 rows, 0
+    mismatches)`, `init.col matches the table (47 rows)`, CO-OSC...CO-WTB 0
+    failures, the 8 Colloid breaks caught (55 breaks caught in all),
+    `ColloidTables.c matches`;
+  - `colloid_cpu.py` (voice only): plain 12 par 309.2, ser 299.1; pwm 6 par
+    255.9, ser 245.9 (`step1_colloid_cpu.txt`).
+- **Open for the device (yours, can share one flash with step 0's
+  listening):** the boot special-tag self-check reads 0; Instrument Load lists
+  `Colloid` / `ColloMrp` (copy `SD_CARD/Instrument/Colloid/` to the card);
+  `init.col` plays from any slot (mono, the left block, until step 2); `sus`
+  on holds while running and releases at stop; a pad hit while stopped plays
+  A-D-R; a Scene save and load keeps the Colloid.
+
+### 9.2 Step 2: the mixer's stereo path (done, 2026-11-12)
+
+- **Applied:** S2.1-S2.6 (the two stereo functions after
+  `mixer_addVoiceInt16ToOutputAndFx()`, the `right` local, its read after the
+  pan, and the slot loop's stereo branch), the MX-ST group in
+  `modules/colloid.c` (the §3.3 code, plus `G_MX`, `"MX-ST"`,
+  `test_mixer()` in `main()`, and the header's law list), and in the
+  `colloid` target the mixer extraction and the `mx` break.
+- **Gates (all pass):**
+  - `make all`: no new warning; flash **717,372 B** (step +3,256 B;
+    **running +6,336 B**, ≤ +8,192 B); ITCM 14,904 B; `.data` / `.bss`
+    unchanged (`baselines/s095p2/link_budget_step2.txt`);
+  - oscillator loops: by length, no loop longer
+    (`step2_loop_lengths.txt`); `elf_p4_check` against step 0: 96 of 96 exact
+    (`step2_p4_check.txt`);
+  - mixer against the pre-step-0 snapshot: **55 equal, 4 shrank, 0 grew**
+    (`step2_mixer.txt`);
+  - Alkaline ladder loops equal (`step2_alkaline_loops.txt`); `space_cpu.py`
+    identical to step 0 (`step2_space_cpu.txt`); `crumpbit_cpu.py --cap 184
+    --feed-cap 204` passes, feed worst 202.7 (`step2_crumpbit_cpu.txt`);
+  - `make -C tools/dsp_test all` exit 0, MX-ST 0 failures, `mx` break caught
+    (56 breaks caught in all);
+  - `colloid_cpu.py` (the regression baseline,
+    `baselines/s095p2/colloid_cpu.txt`): plain 12 par **309.2**, ser 299.1;
+    pwm 6 par **255.9**, ser 245.9. `make -C tools/dsp_test
+    colloid_cpu_check COL_BASE=baselines/s095p2/colloid_cpu.txt` passes. The
+    count-10 line (`colloid_cpu_count10_estimate.txt`, 271.2) is counted on
+    the 12-oscillator image with ten control iterations, so it is an
+    *estimate*; a `COL_OSC_COUNT 10` build replaces it.
+
+### 9.3 Steps 3 and 4: on the device (open; yours)
+
+The current build (`build/LXRV2_lxr02.img`, 717,372 B, `DEV_MODE_LOGGING` 1,
+so the probe is in) answers steps 0-3 in one flash. Copy
+`SD_CARD/Instrument/Colloid/` to the card first.
+
+1. **Step 0 listening:** a Drum `sin`, an FM carrier, a sine LFO on pitch.
+2. **Step 1:** the boot special-tag self-check reads 0; Instrument Load lists
+   `Colloid` and `ColloMrp`; `init.col` loads into any slot and plays; `sus`
+   on holds while running and releases at stop; a pad hit while stopped plays
+   A-D-R; a Scene save and load keeps the Colloid and its values.
+3. **Step 2:** `spr` 127 at a high note widens the image, `spr` 0 is mono;
+   `mot` moves it; `fmd ser` is mono, and `spr`/`mot` show `---`; `pos`/`psp`
+   show `---` under `typ wav`; a send into Delay, Reverb or Echo keeps the
+   image; into CrumpBit it is summed.
+4. **Step 3 (C-D2):** the §4 Scene: one Colloid, cold, `typ wav` Saw,
+   `int pwr`, `dtn`/`spr`/`mot` 127, `fmd par`, `drv` 127, `sus` on, a stereo
+   send into Reverb; then `typ pwm`, then `typ wtb` with a table installed.
+   Read the slot's async + sync + its share of `MIX` from the `'p'` records
+   (`decode_devlogs.py`). Gate: ≤ 19,620 cycles per block. The counts
+   predict 12 plain is over and 10 plain and 6 PWM fit (§C). If 12 is over:
+   `#define COL_OSC_COUNT 10u` in `ColloidVoice.h` is the only edit; rebuild,
+   run the host suite and `colloid_cpu_check COL_COUNT=10`, and flash again
+   for the re-measure.
+5. **Step 4:** the full Scene (Colloids and Alkalines, the Space Effect on),
+   the `cpu` widget, underruns; then the by-ear values of §5.
+
+Bring back the decoded probe file and your listening notes. Their records
+then go in `tools/dsp_test/baselines/s095p2/`.
+
+### 9.4 Device report 1 (2026-11-12): freeze and audio crash on switching to Colloid
+
+**Report (user):** "freezes and audio crashes when switching instrument menu
+to Colloid".
+
+**What the code rules out.** I checked these paths and found no fault in any
+of them:
+- **The menu:** empty cells inside a page are skipped by design
+  (`menu_voiceAbsolutePositionSelectable()`); tags 4-7 all decode through
+  `menu_onoffTagNames()`.
+- **The Load menu and storage:** the type list, indexes, tokens and folders
+  are registry-driven (`instrumentManager_registryCount()` loops, no array
+  sized for five types).
+- **Initialisation:** both places that set a runtime type also initialise
+  the voice (`InstrumentManager.c:1586`, `:1746`).
+- **The ITCM calls:** the flash-to-ITCM calls go through linker veneers
+  (`__col_osc*_veneer`).
+- **Bounds:** every Colloid table index is clamped or masked.
+
+The host bench runs the voice for 20,000 randomised blocks with no fault.
+
+**Two mechanisms fit "freeze + audio crash", and the panel cannot tell them
+apart:**
+1. **Render overload.** If a block takes longer to render than to play,
+   `audio_check_and_render()` (`main.c:183`) never leaves its
+   `while (audioCodec_queueFreeSlots() > 0)` loop. The UI stops and the audio
+   garbles.
+   - The Colloid measures 309.2 instructions per sample on the host, plus
+     about 48 for its stereo send. That is ~22,000 cycles estimated, against
+     the 19,620 share.
+   - MEMORY records that the render already sits at 99-100 % while playing.
+   - So overload is the leading hypothesis. The draft's step 3 expected 12
+     oscillators to be over.
+2. **A fault.** There is no fault handler (`startup_stm32f765xx.s` default:
+   an endless loop). The UI stops and the DMA repeats its last buffer: a
+   stuck buzz.
+
+**A real defect found while checking (fixed):**
+- **The defect:** `GetRngValue()` (`random.c`) returns `RNG_DR` without
+  waiting for a new value (one every ~833 ns). The Colloid's back-to-back
+  reads repeated, so a trigger's twelve draws, and the twelve start phases
+  at init, were nearly equal: no frame or width spread, and a phase-aligned
+  stack. This is not the crash, but a phase-aligned stack starts at up to 12
+  times one oscillator's level into the drive.
+- **The fix:** `ColloidVoice.c` `col_rngSeed()` / `col_rngNext()` (comment
+  block in place). One hardware read per trigger, salted, then xorshift32
+  per oscillator. At init the seed is salted with the voice's address, so
+  the six slots differ.
+- **The test:** new host law CO-RND, with the RNG stand-in stuck on one value
+  as the device's is between refreshes. The draws and phases must be pairwise
+  distinct. Its break `rng` (a hardware read per draw) is caught.
+- **A test adjusted:** CO-AMP now uses the Sin stack. With truly random
+  phases, a full-bandwidth saw stack's own sample-to-sample steps exceeded
+  the law's fixed allowance on some address-dependent seeds. The law tests
+  the amp ramp, so a smooth signal isolates it. Ten consecutive runs are
+  clean.
+- **Gates after the fix:**
+  - flash 717,516 B (+144 B; running +6,480 B);
+  - oscillator loops 96 of 96 exact against step 0, by length and by text;
+  - mixer 55 equal, 4 shrank, 0 grew;
+  - the Colloid unchanged at 309.2 (the baseline check passes);
+  - `make -C tools/dsp_test all` exit 0, 57 breaks caught.
+
+**Diagnostic image (one flash, one question: overload or fault?):**
+`build/LXRV2_lxr02_DIAG_2osc.img`. Rename it to `LXRV2_lxr02.img` on the
+card. It is built from a scratch copy of the current tree with only
+`COL_OSC_COUNT` 2 and `COL_PWM_COUNT` 2 (and their two norms). The tree keeps
+12 / 6.
+- Every Colloid path still runs: the pair-store loop, both filters, the
+  envelopes, the positions, the stereo mixer path, the menus and storage.
+- It costs about 120 instructions per sample (loops 93, per block 849 / 32),
+  under half a Drum.
+- **Reading the result:**
+  - **no freeze:** it is overload. The fix is the planned C-D2 fallback (10
+    oscillators, about 271), measured with the probe; it may also need the
+    per-oscillator control cut (82-116 per oscillator per block; the motion
+    and position work is half of it);
+  - **still freezes:** it is a fault, now isolated to code that runs at any
+    oscillator count.
+
+The normal image (`build/LXRV2_lxr02.img`, 12 oscillators, with the RNG fix)
+is also built.
+
+### 9.5 Device report 2 (2026-11-12): the 2-oscillator image still crashes
+
+**Result:** `LXRV2_lxr02_DIAG_2osc.img` (the Colloid at about 120
+instructions per sample, under half a Drum) still freezes and crashes the
+audio. **CPU overload is ruled out:** this is a fault or an endless loop in
+code that runs at any oscillator count.
+
+**Searched since, with nothing found:**
+- the key-matched paths (`osc1_wave` / `osc1_type` in `InstrumentManager.c`
+  and `menu.c:5330-5375`);
+- the Load menu's type list (`menu_instrumentLoadStepType()`,
+  `menu_instrumentLoadOptionAt()`: registry-driven);
+- the filesystem's per-type index rebuild (`filesystem.c:4478-4500`:
+  registry-driven).
+
+**Diagnostic image 2 (one flash, one question: where does it stop?):**
+`build/LXRV2_lxr02_DIAG_fault.img`, with its ELF
+`build/lxr02_DIAG_fault.elf` for resolving the addresses. It is the current
+tree (12 oscillators) plus, in a scratch copy only:
+- `faultDiag.c`: HardFault / MemManage / BusFault / UsageFault handlers that
+  show the stacked PC, LR, CFSR and HFSR's FORCED bit;
+- a SysTick stall watch: 3 s without a main-loop pass pends PendSV, which
+  shows the PC it interrupted;
+- a blocking two-row LCD writer;
+- a heartbeat in `main.c`'s loop.
+
+Screen format:
+- row 1 `HF pc XXXXXXXX F`: HF/MM/BF/UF for a fault, ST for a stall; F if
+  the fault escalated to HardFault;
+- row 2 `LLLLLLLL CCCCCCC`: the stacked LR, then CFSR's low 7 hex digits.
+
+A legitimate main-loop block over 3 s (a sample install's flash erase) would
+also trigger it; do not install samples with this image. **If nothing shows
+and it still freezes:** the stall is inside an interrupt at the highest
+priority, or the fault handler itself faulted. That alone narrows it a lot.
+
+### 9.6 Device reports 3-4 (2026-11-12): the freeze is on the Load type step
+
+- **Report 3 (first fault image):** row 1 garbage, row 2 `chg init`. `chg`
+  is the Instrument Load page's type-change row (`menu.c:13655`) and `init`
+  is row 000 of the Colloid index, so the index had loaded. The garbage is
+  most likely the fault report itself, sent while the LCD's 4-bit interface
+  was out of step.
+- **Report 4 (with a nibble resync):** a blank screen. The handler ran (its
+  clear landed), but its text was lost.
+  - **Cause:** the LCD's `delay_us()` (`lcd.c:111`) is about 10x short
+    (~93 ns per "us", by its own comment's arithmetic). The WS0010 clear
+    needs milliseconds, so the bytes sent after it were ignored.
+  - **Note for later:** boot works only because `lcd_init()` uses
+    `delay_ms()` (SysTick) for its long waits.
+- **User:** the freeze happens **as the Instrument Load type selector turns to
+  Colloid**, playing or stopped, on any voice. Nothing has been confirmed or
+  applied at that point.
+  - With the `chg` source, the index completion only repaints
+    (`menu_instrumentIndexReady()`: no selection request).
+  - So the Colloid engine is not running. The fault is in Load-page, menu or
+    filesystem code that meets type 5. My menu additions run only on voice
+    pages and wave cells.
+- **Checked, sound:**
+  - `menu_instrumentLoadStepType()`, `menu_instrumentLoadOptionAt()` and
+    `menu_instrumentLoadCopyTypeLabel()`;
+  - the trace record's type field (`AutosaveTrace.h:656`, shift 8);
+  - every array indexed by the selected type (only
+    `menu_instrumentLoadIndex[]`, now 6 entries);
+  - the filesystem's index rebuild selection (registry-driven).
+- **Diagnostic image, third build** (`build/LXRV2_lxr02_DIAG_fault.img`,
+  18:14; ELF beside it): the fault screen now times every LCD wait with the
+  cycle counter (216 per us), which the handler enables and unlocks itself.
+  It resyncs the 4-bit interface, re-sends the OLED power command as
+  `lcd_init()` does, waits 10 ms for the clear and 200 us per byte.
+
+### 9.7 Device report 5 (2026-11-12): CGRAM glyphs; the report moves to the next boot
+
+- **Report 5 (third fault image, photo):** both rows are the display's own
+  CGRAM glyphs (the splash pieces at codes 0-7) and `αX̄` pairs. That is the
+  hex text with each byte's two nibbles swapped (`'0'` 0x30 -> 0x03, a splash
+  piece). So the handler ran and wrote its report, but the WS0010 stays one
+  nibble out of step through the standard 4-bit soft reset.
+  - The display has no R/W line (`lcd.c:70-75`, write-only), so it is the
+    nibble pairing alone.
+  - Driving the LCD from a fault context is abandoned.
+- **Diagnostic image, fourth build** (`build/LXRV2_lxr02_DIAG_fault.img`,
+  18:22; ELF beside it). Built in a scratch copy, not the tree:
+  - the fault handlers and the PendSV stall report record kind, stacked PC
+    and LR, CFSR, HFSR, BFAR and MMFAR in `.devwdg_noinit` (SRAM2, NOLOAD,
+    never zeroed). This is the section of the `DEV_LOGGING_IWDG` capsule,
+    32 B, unused while that switch is 0 (the record is exactly 32 B, so the
+    linker's 32 B assert holds);
+  - then `AIRCR.SYSRESETREQ`;
+  - right after `lcd_tim7_init()`, `faultDiag_bootShow()` shows the record
+    through the normal LCD queue and holds. A power cycle boots normally (the
+    record is cleared once shown, and RAM does not survive power-off).
+- **User (binding): do not enable the watchdog** ("that only made things
+  worse last time"). The image does not:
+  - `DEV_LOGGING_IWDG` stays 0 and the IWDG is never started;
+  - only its spare RAM section is borrowed;
+  - the stall check is SysTick plus PendSV;
+  - the only `0x40003000` literals in the image are the existing
+    `i2s_init()` / `audioCodec_suspend()` I2S bases (+0x800), the same as in
+    the normal image.
+
+### 9.8 Device report 6 (2026-11-12): garbage screen and a hang, once a reboot
+
+- **Report 6 (fourth fault image):** one run rebooted at once; one hung with
+  the screen full of garbage.
+  - **The photo:** row 1 is mostly the `…` glyph (CGRAM 0) with a few stray
+    characters; row 2 is stray characters. The menu's display buffer had been
+    overwritten (mostly zeros), and the hang never reached the 3 s stall
+    report. This points to memory corruption, not a clean fault or loop.
+  - **The reboot:** no code in the tree requests a software reset (no
+    `SYSRESETREQ` / `NVIC_SystemReset`), so it was either the diagnostic's
+    own reset or a hardware reset. The boot did not stop on the record
+    screen, so the record was lost or never written.
+- **The user's question, "type 4 / type 5":** `instrument_type_t`'s values
+  (Drum 0, Snare 1, Cymbal 2, HiHat 3, Alkaline 4, Colloid 5). Files store the
+  3-letter tokens; the numbers are RAM-only table indices.
+- **Checked since, all sound:**
+  - no `COL_*` macro collides with an existing name (none existed before);
+  - the instrument-file key buffer (32 B; the longest key in any table, 24);
+  - the `.hcnames` header builder (bounded);
+  - `instrumentManager_resetSlot()`;
+  - the type-step body (`menu_instrumentLoadStepType()`, its selectability
+    check);
+  - stack reach: `.bss` ends at `0x20066AA4`, so 87 KB of free SRAM1 lies
+    below the 16 KB stack area;
+  - the display buffers sit among the button-history variables, far from the
+    file-name cache.
+- **User:** consider rolling back what was done to the instrument switcher;
+  the Alkaline does not do this.
+  - The switcher's own code is unchanged; its list comes from the registry.
+  - So the rollback is done as a bisection of my changes that the Load page
+    can reach.
+- **Bisection image 1:** `build/LXRV2_lxr02_BISECT_nomenu.img` (716,972 B).
+  It is the current tree with `Core/Menu/menu.c` and `Core/Menu/MenuText.h`
+  at `HEAD`, so my menu additions are removed: the `---` cells, the Colloid
+  wave names, the selector names and their asserts.
+  `ColloidParameters.c` gets local copies of the four tag values so it
+  compiles unchanged. No fault diagnostics.
+  - **If the freeze is gone:** it is in my menu additions.
+  - **If it stays:** it is in the type's registration (registry, parameter
+    table, storage folder), the next bisection.
+
+### 9.9 Device report 7 (2026-11-12): without the menu additions it still freezes
+
+- **Report 7 (bisection image 1, `menu.c` / `MenuText.h` at `HEAD`):**
+  - still freezes, so **my menu additions are cleared**;
+  - it freezes during the page redraw. Usually the top row stays
+    `Load:[Alkaline]`; once it was `Load:[Colloine]`, the first five letters
+    of `Colloid` written over `Alkaline`.
+  - The LCD is fed one character per ~1 ms by TIM7 (priority 7), so it stops
+    within a few milliseconds of the type step.
+- **Priorities read:**
+  - TIM7 is priority 7 (`lcd.c:462`). The render masks priorities 6 and below
+    (`BASEPRI 6 << 4`, `main.c:170-181`), so TIM7 waits during each render
+    block.
+  - SysTick is priority 0, and PendSV is at its reset priority 0, so the
+    diagnostic's stall report would have fired for a hang in the render or in
+    thread mode.
+  - It did not in the "garbage" run. Together with the overwritten display
+    buffer, the likeliest picture is a **stray write** that corrupts the LCD
+    queue, the menu and the audio state while the main loop keeps running.
+- **Checked, nothing found:**
+  - every filesystem array indexed by a type (none) and every IRQ mask there
+    (none);
+  - every constant defined as 5 (none sizes a per-type table).
+- **Bisection image 2:** `build/LXRV2_lxr02_BISECT_alktable.img` (717,396 B).
+  It is the current tree with the Colloid registry row pointed at the
+  **Alkaline's** descriptor table and pages. Number 5, `col`, `.col`, the
+  `Colloid` label and folder are unchanged. No diagnostics.
+  - **If the freeze is gone:** the cause is in the Colloid parameter table
+    (its 47 rows, or row kinds new to the platform), met by code that walks
+    the selected type's descriptors.
+  - **If it stays:** the cause is the type's identity: the number 5, the
+    token, or the folder and its `.hcindex`.
+
+### 9.10 Device report 8 (2026-11-12) and the corrupted block
+
+- **Report 8 (bisection image 2, Colloid on the Alkaline's table):** freezes
+  the same way. With report 7, **the Colloid engine, its parameter table and
+  my menu additions are all cleared.** What remains is existing code meeting
+  the sixth type's identity (number 5, `col`, the `Colloid` folder and its
+  index) on the Load type step (Alkaline -> Colloid).
+- **User:** no more bisection images.
+- **Where the damage lands (from the linked map, `nm -n -S`):** one block,
+  `0x20022094` to `0x200221C0`, holds every symptom:
+  - `ready_tail` and `audioCodec_renderCount` (the audio queue);
+  - `editDisplayBuffer` / `currentDisplayBuffer` at `0x20022124` /
+    `0x20022148` (the garbage screen);
+  - the event ring;
+  - `audio_hw_initialized` / `audio_hw_suspended` at `0x200221B4` / `B5`
+    (the audio stops; the main loop can keep running, which is why the stall
+    report did not fire);
+  - the LCD state machine's statics `state.4` / `cur_rs.3` at `0x200221BE`
+    onward (the display stops mid-word).
+
+  Just below the block: `parameter_values[384]` (to `0x20022030`) and the
+  Scene override arrays.
+- **Searched for the writer, not found:**
+  - every variable-indexed write into `parameter_values[]` (all
+    bounds-checked);
+  - every unbounded string write (`strcpy` / `sprintf`) and every
+    variable-length copy into the screen buffers in `menu.c`;
+  - every screen-buffer write with a variable column;
+  - the Load step's path (`menu_instrumentLoadStepType()` ->
+    `menu_requestInstrumentIndexLoad()` -> `filesystem_requestLoadInstrumentIndex()`
+    -> `filesystem_loadInstrumentIndex_tick()`, and the missing-index rebuild
+    `filesystem_beginInstrumentIndexRecovery()` -> `filesystem_scanInstruments_tick()`
+    -> `filesystem_createBootIndex_tick()`), all bounds-checked;
+  - IRQ masking (`AutosaveTrace.c` only, sound); the LCD queue
+    (non-blocking); codec suspension (the sample installer only).
+
+### 9.11 Device report 9 (2026-11-12): the audio buzzes; a watchpoint image
+
+- **User:** at the freeze the audio goes "brrrrrr": the DMA is replaying its
+  last buffer, so no new blocks are rendered and committed. That fits
+  `audio_hw_suspended` (or the queue state) being overwritten:
+  `audio_check_and_render()` then returns early, and the main loop keeps
+  running, so no stall is seen.
+- **Ruled out on the way:**
+  - `menu_beginNoPlaybackStorage()` suspends the codec only for Load/Save
+    commands while stopped (`menu_updateNoPlaybackStorage()`), and the freeze
+    happens while playing too;
+  - `audioCodec_suspend()` stops the I2S hardware and PLL, which would
+    silence the output rather than buzz.
+- **User's choice:** the watchpoint diagnostic (option 2, no debugger), using
+  all four comparators ("try other watchdog too").
+- **Watchpoint image:** `build/LXRV2_lxr02_DIAG_watch.img`, ELF
+  `build/lxr02_DIAG_watch.elf`. Scratch copy of the current tree plus
+  `watchDiag.c`. No watchdog, no reset, no stall detector or fault handlers.
+  - The four DWT comparators are in DebugMonitor mode (`DEMCR.TRCENA |
+    MON_EN`, LAR unlocked), FUNCTION 5 (write), armed on the main loop's
+    first pass, after boot's legitimate writes:
+
+    | | Address | Contents (this build's map) |
+    |---|---|---|
+    | W0 | `0x2002215C` (mask 2) | `audio_hw_initialized`, `audio_hw_suspended`, padding |
+    | W1 | `0x20022110` (mask 2) | `evt_overflow_flag`, `evt_drop_count`, padding |
+    | W2 | `0x2002209E` (mask 1) | padding after `screensaver_Active` |
+    | W3 | `0x200220EE` (mask 1) | padding after `editDisplayBuffer` |
+
+    After the build, the arming code was checked in `main()`'s disassembly
+    against the map.
+  - `DebugMon_Handler` runs at priority 5. TIM7 is raised to 4 in this build
+    only, so the LCD queue keeps draining while the handler holds. It shows
+    `W<n> pc <stacked PC>` and `lr <stacked LR>`, then halts. The PC is
+    imprecise, a few instructions after the store.
+  - **If nothing shows and it still freezes:** the writer is not the CPU
+    (DMA), or it missed these four words.
+
+### 9.12 Device report 10 (2026-11-12): the watchpoint image hangs at boot; a rollback image
+
+- **User:** `LXRV2_lxr02_DIAG_watch.img` does not boot. It hangs on the voice
+  menu page with nothing loaded and no LEDs. The DWT image is withdrawn, and
+  there will be no further diagnostic or bisection images.
+- **Rollback image** `build/LXRV2_lxr02_ROLLBACK.img`, built in a scratch copy;
+  the tree is unchanged. It is the tree with one line changed:
+  `ColloidParameters.h` `COLLOID_INSTRUMENT_TYPE_FLAGS` becomes `0u`.
+  `instrumentManager_typeSelectableForSceneSlot()` rejects a type with zero
+  flags, so the Load type step never lands on Colloid. The registry row, the
+  storage, the engine and the mixer path stay linked in, so flash stays at
+  717,516 B. This is an interim measure while the freeze is open. It does not
+  fix the freeze.
+- **Freeze:** the root cause is still open. Static analysis continues.
+
+- **Static analysis after the rollback (2026-11-12):**
+  - The user reports that the freeze happens on the encoder step itself; the
+    instrument loads only on "chg". The step path is
+    `menu_instrumentLoadStepType()` → `filesystem_cancelBrowseRead()` →
+    `menu_requestInstrumentIndexLoad(COL)` → `menu_paintTypeStepWhileBusy()`.
+  - The display is drained by TIM7 (priority 7). Stopping mid-word
+    ("Colloine") together with the buzz means the main loop stopped.
+    Nothing is rendered, and nothing new is enqueued.
+  - Checked and cleared:
+    - ITCM placement and copy bounds (`_eitcm` 0x3A38);
+    - the Colloid ABI attributes;
+    - Colloid stack frames (96 B at most);
+    - `GetRngValue()` (it does not block);
+    - the step's bounds (`menu_instrumentLoadIndex[INSTRUMENT_TYPE_UNKNOWN]`);
+    - the type label (`menu_copyPaddedField`);
+    - the index row validator;
+    - the async SD driver's loops.
+  - Lead: `SD_CARD/Instrument/Colloid` is the only Instrument folder without
+    a `.hcindex`, so the first browse goes through
+    `filesystem_beginInstrumentIndexRecovery()` → the one-type scan →
+    `filesystem_createBootIndex_tick()`, which writes `.hcindex` in a browse.
+    That write path is not exercised by any other type on this card. It is
+    not yet proven.
+
+### 9.13 Resolved (2026-11-12): the freeze was a missing type folder
+
+- **User:** the card had no `Instrument/Colloid/` folder. With the folder
+  added, the normal P2 image works, and Colloid plays as built.
+- **Root cause:** `filesystem_createBootIndex_tick()` case 6 dereferences
+  `entry`, a local that only cases 4, 5 and 11 set (an earlier tick), when
+  it creates a missing type folder. The junk pointer faults and halts
+  TIM7, which explains the display stopping mid-word and the buzz.
+  `filesystem_scanInstruments_tick()` also returns an unset
+  `op_close_status` on that path. This predates P2; any type with a
+  missing folder hits it. The fix is S095 P3 F1
+  (`S095_P3_COLLOID_FOLLOW_UPS.md` §1).
+- §9.4–§9.12's corruption and overload hypotheses are withdrawn. The
+  diagnostic, bisection and rollback images and the scratch copies are
+  deleted, and the tree never held diagnostic code.
+- The follow-ups from the listening notes are planned in
+  `S095_P3_COLLOID_FOLLOW_UPS.md`.

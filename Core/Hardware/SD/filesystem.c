@@ -4730,12 +4730,17 @@ static void filesystem_createBootIndex_tick(void)
                 filesystem_finish(FS_STATUS_ERROR);
                 return;
             }
-            op_create_dir_retry = 1u;
+            /* S095 P3 F1: arm the retry and the wait only once the mkdir has
+             * started; a refused request stays ready with op_file NULL and
+             * retries next tick (case 6 explains the stuck-wait defect). */
             op_file_ready = false;
             if (!afatfs_mkdir_lfn(STORAGE_ROOT_INSTRUMENT,
                                   AFATFS_MATCH_CASE_INSENSITIVE,
-                                  NULL, on_file_opened))
+                                  NULL, on_file_opened)) {
+                op_file_ready = true;   /* not started: retry next tick */
                 return;
+            }
+            op_create_dir_retry = 1u;
             return;
         }
         op_kit_root_dir = op_file;
@@ -4820,12 +4825,40 @@ static void filesystem_createBootIndex_tick(void)
                 filesystem_finish(FS_STATUS_ERROR);
                 return;
             }
-            op_create_dir_retry = 1u;
+            /*
+             * S095 P3 F1: the type folder is missing (the S095 P2 freeze).
+             *
+             * What:       re-read the registry entry for this tick, then start
+             *             one mkdir; the retry flag and the wait are armed only
+             *             once afatfs has accepted the request.
+             * Why:        this function runs once per tick, so a local set in
+             *             case 5 is gone when case 6 runs: `entry` was read
+             *             uninitialised here and the junk pointer faulted (the
+             *             display stopped mid-word, the audio buzzed). Every
+             *             other type's folder existed on the card, so only a
+             *             new type ever reached this branch. Second: clearing
+             *             op_file_ready before a mkdir that does not start (the
+             *             FAT layer busy) left this phase waiting for a callback
+             *             that never comes; on refusal it now stays ready with
+             *             op_file NULL and retries on the next tick.
+             * Inputs:     op_instrument_scan_registry_index (set in case 4).
+             * Outputs:    on_file_opened() reports the new folder (phase 6
+             *             continues) or NULL (the retry flag ends in ERROR).
+             */
+            entry = instrumentManager_registryEntryAt(
+                op_instrument_scan_registry_index);
+            if (!entry || !entry->storage_directory) {
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
             op_file_ready = false;
             if (!afatfs_mkdir_lfn(entry->storage_directory,
                                   AFATFS_MATCH_CASE_INSENSITIVE,
-                                  NULL, on_file_opened))
+                                  NULL, on_file_opened)) {
+                op_file_ready = true;   /* not started: retry next tick */
                 return;
+            }
+            op_create_dir_retry = 1u;
             return;
         }
         op_kit_root_dir = op_file;
@@ -23575,6 +23608,11 @@ static void filesystem_scanInstruments_tick(void)
         /* Registry order owns the set of Instrument folders to scan. */
         if (!op_instrument_scan_one_type)
             op_instrument_scan_registry_index = 0u;
+        /* S095 P3 F1: phase 12 finishes with op_close_status. A missing type
+         * folder (phase 7) reaches it without passing phase 9, the only other
+         * writer here, so start from DONE: a missing folder is an empty list,
+         * not the previous operation's result. */
+        op_close_status = FS_STATUS_DONE;
         op_phase = 1;
         return;
 

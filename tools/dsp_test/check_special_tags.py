@@ -29,6 +29,12 @@ TABLES = {
     # Drum twins. S094 P1 S4: instrument_drive (the VCA overdrive) is the
     # Drum twin's INSTRUMENT_DRIVE; alk_tone is NONE.
     'ALK': 'Core/DSP/Instruments/Alkaline/AlkalineParameters.c',
+    # S095 P2: the Colloid's oscillator rows are Drum twins (coa/fin
+    # PITCH_COARSE/FINE | OSC1, typ OSC_TYPE | OSC1, wav and pos NONE); every
+    # col_* key and vol/pan classify as NONE; the LFO rows as their twins.
+    # S095 P3 F10: instrument_drive (the post-filter overdrive) is the Drum
+    # twin's INSTRUMENT_DRIVE, as the Alkaline's.
+    'COL': 'Core/DSP/Instruments/Colloid/ColloidParameters.c',
 }
 ENUM = 'Core/DSP/Instruments/InstrumentManager.h'
 REGISTRY = 'Core/DSP/Instruments/InstrumentManager.c'

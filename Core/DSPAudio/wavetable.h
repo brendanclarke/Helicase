@@ -40,7 +40,22 @@
 #include "stm32f4xx.h"
 #include <stdio.h>
 
-#define TABLESIZE 4096
+/*
+ * The sine table's length (S095 P2 step 0).
+ *
+ * What:       1,024 points (plus one guard point: sine_table[TABLESIZE + 1]),
+ *             read at phase >> 22 with a 22-bit fraction, as the stock
+ *             [11][1024] rows are.
+ * Why:        S095 P2 C-D10 (user): linear interpolation of a sine on 1,024
+ *             points errs by at most (2 pi / 1024)^2 / 8 = -106.5 dB, below
+ *             the int16 output's step; the table shrinks by 6,144 B of flash
+ *             and keeps 2 KB of D-cache hot instead of 8 KB. The 1,024 points
+ *             are the former 4,096-point table's every fourth point, so a read
+ *             on a multiple of 2^22 is unchanged.
+ * Accessors:  sine_table's readers (Oscillator.c, lfo.c); the Colloid's
+ *             Sin row (its loops wrap at 1,024 and never read the guard).
+ */
+#define TABLESIZE 1024
 #define TABLES 128
 
 /*
