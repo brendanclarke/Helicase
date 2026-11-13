@@ -4,11 +4,13 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 093 P8 (2026-11-10),
+- **Current as of:** Session 094 (2026-11-12),
   `dev-ph7-alkaline`. DEV link: `text=695,560`, `data=420`,
   `bss=413,280`; flash payload 695,980 B of 753,664 B
-  (**headroom 44,556 B**). ITCM 12,128 / 16,384 B; FXBUF 126,656 B at
-  `0x20001140` (margin 3,776 B). The entries below run newest first.
+  (**headroom 44,556 B**). ITCM 13,984 / 16,384 B; SRAM1 free 87,404 B
+  (DEV link); FXBUF 126,656 B at `0x20001140` (margin 3,776 B).
+  The entries below run newest first.
+  *(S093 P8 flash/bss figures preserved; exact S094 build figures TBD.)*
 - **S093 P8 changes (2026-11-10):** Alkaline (TB-303) instrument,
   catalogue v3, 8-bit removal, wavetable reassessment.
   - **Added (S093 P4, approved):** `AlkalineVoice` (**548 B** after P6)
@@ -27,6 +29,26 @@ changing any of it.
     (D8).
   - Build P8: `text=695,560`, `data=420`, `bss=413,280`; ITCM 12,128 B;
     flash headroom 44,556 B.
+- **S094 changes (2026-11-12):** Voice DSP adjustments, SRAM D-cache fix,
+  cycle budget, memory allocation speed-ups, PWM position law fix.
+  - **ITCM:** 12,128 → **13,984 B** (+1,856 net: S2 crash removal −≈540,
+    S3 PWM 15 loops in `.itcm.s094p1` +≈2,400).
+  - **SRAM1 added (P3, approved):** `filesystem_copy_clear_scratch_t`
+    **+1,932 B** (`.bss`, copy/clear dedicated scratch, replacing the
+    9 KB name-cache loan). AsyncFATFS cache 8→16 sectors: **+4,224 B**.
+    Total: **+6,156 B**. SRAM1 free after: **87,404 B** (DEV link).
+  - **MPU (P2, AS-6):** region 0 S bit cleared (non-shareable, D-cache
+    effective). The S=1 bit set in S013 had disabled the D-cache for all
+    SRAM. Fix: −14.8 % on same Scene.
+  - **MPU (P3, D):** region 2 added over SRAM2 for write-back stack
+    (`TEX 001 C1 B1 S0`, SRD `0x01` for IWDG capsule).
+  - **DiodeLadder +12 B** (`otaIn`, `toneC`, `toneZ`): inside the
+    1,264 B slot reserve (no union growth).
+  - **Crash removed (P1 S2):** `crashSample` −32,769 B flash, crash loops
+    −≈540 B ITCM. Card sample `02_crash.wav` on SD.
+  - **No `.bss` or `.data` growth** from DSP changes. The copy/clear
+    scratch and AFATFS cache are the only SRAM1 additions.
+  - **Stall record** part 1 changed to 32-bit layout.
 - **S091 P5 changes (2026-11-05):** CrumpBit sub-type efficiencies
   (`S091_P5_IMPLEMENTATION.md`).
   - **Added (approved Q4):** `crumpBit_dataLines` (**256 B**) and

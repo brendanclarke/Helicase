@@ -8,7 +8,7 @@ see `ALKALINE_MODELLING_REFERENCE.md`; for the instrument's place in the
 DSP pipeline alongside the other five types, see
 `INSTRUMENTS_DSP_REFERENCE.md` §5.5.
 
-- **Sessions:** S092 (design), S093 P3–P6 (implementation).
+- **Sessions:** S092 (design), S093 P3–P6 (implementation), S094.
 - **Type:** `INSTRUMENT_TYPE_ALK`, Basic class (may take any of the six
   slots without counting towards the Advanced limit).
 
@@ -23,6 +23,8 @@ DSP pipeline alongside the other five types, see
 | `Core/DSP/Instruments/Alkaline/AlkalineControl.c/.h` | Control-rate path: expo converter, MEG, accent network, VEG, prewarp |
 | `Core/DSPAudio/DiodeLadder.c/.h` | The diode-ladder filter: `DiodeLadder_renderB2Osc()` (fused oscillator + B2R ladder), `DiodeLadder_setNet()`, `dl_slowUpdate()` |
 | `Core/DSPAudio/AlkalineSquareTable.c` | Generated per-octave Q8 square table (`alkSqrTable[]`) |
+| `Core/DSPAudio/AlkalinePostTables.c/.h` | Generated post-FX tables |
+| `tools/alkaline/gen_alk_post_tables.py` | Generator for `AlkalinePostTables` |
 | `SD_CARD/Instrument/Alkaline/init.alk` | Default instrument file |
 
 Build: voice, control and ladder in `DSP_SRCS` with explicit `-Ofast` rule;
@@ -66,6 +68,13 @@ Stays a table wave (S093 P3):
   the 11 table levels carries its octave's duty (51 % at C1, 23 % at C5) and
   level (−2.5 to +3.2 dB relative to saw). Runtime cost: 0 (the table lookup
   is the same as any stock wave).
+- S094 P4: `wav` gains Tri (index 2; `ALK_WAVE_COUNT` 2→3). 0 per sample.
+- S094 P1 S5: `ALK_TYP_PWM 2u` (`ALK_TYP_COUNT` 3). Fused mode 3 in
+  `dl_renderB2Body()`, `DiodeLadder_renderB2OscPwm()`. Read form 2
+  (A interpolated, B truncated): 204 instructions.
+- S094 P4: `pwm` gains Tri (index 2). Waves under `pwm`: Saw (two-saw
+  sum/difference pulse) and Sqr. Sqr scaled 1.40× (303 square RMS
+  1.41–1.43× flat pulse).
 - Pitch is computed at control rate from `midiFreq` (coarse) + note + fine
   byte, plus Tuning (±700 cents centred at byte 63) and slide lag (22 ms
   one-pole in log2 Hz). `osc_setTableFreq()` sets `phaseInc`/`tableOffset`
@@ -131,7 +140,19 @@ device.
 x16 at max; S093 P6 doubled the former x8). Applied to the oscillator signal
 before the ladder. Cost: 0 per sample.
 
-### 3.7 Resonance and self-oscillation (S093 P6)
+### 3.7 VCA overdrive (S094 P1 S4)
+
+`otaIn = gain[vcaDrive] * DL_INV_2VT` scales the OTA input per block.
+Gain ×1..×32 (`OVD_OCT` 5.0). Make-up table folds into the per-block
+make-up. At Overdrive 0, `otaIn` = constant `DL_INV_2VT` (bit-identical).
+
+### 3.8 Tone (S094 P1 S4)
+
+One-pole low-pass in `c` form on OTA output, inside the B2R loop.
+`z = o + toneC * (z - o)`. At Tone 127, `toneC = 0.0f`, so `z = o` exactly
+(bit-identical). Spill cost: +6 per sample from the three new live floats.
+
+### 3.9 Resonance and self-oscillation (S093 P6)
 
 The Res knob runs `k_eff = ALK_RES_KMAX × knob` with `ALK_RES_KMAX` 1.5.
 The 303's maximum sits at byte ≈ 85; above it is new territory.
@@ -255,18 +276,21 @@ so there is no `velo_vol_on_off` row.
 
 ## 6. Parameter table
 
-28 rows, 8 sub-pages (S093 P6):
+30 rows, 8 sub-pages (S093 P6, S094):
 
 | Sub-page | Rows | Notes |
 |---|---|---|
-| OSC | `coa`, `tun`, `wav`, `pos` | `wav`: Saw/Sqr selector. `tun`: ±700 cents (`IM_SPECIAL_ALK_TUNE`, tag 24/32). `pos`: S093 P6 addition |
+| OSC | `coa`, `tun`, `wav`, `pos` | `wav`: Saw/Sqr/Tri selector. `tun`: ±700 cents (`IM_SPECIAL_ALK_TUNE`, tag 24/32). `pos`: S093 P6 addition |
 | AEG | `atk`, `dec` | `atk` = `alk_attack` (row 26): VEG trigger-pulse width. `dec` = MEG decay |
 | mod | `dst`, `amt`, `sld` | `dst`/`amt`: filter drive and amount. `sld`: slide on/off (latched at trigger) |
 | click | `acc` | Accent level |
 | FILTER | `cut`, `res`, `env`, `drv` | One screen. `drv`: drive (x1–x16) |
 | LFO | (as Drum) | |
-| MIX | `vol`, `pan` | |
+| MIX | `vol`, `pan`, `ton`, `drv` | `ton`: `alk_tone` (row 30). `drv`: `instrument_drive` (row 29) |
 | (FM page empty) | | |
+
+Row 29 `instrument_drive` (K1: shared key, Alkaline branch in writer) and
+row 30 `alk_tone` are appended.
 
 `alk_attack` (26) and `osc1_position` (27) are appended, so every stored
 index, automation ID and NRPN of rows 0–25 is unchanged.
@@ -287,16 +311,17 @@ rows. LFO voices are `self`, target selectors `255`.
 
 ## 7. Cost
 
-### 7.1 Measured (S093 P6, G3–G5)
+### 7.1 Measured (S093 P6, S094, G3–G5)
 
-| Component | Cost |
+| Configuration | Cost |
 |---|---|
-| Fused loop (oscillator + B2R ladder) | 214 instr/sample, 3 VDIV |
-| Per-block (async + sync-block) | 1,230 per block = 38.4/sample, 9 VDIV |
-| **Whole voice** | **252.5 per sample** |
+| wav/wtb, no slot held (with tone) | 263.7 per sample |
+| wtb, slot held | 276.7 per sample |
+| pwm | 256.6 per sample |
 | **Drum ceiling (frozen, P4 re-measured)** | **261.3 per sample** |
 
-The per-block part: async 884 + sync-block entry/exit 332 + dispatch 14.
+Note: AS-2 (remove tone) open at S094 close.
+
 The `pos` bend adds +13 per block. `Alkaline_isQuiet()` is used for Scene
 swap only, not for CPU saving (constant-CPU rule).
 
@@ -368,7 +393,7 @@ To add points: expand the table in `DiodeLadder.c` and update
 
 | # | Extra | Status | Notes |
 |---|---|---|---|
-| E1 | Post-VCA overdrive (`tanh` stage) | Not implemented | +22–25 instr/sample, +1 VDIV. Only fits if SRR is out |
+| E1 | Drive (pre-filter + post-VCA overdrive) | **Implemented** (S093 P6 pre-filter, S094 P1 S4 post-filter VCA overdrive) | Pre-filter x1–x16. Post-filter VCA ×1..×32 (`OVD_OCT` 5.0) |
 | E2 | Filter drive (user `drv` row) | **Implemented** (S093 P6) | x1–x16, applied before the ladder. 0 per sample |
 | E3 | Devil Fish ranges (extended Res, Decay, Accent, Env Mod) | **Partially** (Res beyond 303 max, S093 P6) | |
 | E4 | MIDI note-off | **Implemented** (B-6) | Does not end the gate |

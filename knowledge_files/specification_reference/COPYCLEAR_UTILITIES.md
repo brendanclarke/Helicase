@@ -718,7 +718,14 @@ A writer already running finishes normally; pastes do not wait for it unless
 they need the name buffer. Dirty marks happen at every change, so AutoSave
 captures everything after the suspension ends.
 
-### 11.7 The 9 kB name buffer loan
+### 11.7 The 9 kB name buffer loan (historical)
+
+> **S094 P3:** The 9 KB name-cache loan is replaced by a dedicated
+> `filesystem_copy_clear_scratch_t` buffer (+1,932 B SRAM1, `.bss`).
+> The D53 wait (which blocked the copy/clear system until the name cache
+> was free) is removed. The copy/clear system now has its own scratch at
+> all times, eliminating the dependency on filesystem naming operations.
+> The loan mechanism below is retained for historical context only.
 
 - `filesystem_borrowNameCacheScratch()` succeeds only while the facade is
   idle; it tags the cache `FS_NAME_CACHE_COPYCLEAR` so every browser

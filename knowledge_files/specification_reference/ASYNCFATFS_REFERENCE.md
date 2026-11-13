@@ -384,6 +384,32 @@ Caller rule:
   the Session 057 case study above for a concrete instance where the pool size
   was never the actual problem.
 
+## Sector cache
+
+asyncfatfs maintains a sector cache in SRAM1 that buffers recently accessed
+512-byte SD sectors. The cache serves FAT chain lookups, directory scans, and
+file read/write operations without re-issuing SD commands for sectors already
+in memory.
+
+**Cache size doubled 8 to 16 sectors (S094 P3 change B).** The sector cache was
+doubled from 8 to 16 sectors. Cost: +4,224 B SRAM1. This doubles the
+read-ahead capacity and reduces the frequency of cache evictions during
+concurrent file operations (instrument loading overlapping with card-sample
+streaming). The previous 8-sector budget forced frequent evict/reload cycles
+whenever two independent file streams competed for cache lines; 16 sectors
+gives each stream enough headroom to keep its working set resident.
+
+**Discardable hint for read-only data sectors (S094 P3 change C).** A new
+"discardable" hint was added for regular-file data reads. When a cached sector
+is marked discardable, the cache manager can evict it without write-back when
+space is needed. This applies to read-only streaming operations (e.g., card
+sample playback) where re-reading from the card is cheaper than holding the
+cache line. Discardable sectors are never dirty, so eviction skips the
+write-back path entirely and frees the slot immediately. This complements the
+enlarged cache by letting the eviction policy distinguish expendable streaming
+data from metadata and write-buffered sectors that must be retained or
+flushed.
+
 ## Removal
 
 APIs:

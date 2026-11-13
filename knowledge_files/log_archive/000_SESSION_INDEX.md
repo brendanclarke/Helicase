@@ -2367,3 +2367,34 @@ Session 093 took the Alkaline instrument from DSP equations (S092) through full 
   `OSC_INTERP_AUDIT.md` (slot budget),
   `FILESYSTEM_SPEC.md` (`.alk` file, catalogue v3, Re3/Sw3 removal, Alkaline keys),
   `STORAGE_SRAM_MANIFEST.md` (flash, ITCM, SRAM after S093).
+
+### 094 — Voice DSP Adjustments, SRAM D-Cache Discovery, Cycle Budget, Memory Allocation Speed-ups, PWM Position Law Fix (2026-11-11/12)
+
+Session 094 implemented voice DSP adjustments (crash wave removal, PWM oscillator type, Alkaline VCA overdrive + tone, LFO sync fix and rate table), discovered and fixed the SRAM D-cache being disabled since Session 013, adopted a cycle-based budget replacing the instruction model, implemented QADD and memory allocation speed-ups, fixed the PWM position law, and expanded the Alkaline wave set. Branch `dev-ph7-alkaline`, HEAD `264c1e34`. Device-tested across four hardware runs.
+
+**P0 — Planning drafts.** Three draft proposals for review (no code changed): sample and voice reductions (crash removal analysis, sync blend cost, Advanced ceiling first frozen at ≈ 292.9 for Cymbal/HiHat); PWM as an oscillator type (hybrid mechanism: phase warp for Sin/Tri, two-read for Saw/Rec; integer Q15/Q14 interpolation paying for the second read; 15 ITCM loops; Alkaline fused mode 3 at 212 instructions); Alkaline post-filter overdrive + tone (P9-A′: the OTA input gain as a per-block variable, one-pole low-pass on the OTA output in the `c` form; A3 drive/makeup from tables; rows 29 `instrument_drive` and 30 `alk_tone`; Overdrive 0 / Tone 127 = bit-identical to before; ≈ 261.5 per sample accepted).
+
+**P1 — Voice DSP adjustments (S0–S6).** One implementation pass. S0: baselines and Alkaline golden capture (law AL-OD0). S1: LFO sync fix (`IM_SPECIAL_LFO_SYNC` writer 23, count 24; five `lfo_sync` rows become `ROW_MENU_SPECIAL`; `lfo_setSync()` recomputes `phaseInc`; sync wins: rate scale 1.0 while synced) and new rate table (`lfoRateHz[128]`: `frq` 0 = stopped, `frq` 1 = 100 s cycle, semitone grid 63..127; `LFO_MAX_F` removed). S2: crash wave removal (`crashSample` deleted; `OSC_STOCK_LAST` → `NOISE`; `OSC_SAMPLE_START` 6 → 5; `Cym` removed from `waveformNames`; savings: Drum −3, Snare −3, Cymbal/HiHat −6 per sample, ITCM −≈ 540 B, flash −32,769 B; card sample `SD_CARD/samples/02_crash.wav` generated from ROM data). S3: PWM on Drum, Snare, Cymbal, HiHat (`typ` 4 `pwm`; `OSC_TYPE_MODLIST` 5; `OSC_BIND_PWM` 3; 15 loops in `.itcm.s094p1`; integer Q15/Q14 interpolation). S4: Alkaline VCA overdrive + tone (`otaIn`, `toneC`, `toneZ` in `DiodeLadder`; A3 tables in `AlkalinePostTables.c/.h`; rows 29–30 appended; mix page vol pan ton drv). S5: Alkaline PWM (fused mode 3; `ALK_TYP_PWM` 2u; read form 2, 204 instructions). S6: ceiling assessment (Basic worst 257.8; first frozen Advanced ceiling). Key finding: the sine table starts at its trough (−cos), so the warped sine has no DC and P-D8 (DC correction) was not needed.
+
+**P2 — Alkaline savings: SRAM D-cache, cycle probe, budget.** Triggered by three Alkalines pinning the CPU after P1. The cycle probe (DEV_MODE_LOGGING only, DWT_CYCCNT, seven mixer sections, trace stage `p`, 94 B RAM) showed the whole block was 95.1 % of capacity. Root cause: MPU region 0 had S=1 (shareable) since S013 — the D-cache was effectively OFF for all SRAM. Fix: clear the S bit. Result: **−14.8 %** on the same Scene; six Alkalines at 80.9 %; worst Scene 84.0 %. Post-filter overdrive doubled (`OVD_OCT` 4.0 → 5.0, gain ×1..×32; `OVD_MAKEUP_OCT` −2.0 → −2.5). `bufferTool_satAdd32()` → `__QADD()` (stereo dry add 41–42 → 26 instructions/sample; with send 56–57 → 33–34). Cymbal and HiHat moved to Basic (`INSTRUMENT_FLAG_BASIC` set); no current type is Advanced. CrumpBit resonant TPT SVF restored on `grn`/`rvb` (S091 P5 F1 had replaced it with one-pole; `grn` 180.8 instructions/frame; cap 170 → 181). Budget adopted: **97 % average cap** of 156,705 cycles per block: 4 Basic × 19,620 + 2 Advanced × 21,803 + Effect 16,634 + shared mixer 12,784 + outside-mixer 4,701 + 500 slack.
+
+**P3 — Memory allocation speed-ups.** All four in one build. A: dedicated `filesystem_copy_clear_scratch_t` (+1,932 B SRAM1), removing the 9 KB name-cache loan for copy/clear (AutoSave, settings and Load no longer refused during paste). B: AsyncFATFS cache 8 → 16 sectors (+4,224 B SRAM1; 10 free slots instead of 2). C: discardable hint for regular-file data reads in AsyncFATFS (streamed data stops evicting directory/FAT sectors). D: write-back stack region (MPU region 2 over SRAM2, `TEX 001 C1 B1 S0`, SRD `0x01` for the IWDG capsule; speeds up spill stores). Stall record part 1 changed to 32-bit layout. SRAM1 free after: **87,404 B** (DEV link).
+
+**P4 — PWM position law fix and Alkaline wave additions.** Investigation: `pos` *p* and `128 − p` produce identical harmonic content; half the knob repeats. Fix: position-indexed tables; `pos` 0 = 50 % (unmodified wave), `pos` 127 = narrowest; 128 distinct widths. Narrowest: Rec 0.39 %, Saw/Tri 2.54 %, Sin 6.25 %. Alkaline `wav` gains Tri (index 2; 0 per sample in the existing fused loop; appended to preserve stored values). Alkaline `pwm` gains Tri (index 2; new fused ladder mode). No Sin (the ladder filters highs so strongly that warped sine and warped triangle sound the same), no Noi, Rec is the existing Sqr.
+
+**Bug fixes:** SRAM D-cache disabled since S013 (MPU region 0 S=1; −14.8 %); LFO sync/rate desync (plain byte store, no phaseInc recomputation); PWM pos law mirror symmetry (half the knob wasted); Alkaline tone spill cost (6 per sample; AS-2 open); CrumpBit build note (`menu.c` missing `AlkalineVoice.h` include during concurrent edit).
+
+**ITCM after S094:** **13,984 / 16,384 B** (was 12,128 at start of S094).
+
+- **Find here**: [094_SESSION_HANDOFF_LOG.md](094_SESSION_HANDOFF_LOG.md),
+  `INSTRUMENTS_DSP_REFERENCE.md` (PWM type, crash removal, Alkaline post-FX and waves),
+  `CPU_USE_DSP_AUDIT.md` (SRAM D-cache, QADD, cycle budget, CrumpBit SVF),
+  `EFFECTS_MODULES_DSP_REFERENCE.md` (CrumpBit SVF restored),
+  `ALKALINE_MODULE_REFERENCE.md` (post-FX, PWM, Tri wave, A3 tables),
+  `FILESYSTEM_SPEC.md` (OSC_SAMPLE_START 5, 02_crash.wav, typ pwm, Alkaline rows 29–30),
+  `STORAGE_SRAM_MANIFEST.md` (ITCM 13,984, SRAM1 +6,156 B, MPU region 2),
+  `ASYNCFATFS_REFERENCE.md` (16 sectors, discardable hint),
+  `COPYCLEAR_UTILITIES.md` (dedicated scratch, D53 wait removed),
+  `OSC_INTERP_AUDIT.md` (PWM no slot, crash removal pool 90→84),
+  `DEV_MODES.md` (cycle probe),
+  `MODULE_INTERCHANGE_SPEC.md` (IM_SPECIAL_LFO_SYNC, instrument_drive Alkaline branch).

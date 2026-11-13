@@ -16,6 +16,16 @@ be performed when the opportunity arises, not blocking items for current work.
   playback, attack/decay/resonance/drive/pos parameter ranges,
   self-oscillation bounded. Tracks 6/7 share slot 5 confirmed; note-off
   does not end the gate; roll hits get full gates.
+- **S094 P1–P4 voice DSP, SRAM D-cache, budget, PWM, Alkaline post-FX:
+  PASSED** — hardware-tested 2026-11-12. Crash removal (card sample
+  plays via `slp`), PWM on all four drum voices (pos law: 0 = 50 %,
+  127 = narrowest), Alkaline VCA overdrive + tone (bit-identical at
+  Overdrive 0 / Tone 127 — P9-D7), Alkaline PWM and Tri wave, LFO sync
+  and rate table, SRAM D-cache fix (−14.8 % on same Scene, six Alkalines
+  no longer pin CPU), QADD (bit-exact), CrumpBit SVF restored on grn/rvb
+  (180.8 per frame ≤ 181 cap), cycle budget probe, PWM position law,
+  memory allocation speed-ups (copy/clear scratch, AFATFS 16 sectors,
+  write-back stack). 0 underruns over extended playback.
 - **S090 P5 Load/Save speed and watchdog T1–T9 (HIGH PRIORITY):**
   - T1: Load page type cycling (Kit→Scene→Bank→Pattern) — names appear
     faster than before; trace `w` lines give each index-read duration
@@ -41,7 +51,8 @@ be performed when the opportunity arises, not blocking items for current work.
   2026-11-06. Labels hook display, dly delay time curve, dpn→spn rename,
   snc removed from dly lanes, pit interval labels, grn below /64 rows, tap
   fade, all confirmed. Final CPU: dly 157.6, cmb 153.8, pit 154.1, grn 165.3,
-  rvb 163.9 (worst 165.3 ≤ 170 cap).
+  rvb 163.9 (worst 165.3 ≤ 170 cap). **Note:** grn/rvb SVF restored in
+  S094 P2 §23; grn now 180.8, cap raised to 181.
 - **S089 P3 Drum FM ramp efficiency H1–H6 (open):**
   - H1: boot and play Drum `fm` with `slp`/`smp`/`wtb` — sounds correct
   - H2: A/B against the P2 image with `fm` carriers — no audible difference

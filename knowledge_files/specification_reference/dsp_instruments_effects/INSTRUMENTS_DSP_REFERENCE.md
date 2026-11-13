@@ -4,7 +4,12 @@ How the six instrument voices are rendered, how their parameters reach the
 DSP, how modulation (LFO, velocity, Morph, step automation) works, what each
 part costs, and how to change or extend it.
 
-- **Current as of:** Session 093 P6 (2026-11-10). S093 added the Alkaline
+- **Current as of:** Session 094 (2026-11-12). S094 added VCA overdrive and
+  tone to Alkaline (§5.5), PWM oscillator type (`ALK_TYP_PWM`, §5.5;
+  `OSC_TYPE_PWM`, §6.1), Tri waveform for both `wav` and `pwm`, LFO sync
+  fix and `lfoRateHz[128]` table (§7.1), `CRASH` removal from the stock
+  list (§6.1), and `IM_SPECIAL_LFO_SYNC` (§4.4). Cymbal/HiHat moved to
+  Basic (`INSTRUMENT_FLAG_BASIC`). S093 added the Alkaline
   instrument (TB-303 emulation, §5.5): diode-ladder filter B2R, per-octave
   Q8 square table, gate timer, 303 sequencing rules, `pos` and `alk_attack`
   rows, extended resonance. S092 (pre-implementation) produced the circuit
@@ -320,6 +325,7 @@ write (up to 20 `strcmp`, 2 `strstr` and 7 `strncmp`).
 | `TRANSIENT_FREQ` | `transient->pitch = 1 + (v/33.9 − 0.75)` |
 | `INSTRUMENT_DRIVE` | `setDistortionShape(v)` (§6.6) |
 | `LFO_RATE` | `lfo_setFreq(v)` (§7.1) |
+| `LFO_SYNC` (S094) | `lfo_setSync(v)` — writer 23; `IM_SPECIAL_WRITER_COUNT` 24. Five `lfo_sync` rows become `ROW_MENU_SPECIAL`. |
 
 - `valueShaperF2F(x, s)` and `valueShaperI2F(v, s)` (`valueShaper.h`) apply
   the curve `(1+k)x/(1+k|x|)` with `k = 2s/(1.0001 − s)`.
@@ -690,6 +696,18 @@ osc table wave (sawTable | alkSqrTable[octave]) --x driveGain--> B2R ladder
   async 884 + sync-block entry/exit 332 + dispatch 14: the `pos` bend +13,
   the VEG factor −1, drive and MEG +0. `Alkaline_isQuiet()` is used for
   a Scene swap. Basic: it may take any slot, and `slotUsesSrr()` is 0.
+- **S094 P1 S4: VCA overdrive and tone.** `otaIn` overdrive and a one-pole
+  low-pass tone filter (`toneC` in `c` form) added to the B2R loop. Overdrive
+  0 / Tone 127 = bit-identical to S093. Drive gain and makeup from tables
+  (`AlkalinePostTables.c/.h`). Rows 29 `instrument_drive` and 30 `alk_tone`
+  appended; mix page: vol pan ton drv.
+- **S094 P1 S5: PWM type.** `ALK_TYP_PWM` 2u (fused mode 3,
+  `DiodeLadder_renderB2OscPwm()`, read form 2: 204 instructions).
+  `ALK_TYP_COUNT` 3.
+- **S094 P4: Tri waveform.** `wav` gains Tri (index 2; 0 per sample in fused
+  loop). `pwm` gains Tri (index 2). `ALK_WAVE_COUNT` 2 -> 3.
+- **Post-filter overdrive constants.** `OVD_OCT` 5.0 (gain x1..x32),
+  `OVD_MAKEUP_OCT` -2.5.
 
 ### 5.6 Where each engine's hot code runs
 
@@ -730,12 +748,15 @@ function's per-sample loops with a P2 baseline and fails if one grew.
   | 0 | `SINE` | `Sin` | `calcSineBlock` |
   | 1–3 | `TRI SAW REC` | `Tri Saw Rec` | `calcWavetableOscBlock(table)` |
   | 4 | `NOISE` | `Noi` | `calcNoiseBlock` |
-  | 5 | `CRASH` | `Cym` | `calcSampleOscBlock` (the built-in crash sample) |
+
+  S094 P1 S2: `CRASH` removed; `OSC_STOCK_LAST` is now `NOISE`;
+  `OSC_SAMPLE_START` 6 -> 5. The built-in crash sample becomes a card
+  sample (`02_crash.wav`).
 
   `waveformNames` (`MenuText.h`) must have exactly `OSC_SAMPLE_START`
   entries (a `_Static_assert` in `menu.c`). Inserting a waveform renumbers
   the catalogue entries (S086 did, 6+ → 8+; S093 P3 removed `Re3`/`Sw3`,
-  8+ → 6+; neither with a migration, §6.1.2).
+  8+ → 6+; S094 removed `CRASH`, 6+ → 5+; none with a migration, §6.1.2).
 
 - **Oscillator type system (S087, `osc1_type`):** the `typ` row on the main
   oscillator selects which reader serves `wav` values ≥ `OSC_SAMPLE_START`:
@@ -746,6 +767,10 @@ function's per-sample loops with a P2 baseline and fails if one grew.
   | `smp` (1) | `OSC_TYPE_SMP` | one-shot sample reader (`osc_smp*Block`, §6.1.4) |
   | `slp` (2) | `OSC_TYPE_SLP` | looped sample reader (`osc_slp*Block`, §6.1.4) |
   | `wtb` (3) | `OSC_TYPE_WTB` | wavetable reader with frame blending (§6.1.5) |
+  | `pwm` (4) | `OSC_TYPE_PWM` | S094 P1 S3: pulse-width modulation; `OSC_TYPE_MODLIST` 4 -> 5 (never stored); `OSC_BIND_PWM` 3. Hybrid mechanism: warp (W) for Sin/Tri, two-read (D) for Saw/Rec. Integer Q15/Q14 interpolation. 15 ITCM loops. |
+
+  S094 P4: PWM position law fix. Old: pos 64 = unmodified, mirror-symmetric.
+  New: pos 0 = 50 %, pos 127 = narrowest. Position-indexed tables.
 
   `typ` is a **selector row**: `INSTRUMENT_PARAM_FLAG_SELECTOR` (0x08),
   `DTYPE_MENU` with id `MENU_OSC_TYPE`. Not morphable, stored single-ended,
@@ -1307,6 +1332,8 @@ byte is a fold type index, not a waveform selector.
 - **Rate:** `lfo_setFreq(v)`: `f = ((v+1)/128)³ · 200 Hz`; the phase
   increment is `f / (44,108/32) · 2³²`, so the LFO steps once per block.
   Sync modes 1..11 (4/1 … 1/32) derive the rate from `seq_getBpm()`.
+- **S094 P1 S1: LFO sync fix.** New `lfoRateHz[128]` table: frq 0 = stopped,
+  1 = 100 s period, semitone grid 63..127. `LFO_MAX_F` removed.
 - **Retrigger:** values 0–7: off (0), v1–v6 (1–6), scn (7,
   `LFO_RETRIGGER_SCENE`). Values 1–6 reset the phase to the offset on a
   trigger from the corresponding track. Value 7 (`scn`) preserves the LFO
@@ -1461,6 +1488,8 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 | Snare post-chain | 30 (was 35) | 1 |
 | Cymbal/HiHat post-chain | 25 (was 28) | 1 |
 | S093 Alkaline fused oscillator + B2R ladder (linked) | 214 | 3 |
+| S094 Alkaline fused wav + B2R + tone + overdrive (linked) | see §5.5 | 3 |
+| S094 Alkaline fused PWM + B2R (linked) | 204 | 3 |
 
 ### 8.2 Per-voice estimate (worst case, per sample)
 
@@ -1472,7 +1501,7 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 | Snare | noise 13 + filter 95 + transient 22 + add 5 + osc 24 + post 30 | 190 instructions, 3 divisions |
 | Cymbal | 2 mod osc 48 + add 5 + FM carrier 35 + filter 95 + transient 22 + post 25 | 230 instructions, 3 divisions |
 | HiHat | as Cymbal | 230 instructions, 3 divisions |
-| Alkaline (B2R, r6, linked, S093 P6) | fused loop 214 + per block 1,230/32 = 38.4 | 252 instructions, 3 divisions + 9 per block |
+| Alkaline (B2R, r6, linked, S094: wav/wtb with tone) | fused loop + tone + overdrive + per block | 263.7 per sample, 3 divisions + 9 per block |
 
 Add waveform interpolation (about one extra oscillator render each, at most
 two per block) and the mixer per slot (decimator 12–18, dry path 28–46, plus
@@ -1546,7 +1575,11 @@ sample vs 22 for built-in clicks.
   |---|---|---:|
   | Drum (Basic ceiling) | `fm`: `slp` FM ramp 51 + crash modulator 30 | 261.3, 3 VDIV |
   | Cymbal / HiHat (Advanced; measured, not frozen) | T+D: crash modulators 30 + 30, sum ≈ 2.5, `slp` FM 50, filter 92, click 22, post 25; per block ≈ 1,006; SRR 10 | ≈ 292.9, 3 VDIV |
-  | Alkaline (P8 image) | fused loop 214 + per block 1,319 / 32 | 255.2, 3 + 9/32 VDIV |
+  | Alkaline (S094, wav/wtb no slot, with tone) | fused loop + per block | 263.7, 3 + 9/32 VDIV |
+  | Alkaline (S094, pwm) | fused PWM loop + per block | 256.6, 3 + 9/32 VDIV |
+  | Alkaline (S094, wtb slot held) | fused loop + blend + per block | 276.7, 3 + 9/32 VDIV |
+  | Drum (Basic ceiling) | `fm`: `slp` FM ramp 51 + crash modulator 30 | 257.8, 3 VDIV |
+  | Cymbal / HiHat (now Basic, S094 P2: `INSTRUMENT_FLAG_BASIC` set) | as above | ≈ 292.9, 3 VDIV |
 
 - **The interpolation slots:** the S087 "+10..+13" above is the blend's
   premium over the same reader. It is not what a slot adds to the worst

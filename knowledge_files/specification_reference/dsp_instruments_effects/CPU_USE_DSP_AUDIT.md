@@ -1293,7 +1293,7 @@ most expensive choice an oscillator can make.
       | `alk_prewarp` | 36 | 1 |
       | `DiodeLadder_setNet` | 32 | 0 |
 
-    - **Decided, not yet in the tree** (S093 P8 revision 3, D12/D13): frame
+    - **Implemented in S094 P1.** (S093 P8 revision 3, D12/D13): frame
       blending with an interpolation slot.
       - Prototype: blend loop 228, no-slot loop 213, per block 1,391.
       - Whole voice 256.5 (no slot) / **271.5 (slot held)**. The slot-held
@@ -1310,6 +1310,71 @@ most expensive choice an oscillator can make.
       dependency files present, the default goal becomes `build/main.o`, and
       copied timestamps look current. Use `rm -rf build && make all` in
       every scratch copy.
+
+### Session 094 findings (measured 2026-11-11/12; records in S094_P2_ALKALINE_SAVINGS.md, S094_P1_IMPLEMENTATION.md)
+
+80. **IMPLEMENTED (S094 P1 S2): crash wave removed.** `crashSample` deleted
+    from firmware. The plain crash loop (30 per sample) was the dearest plain
+    read in the system. Without it: Drum 261.3→258.3, Snare −3,
+    Cymbal/HiHat −6, `itp` fade 45→42, pool 90→84. Card sample
+    `SD_CARD/samples/02_crash.wav` replaces it (playable as `slp` or
+    modulator `l` entry). ITCM −≈540 B; flash −32,769 B.
+81. **IMPLEMENTED (S094 P1 S3): PWM oscillator type on Drum, Snare, Cymbal,
+    HiHat.** `typ` 4 `pwm`. Hybrid mechanism: phase warp (W) for Sin/Tri,
+    two-read (D) for Saw/Rec. Integer Q15/Q14 interpolation. 15 ITCM loops
+    in `.itcm.s094p1`. Every PWM loop at or below its role ceiling. The key
+    finding: integer interpolation pays for the second read (float two-read
+    30, integer two-read 23). No voice's worst case rises. ITCM +≈2.4 KB.
+82. **IMPLEMENTED (S094 P1 S4): Alkaline VCA overdrive + tone.** OTA input
+    gain as per-block variable (`otaIn`); one-pole low-pass tone in `c` form
+    on OTA output inside the B2R loop. A3 drive/makeup from tables (−40 per
+    block). The three new live floats pushed the loop into spill reloads:
+    stack loads/stores 30→41. The tone costs 6 per sample; the overdrive
+    about 2. Loops: one-row 213→221, blend 228→234. Whole voice
+    256.1→263.7 (no slot). Overdrive 0 / Tone 127 = bit-identical to before
+    (P9-D7). The new accepted worst case ≈261.5.
+83. **IMPLEMENTED (S094 P1 S5): Alkaline PWM.** Fused mode 3 in
+    `dl_renderB2Body()`, `DiodeLadder_renderB2OscPwm()`. Read form 2
+    (A interpolated, B truncated): 204 instructions. `ALK_TYP_PWM 2u`. The
+    Alkaline's cheapest path (256.6). Removing it saves nothing on the worst
+    path.
+84. **IMPLEMENTED (S094 P1 S1): LFO sync fix and rate table.** New
+    `IM_SPECIAL_LFO_SYNC` (writer 23, count 24). `lfoRateHz[128]` table:
+    `frq` 0 = stopped, 1 = 100 s, semitone grid 63..127. Sync wins: rate
+    scale 1.0 while synced. `LFO_MAX_F` removed.
+85. **DISCOVERY (S094 P2 §13): SRAM D-cache was effectively disabled since
+    Session 013.** MPU region 0 had S=1 (shareable). On Cortex-M7 with
+    CACR.SIWT=0, shareable means the D-cache is OFF for SRAM. Fix: clear S
+    bit. Result: −14.8% on the same Scene. Six Alkalines from pinning the
+    CPU to 80.9%. All voices benefited (Alkaline −20.2%, drums −10-15%).
+86. **IMPLEMENTED (S094 P2 §22): QADD.** `bufferTool_satAdd32()` replaced
+    with `__QADD()` intrinsic. Bit-exact. Stereo dry add: 41-42→26
+    instructions/sample. With send: 56-57→33-34.
+87. **IMPLEMENTED (S094 P2 §22): Cymbal and HiHat moved to Basic.**
+    `INSTRUMENT_FLAG_BASIC` set. No current type is Advanced. The Advanced
+    machinery preserved for future types.
+88. **ADOPTED (S094 P2 §21): cycle-based budget.** 97% average cap (152,004
+    of 156,705 cycles per block). Replaces S089's instruction-based gates.
+    Budget: 4 Basic × 19,620 + 2 Advanced × 21,803 + Effect 16,634 +
+    shared mixer 12,784 + outside-mixer 4,701 + 500 slack.
+89. **IMPLEMENTED (S094 P2 §23): CrumpBit resonant SVF restored on
+    `grn`/`rvb`.** S091 P5 F1 had replaced it with one-pole. `grn` 180.8
+    instructions/frame. Cap 170→181. About 16,280 cycles against 16,634
+    Effect share.
+90. **IMPLEMENTED (S094 P2 §10.2): post-filter overdrive doubled.**
+    `OVD_OCT` 4.0→5.0 (gain ×1..×32), `OVD_MAKEUP_OCT` −2.0→−2.5.
+91. **IMPLEMENTED (S094 P2 §10): cycle probe.** DEV_MODE_LOGGING-only probe
+    using DWT_CYCCNT around each slot's async+sync. Per-slot block-rate and
+    render timing. Seven mixer sections. Trace stage `p`. 94 B RAM (logging
+    builds only).
+92. **IMPLEMENTED (S094 P4): PWM position law fix.** Old law: pos 64 =
+    unmodified, both directions narrow (half the knob wasted). New law:
+    pos 0 = 50%, pos 127 = narrowest. 128 distinct widths from
+    position-indexed tables. Narrowest: Rec 0.39%, Saw/Tri 2.54%,
+    Sin 6.25%. No per-sample cost change.
+93. **IMPLEMENTED (S094 P4): Alkaline waves expanded.** `wav` gains Tri
+    (index 2): 0 per sample in existing fused loop. `pwm` gains Tri
+    (index 2): new fused ladder mode.
 
 ---
 

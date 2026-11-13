@@ -174,7 +174,7 @@ the blend fraction and `next` > base.
   `modNode_getWaveTargetOsc()`, `modNode_getMaxWaveformIndex()` and the
   `stub_silence_buffer` are all deleted.
 
-## Slot budget (Session 093 P8, measured 2026-11-10)
+## Slot budget (Session 094, updated 2026-11-13)
 
 Measured on the linked P6 and P8 images (`CPU_USE_DSP_AUDIT.md` items
 72–79). The worst-case Scene budgets the two slots as always held. A slot's
@@ -182,12 +182,12 @@ charge is what it adds on top of its voice's dearest setting without a slot.
 
 | Slot user | Adds per sample (P8) | Why |
 |---|---:|---|
-| Wavetable blend on a plain oscillator (Drum modulator or `mix`, Snare tonal, Cymbal/HiHat modulators) | 3 (P6: 8) | blend 33 against the dearest plain read, crash 30 |
+| Wavetable blend on a plain oscillator (Drum modulator or `mix`, Snare tonal, Cymbal/HiHat modulators) | 3 (P6: 8) | blend 33 against the dearest plain read; crash removed S094 P1 S2 |
 | Wavetable blend on an FM, ring or sync carrier | 0 | never dearer than the voice's dearest setting (`slp` FM 50/51) |
-| `itp` fade | **45** | the old carrier rendered plain (up to 30, crash) + the 15-instruction crossfade, on top of the live carrier |
+| `itp` fade | **42** | the old carrier rendered plain (up to 27, no crash) + the 15-instruction crossfade, on top of the live carrier |
 
-- **The pool's ceiling is the `itp` fade:** 2 × 45 = **90** per sample (84
-  if crash were removed). It is the same on the P6 and P8 images.
+- **The pool's ceiling is the `itp` fade:** 2 × 42 = **84** per sample.
+  `crashSample` was removed in S094 P1 S2, dropping the old 90 figure by 6.
 - **The S087 "+10..+13 per slot"** is the blend's premium over the same
   reader without a blend, not the slot's charge.
 - **The wavetable sync blend** (45, Drum `snc` only) has the largest premium
@@ -198,3 +198,7 @@ charge is what it adds on top of its voice's dearest setting without a slot.
   (after `modNode_resetTargets()`), never in the sync render: a claim there
   moved the mixer's hot loops (`CPU_USE_DSP_AUDIT.md` item 79). Its charge
   is +15 (blend loop 228 against 213), below the pool's ceiling.
+- **`OSC_TYPE_PWM` does NOT use a slot (S094 P1 S3).** PWM uses integer
+  Q15/Q14 interpolation with position-indexed tables. The hybrid mechanism
+  (warp for Sin/Tri, two-read for Saw/Rec) stays within each voice's
+  existing ceiling. 15 ITCM loops added in `.itcm.s094p1`.
