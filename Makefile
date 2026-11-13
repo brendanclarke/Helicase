@@ -39,7 +39,6 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/DSP/Instruments/Alkaline \
           -ICore/DSP/Instruments/Colloid \
           -ICore/DSP/Effects \
-          -ICore/DSP/Effects/StereoFilter \
           -ICore/DSP/Effects/CrumpBit \
           -ICore/DSP/Effects/Space \
           -ICore/Bank/Scene \
@@ -120,7 +119,6 @@ SRCS = \
   Core/DSP/Instruments/Colloid/ColloidParameters.c \
   Core/DSP/Effects/FxBuffer.c \
   Core/DSP/Effects/EffectsManager.c \
-  Core/DSP/Effects/StereoFilter/StereoFilterParameters.c \
   Core/DSP/Effects/CrumpBit/CrumpBitParameters.c \
   Core/DSP/Effects/CrumpBit/CrumpBitTables.c \
   Core/DSP/Effects/Space/SpaceKit.c \
@@ -171,12 +169,12 @@ DSP_SRCS = \
   Core/DSPAudio/dither.c \
   Core/DSP/Instruments/Drum/DrumVoice.c \
   Core/DSP/Instruments/HiHat/HiHat.c \
-  Core/DSP/Effects/StereoFilter/StereoFilterEffect.c \
   Core/DSP/Effects/CrumpBit/CrumpBitEffect.c \
   Core/DSP/Effects/Space/SpaceKitDsp.c \
   Core/DSP/Effects/Space/SpaceEffect.c \
   Core/DSPAudio/lfo.c \
   Core/DSPAudio/lfoRateTable.c \
+  Core/DSPAudio/distortionMakeup.c \
   Core/DSPAudio/mixer.c \
   Core/DSPAudio/modulationNode.c \
   Core/DSPAudio/Oscillator.c \
@@ -282,13 +280,7 @@ $(BUILD)/Core/DSP/Instruments/Colloid/ColloidTables.o: Core/DSP/Instruments/Coll
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 
-# StereoFilter DSP runs with the fast-math policy; registry/descriptor control
-# sources remain ordinary -O2 sources in SRCS.
-$(BUILD)/Core/DSP/Effects/StereoFilter/StereoFilterEffect.o: Core/DSP/Effects/StereoFilter/StereoFilterEffect.c | $(BUILD)
-	@mkdir -p $(dir $@)
-	$(CC) -c $(CFLAGS_DSP) $< -o $@
-
-# CrumpBit DSP (S074) runs with the fast-math policy like StereoFilter; its
+# CrumpBit DSP (S074) runs with the fast-math policy; its
 # descriptor, layout and page-hook source stays an ordinary -O2 source in SRCS.
 $(BUILD)/Core/DSP/Effects/CrumpBit/CrumpBitEffect.o: Core/DSP/Effects/CrumpBit/CrumpBitEffect.c | $(BUILD)
 	@mkdir -p $(dir $@)

@@ -366,7 +366,7 @@ static const char shortNames[][4] = {
     /* Requested short label for the persistent Global AutoSave switch. */
     {"ats"},
     /* S074 bus compressor compact labels. */
-    {"cmp"},{"cam"},{"ctm"},{"csc"},
+    {"cmp"},{"cam"},{"ctm"},{"csc"},{"cgr"},
     /*
      * S078 per-track run mode compact label (S078 P4: renamed from `mod`).
      * `run` matches the FX sequencer's run-mode cell (menuEffects.c), so the
@@ -439,7 +439,7 @@ static const char longNames[][16] = {
     /* Requested long label; valueNames assigns it to category Global. */
     {"AutoSave"},
     /* S074 bus compressor long names. */
-    {"BusComp"},{"CompAmt"},{"CompTime"},{"CompSC"},
+    {"BusComp"},{"CompAmt"},{"CompTime"},{"CompSC"},{"CompGR"},
     /* S078 per-track run mode long name (S078 P4: renamed from PlayMode to
      * match the FX sequencer's RunMode). */
     {"RunMode"},

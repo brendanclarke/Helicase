@@ -39,8 +39,8 @@
 #define SPACE_TAG_REVERB         1u
 #define SPACE_TAG_ECHO           2u
 
-/* Raw rows 3.. of the largest type (Reverb, 18 rows). */
-#define SPACE_ROWS_MAX           18u
+/* Raw rows 3.. of the largest type (Reverb, 17 rows since S095 P4 T1). */
+#define SPACE_ROWS_MAX           17u
 
 /*
  * The smallest share each type plays in (buffer_min_bytes, declarative):
@@ -60,8 +60,10 @@
  *   valid (frames written since the seat, saturating), pos (the write
  *   position in frames, fractional: the tape runs at speed v), d[c] (each
  *   channel's delay in tape frames), v (speed), rph[c] (the reverse head's phase 0..1);
- * - mix (the wet gain the next block ramps from: mix x ducking),
- *   dry (the dry gain, gliding from the outgoing type's), duck (the input
+ * - wet (the wet gain the next block ramps from: the ducking, and on the
+ *   Reverb the gate/bloom; S095 P4: no `mix` row, so 1 is the top),
+ *   dry (the dry gain, gliding from the outgoing type's to 0; it exists
+ *   only for the type-change handoff, S095 P4 D-a), duck (the input
  *   follower, per block);
  * - t_samples/t_bpm/t_row: the `tim` curve's value and the tempo and row
  *   it was worked out for (the curve runs only when they move);
@@ -81,7 +83,7 @@ typedef struct {
     float    d[2];
     float    v;
     float    rph[2];
-    float    mix;
+    float    wet;
     float    dry;
     float    duck;
     uint32_t ring_p;
@@ -114,15 +116,21 @@ uint8_t space_timeLimit(uint8_t tag, const fx_share_t *share);
 /* The Reverb's `pre` clamp, the same rule for its predelay line. */
 uint8_t space_preLimit(const fx_share_t *share);
 
-/* The row laws the DSP and the page text share (SpaceParameters.c). */
-float space_fbkGain(uint8_t row);      /* 0..1.20, unity at 106 (D4) */
+/* The row laws the DSP uses (S095 P4: the page shows these rows plain). */
+float space_fbkGain(uint8_t row);      /* 0..1.20, unity at 100 (D4, S095 P4) */
 float space_sprRatio(uint8_t row);     /* R/L time 0.5..2 (D23) */
 float space_rt60(uint8_t row);         /* `dcy`: 0.3..20 s */
 
-/* A stepped row's stop: value 0..127 in n equal zones (§S18). */
-static inline uint8_t space_stop(uint8_t value, uint8_t n)
+/*
+ * A stepped row's stop (S095 P4): the stored value is the stop; anything
+ * above the last stop plays the last one (the descriptor maximum already
+ * clamps every managed write; this covers a direct write_param, the host
+ * laws). Replaces S095 P1's space_stop() zones. Callers: the `hed`, `frz`
+ * and `rtg` laws (SpaceEffect.c) and labels (SpaceParameters.c).
+ */
+static inline uint8_t space_step(uint8_t value, uint8_t n)
 {
-    return (uint8_t)(((uint32_t)((value > 127u) ? 127u : value) * n) >> 7);
+    return (value < n) ? value : (uint8_t)(n - 1u);
 }
 
 #endif /* SPACE_EFFECT_H_ */

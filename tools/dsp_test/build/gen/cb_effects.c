@@ -3,7 +3,7 @@
 
 #define EFFECT_LANE_NONE                 0xFFu
 
-#define EFFECT_TYPE_CRUMPBIT             2u
+#define EFFECT_TYPE_CRUMPBIT             1u
 
 typedef struct {
     float *l;

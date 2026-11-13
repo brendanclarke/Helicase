@@ -90,9 +90,9 @@ typedef struct {
  * (D23), bw (the playback LP at speed 1), comp (O8: its level-dependent
  * loss), tlp/thp (`ton`: below 63 the playback LP's cutoff ceiling, above
  * 63 a one-pole high-pass; flat at 63: 1 and 0), drive/makeup/hiss (`deg`,
- * D5), hg[3] (the heads
- * D/3, 2D/3, D, O6, normalised), mix/wow/dck/xfb (the linear rows: wet
- * mix, wow depth, ducking, cross-feed).
+ * D5), hg[3] (the heads D/3, 2D/3, D, O6, normalised), wow/dck/xfb (the
+ * linear rows: wow depth, ducking, cross-feed). S095 P4 T1: no wet mix;
+ * the Space types are 100 % wet.
  */
 typedef struct {
     float fbk;
@@ -105,7 +105,6 @@ typedef struct {
     float makeup;
     float hiss;
     float hg[3];
-    float mix;
     float wow;
     float dck;
     float xfb;
@@ -198,11 +197,19 @@ static inline space_hdr_t *space_hdr(const fx_share_t *share)
 /* Laws (shared with the page text, SpaceParameters.c)                     */
 /* ---------------------------------------------------------------------- */
 
+/*
+ * The tape loop gain of an `fbk` row (D4; S095 P4, user 2026-11-13): linear
+ * to unity at row 100, then to 1.20 at 127, CrumpBit's law
+ * (CRUMPBIT_FEEDBACK_UNITY_ROW, CRUMPBIT_FEEDBACK_ABOVE_STEP), so every
+ * feedback that can pass unity reaches it at the same row. Unity stays
+ * unmarked on the page (the row shows 0..127). Before P4 unity was row 106.
+ * Callers: space_writeParam() (SPACE_LAW_FBK). The page no longer calls it
+ * (S095 P4 T2).
+ */
 SPACE_SIZE float space_fbkGain(uint8_t row)
 {
-    /* Linear to unity at 106, then to 1.20 at 127 (D4). */
-    return (row <= 106u) ? (float)row * (1.0f / 106.0f)
-                         : 1.0f + (float)(row - 106u) * (0.2f / 21.0f);
+    return (row <= 100u) ? (float)row * (1.0f / 100.0f)
+                         : 1.0f + (float)(row - 100u) * (0.2f / 27.0f);
 }
 
 SPACE_SIZE float space_sprRatio(uint8_t row)
@@ -1082,7 +1089,7 @@ static SPACE_SIZE float space_onePoleHalf(float fc)
 
 /* The laws a row drives (write_param), per type in row order (3..). */
 enum {
-    SPACE_LAW_NONE = 0, SPACE_LAW_MIX, SPACE_LAW_TIME, SPACE_LAW_SPR,
+    SPACE_LAW_NONE = 0, SPACE_LAW_TIME, SPACE_LAW_SPR,
     SPACE_LAW_FBK, SPACE_LAW_XFB, SPACE_LAW_TONE, SPACE_LAW_DEG,
     SPACE_LAW_WOW, SPACE_LAW_HOLD, SPACE_LAW_REV,
     SPACE_LAW_HED, SPACE_LAW_DCK, SPACE_LAW_PRE, SPACE_LAW_SIZ,
@@ -1092,22 +1099,26 @@ enum {
     SPACE_LAW_E2R, SPACE_LAW_BLN, SPACE_LAW_RTG, SPACE_LAW_RTONE
 };
 
+/*
+ * Each type's rows 3.. in order (S095 P4 T1: the `mix` column is gone, so
+ * column 0 is now row 3, `tim` / `pre`).
+ */
 static const uint8_t space_laws[3][SPACE_ROWS_MAX] = {
-    /* Delay: mix tim spr fbk xfb ton deg wow hld rev hed dck */
-    { SPACE_LAW_MIX, SPACE_LAW_TIME, SPACE_LAW_SPR, SPACE_LAW_FBK,
-      SPACE_LAW_XFB, SPACE_LAW_TONE, SPACE_LAW_DEG, SPACE_LAW_WOW,
-      SPACE_LAW_HOLD, SPACE_LAW_REV, SPACE_LAW_HED, SPACE_LAW_DCK },
-    /* Reverb: mix pre siz dcy dif lsh lsf hsh hsf mod wid frz shm int dtn env dck */
-    { SPACE_LAW_MIX, SPACE_LAW_PRE, SPACE_LAW_SIZ, SPACE_LAW_DCY,
-      SPACE_LAW_DIF, SPACE_LAW_LSH, SPACE_LAW_LSF, SPACE_LAW_HSH,
-      SPACE_LAW_HSF, SPACE_LAW_MOD, SPACE_LAW_WID, SPACE_LAW_FRZ,
-      SPACE_LAW_SHM, SPACE_LAW_INT, SPACE_LAW_INT, SPACE_LAW_ENV,
-      SPACE_LAW_DCK, SPACE_LAW_RTONE },
-    /* Echo: mix tim fbk ton deg wow e>r bln dcy lsh hsh hed dck rtg */
-    { SPACE_LAW_MIX, SPACE_LAW_TIME, SPACE_LAW_FBK, SPACE_LAW_TONE,
-      SPACE_LAW_DEG, SPACE_LAW_WOW, SPACE_LAW_E2R, SPACE_LAW_BLN,
-      SPACE_LAW_DCY, SPACE_LAW_LSH, SPACE_LAW_HSH, SPACE_LAW_HED,
-      SPACE_LAW_DCK, SPACE_LAW_RTG },
+    /* Delay: tim spr fbk xfb ton deg wow hld rev hed dck */
+    { SPACE_LAW_TIME, SPACE_LAW_SPR, SPACE_LAW_FBK, SPACE_LAW_XFB,
+      SPACE_LAW_TONE, SPACE_LAW_DEG, SPACE_LAW_WOW, SPACE_LAW_HOLD,
+      SPACE_LAW_REV, SPACE_LAW_HED, SPACE_LAW_DCK },
+    /* Reverb: pre siz dcy dif lsh lsf hsh hsf mod wid frz shm int dtn env dck ton */
+    { SPACE_LAW_PRE, SPACE_LAW_SIZ, SPACE_LAW_DCY, SPACE_LAW_DIF,
+      SPACE_LAW_LSH, SPACE_LAW_LSF, SPACE_LAW_HSH, SPACE_LAW_HSF,
+      SPACE_LAW_MOD, SPACE_LAW_WID, SPACE_LAW_FRZ, SPACE_LAW_SHM,
+      SPACE_LAW_INT, SPACE_LAW_INT, SPACE_LAW_ENV, SPACE_LAW_DCK,
+      SPACE_LAW_RTONE },
+    /* Echo: tim fbk ton deg wow e>r bln dcy lsh hsh hed dck rtg */
+    { SPACE_LAW_TIME, SPACE_LAW_FBK, SPACE_LAW_TONE, SPACE_LAW_DEG,
+      SPACE_LAW_WOW, SPACE_LAW_E2R, SPACE_LAW_BLN, SPACE_LAW_DCY,
+      SPACE_LAW_LSH, SPACE_LAW_HSH, SPACE_LAW_HED, SPACE_LAW_DCK,
+      SPACE_LAW_RTG },
 };
 
 _Static_assert((int)SPACE_ECH_TIME == (int)SPACE_DLY_TIME,
@@ -1158,7 +1169,6 @@ static __attribute__((cold)) SPACE_SIZE void space_writeParam(void *rt_void,
     pl = &space_hdr(&share)->pl;
     g = (float)value * (1.0f / 127.0f);
     switch (space_laws[rt->tag][index - EFFECT_COMMON_PARAM_COUNT]) {
-    case SPACE_LAW_MIX: k->mix = g; break;
     case SPACE_LAW_SPR: k->spr = space_sprRatio(value); break;
     case SPACE_LAW_FBK: k->fbk = space_fbkGain(value); break;
     case SPACE_LAW_XFB: k->xfb = 0.5f * g; break;
@@ -1185,12 +1195,12 @@ static __attribute__((cold)) SPACE_SIZE void space_writeParam(void *rt_void,
         break;
     case SPACE_LAW_HED: {
         /*
-         * O6: the stops' head sets in knob order 1 2 3 12 13 23 123 (bit 0
-         * D/3, bit 1 2D/3, bit 2 D; §S18: 0..127 zones).
+         * O6: the stops' head sets in knob order A B C AB AC BC ABC (bit 0
+         * D/3, bit 1 2D/3, bit 2 D; S095 P4: the stored value is the stop).
          */
         static const uint8_t sets[SPACE_HEADS_STOPS] = { 1u, 2u, 4u, 3u, 5u,
                                                          6u, 7u };
-        const uint8_t s = sets[space_stop(value, SPACE_HEADS_STOPS)];
+        const uint8_t s = sets[space_step(value, SPACE_HEADS_STOPS)];
         const float h = 1.0f / sqrtf((float)((s & 1u) + ((s >> 1) & 1u) +
                                              ((s >> 2) & 1u)));
 
@@ -1203,7 +1213,7 @@ static __attribute__((cold)) SPACE_SIZE void space_writeParam(void *rt_void,
     case SPACE_LAW_REV: space_flag(rt, SPACE_F_REVERSE, value != 0u); break;
     case SPACE_LAW_RTG:
         rt->flags = (uint8_t)((rt->flags & ~SPACE_F_ROUTE_MASK) |
-                              (space_stop(value, 3u) << 5));
+                              (space_step(value, SPACE_ROUTING_STOPS) << 5));
         break;
     case SPACE_LAW_SIZ:
         pl->siz = 0.35f + 0.65f * g;
@@ -1223,12 +1233,14 @@ static __attribute__((cold)) SPACE_SIZE void space_writeParam(void *rt_void,
     case SPACE_LAW_HSF: pl->kh = space_onePoleHalf(1500.0f * exp2f(2.585f * g)); break;
     case SPACE_LAW_MOD: pl->mod = 7.0f * g; break;
     case SPACE_LAW_WID: pl->wid = (float)value * (1.0f / 63.0f); break;
-    case SPACE_LAW_FRZ:
-        /* Three zones: off, on, on with the shimmer (O12; §S18). */
-        pl->frz = (space_stop(value, 3u) != SPACE_FREEZE_OFF) ? 1.0f : 0.0f;
-        space_flag(rt, SPACE_F_FRZ_SHM,
-                   space_stop(value, 3u) == SPACE_FREEZE_SHIMMER);
+    case SPACE_LAW_FRZ: {
+        /* Three stops: off, on, on with the shimmer (O12; S095 P4 stepped). */
+        const uint8_t s = space_step(value, SPACE_FREEZE_STOPS);
+
+        pl->frz = (s != SPACE_FREEZE_OFF) ? 1.0f : 0.0f;
+        space_flag(rt, SPACE_F_FRZ_SHM, s == SPACE_FREEZE_SHIMMER);
         break;
+    }
     case SPACE_LAW_RTONE:
         /* §S18: 127 flat (k 1), down to 300 Hz at 0, per output side. */
         pl->tone = (value >= 127u) ? 1.0f
@@ -1292,9 +1304,14 @@ static SPACE_SIZE uint32_t space_enter(SpaceRuntime *rt, uint8_t tag,
     rt->v = 1.0f;
     rt->siz = 1.0f;
     rt->d[0] = rt->d[1] = SPACE_D_MIN;
-    /* The dry starts at the outgoing type's (plan §5.3 step 5), else 1. */
+    /*
+     * The dry starts at the outgoing type's (plan §5.3 step 5) and glides
+     * to 0. S095 P4 (SD2): with no handoff written (OFF, boot) it starts
+     * at 0, because OFF's return is silent; before T1 it started at 1 and
+     * glided to 1 - mix, a step up to the whole dry bus on entry.
+     */
     rt->dry = (h && (h->state_flags & FXBUF_STATE_EFFECT_WRITTEN))
-                  ? (float)h->effect_dry_uq15 * (1.0f / 32768.0f) : 1.0f;
+                  ? (float)h->effect_dry_uq15 * (1.0f / 32768.0f) : 0.0f;
     sk_feedBegin(share, h, owner);
     if (!share || !share->base || share->bytes < SK_PREFIX_BYTES)
         return 0u;
@@ -1447,9 +1464,15 @@ static __attribute__((cold)) SPACE_SIZE void space_export(const void *rt_void,
         fxbuf_effectShare(&share);
         if (!share.base || share.bytes < SPACE_RVB_PRE_OFF)
             return;
+        /*
+         * S095 P4 (SD3): the dry handed over is the glide's current value
+         * (0 once settled; non-zero only right after a switch into this
+         * type), so a switch during the glide continues it rather than
+         * stepping. Before T1 this was the target 1 - mix.
+         */
         sk_exportBegin(out, SK_PREFIX_BYTES, 2u * SPACE_RVB_RING, 16u, 2u,
                        (uint16_t)SPACE_FS_HALF, 1.0f,
-                       1.0f - space_hdr(&share)->k.mix, 1.0f);
+                       rt->dry, 1.0f);
         for (c = 0u; c < 4u; c++) {
             const uint32_t k = lines[c];
             const uint32_t m = SPACE_RVB_RING - 1u;
@@ -1473,9 +1496,7 @@ static __attribute__((cold)) SPACE_SIZE void space_export(const void *rt_void,
         fxbuf_effectShare(&share);
         sk_exportBegin(out, lo, rt->tape_n * fb, 16u, (uint8_t)fb,
                        (uint16_t)SK_FS, rt->v,
-                       1.0f - ((share.base && share.bytes >= SK_PREFIX_BYTES)
-                                   ? space_hdr(&share)->k.mix : 0.0f),
-                       1.0f);
+                       rt->dry, 1.0f);
         for (c = 0u; c < lanes; c++) {
             const uint32_t w = (uint32_t)rt->pos;
             uint32_t d = (uint32_t)(rt->d[c] + 0.999f);
@@ -1505,8 +1526,8 @@ static __attribute__((cold)) SPACE_SIZE void space_export(const void *rt_void,
  * 2. the heads' gains (O6) x the valid gate; the loop's gains (`hld`: no
  *    input, unity loop, D10); the record LP and the playback bandwidth at
  *    the tape speed;
- * 3. the output ramps: dry from the outgoing type's to 1 - mix (plan §5.3
- *    step 5); wet = mix x the ducking (O1).
+ * 3. the output ramps: dry from the outgoing type's to 0 (plan §5.3 step
+ *    5; S095 P4 T1: only the handoff uses it); wet = 1 x the ducking (O1).
  * Inputs: runtime, header, frames, nch (2 Delay, 1 Echo). Outputs: the
  * pass; v1o: the block-end speed (space_tapeEnd()).
  */
@@ -1585,14 +1606,20 @@ static SPACE_SIZE void space_tapeBegin(SpaceRuntime *rt, space_hdr_t *h,
     ps->xfb = h->k.xfb;
     ps->bw = __builtin_fminf(h->k.bw * ps->va, h->k.tlp);
     ps->rk = 0.25f + 0.75f * ps->va;
-    dry1 = rt->dry + 0.1f * ((1.0f - h->k.mix) - rt->dry);
-    wg1 = h->k.mix * (1.0f - rt->duck * h->k.dck);
+    /*
+     * S095 P4 T1: the dry glides to 0 (one-pole, 0.1 per block, as before;
+     * -20 dB after about 22 blocks, 16 ms) and the wet is the ducking alone.
+     * The output loop still runs `in x dry` every frame (constant cost,
+     * plan D-a); dry is 0 once the handoff has faded.
+     */
+    dry1 = 0.9f * rt->dry;
+    wg1 = 1.0f - rt->duck * h->k.dck;
     ps->dry = rt->dry;
     ps->ddry = (dry1 - rt->dry) * inv;
-    ps->wg = rt->mix;
-    ps->dwg = (wg1 - rt->mix) * inv;
+    ps->wg = rt->wet;
+    ps->dwg = (wg1 - rt->wet) * inv;
     rt->dry = dry1;
-    rt->mix = wg1;
+    rt->wet = wg1;
     *v1o = v1;
 }
 
@@ -1650,8 +1677,9 @@ static SPACE_SIZE void space_delayProcess(void *rt_void, effect_io_t *io)
                           h, &ps, (uint8_t)(rt->flags & SPACE_F_REVERSE),
                           io->l, io->r, io->frames);
     space_tapeEnd(rt, &ps, io->frames, v1, peak);
+    /* S095 P4 T1: the outgoing tail is heard at full wet (no `mix` row). */
     sk_feedMix(io->share, EFFECT_TYPE_DELAY, io->l, io->r, io->frames,
-               h->k.mix, h->k.mix);
+               1.0f, 1.0f);
 }
 
 /*
@@ -1675,7 +1703,8 @@ static SPACE_LOOP float space_monoPeak(const float *l, const float *r,
  * The block's wet gain shared by the plate types: the ducking (O1), the
  * Reverb's gate/bloom (O10: a transient is the fast follower above twice
  * the slow one; gate: 1 for its time after it, then 0; bloom: rising to 1
- * over its time), the dry glide. Returns the block-end wet gain.
+ * over its time), the dry glide to 0 (S095 P4 T1). Returns the block-end
+ * wet gain (1 at most: no `mix` row).
  */
 static SPACE_SIZE float space_plateGains(SpaceRuntime *rt, space_hdr_t *h,
                                          float peak, float *dry1)
@@ -1697,8 +1726,8 @@ static SPACE_SIZE float space_plateGains(SpaceRuntime *rt, space_hdr_t *h,
     else if (pl->env < 0.0f)
         eg = __builtin_fminf((float)pl->env_n / -pl->env, 1.0f);
     pl->env_g += 0.3f * (eg - pl->env_g);
-    *dry1 = rt->dry + 0.1f * ((1.0f - h->k.mix) - rt->dry);
-    return h->k.mix * pl->env_g * (1.0f - rt->duck * h->k.dck);
+    *dry1 = 0.9f * rt->dry;
+    return pl->env_g * (1.0f - rt->duck * h->k.dck);
 }
 
 /*
@@ -1775,12 +1804,13 @@ static SPACE_SIZE void space_reverbProcess(void *rt_void, effect_io_t *io)
     wg1 = space_plateGains(rt, h, h->pl.peak, &dry1);
     inv = 1.0f / (float)io->frames;
     space_rvbOut(io->l, io->r, ol, orr, h->pl.up, h->pl.tl, h->pl.tone,
-                 rt->dry, 2.0f * (dry1 - rt->dry) * inv, rt->mix,
-                 2.0f * (wg1 - rt->mix) * inv, ticks);
+                 rt->dry, 2.0f * (dry1 - rt->dry) * inv, rt->wet,
+                 2.0f * (wg1 - rt->wet) * inv, ticks);
     rt->dry = dry1;
-    rt->mix = wg1;
+    rt->wet = wg1;
+    /* S095 P4 T1: the outgoing tail is heard at full wet (no `mix` row). */
     sk_feedMix(io->share, EFFECT_TYPE_REVERB, io->l, io->r, io->frames,
-               h->k.mix, h->k.mix);
+               1.0f, 1.0f);
 }
 
 /*
@@ -1876,8 +1906,9 @@ static SPACE_SIZE void space_echoProcess(void *rt_void, effect_io_t *io)
     space_tapeEnd(rt, &ps, io->frames, v1, 2.0f * peak);
     space_echoOut(io->l, io->r, e, ol, orr, h->pl.up, h->pl.bln,
                   h->pl.sh, ps.dry, ps.ddry, ps.wg, ps.dwg, ticks);
+    /* S095 P4 T1: the outgoing tail is heard at full wet (no `mix` row). */
     sk_feedMix(io->share, EFFECT_TYPE_ECHO, io->l, io->r, io->frames,
-               h->k.mix, h->k.mix);
+               1.0f, 1.0f);
 }
 
 const effect_type_ops_t space_delayOps = {

@@ -33,18 +33,21 @@
  */
 
 /*
- * Descriptor rows: common rows 0..2 plus type rows 3..23.
+ * Descriptor rows: common rows 0..2 plus type rows 3..24.
  * S091 P2 appended rows 11..14 (`ton`, `typ`, `frq`, `res`). S091 P3
  * appended row 15 (`aux`, the per-sub-type pitch/drive row) and the granular
  * rows 16..21. S091 P4 (S091_P4_GRN_TWEAKS.md): row 20 is the grain Length
  * (`crump_grain_length`; the retired level jitter `amp` held this index),
  * and row 22 is the shared output-filter balance `bal`. The deferred
- * output-filter drive (`drv`) would append as 24 (row 23 is `fin`, S091 P5
- * follow-up); the tone drive (`tdr`) is
- * the `aux` row's meaning in `dly`/`cmb` when the drives land.
+ * output-filter drive (`drv`) would append as 25 (row 23 is `fin`, S091 P5
+ * follow-up; row 24 is `rvb`'s damping `dmp`, S095 P4); the tone drive
+ * (`tdr`) is the `aux` row's meaning in `dly`/`cmb` when the drives land.
  */
-/* S091 P5 follow-up: row 23 `fin`, `pit`'s fine pitch (user). */
-#define CRUMPBIT_PARAM_COUNT 24u
+/*
+ * S091 P5 follow-up: row 23 `fin`, `pit`'s fine pitch (user).
+ * S095 P4 (F1, user): row 24 `dmp`, `rvb`'s own low-pass damping.
+ */
+#define CRUMPBIT_PARAM_COUNT 25u
 
 /*
  * Local descriptor indices.
@@ -91,6 +94,16 @@ typedef enum {
      * on the `pit` page and FX lane 6 where `snp` was.
      */
     CRUMPBIT_PARAM_PIT_FINE,
+    /*
+     * S095 P4 (F1, user 2026-11-13: every low-pass-only tone control is
+     * 0..127 with 127 flat AND 127 as its default): `rvb`'s line damping.
+     * It was the shared bipolar `ton` row (row 11), whose default 63 is
+     * flat for the tilt sub-types (`dly`, `cmb`, `pit`) but mid damping for
+     * a low-pass-only control, so a fresh `rvb` was dull and a freeze
+     * decayed. Its own row lets the default be 127 (flat) without moving
+     * the tilt rows' 63. `ton` is not read by `rvb` any more (`---`).
+     */
+    CRUMPBIT_PARAM_RVB_DAMP,
     CRUMPBIT_PARAM_ENUM_COUNT
 } crumpbit_param_t;
 
@@ -130,6 +143,7 @@ typedef enum {
  *   follow-up: `fin` (row 23), read by `pit` only (its fine pitch).
  * - CRUMPBIT_ROWS_GRN: rows only `grn` reads (`st2 st3 spr den len wid`;
  *   S091 P4: `len` replaced the retired `amp`).
+ * - CRUMPBIT_ROWS_RVB: rows only `rvb` reads (`dmp`, row 24; S095 P4 F1).
  * Why: a new sub-type adds its own mask here; the _Static_asserts in
  * CrumpBitParameters.c prove the masks are disjoint and cover every type
  * row 3..COUNT-1, so a row appended without an owner fails the build. The
@@ -162,13 +176,26 @@ typedef enum {
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_DENSITY) |         \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_LENGTH) |          \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_WIDTH))
+/* S095 P4 (F1): rows only `rvb` reads (its damping `dmp`, row 24). */
+#define CRUMPBIT_ROWS_RVB                                     \
+    (CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_RVB_DAMP))
 
 /*
  * Tone tilt centre (S091 P2 §5.3): stored 63 displays 0 through DTYPE_PM63
  * and selects the flat table entry (crumpBit_toneK[63] == 1.0).
+ * (`rvb` does not read `ton`; its damping is row 24, CRUMPBIT_RVB_DAMP_FLAT.)
  * Accessors: crumpBit_descriptors (default), crumpBit_process() (side select).
  */
 #define CRUMPBIT_TONE_FLAT 63u
+
+/*
+ * `rvb` damping (`dmp`, row 24; S095 P4 F1): 0..127, low-pass only, 127 flat
+ * and the default. The engine reads crumpBit_toneK[dmp >> 1] (the `ton`
+ * table's low-pass half, entry 63 exactly 1), so 126 and 127 are both an
+ * exact pass-through. Accessors: crumpBit_descriptors (default), the
+ * runtime's neutral value (crumpBit_enter()), crumpBit_runReverb().
+ */
+#define CRUMPBIT_RVB_DAMP_FLAT 127u
 
 /*
  * Pitch-row range (S091 P5 follow-up, user): `aux` (the `pit` interval and
@@ -176,8 +203,8 @@ typedef enum {
  * clamped to -36..+36 st: stored 27..99. The rows stop there (descriptor
  * maximum and EFFECT_MOD_RANGE floor), so the value shown is the value
  * played everywhere. CrumpBitEffect.c asserts 63 +- CRUMPBIT_SEMITONE_SPAN.
- * Accessors: crumpBit_descriptors, crumpBit_rowSemitones(),
- * crumpBit_formatSemitones().
+ * Accessors: crumpBit_descriptors, crumpBit_rowSemitones(). (The page text
+ * is the plain +-63 row since S095 P4 T2.)
  */
 #define CRUMPBIT_PITCH_ROW_MIN 27u
 #define CRUMPBIT_PITCH_ROW_MAX 99u
@@ -188,7 +215,7 @@ typedef enum {
  * What: the MENU_FILTER display order (MenuText.h filterTypes: LP HP BP UBP
  * Nch Pek LP2 off), so the row shows and stores exactly what a voice filter
  * type does (user U1). Each value is ResonantFilter's FILTER_* id minus 1,
- * the same offset StereoFilter applies (`svf_type = value + 1`).
+ * the offset the voice filter rows apply (`svf_type = value + 1`).
  * CRUMPBIT_FILTER_LP2 is rendered as LP: the voice LP2 is a different naive
  * 2-pole structure that would break constant CPU here (plan Q9).
  * CRUMPBIT_FILTER_OFF passes the input exactly once its one-block coefficient
@@ -197,7 +224,7 @@ typedef enum {
  * S091 P5 F1 one-pole of `grn` and `rvb`, which mapped them onto three, is
  * gone).
  * Accessors: crumpBit_descriptors (default/max), crumpBit_filterMix().
- * Affiliates: MENU_FILTER, StereoFilterEffect.c stereoFilter_writeParam().
+ * Affiliates: MENU_FILTER, ResonantFilter.h filterTypeEnum.
  */
 #define CRUMPBIT_FILTER_LP    0u
 #define CRUMPBIT_FILTER_HP    1u

@@ -45,14 +45,13 @@ const char space_echoFull8[]   = "Echo";
 
 /*
  * Delay rows (plan §4.1; D3, D4, D5, D10, D23; options O1, O3, O4, O6, O8,
- * O9). Defaults: a musical starting point (mix 40, time row 64 = a
- * StepScale stop, feedback 64 ≈ 0.6, flat tone, clean tape).
+ * O9). 100 % wet since S095 P4 T1 (the Effect is a send; the level is the
+ * common `vol`). Defaults: a musical starting point (time row 64 = a
+ * StepScale stop, feedback 64, flat tone, clean tape).
  */
 const effect_param_descriptor_t space_delayDescriptors[] = {
     EFFECT_COMMON_ROWS(INSTRUMENT_PARAM_FLAG_AUTOMATABLE,
                        EFFECT_FLAGS_IMAGE, EFFECT_FLAGS_IMAGE),
-    EFFECT_ROW("dly_mix", "Delay", "Mix", "mix", DTYPE_0B127,
-               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 40u, 127u),
     /* D3: CrumpBit's `dly` curve, clamped to the live tape (effective_max). */
     EFFECT_ROW_FLAGS("dly_time", "Delay", "Time", "tim", DTYPE_0B127,
                      EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u,
@@ -75,11 +74,11 @@ const effect_param_descriptor_t space_delayDescriptors[] = {
                INSTRUMENT_PARAM_FLAG_AUTOMATABLE, EFFECT_MOD_NONE, 0u, 1u),
     EFFECT_ROW("dly_reverse", "Delay", "Reverse", "rev", DTYPE_ON_OFF,
                INSTRUMENT_PARAM_FLAG_AUTOMATABLE, EFFECT_MOD_NONE, 0u, 1u),
-    /* §S18: seven stops in 0..127 zones, so the knob steps in order. */
+    /* S095 P4: seven stops 0..6, one per detent (A B C AB AC BC ABC). */
     EFFECT_ROW("dly_heads", "Delay", "Heads", "hed", DTYPE_0B127,
                INSTRUMENT_PARAM_FLAG_MORPHABLE |
                INSTRUMENT_PARAM_FLAG_AUTOMATABLE,
-               EFFECT_MOD_NONE, SPACE_HEADS_DEFAULT, 127u),
+               EFFECT_MOD_NONE, SPACE_HEADS_DEFAULT, SPACE_HEADS_STOPS - 1u),
     EFFECT_ROW("dly_duck", "Delay", "Ducking", "dck", DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
 };
@@ -91,8 +90,6 @@ const effect_param_descriptor_t space_delayDescriptors[] = {
 const effect_param_descriptor_t space_reverbDescriptors[] = {
     EFFECT_COMMON_ROWS(INSTRUMENT_PARAM_FLAG_AUTOMATABLE,
                        EFFECT_FLAGS_IMAGE, EFFECT_FLAGS_IMAGE),
-    EFFECT_ROW("rvb_mix", "Reverb", "Mix", "mix", DTYPE_0B127,
-               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 40u, 127u),
     EFFECT_ROW_FLAGS("rvb_predelay", "Reverb", "PreDelay", "pre",
                      DTYPE_0B127, EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u,
                      127u, EFFECT_PARAM_FLAG_BUFFER_DEPENDENT),
@@ -114,10 +111,11 @@ const effect_param_descriptor_t space_reverbDescriptors[] = {
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 32u, 127u),
     EFFECT_ROW("rvb_width", "Reverb", "Width", "wid", DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
+    /* S095 P4: three stops 0..2 (off on shm). */
     EFFECT_ROW("rvb_freeze", "Reverb", "Freeze", "frz", DTYPE_0B127,
                INSTRUMENT_PARAM_FLAG_MORPHABLE |
                INSTRUMENT_PARAM_FLAG_AUTOMATABLE,
-               EFFECT_MOD_NONE, 0u, 127u),
+               EFFECT_MOD_NONE, SPACE_FREEZE_OFF, SPACE_FREEZE_STOPS - 1u),
     EFFECT_ROW("rvb_shimmer", "Shimmer", "Amount", "shm", DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     EFFECT_ROW("rvb_interval", "Shimmer", "Interval", "int", DTYPE_PM63,
@@ -143,8 +141,6 @@ const effect_param_descriptor_t space_reverbDescriptors[] = {
 const effect_param_descriptor_t space_echoDescriptors[] = {
     EFFECT_COMMON_ROWS(INSTRUMENT_PARAM_FLAG_AUTOMATABLE,
                        EFFECT_FLAGS_IMAGE, EFFECT_FLAGS_IMAGE),
-    EFFECT_ROW("ech_mix", "Echo", "Mix", "mix", DTYPE_0B127,
-               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 40u, 127u),
     EFFECT_ROW_FLAGS("ech_time", "Echo", "Time", "tim", DTYPE_0B127,
                      EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u,
                      EFFECT_PARAM_FLAG_BUFFER_DEPENDENT),
@@ -166,16 +162,19 @@ const effect_param_descriptor_t space_echoDescriptors[] = {
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
     EFFECT_ROW("ech_high_shelf", "Plate", "HighDamp", "hsh", DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 40u, 127u),
+    /* S095 P4: seven stops 0..6, one per detent (A B C AB AC BC ABC). */
     EFFECT_ROW("ech_heads", "Echo", "Heads", "hed", DTYPE_0B127,
                INSTRUMENT_PARAM_FLAG_MORPHABLE |
                INSTRUMENT_PARAM_FLAG_AUTOMATABLE,
-               EFFECT_MOD_NONE, SPACE_HEADS_DEFAULT, 127u),
+               EFFECT_MOD_NONE, SPACE_HEADS_DEFAULT, SPACE_HEADS_STOPS - 1u),
     EFFECT_ROW("ech_duck", "Echo", "Ducking", "dck", DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
+    /* S095 P4: three stops 0..2 (e>r r>e lp). */
     EFFECT_ROW("ech_routing", "Echo", "Routing", "rtg", DTYPE_0B127,
                INSTRUMENT_PARAM_FLAG_MORPHABLE |
                INSTRUMENT_PARAM_FLAG_AUTOMATABLE,
-               EFFECT_MOD_NONE, 0u, 127u),
+               EFFECT_MOD_NONE, SPACE_ROUTING_E2R,
+               SPACE_ROUTING_STOPS - 1u),
 };
 
 _Static_assert(sizeof(space_delayDescriptors) /
@@ -195,44 +194,45 @@ _Static_assert(SPACE_ECHO_PARAM_ENUM_COUNT == SPACE_ECHO_PARAM_COUNT,
                "space_echo_param_t must match the descriptor table");
 
 /*
- * Row kinds of the page text (one per row 3..; SPACE_TXT_NONE: the generic
- * dtype text).
+ * Row kinds of the page text (one per row 3..; SPACE_TXT_NONE: the plain
+ * dtype text, 0..127 or +-63).
+ *
+ * S095 P4 (T2, user 2026-11-13): only the rows that need a label to be
+ * played keep one: `tim` (the synced stops and the clamped row), and the
+ * stepped rows `hed`, `frz`, `rtg` (names, not numbers). `spr`, `fbk`,
+ * `xfb`, `dck`, `pre`, `dcy`, `int`, `dtn`, `env` show plain numbers; their
+ * laws are unchanged, so the number is a position on the same curve.
  */
 enum {
     SPACE_TXT_NONE = 0,
     SPACE_TXT_TIME,      /* `tim`: the row the DSP plays, CrumpBit's labels (D3) */
-    SPACE_TXT_RATIO,     /* `spr`: R/L ratio, "0.5" .. "2.0" (D23) */
-    SPACE_TXT_FBK,       /* `fbk`: loop gain in percent, 0 .. 120 (D4) */
-    SPACE_TXT_PCT,       /* 0 .. 100 percent */
-    SPACE_TXT_HEADS,     /* `hed`: the heads in use (O6) */
-    SPACE_TXT_PRE,       /* `pre`: the predelay played, ms to 999, then s */
-    SPACE_TXT_DECAY,     /* `dcy`: RT60 s, "0.3" .. "9.9", then 10 .. 20 */
+    SPACE_TXT_HEADS,     /* `hed`: the head set (O6), letters (S095 P4) */
     SPACE_TXT_FREEZE,    /* `frz`: off / on / shm (O12) */
-    SPACE_TXT_SIGNED,    /* `int`: semitones, value - 63 */
-    SPACE_TXT_CENTS,     /* `dtn`: 0 .. 50 cents */
-    SPACE_TXT_ENV,       /* `env`: off at 63, else value - 63 (O10) */
     SPACE_TXT_ROUTE      /* `rtg`: e>r / r>e / lp (O16) */
 };
 
+/* tim spr fbk xfb ton deg wow hld rev hed dck */
 static const uint8_t space_delayText[SPACE_DELAY_PARAM_COUNT - 3u] = {
-    SPACE_TXT_NONE, SPACE_TXT_TIME, SPACE_TXT_RATIO, SPACE_TXT_FBK,
-    SPACE_TXT_PCT, SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE,
-    SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_HEADS, SPACE_TXT_PCT
+    SPACE_TXT_TIME, SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE,
+    SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE,
+    SPACE_TXT_NONE, SPACE_TXT_HEADS, SPACE_TXT_NONE
 };
 
+/* pre siz dcy dif lsh lsf hsh hsf mod wid frz shm int dtn env dck ton */
 static const uint8_t space_reverbText[SPACE_REVERB_PARAM_COUNT - 3u] = {
-    SPACE_TXT_NONE, SPACE_TXT_PRE, SPACE_TXT_NONE, SPACE_TXT_DECAY,
     SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE,
-    SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_FREEZE,
-    SPACE_TXT_NONE, SPACE_TXT_SIGNED, SPACE_TXT_CENTS, SPACE_TXT_ENV,
-    SPACE_TXT_PCT, SPACE_TXT_NONE
+    SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE,
+    SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_FREEZE, SPACE_TXT_NONE,
+    SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE,
+    SPACE_TXT_NONE
 };
 
+/* tim fbk ton deg wow e>r bln dcy lsh hsh hed dck rtg */
 static const uint8_t space_echoText[SPACE_ECHO_PARAM_COUNT - 3u] = {
-    SPACE_TXT_NONE, SPACE_TXT_TIME, SPACE_TXT_FBK, SPACE_TXT_NONE,
+    SPACE_TXT_TIME, SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE,
     SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE,
-    SPACE_TXT_DECAY, SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_HEADS,
-    SPACE_TXT_PCT, SPACE_TXT_ROUTE
+    SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_HEADS, SPACE_TXT_NONE,
+    SPACE_TXT_ROUTE
 };
 
 /* The stepped rows' names (O12, O16). */
@@ -240,31 +240,25 @@ static const char space_frzNames[3][4] = { "off", " on", "shm" };
 static const char space_rtgNames[3][4] = { "e>r", "r>e", "lp " };
 
 /*
- * The seven `hed` stops in knob order, D/3 2D/3 D as 1 2 3 (O6; §S18: the
- * labels rise with the knob).
+ * The seven `hed` stops in knob order (O6; S095 P4 Q3: letters, one per
+ * head, A = D/3, B = 2D/3, C = D, so a label cannot be read as a number or
+ * a knob position). The order is the one §S18 settled: single heads, then
+ * pairs, then all three.
  */
 static const char space_hedNames[SPACE_HEADS_STOPS][4] = {
-    "  1", "  2", "  3", " 12", " 13", " 23", "123"
+    "  A", "  B", "  C", " AB", " AC", " BC", "ABC"
 };
 
-/* "x.y" from tenths (0..99). */
-static uint8_t space_tenths(uint32_t t, char *out)
-{
-    out[0] = (char)('0' + (t / 10u) % 10u);
-    out[1] = '.';
-    out[2] = (char)('0' + t % 10u);
-    return 1u;
-}
-
 /*
- * The value text of a Space row (S095 P1 plan §6 item 8).
- * What: out[0..2] for the row's kind (above); stepped kinds only when
- * `target` (the STEP automation page and Pattern entry). The `tim` text is
- * the row the DSP plays: the value clamped first to the live tape's limit
- * (space_timeLimit(), the clamp effects_service() applies).
+ * The value text of a Space row (S095 P1 plan §6 item 8; S095 P4 T2).
+ * What: out[0..2] for the row's kind (above); the stepped kinds also when
+ * `target` (the STEP automation page and Pattern entry), where a name is
+ * still clearer than 0..6. The `tim` text is the row the DSP plays: the
+ * value clamped first to the live tape's limit (space_timeLimit(), the
+ * clamp effects_service() applies).
  * Inputs: the type's kind table and tag, row index, value, out, target.
- * Output: nonzero when out was written. Foreground.
- * Callers: the three types' format hooks below.
+ * Output: nonzero when out was written (0: the generic dtype text).
+ * Foreground. Callers: the three types' format hooks below.
  */
 static __attribute__((optimize("Os"))) uint8_t space_formatValue(const uint8_t *kinds, uint8_t count,
                                  uint8_t tag, uint8_t index, uint8_t value,
@@ -276,8 +270,7 @@ static __attribute__((optimize("Os"))) uint8_t space_formatValue(const uint8_t *
         index - EFFECT_COMMON_PARAM_COUNT >= count)
         return 0u;
     kind = kinds[index - EFFECT_COMMON_PARAM_COUNT];
-    if (target && kind != SPACE_TXT_HEADS && kind != SPACE_TXT_FREEZE &&
-        kind != SPACE_TXT_ROUTE)
+    if (target && kind == SPACE_TXT_TIME)
         return 0u;
     switch (kind) {
     case SPACE_TXT_TIME: {
@@ -289,61 +282,14 @@ static __attribute__((optimize("Os"))) uint8_t space_formatValue(const uint8_t *
         crumpBit_formatDelayRow((value > limit) ? limit : value, out);
         return 1u;
     }
-    case SPACE_TXT_RATIO:
-        return space_tenths((uint32_t)(space_sprRatio(value) * 10.0f + 0.5f),
-                            out);
-    case SPACE_TXT_FBK:
-        numtostrpu(out, (uint8_t)(space_fbkGain(value) * 100.0f + 0.5f), ' ');
-        return 1u;
-    case SPACE_TXT_PCT:
-        numtostrpu(out, (uint8_t)(((uint32_t)value * 100u + 63u) / 127u), ' ');
-        return 1u;
     case SPACE_TXT_HEADS:
-        memcpy(out, space_hedNames[space_stop(value, SPACE_HEADS_STOPS)], 3u);
+        memcpy(out, space_hedNames[space_step(value, SPACE_HEADS_STOPS)], 3u);
         return 1u;
-    case SPACE_TXT_PRE: {
-        fx_share_t share;
-        const uint8_t limit = (fxbuf_effectShare(&share),
-                               space_preLimit(&share));
-        const float r = (float)((value > limit) ? limit : value) *
-                        (1.0f / 127.0f);
-        const uint32_t ms = (uint32_t)(r * r * 1400.0f + 0.5f);
-
-        if (ms >= 1000u)
-            return space_tenths((ms + 50u) / 100u, out);
-        numtostrpu(out, (uint8_t)((ms > 255u) ? 0u : ms), ' ');
-        if (ms > 255u) {
-            out[0] = (char)('0' + ms / 100u);
-            out[1] = (char)('0' + (ms / 10u) % 10u);
-            out[2] = (char)('0' + ms % 10u);
-        }
-        return 1u;
-    }
-    case SPACE_TXT_DECAY: {
-        const float r = space_rt60(value);
-
-        if (r < 9.95f)
-            return space_tenths((uint32_t)(r * 10.0f + 0.5f), out);
-        numtostrpu(out, (uint8_t)(r + 0.5f), ' ');
-        return 1u;
-    }
     case SPACE_TXT_FREEZE:
-        memcpy(out, space_frzNames[space_stop(value, 3u)], 3u);
+        memcpy(out, space_frzNames[space_step(value, 3u)], 3u);
         return 1u;
     case SPACE_TXT_ROUTE:
-        memcpy(out, space_rtgNames[space_stop(value, 3u)], 3u);
-        return 1u;
-    case SPACE_TXT_ENV:
-        if (value == 63u) {
-            memcpy(out, "off", 3u);
-            return 1u;
-        }
-        __attribute__((fallthrough));
-    case SPACE_TXT_SIGNED:
-        numtostrps(out, (int8_t)((int32_t)value - 63));
-        return 1u;
-    case SPACE_TXT_CENTS:
-        numtostrpu(out, (uint8_t)(((uint32_t)value * 50u + 63u) / 127u), ' ');
+        memcpy(out, space_rtgNames[space_step(value, 3u)], 3u);
         return 1u;
     default:
         return 0u;
@@ -389,7 +335,8 @@ static uint8_t space_echoFormatTarget3(uint8_t index, uint8_t value, char *out)
 /*
  * The hooks: values only. No SELECT/TRACK/BAR ownership, no LED row, no
  * custom row 0 and no layout (the default page layout places rows 3.. on
- * SELECT 2.., menuEffects.c header), no label variants.
+ * SELECT 2.., menuEffects.c header), no label variants. S095 P4: values only
+ * for `tim` and the stepped rows.
  */
 const effect_ui_hooks_t space_delayUi = {
     .select = NULL, .track = NULL, .bar = NULL, .render_leds = NULL,

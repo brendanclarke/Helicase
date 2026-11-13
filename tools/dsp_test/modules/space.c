@@ -80,13 +80,13 @@ void fxbuf_effectShare(fx_share_t *out) { *out = sp_share; }
  *       shm 127 after noise stays finite and below 8.0 (R-7, shortened);
  *   SP4 Echo: each routing gives a finite, bounded, non-silent output for
  *       an impulse, and the three differ;
- *   SP6-SP10 (§S18): `hed` steps in knob order; the longest `tim` returns
+ *   SP6-SP10 (§S18): `hed` steps 0..6 in knob order (S095 P4); the longest `tim` returns
  *       on the long channel (spr relative); `hld` does not build; Reverb
  *       `ton` darkens below 127; the stopped-transport idle ramps, idles and
  *       wakes;
  *   SP5 the feed: a Delay holding a tone exports, a Reverb enters with the
- *       record: the feed runs with the slot lock set; with the Reverb's mix
- *       up its output carries the tail while the feed runs; the feed and
+ *       record: the feed runs with the slot lock set; at full wet its output
+ *       carries the tail while the feed runs; the feed and
  *       the lock clear within 7 s.
  * Outputs: one line per failure; "space failures: N"; exit 1 if N > 0.
  * Accessors: make -C tools/dsp_test space.
@@ -154,9 +154,9 @@ static int sp_bounded(const float *x, uint32_t n, float lim)
     return 1;
 }
 
-/* mix tim spr fbk xfb ton deg wow hld rev hed dck */
-#define SP_DLY_ROWS 12u
-static const uint8_t sp_dlyRows[SP_DLY_ROWS] = { 127u, 64u, 63u, 0u, 0u, 63u,
+/* tim spr fbk xfb ton deg wow hld rev hed dck (S095 P4: no `mix`) */
+#define SP_DLY_ROWS 11u
+static const uint8_t sp_dlyRows[SP_DLY_ROWS] = { 64u, 63u, 0u, 0u, 63u,
                                                  0u, 0u, 0u, 0u,
                                                  SPACE_HEADS_DEFAULT, 0u };
 
@@ -179,7 +179,7 @@ static void law_sp1(void)
         float mr = 0.0f;
 
         memcpy(rows, sp_dlyRows, sizeof(rows));
-        rows[2] = pass ? 126u : 63u;
+        rows[1] = pass ? 126u : 63u;
         cb_bpm = 120u;
         sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
         /* Settle the delay glide from the floor (150 ms one-pole). */
@@ -201,11 +201,11 @@ static void law_sp1(void)
         }
         /* spr relative (§S18): at 126 R plays `tim` and L half of it. */
         snprintf(msg, sizeof msg, "SP1 spr %u: L at %u want %.0f (peak %.3f)",
-                 rows[2], pl - at, pass ? 0.5f * t : t, ml);
+                 rows[1], pl - at, pass ? 0.5f * t : t, ml);
         expect(fabsf((float)(pl - at) - (pass ? 0.5f * t : t)) <= 2.0f &&
                    ml > 0.3f, msg);
         snprintf(msg, sizeof msg, "SP1 spr %u: R at %u want %.0f (peak %.3f)",
-                 rows[2], pr - at, t, mr);
+                 rows[1], pr - at, t, mr);
         expect(fabsf((float)(pr - at) - t) <= 2.0f && mr > 0.3f, msg);
     }
 }
@@ -220,17 +220,17 @@ static void law_sp2(void)
     int ok = 1;
 
     memcpy(rows, sp_dlyRows, sizeof(rows));
-    rows[1] = 40u;
-    rows[3] = 127u;
-    rows[4] = 64u;
+    rows[0] = 40u;
+    rows[2] = 127u;
+    rows[3] = 64u;
+    rows[5] = 127u;
     rows[6] = 127u;
-    rows[7] = 127u;
-    rows[8] = 1u;   /* hld on part of the time (written below too) */
+    rows[7] = 1u;   /* hld on part of the time (written below too) */
     sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
     for (b = 0u; b < 5513u && ok; b++) {
         if ((b & 511u) == 0u) {
             space_delayOps.write_param(&sp_rt, SPACE_DLY_HEADS,
-                                       (uint8_t)(((b >> 9) * 19u) & 127u));
+                                       (uint8_t)((b >> 9) % SPACE_HEADS_STOPS));
             space_delayOps.write_param(&sp_rt, SPACE_DLY_HOLD,
                                        (uint8_t)((b >> 10) & 1u));
             space_delayOps.write_param(&sp_rt, SPACE_DLY_REVERSE,
@@ -250,9 +250,9 @@ static void law_sp2(void)
     expect(ok, "SP2 Delay: a sample is not finite or above 4.0");
 }
 
-/* mix pre siz dcy dif lsh lsf hsh hsf mod wid frz shm int dtn env dck ton */
-#define SP_RVB_ROWS 18u
-static const uint8_t sp_rvbRows[SP_RVB_ROWS] = { 127u, 0u, 96u, 64u, 96u, 63u,
+/* pre siz dcy dif lsh lsf hsh hsf mod wid frz shm int dtn env dck ton */
+#define SP_RVB_ROWS 17u
+static const uint8_t sp_rvbRows[SP_RVB_ROWS] = { 0u, 96u, 64u, 96u, 63u,
                                                  40u, 40u, 80u, 32u, 63u, 0u,
                                                  0u, 75u, 0u, 63u, 0u, 127u };
 
@@ -289,13 +289,14 @@ static void law_sp3(void)
              e1, e2, ok);
     expect(ok && e1 > 1e-6 && e2 < e1, msg);
     /* R-7 (shortened): freeze with shimmer after noise, 10 s. */
-    rows[11] = 127u;  /* frz zone 2: freeze with the shimmer */
-    rows[12] = 127u;
+    rows[10] = SPACE_FREEZE_SHIMMER;  /* frz: freeze with the shimmer */
+    rows[11] = 127u;
     sp_enter(&space_reverbOps, NULL, rows, SP_RVB_ROWS);
     space_reverbOps.write_param(&sp_rt, SPACE_RVB_FREEZE, 0u);
     for (b = 0u; b < 13784u && ok; b++) {
         if (b == 200u)
-            space_reverbOps.write_param(&sp_rt, SPACE_RVB_FREEZE, 127u);
+            space_reverbOps.write_param(&sp_rt, SPACE_RVB_FREEZE,
+                                        SPACE_FREEZE_SHIMMER);
         for (n = 0u; n < 32u; n++)
             l[n] = r[n] = (b < 200u) ? 0.5f * sp_noise() : 0.0f;
         sp_block(&space_reverbOps, l, r);
@@ -304,9 +305,9 @@ static void law_sp3(void)
     expect(ok, "SP3 Reverb freeze+shimmer: a sample is not finite or above 8.0");
 }
 
-/* mix tim fbk ton deg wow e>r bln dcy lsh hsh hed dck rtg */
-#define SP_ECH_ROWS 14u
-static const uint8_t sp_echRows[SP_ECH_ROWS] = { 127u, 64u, 64u, 63u, 0u, 0u,
+/* tim fbk ton deg wow e>r bln dcy lsh hsh hed dck rtg */
+#define SP_ECH_ROWS 13u
+static const uint8_t sp_echRows[SP_ECH_ROWS] = { 64u, 64u, 63u, 0u, 0u,
                                                  64u, 48u, 48u, 63u, 40u,
                                                  SPACE_HEADS_DEFAULT, 0u, 0u };
 
@@ -325,7 +326,7 @@ static void law_sp4(void)
         int ok = 1;
 
         memcpy(rows, sp_echRows, sizeof(rows));
-        rows[13] = (uint8_t)(route * 50u);   /* rtg zones 0, 1, 2 */
+        rows[12] = (uint8_t)route;   /* rtg stops 0, 1, 2 */
         sp_enter(&space_echoOps, NULL, rows, SP_ECH_ROWS);
         sum[route] = 0.0;
         for (b = 0u; b < 3000u; b++) {
@@ -372,7 +373,7 @@ static void law_sp5(void)
            "SP5: the Delay's export has no audio");
     /* The Reverb enters with it, its plate silent (dcy 0, no input). */
     memcpy(rows, sp_rvbRows, sizeof(rows));
-    rows[3] = 0u;
+    rows[2] = 0u;
     cb_feed_lock = 0u;
     sp_enter(&space_reverbOps, &h, rows, SP_RVB_ROWS);
     expect(cb_feed_lock == 1u && sk_feeding(&sp_share, EFFECT_TYPE_REVERB),
@@ -394,19 +395,24 @@ static void law_sp5(void)
            msg);
 }
 
-/* SP6 (§S18): `hed` steps 1 2 3 12 13 23 123 in order across 0..127. */
+/*
+ * SP6 (§S18; S095 P4): `hed` steps A B C AB AC BC ABC for the stored
+ * values 0..6, in order, each its own head set; a value above 6 plays ABC;
+ * the default is C (D only).
+ */
 static void law_sp6(void)
 {
     static const uint8_t sets[SPACE_HEADS_STOPS] = { 1u, 2u, 4u, 3u, 5u, 6u, 7u };
     uint32_t v;
-    uint8_t last = 0u;
     uint8_t seen = 0u;
     int ok = 1;
     char msg[120];
 
     sp_enter(&space_delayOps, NULL, sp_dlyRows, SP_DLY_ROWS);
-    for (v = 0u; v < 128u; v++) {
-        const uint8_t st = space_stop((uint8_t)v, SPACE_HEADS_STOPS);
+    for (v = 0u; v <= SPACE_HEADS_STOPS; v++) {
+        /* v == SPACE_HEADS_STOPS is one past the last stop: it plays ABC. */
+        const uint8_t st = (v < SPACE_HEADS_STOPS) ? (uint8_t)v
+                                                   : (uint8_t)(SPACE_HEADS_STOPS - 1u);
         fx_share_t sh;
         const space_tapeK_t *k;
         uint8_t mask;
@@ -416,15 +422,12 @@ static void law_sp6(void)
         k = &space_hdr(&sh)->k;
         mask = (uint8_t)((k->hg[0] > 0.0f) | ((k->hg[1] > 0.0f) << 1) |
                          ((k->hg[2] > 0.0f) << 2));
-        ok = ok && st >= last && st < SPACE_HEADS_STOPS && mask == sets[st];
+        ok = ok && mask == sets[st];
         seen |= (uint8_t)(1u << st);
-        last = st;
     }
-    snprintf(msg, sizeof msg, "SP6 hed: monotonic %d, stops seen 0x%02x, "
-             "default %u is `3`", ok, seen,
-             space_stop(SPACE_HEADS_DEFAULT, SPACE_HEADS_STOPS));
-    expect(ok && seen == 0x7Fu &&
-               space_stop(SPACE_HEADS_DEFAULT, SPACE_HEADS_STOPS) == 2u, msg);
+    snprintf(msg, sizeof msg, "SP6 hed: stops %d, seen 0x%02x, default %u",
+             ok, seen, (unsigned)SPACE_HEADS_DEFAULT);
+    expect(ok && seen == 0x7Fu && SPACE_HEADS_DEFAULT == 2u, msg);
 }
 
 /*
@@ -454,8 +457,8 @@ static void law_sp7(void)
         lim = space_timeLimit(SPACE_TAG_DELAY, &sp_share);
         t = crumpBit_delaySamples(lim, 120u);
         memcpy(rows, sp_dlyRows, sizeof(rows));
-        rows[1] = lim;
-        rows[2] = pass ? 127u : 0u;
+        rows[0] = lim;
+        rows[1] = pass ? 127u : 0u;
         sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
         /* Start at the target: no glide from the floor. */
         sp_rt.d[0] = sp_rt.d[1] = (float)(sp_rt.tape_n - 3u);
@@ -472,7 +475,7 @@ static void law_sp7(void)
         }
         snprintf(msg, sizeof msg,
                  "SP7 tim %u (limit) spr %u: the long side returns at %u, "
-                 "want %.0f +-1%% (peak %.3f)", lim, rows[2], pk - at, t, mk);
+                 "want %.0f +-1%% (peak %.3f)", lim, rows[1], pk - at, t, mk);
         expect(mk > 0.1f && fabsf((float)(pk - at) - t) < 0.01f * t, msg);
     }
 }
@@ -490,8 +493,8 @@ static void law_sp8(void)
     char msg[160];
 
     memcpy(rows, sp_dlyRows, sizeof(rows));
-    rows[1] = 40u;
-    rows[3] = 127u;
+    rows[0] = 40u;
+    rows[2] = 127u;
     sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
     for (b = 0u; b < 7000u; b++) {
         if (b == 1500u)
@@ -527,11 +530,11 @@ static void law_sp9(void)
         uint32_t n;
 
         memcpy(rows, sp_rvbRows, sizeof(rows));
-        rows[17] = pass ? 0u : 127u;
+        rows[16] = pass ? 0u : 127u;
         sp_enter(&space_reverbOps, NULL, rows, SP_RVB_ROWS);
         e[pass] = 0.0;
         for (b = 0u; b < 600u; b++) {
-            /* After the dry glide to 1 - mix = 0 (no dry impulse). */
+            /* No dry: the entry starts at 0 (SD2) and no mix row exists. */
             for (n = 0u; n < 32u; n++)
                 l[n] = r[n] = (b == 200u && n == 0u) ? 1.0f : 0.0f;
             sp_block(&space_reverbOps, l, r);

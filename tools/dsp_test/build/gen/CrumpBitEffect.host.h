@@ -289,6 +289,7 @@ typedef struct {
     uint8_t feed_bits;         /* S095 P1: CRUMPBIT_FEED_* */
     uint8_t filter_bal;        /* row 22, shared: filter balance (P4) */
     uint8_t pit_fine;          /* row 23, pit: fine pitch (P5 follow-up) */
+    uint8_t rvb_damp;          /* row 24, rvb: damping `dmp` (S095 P4 F1; a former padding byte) */
     union {
         CrumpBitTapState tap;      /* dly, cmb */
         CrumpBitPitchState pit;    /* pit */

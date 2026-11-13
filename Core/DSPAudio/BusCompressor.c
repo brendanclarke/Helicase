@@ -36,8 +36,15 @@
 #define BUS_COMP_LOG2_PER_DB_GAIN  0.16609640f
 #define BUS_COMP_POWER_FLOOR       1.0e-12f
 #define BUS_COMP_KNEE_DB           12.0f
-#define BUS_COMP_REF_LEVEL_DB      (-12.0f)
-#define BUS_COMP_REF_POWER         0.06309573f
+/*
+ * Makeup reference (S095 P4 C1): the detector level whose static gain
+ * reduction the makeup restores (scaled by 1 - 0.3a), and the power the cell
+ * is seeded with on a fade-in. -20 dBFS (was -12): a clean kit sits around
+ * -12 to -20 dBFS on the 5 ms detector, so the makeup now tracks a real bus
+ * instead of one 8 dB louder than most Scenes. REF_POWER = 10^(-20/10).
+ */
+#define BUS_COMP_REF_LEVEL_DB      (-20.0f)
+#define BUS_COMP_REF_POWER         0.01f
 #define BUS_COMP_RMS_MS            5.0f
 #define BUS_COMP_CHARGE_MS         300.0f
 #define BUS_COMP_MEMORY_SHARE      0.5f
@@ -244,23 +251,29 @@ void busComp_processBlock(sample_mx_t *st1, sample_mx_t *st2,
     }
 
     /*
-     * cam/ctm macro (S074 §4.2/§4.3): threshold -3..-30 dBFS, ratio 1..8,
-     * makeup, and cubic drive. These are recomputed per block so Scene
-     * changes take effect smoothly next block.
+     * cam/ctm macro (S074 §4.2/§4.3): threshold, ratio 1..8, makeup, and
+     * cubic drive. These are recomputed per block so Scene changes take
+     * effect smoothly next block.
      *
      * Tuning revision (user, after hardware listening): makeup is the static
-     * reduction at the -12 dBFS reference scaled by (1 - 0.3a), so the level
-     * rise tapers off progressively across cam (+11.0 dB at cam 127 instead
-     * of +15.8; a -18 dBFS bus now leaves at about -17.5 dBFS rather than
-     * -12.8 at the top). Drive is 1 + 0.5a^2 (was 0.4a^2): unchanged at low
-     * cam, ceiling -3.5 dBFS at cam 127 (was -2.9), i.e. just slightly more
-     * saturation at the top. ref_gr_db also seeds the cell on fade-in.
+     * reduction at the reference level scaled by (1 - 0.3a), so the level
+     * rise tapers off progressively across cam. Drive is 1 + 0.5a^2:
+     * unchanged at low cam, ceiling -3.5 dBFS at cam 127. ref_gr_db also
+     * seeds the cell on fade-in.
+     *
+     * S095 P4 C1 (S095_P4_FX_BUS_TWEAKS.md §4): the threshold runs
+     * -8 .. -40 dBFS (was -3 .. -30). A clean voice reaches the bus around
+     * -10 dBFS peak / -12 dBFS on the 5 ms detector, so the old curve only
+     * engaged once distortion lifted the voices; now cam 48 gives about
+     * 3-6 dB of reduction on a clean kit, and cam 127 is a deliberate squash.
+     * The ratio curve and the drive are unchanged; the makeup reference
+     * moved to -20 dBFS (BUS_COMP_REF_LEVEL_DB).
      */
     a = (float)scene_getBusCompSetting(scene_index, SCENE_BUS_COMP_AMOUNT) *
         (1.0f / 127.0f);
     t = (float)scene_getBusCompSetting(scene_index, SCENE_BUS_COMP_TIME) *
         (1.0f / 127.0f);
-    threshold = -3.0f - 27.0f * a;
+    threshold = -8.0f - 32.0f * a;
     slope = 1.0f - 1.0f / (1.0f + 3.0f * a + 4.0f * a * a * a);
     ref_gr_db = busComp_staticGainDb(BUS_COMP_REF_LEVEL_DB, threshold, slope);
     makeup_db = -ref_gr_db * (1.0f - 0.3f * a);
@@ -400,4 +413,14 @@ void busComp_processBlock(sample_mx_t *st1, sample_mx_t *st2,
          busComp.power);
     if (fade_out)
         busComp.active = SCENE_BUS_COMP_MODE_OFF;
+}
+
+uint8_t busComp_meterRaw(float *power, float *gr_db)
+{
+    /* S095 P4 C5: contract in BusCompressor.h. */
+    if (busComp.active == SCENE_BUS_COMP_MODE_OFF || !power || !gr_db)
+        return 0u;
+    *power = busComp.power;
+    *gr_db = fminf(busComp.gr_fast_db, busComp.gr_memory_db);
+    return 1u;
 }

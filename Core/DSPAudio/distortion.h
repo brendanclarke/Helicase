@@ -41,10 +41,23 @@
 #include <math.h>
 #include <stdint.h>
 //--------------------------------------------------
+/*
+ * Voice distortion state (Drum, Snare, Cymbal, HiHat post-chain).
+ *
+ * What: shape = k of the curve y = g x / (1 + k|x|); out_gain = g =
+ * m(drv) (1 + k), where m is the makeup factor (distortion_makeup[]).
+ * Why (S095 P4 C3): folding m into the numerator costs nothing per sample
+ * (the numerator was (1 + k), already a per-voice constant), and keeps
+ * the curve's shape while lowering its level. out_gain replaces the
+ * unused inv_shape (no RAM change). At drv 0, k = 0 and out_gain = 1: the
+ * curve is the identity, bit for bit as before.
+ * Written by: setDistortionShape() (per row change). Read by: the curve
+ * helpers below (per sample).
+ */
 typedef struct DistStruct
 {
 	float shape;
-	float inv_shape;
+	float out_gain;
 }Distortion;
 //--------------------------------------------------
 void setDistortionShape(Distortion *dist, uint8_t shape);
@@ -52,6 +65,15 @@ void setDistortionShape(Distortion *dist, uint8_t shape);
 void calcDistBlock(const Distortion *dist, int16_t* buf, const uint8_t size);
 //--------------------------------------------------
 float distortion_calcSampleFloat(const Distortion *dist, float x);
+//--------------------------------------------------
+/*
+ * Makeup factors per drive row (S095 P4 C3; generated,
+ * distortionMakeup.c, tools/plots/gen_dist_makeup.py): half of the curve's
+ * RMS rise on two reference hits, entry 0 exactly 1.0, non-increasing.
+ * Accessor: setDistortionShape().
+ */
+#define DISTORTION_MAKEUP_COUNT 128u
+extern const float distortion_makeup[DISTORTION_MAKEUP_COUNT];
 //--------------------------------------------------
 /*
  * Distortion curve for one int16 sample (S073 Step 4).
@@ -64,12 +86,14 @@ float distortion_calcSampleFloat(const Distortion *dist, float x);
  * Outputs:    distorted int16 sample.
  * Accessors:  calcDistBlock() and voicePostChain.h.
  * Affiliates: BufferTools.h and the Step 4 golden/ARM checks.
+ * S095 P4 C3: the numerator is out_gain = m(drv)(1 + k) (the makeup folded
+ * in, setDistortionShape()); same operations per sample as (1 + k).
  */
 static inline int16_t distortion_curveSample16(const Distortion *dist,
 										const int16_t in)
 {
 	float x = in/32767.f;
-	x = (1+dist->shape)*x/(1+dist->shape*fabsf(x));
+	x = dist->out_gain*x/(1+dist->shape*fabsf(x));
 	return (int16_t)(int32_t)(x*32767);
 }
 //--------------------------------------------------
@@ -79,7 +103,7 @@ static inline int16_t distortion_curveSampleF(const Distortion *dist,
 										const float in)
 {
 	float x = in * (1.f/32767.f);
-	x = (1+dist->shape)*x/(1+dist->shape*fabsf(x));
+	x = dist->out_gain*x/(1+dist->shape*fabsf(x));
 	return (int16_t)(int32_t)(x*32767);
 }
 //--------------------------------------------------

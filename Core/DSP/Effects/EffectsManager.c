@@ -17,8 +17,6 @@
 #include "BankData.h"
 #include "sequencer.h"
 #include "StepScale.h"
-#include "StereoFilterParameters.h"
-#include "StereoFilterEffect.h"
 /* S074: CrumpBit (`cbt`), the first buffer-using Effect type. */
 #include "CrumpBitParameters.h"
 #include "CrumpBitEffect.h"
@@ -54,7 +52,6 @@ static const effect_param_descriptor_t effects_off_descriptors[] = {
  * switch without violating the arena handoff contract.
  */
 typedef union {
-    StereoFilterRuntime stereo_filter;
     /*
      * S074: 56 B; S091 P2: 76 B; S091 P3: 88 B; S091 P4: 100 B (a shared
      * part plus a 44 B union of five sub-engine states, the reworked `grn`
@@ -93,20 +90,6 @@ static const effect_registry_entry_t effects_registry[EFFECT_TYPE_COUNT] = {
           EFFECT_LANE_NONE, EFFECT_LANE_NONE, EFFECT_LANE_NONE },
         NULL, NULL, NULL,
         0u, 0u, 0u
-    },
-    {
-        stereoFilter_token3, stereoFilter_abbrev5, stereoFilter_full8,
-        EFFECT_IO_STEREO_IN | EFFECT_IO_STEREO_OUT,
-        stereoFilter_descriptors, STEREO_FILTER_PARAM_COUNT,
-        { EFFECT_LANE_MORPH_SOURCE,
-          STEREO_FILTER_PARAM_FREQ, STEREO_FILTER_PARAM_RESO,
-          STEREO_FILTER_PARAM_DRIVE, STEREO_FILTER_PARAM_TYPE,
-          STEREO_FILTER_PARAM_LEVEL, STEREO_FILTER_PARAM_PAN,
-          EFFECT_LANE_NONE, EFFECT_LANE_NONE, EFFECT_LANE_NONE,
-          EFFECT_LANE_NONE, EFFECT_LANE_NONE, EFFECT_LANE_NONE,
-          EFFECT_LANE_NONE, EFFECT_LANE_NONE, EFFECT_LANE_NONE },
-        NULL, &stereoFilter_ops, NULL,
-        (uint16_t)sizeof(StereoFilterRuntime), 0u, 0u
     },
     /*
      * CrumpBit (`cbt`, S074; S091 P2; S091 P3 sub-types): stereo in and
@@ -149,15 +132,19 @@ static const effect_registry_entry_t effects_registry[EFFECT_TYPE_COUNT] = {
      * CrumpBit's). No sub-types: one fixed lane row each
      * (plan §4, lanes 14/15 = the common vol and pan). The default layout
      * places rows 3.. on SELECT 2.. (menuEffects.c, no select_layout); each
-     * type's ui hooks label its times, ratios, states and pitches (one
-     * hook set per type: format_value3 receives no type id).
+     * type's ui hooks label its times and stepped rows (one hook set per
+     * type: format_value3 receives no type id). S095 P4 T1 (SD1): the `mix`
+     * row is gone; lanes 2..15 keep their rows, so FX-lane data on them
+     * keeps its meaning, and lane 1 takes the one row that had no lane
+     * (Reverb `siz`, Echo `hsh`; the Delay has none, so its lane 1 is
+     * empty).
      */
     {
         space_delayToken3, space_delayAbbrev5, space_delayFull8,
         EFFECT_IO_STEREO_IN | EFFECT_IO_STEREO_OUT,
         space_delayDescriptors, SPACE_DELAY_PARAM_COUNT,
         { EFFECT_LANE_MORPH_SOURCE,
-          SPACE_DLY_MIX, SPACE_DLY_TIME, SPACE_DLY_FEEDBACK, SPACE_DLY_TONE,
+          EFFECT_LANE_NONE, SPACE_DLY_TIME, SPACE_DLY_FEEDBACK, SPACE_DLY_TONE,
           SPACE_DLY_DEGRADE, SPACE_DLY_WOW, SPACE_DLY_XFEED, SPACE_DLY_SPREAD,
           SPACE_DLY_REVERSE, SPACE_DLY_HOLD, SPACE_DLY_HEADS, SPACE_DLY_DUCK,
           EFFECT_COMMON_PARAM_LEVEL, EFFECT_COMMON_PARAM_PAN,
@@ -171,7 +158,7 @@ static const effect_registry_entry_t effects_registry[EFFECT_TYPE_COUNT] = {
         EFFECT_IO_STEREO_IN | EFFECT_IO_STEREO_OUT,
         space_reverbDescriptors, SPACE_REVERB_PARAM_COUNT,
         { EFFECT_LANE_MORPH_SOURCE,
-          SPACE_RVB_MIX, SPACE_RVB_DECAY, SPACE_RVB_FREEZE, SPACE_RVB_SHIMMER,
+          SPACE_RVB_SIZE, SPACE_RVB_DECAY, SPACE_RVB_FREEZE, SPACE_RVB_SHIMMER,
           SPACE_RVB_INTERVAL, SPACE_RVB_DETUNE, SPACE_RVB_ENV, SPACE_RVB_DUCK,
           SPACE_RVB_LOW_SHELF, SPACE_RVB_HIGH_SHELF, SPACE_RVB_PREDELAY,
           SPACE_RVB_MOD, SPACE_RVB_WIDTH,
@@ -185,7 +172,7 @@ static const effect_registry_entry_t effects_registry[EFFECT_TYPE_COUNT] = {
         EFFECT_IO_STEREO_IN | EFFECT_IO_STEREO_OUT,
         space_echoDescriptors, SPACE_ECHO_PARAM_COUNT,
         { EFFECT_LANE_MORPH_SOURCE,
-          SPACE_ECH_MIX, SPACE_ECH_TIME, SPACE_ECH_FEEDBACK, SPACE_ECH_TONE,
+          SPACE_ECH_HIGH_SHELF, SPACE_ECH_TIME, SPACE_ECH_FEEDBACK, SPACE_ECH_TONE,
           SPACE_ECH_DEGRADE, SPACE_ECH_WOW, SPACE_ECH_TO_REVERB,
           SPACE_ECH_BLEND, SPACE_ECH_DECAY, SPACE_ECH_LOW_SHELF, SPACE_ECH_HEADS,
           SPACE_ECH_DUCK, SPACE_ECH_ROUTING,
@@ -196,8 +183,6 @@ static const effect_registry_entry_t effects_registry[EFFECT_TYPE_COUNT] = {
     },
 };
 
-_Static_assert(sizeof(StereoFilterRuntime) <= sizeof(effects_runtime_t),
-               "Effect runtime union must hold StereoFilter");
 _Static_assert(sizeof(CrumpBitRuntime) <= sizeof(effects_runtime_t),
                "Effect runtime union must hold CrumpBit");
 _Static_assert(sizeof(SpaceRuntime) <= sizeof(effects_runtime_t),

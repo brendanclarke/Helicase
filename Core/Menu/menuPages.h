@@ -62,19 +62,21 @@ const Page menuPages[NUM_PAGES][NUM_SUB_PAGES] = {
    * Scene-owned bus compressor page (MENU_GLOBAL_SCENE_SUBPAGE, S074 /
    * S080 P2).
    *
-   * What: cmp, cam, ctm, csc together in columns 0-3; the empty second half
-   * terminates traversal. Why: all four are Scene settings (active-Scene
-   * mirrors fanned out through the VOICE edit mask), so they are shown
-   * together on the last settings page with the '+' Scene-ownership cue.
+   * What: cmp, cam, ctm, csc together in columns 0-3; S095 P4 C5 adds the
+   * read-only `cgr` readout in column 4 (the first cell of the second
+   * screen), with the rest of the second half empty. Why: all four are Scene
+   * settings (active-Scene mirrors fanned out through the VOICE edit mask),
+   * so they are shown together on the last settings page with the '+'
+   * Scene-ownership cue.
    * New global pages go before this one and move MENU_GLOBAL_SCENE_SUBPAGE.
    * Accessors: global encoder traversal, checkScrollSign() ('+'). Affiliates:
    * menu_commitBusCompParam(), menu_devCheckGlobalSceneSubPage() (diagnostic
    * layout check).
    */
   {TEXT_BUS_COMP_MODE,TEXT_BUS_COMP_AMOUNT,TEXT_BUS_COMP_TIME,TEXT_BUS_COMP_SIDECHAIN,
-    TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,
+    TEXT_BUS_COMP_GR,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,
     PAR_BUS_COMP_MODE,PAR_BUS_COMP_AMOUNT,PAR_BUS_COMP_TIME,PAR_BUS_COMP_SIDECHAIN,
-    PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
+    PAR_BUS_COMP_GR,PAR_NONE,PAR_NONE,PAR_NONE},
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},

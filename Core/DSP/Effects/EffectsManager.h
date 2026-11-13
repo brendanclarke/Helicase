@@ -59,22 +59,26 @@
  */
 
 /*
- * Registry ids are append-only; persisted identity is the three-byte token.
+ * Registry ids are append-only within a build; the persisted identity is the
+ * three-byte token (AutoSave, `.fx`, MIDI Learn), so ids may be renumbered
+ * when a type is removed.
  * EFFECT_TYPE_CRUMPBIT (S074): the first buffer-using type (`cbt`, 8-bit
  * data lines and an 8-bit tape delay in the FxBuffer share).
  * S095 P1: the Space types, clean counterparts to CrumpBit, sharing one
  * kit (Core/DSP/Effects/Space/): EFFECT_TYPE_DELAY (`dly`, true-stereo
  * 16-bit varispeed tape), EFFECT_TYPE_REVERB (`rvb`, half-rate plate with
- * shimmer), EFFECT_TYPE_ECHO (`ech`, a mono tape into the plate). The
- * tokens are the persisted identity (AutoSave, `.fx`, MIDI Learn); the ids
- * only index the registry.
+ * shimmer), EFFECT_TYPE_ECHO (`ech`, a mono tape into the plate).
+ * S095 P4 (T3): the dual filter (`flt`, StereoFilter, id 1) is removed and
+ * the ids below it close up. A stored `flt` token no longer resolves: a
+ * `.fx` file with `type=flt` fails as an invalid Scene, an AutoSave Scene
+ * loads its Effect as `off`, a MIDI Learn row on `flt` is dropped (no
+ * migration, standing rule).
  */
-#define EFFECT_TYPE_STEREO_FILTER        1u
-#define EFFECT_TYPE_CRUMPBIT             2u
-#define EFFECT_TYPE_DELAY                3u
-#define EFFECT_TYPE_REVERB               4u
-#define EFFECT_TYPE_ECHO                 5u
-#define EFFECT_TYPE_COUNT                6u
+#define EFFECT_TYPE_CRUMPBIT             1u
+#define EFFECT_TYPE_DELAY                2u
+#define EFFECT_TYPE_REVERB               3u
+#define EFFECT_TYPE_ECHO                 4u
+#define EFFECT_TYPE_COUNT                5u
 
 /* Extra descriptor capability flags used by Effect-specific owners. */
 #define EFFECT_PARAM_FLAG_WIDE8              0x01u

@@ -150,6 +150,8 @@ enum NamesEnum {
     /* S074 Scene-owned bus compressor page: cmp, cam, ctm, csc. */
     TEXT_BUS_COMP_MODE, TEXT_BUS_COMP_AMOUNT,
     TEXT_BUS_COMP_TIME, TEXT_BUS_COMP_SIDECHAIN,
+    /* S095 P4 C5: read-only gain-reduction readout. */
+    TEXT_BUS_COMP_GR,
     /* S078 per-track play mode label for the STEP track-settings page. */
     TEXT_TRACK_PLAY_MODE,
     /* S079 STEP step-special labels: condition, micro-timing, roll family. */
@@ -232,6 +234,7 @@ enum longNamesEnum {
     /* S074 bus compressor long names. */
     LONG_BUS_COMP_MODE, LONG_BUS_COMP_AMOUNT,
     LONG_BUS_COMP_TIME, LONG_BUS_COMP_SIDECHAIN,
+    LONG_BUS_COMP_GR,
     /* S078 per-track run mode long name: RunMode (S078 P4). */
     LONG_PLAY_MODE,
     /* S079 step-special long names (condition, micro-timing, roll family). */
@@ -278,6 +281,7 @@ enum shortNamesEnum {
     /* S074 bus compressor compact labels: cmp, cam, ctm, csc. */
     SHORT_BUS_COMP_MODE, SHORT_BUS_COMP_AMOUNT,
     SHORT_BUS_COMP_TIME, SHORT_BUS_COMP_SIDECHAIN,
+    SHORT_BUS_COMP_GR,
     /* S078 per-track run mode compact label: run (S078 P4). */
     SHORT_PLAY_MODE,
     /* S079 step-special compact labels. */
@@ -307,6 +311,19 @@ enum shortNamesEnum {
  * widget render/edit guards, and pat_poolUsagePercent().
  */
 #define PAR_PAT_STORE_USE 0xFFFDu
+
+/*
+ * Virtual parameter sentinel for the read-only bus-compressor readout
+ * (S095 P4 C5).
+ *
+ * What: the fifth cell of the compressor page (`cgr`): the deepest gain
+ * reduction and the loudest detector level since the last repaint. Why:
+ * `cam` is set by ear and eye; the cell has no ParameterArray value, so it
+ * follows the PAR_PAT_STORE_USE pattern (formatted specially, edits
+ * rejected) at every site that handles that sentinel.
+ * Affiliates: menuPages.h, busComp_meterRaw(), menu_serviceRuntimeWidgets().
+ */
+#define PAR_BUS_COMP_GR 0xFFFCu
 
 #define ARROW_SIGN '>'
 

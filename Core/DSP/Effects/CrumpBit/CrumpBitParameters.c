@@ -30,7 +30,7 @@ const char crumpBit_full8[] = "CrumpBit";
 /*
  * CrumpBit descriptor table (S074_CRUMPBIT_EFFECT.md §4).
  *
- * What: rows 0..2 are the shared common rows; rows 3..23 are CrumpBit's.
+ * What: rows 0..2 are the shared common rows; rows 3..24 are CrumpBit's.
  * - bit off / bit invert (3, 4): 8-bit masks, one bit per ADC data line
  *   (bit 0 = LSB). Not Morphable (interpolating a mask gives unrelated
  *   bits), not modulatable, not Pattern-automatable (a Pattern value is
@@ -61,14 +61,16 @@ const char crumpBit_full8[] = "CrumpBit";
  *   curve is tempo-synced itself) nor by `pit`.
  * - tone (11, S091 P2, delay sub-type): bipolar tilt on the feedback return,
  *   DTYPE_PM63 so stored 63 is flat and shows 0; below 63 cuts highs, above
- *   63 cuts lows. Morphable, LFO and Pattern, like `dpn`.
+ *   63 cuts lows. Morphable, LFO and Pattern, like `dpn`. S095 P4 F1:
+ *   `rvb` does not read it; its damping is its own row 24 (`dmp`, 0..127,
+ *   127 flat and default).
  * - filter type / freq / reso (12..14, S091 P2, shared output stage): the
  *   voice-filter rows by name, label and value law (user U1): `typ` is the
  *   MENU_FILTER list (LP HP BP UBP Nch Pek LP2 off), Morphable and
- *   Pattern-automatable but not LFO-modulatable, exactly like StereoFilter's
- *   `typ` (user U2); `frq` and `res` are full image rows. Defaults match
- *   StereoFilter (frq 64, res 0) except `typ`, which starts `off` so a
- *   Scene's output is unfiltered until a type is chosen.
+ *   Pattern-automatable but not LFO-modulatable, like a voice filter's
+ *   `typ` (user U2); `frq` and `res` are full image rows. Defaults are
+ *   frq 64, res 0 and `typ` `off`, so a Scene's output is unfiltered until
+ *   a type is chosen.
  * - aux (15, S091 P3): the per-sub-type pitch row, bipolar (63 = 0): the
  *   `pit` interval, the `grn` root `st1`; the tone drive in `dly`/`cmb`
  *   when the deferred drives land. Morph, LFO and Pattern. S091 P5
@@ -190,6 +192,19 @@ const effect_param_descriptor_t crumpBit_descriptors[] = {
      */
     EFFECT_ROW("crump_pit_fine", "CrumpBit", "FinePtch", "fin", DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
+    /*
+     * S095 P4 (F1, user), `rvb` only: the line damping, low-pass only,
+     * 0..127 with 127 flat and 127 the default (the rule for every
+     * low-pass-only tone control). Before F1 `rvb` read the shared `ton`
+     * row, whose 63 default (flat for the tilt sub-types) was mid damping
+     * here. Morph, LFO and Pattern, as `ton`; lane 10 of the `rvb` map.
+     * An older file without the key loads 127; an AutoSave Scene written
+     * before the row existed loads whatever byte its slot held (no
+     * migration).
+     */
+    EFFECT_ROW("crump_rvb_damp", "Reverb", "Damping", "dmp", DTYPE_0B127,
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, CRUMPBIT_RVB_DAMP_FLAT,
+               127u),
 };
 
 _Static_assert(sizeof(crumpBit_descriptors) /
@@ -199,17 +214,21 @@ _Static_assert(CRUMPBIT_PARAM_ENUM_COUNT == CRUMPBIT_PARAM_COUNT,
                "crumpbit_param_t must match the descriptor table");
 
 /*
- * Row-ownership guards (S091 P2 §4; three owners since S091 P3). The masks
- * in CrumpBitParameters.h must not overlap, and together they must name
- * every type row 3..COUNT-1 and nothing else, so appending a row without
- * deciding its owner (shared, sub-type, or grn) stops the build.
+ * Row-ownership guards (S091 P2 §4; three owners since S091 P3, four since
+ * S095 P4 F1 added `rvb`'s). The masks in CrumpBitParameters.h must not
+ * overlap, and together they must name every type row 3..COUNT-1 and
+ * nothing else, so appending a row without deciding its owner (shared,
+ * sub-type, grn or rvb) stops the build.
  */
 _Static_assert((CRUMPBIT_ROWS_SHARED & CRUMPBIT_ROWS_SUBTYPE) == 0u &&
                (CRUMPBIT_ROWS_SHARED & CRUMPBIT_ROWS_GRN) == 0u &&
-               (CRUMPBIT_ROWS_SUBTYPE & CRUMPBIT_ROWS_GRN) == 0u,
+               (CRUMPBIT_ROWS_SUBTYPE & CRUMPBIT_ROWS_GRN) == 0u &&
+               (CRUMPBIT_ROWS_RVB & (CRUMPBIT_ROWS_SHARED |
+                                     CRUMPBIT_ROWS_SUBTYPE |
+                                     CRUMPBIT_ROWS_GRN)) == 0u,
                "a CrumpBit row cannot belong to two stages");
 _Static_assert((CRUMPBIT_ROWS_SHARED | CRUMPBIT_ROWS_SUBTYPE |
-                CRUMPBIT_ROWS_GRN) ==
+                CRUMPBIT_ROWS_GRN | CRUMPBIT_ROWS_RVB) ==
                (CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_COUNT) -
                 CRUMPBIT_ROW_BIT(EFFECT_COMMON_PARAM_COUNT)),
                "every CrumpBit type row needs exactly one owner");
@@ -421,7 +440,8 @@ crumpBit_labels[CRUMPBIT_SUBTYPE_COUNT][CRUMPBIT_LABEL_ROWS] = {
         CB_LABEL("dcy", "Reverb", "Decay"), CB_LABEL("siz", "Reverb", "Size"),
         CB_LABEL("frz", "Reverb", "Freeze"),
         CB_LABEL("wid", "Reverb", "Width"),
-        CB_LABEL("dmp", "Reverb", "Damping"), CB_CAT("Reverb"),
+        /* S095 P4 F1: `ton` is not read by `rvb` (its damping is row 24). */
+        CB_CAT("Reverb"), CB_CAT("Reverb"),
         CB_CAT("Reverb") },
 };
 
@@ -485,21 +505,6 @@ static uint8_t crumpBit_shownSubtype(void)
 }
 
 /*
- * Signed semitones of a bipolar pitch row (63 = 0), clamped to +-36 as the
- * DSP clamps it (crumpBit_rowSemitones(); S091 P5: +-24 before). The row
- * itself stops at 27..99, so the clamp only matters for a value that
- * arrived another way.
- */
-static void crumpBit_formatSemitones(uint8_t value, char *out)
-{
-    const int32_t span = (int32_t)CRUMPBIT_SEMITONE_SPAN;
-    int32_t s = (int32_t)value - 63;
-
-    s = (s > span) ? span : ((s < -span) ? -span : s);
-    numtostrps(out, (int8_t)s);
-}
-
-/*
  * Note name of a MIDI note, the menu's DTYPE_NOTE_NAME convention (octave =
  * note / 12; menu.c setNoteName() is file-static, so this is its twin).
  */
@@ -525,8 +530,6 @@ static void crumpBit_formatNote(uint8_t note, char *out)
  *   `cmb` the note
  *   it plays (a higher value is a lower note); `pit` the window in ms;
  *   `grn` the step division it always snaps to (one half line);
- * - `aux` in `pit`/`grn`, and `p2`/`p3` in `grn`: signed semitones (one
- *   per step, -36..+36, exactly what plays; S091 P5);
  * - `snc` in `pit` (`snp`): `---` since S091 P5 (the interval is whole
  *   semitones already, so there is nothing to snap; `fin` took its cell and
  *   lane); in `dly`: `---` since S091 P6 (no Sync);
@@ -539,10 +542,11 @@ static void crumpBit_formatNote(uint8_t note, char *out)
  * - S091 P5, what the cheaper paths play (S094 P2 AS-13: `typ` and `res`
  *   in `grn`/`rvb` show their stored values again, the resonant SVF being
  *   back there):
- *   - `ton` (`dmp`) in `rvb` above 63 (R1, Q10): `  0`, as 63 shows (the
- *     damping is low-pass only; values above 63 play flat);
- *   - `fbk` in `grn` (G4, Q7): the echo gain in percent, 0..98
- *     (crumpBit_grainFeedbackGain() x 100, rounded).
+ *   - `ton` in `rvb`, and `dmp` (row 24) outside `rvb`: `---` (S095 P4
+ *     F1: `rvb` damps with its own row, plain 0..127, 127 flat);
+ * S095 P4 (T2, user): the pitch rows (`aux`, `p2`, `p3`) and `grn`'s `fbk`
+ * show plain numbers; `rte`, `den`, `spn`/`pos` in `grn` and `sub` keep
+ * their labels, as do the `---` inactive markers.
  * Everything else returns 0 for generic dtype formatting.
  * Why: the stored raw byte stays underneath (pots, storage, automation,
  * locks, LFO); only what is played and shown follows the sub-type.
@@ -598,16 +602,16 @@ static uint8_t crumpBit_uiFormatValue3(uint8_t index, uint8_t value,
         }
         return 0u;
     }
-    if (index == CRUMPBIT_PARAM_AUX) {
-        if (sub == CRUMPBIT_SUBTYPE_PITCH || sub == CRUMPBIT_SUBTYPE_GRAIN) {
-            crumpBit_formatSemitones(value, out);
-            return 1u;
-        }
+    /*
+     * S095 P4 T2: the pitch rows show plain +-63, which is the semitone
+     * count already (stored 27..99, 63 = 0, the row stops at +-36, so the
+     * old clamp never acted). `aux` keeps `---` where its sub-type does not
+     * read it (`dly`, `cmb`, `rvb`): that is the inactive-row marker, as for
+     * `snc` and `fin`, not a value text. `p2`/`p3` need no hook.
+     */
+    if (index == CRUMPBIT_PARAM_AUX &&
+        sub != CRUMPBIT_SUBTYPE_PITCH && sub != CRUMPBIT_SUBTYPE_GRAIN) {
         memcpy(out, "---", 3u);
-        return 1u;
-    }
-    if (index == CRUMPBIT_PARAM_GRAIN_ST2 || index == CRUMPBIT_PARAM_GRAIN_ST3) {
-        crumpBit_formatSemitones(value, out);
         return 1u;
     }
     /*
@@ -654,15 +658,14 @@ static uint8_t crumpBit_uiFormatValue3(uint8_t index, uint8_t value,
                    3u);
         return 1u;
     }
-    /* S091 P5 R1: `rvb` damping above 63 plays flat, so it shows 63's 0. */
-    if (sub == CRUMPBIT_SUBTYPE_REVERB && index == CRUMPBIT_PARAM_TONE &&
-        value > CRUMPBIT_TONE_FLAT) {
-        numtostrps(out, 0);
-        return 1u;
-    }
-    /* S091 P5 G4: `grn` echo gain 0..0.98 as a percentage, 0..98. */
-    if (sub == CRUMPBIT_SUBTYPE_GRAIN && index == CRUMPBIT_PARAM_FEEDBACK) {
-        numtostrpu(out, (uint8_t)((value * 98u + 63u) / 127u), ' ');
+    /*
+     * S095 P4 F1: `rvb` damps with its own row (`dmp`, row 24, plain 0..127
+     * through the dtype), so the shared `ton` does nothing in `rvb`, and
+     * `dmp` does nothing outside it: both show the inactive marker there.
+     */
+    if ((sub == CRUMPBIT_SUBTYPE_REVERB && index == CRUMPBIT_PARAM_TONE) ||
+        (sub != CRUMPBIT_SUBTYPE_REVERB && index == CRUMPBIT_PARAM_RVB_DAMP)) {
+        memcpy(out, "---", 3u);
         return 1u;
     }
     return 0u;
@@ -744,8 +747,10 @@ static uint8_t crumpBit_uiFormatTarget3(uint8_t index, uint8_t value,
  * (`spn`/`wid`) follows `ton` wherever both are on a screen.
  * - crumpBit_layout (`dly`; also the registry's layout): s2 mix sub rte(tim)
  *   fbk; s3 ton dpn(spn) - - (S091 P6: `snc` removed from `dly`).
- * - crumpBit_layoutCombReverb (`cmb`, `rvb`): s2 mix sub rte fbk; s3 snc
- *   ton dpn - (`cmb`: pol ton spn; `rvb`: frz dmp wid).
+ * - crumpBit_layoutComb (`cmb`): s2 mix sub rte fbk; s3 snc(pol) ton
+ *   dpn(spn) -.
+ * - crumpBit_layoutReverb (`rvb`; S095 P4 F1, was shared with `cmb`): s2
+ *   mix sub rte(siz) fbk(dcy); s3 snc(frz) dmp(row 24) dpn(wid) -.
  * - crumpBit_layoutPitch: s2 mix sub aux(pit) fin; s3 fbk rte(win) ton
  *   dpn(spn) (S091 P6: the fine pitch next to the interval).
  * - crumpBit_layoutGrain (user order: freeze, position, length, density,
@@ -777,7 +782,7 @@ const effect_select_layout_t crumpBit_layout = {
     .home_screen = 0u,
 };
 
-static const effect_select_layout_t crumpBit_layoutCombReverb = {
+static const effect_select_layout_t crumpBit_layoutComb = {
     .screen_count = { 0u, 4u, 0u, 0u, 0u, 0u, 0u, 0u },
     .cells = {
         [1] = {
@@ -785,6 +790,23 @@ static const effect_select_layout_t crumpBit_layoutCombReverb = {
             { CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_SUBTYPE,
               CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_FEEDBACK },
             { CRUMPBIT_PARAM_SYNC, CRUMPBIT_PARAM_TONE,
+              CRUMPBIT_PARAM_SUB_PAN, EFFECT_LANE_NONE },
+        },
+    },
+    .custom_row0 = { 0u, 0x01u, 0u, 0u, 0u, 0u, 0u, 0u },
+    .home_sub_page = 1u,
+    .home_screen = 0u,
+};
+
+/* S095 P4 F1: `rvb`'s damping is its own row, in `ton`'s cell. */
+static const effect_select_layout_t crumpBit_layoutReverb = {
+    .screen_count = { 0u, 4u, 0u, 0u, 0u, 0u, 0u, 0u },
+    .cells = {
+        [1] = {
+            CRUMPBIT_LAYOUT_FILTER_SCREENS,
+            { CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_SUBTYPE,
+              CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_FEEDBACK },
+            { CRUMPBIT_PARAM_SYNC, CRUMPBIT_PARAM_RVB_DAMP,
               CRUMPBIT_PARAM_SUB_PAN, EFFECT_LANE_NONE },
         },
     },
@@ -839,8 +861,8 @@ static const effect_select_layout_t crumpBit_layoutGrain = {
 static const struct effect_select_layout *crumpBit_uiLayout(void)
 {
     switch (crumpBit_shownSubtype()) {
-    case CRUMPBIT_SUBTYPE_COMB:
-    case CRUMPBIT_SUBTYPE_REVERB: return &crumpBit_layoutCombReverb;
+    case CRUMPBIT_SUBTYPE_COMB:   return &crumpBit_layoutComb;
+    case CRUMPBIT_SUBTYPE_REVERB: return &crumpBit_layoutReverb;
     case CRUMPBIT_SUBTYPE_PITCH:  return &crumpBit_layoutPitch;
     case CRUMPBIT_SUBTYPE_GRAIN:  return &crumpBit_layoutGrain;
     default:                      return &crumpBit_layout;

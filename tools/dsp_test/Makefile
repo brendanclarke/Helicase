@@ -59,11 +59,12 @@ OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
         stock_tables voicefold fold_tables pwm_tables crumpbit crumpbit_tables \
         crumpbit_elf_check crumpbit_cpu_check alkaline alkaline_tables \
         elf_p4_snapshot elf_p4_check seq_steplen lfo lfo_rate_table alk_post_tables \
-        space space_cpu_check colloid colloid_tables colloid_cpu_check
+        space space_cpu_check colloid colloid_tables colloid_cpu_check \
+        distortion dist_makeup_table
 all: oscillator modulation voice_control sequencer seq_steplen instrument_manager samples \
      sampleoptimize run_modes special_tags stock_tables voicefold fold_tables pwm_tables \
      crumpbit crumpbit_tables alkaline alkaline_tables alk_post_tables lfo lfo_rate_table \
-     space colloid colloid_tables
+     space colloid colloid_tables distortion dist_makeup_table
 
 $(GEN):
 	mkdir -p $(GEN)
@@ -184,6 +185,23 @@ lfo: | $(GEN)
 
 lfo_rate_table:
 	cd $(ROOT) && python3 tools/plots/gen_lfo_rate_table.py --check
+
+# S095 P4 C3: the voice distortion curve with its makeup (modules/distortion.c)
+# on the real helpers and the real generated table.
+distortion: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/distortionMakeup.c \
+	  --object distortion_makeup --out $(GEN)/dist_table.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/distortion.h \
+	  --func distortion_curveSample16 --func distortion_curveSampleF \
+	  --out $(GEN)/dist_curve.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/distortion.c \
+	  --func setDistortionShape --func distortion_calcSampleFloat \
+	  --out $(GEN)/dist_shape.c
+	$(HOSTCC) $(HOSTFLAGS) -I$(GEN) modules/distortion.c -o build/distortion -lm
+	./build/distortion
+
+dist_makeup_table:
+	cd $(ROOT) && python3 tools/plots/gen_dist_makeup.py --check
 
 # Break: the old trigger-then-drain order (-DBREAK_DRAIN_AFTER_FIRE); the
 # program reports law 1 failing and exits 0 only when it does.
@@ -882,6 +900,7 @@ crumpbit: | $(GEN)
 	  --typedef crumpbit_param_t --macro CRUMPBIT_PARAM_COUNT \
 	  --macro CRUMPBIT_ROW_BIT --macro CRUMPBIT_ROWS_SHARED \
 	  --macro CRUMPBIT_ROWS_SUBTYPE --macro CRUMPBIT_ROWS_GRN \
+	  --macro CRUMPBIT_ROWS_RVB --macro CRUMPBIT_RVB_DAMP_FLAT \
 	  --macro CRUMPBIT_SUBTYPE_DELAY --macro CRUMPBIT_SUBTYPE_COMB \
 	  --macro CRUMPBIT_SUBTYPE_PITCH --macro CRUMPBIT_SUBTYPE_GRAIN \
 	  --macro CRUMPBIT_SUBTYPE_REVERB --macro CRUMPBIT_SUBTYPE_COUNT \
@@ -1232,6 +1251,7 @@ space: crumpbit
 	  --typedef space_delay_param_t --typedef space_reverb_param_t \
 	  --typedef space_echo_param_t --macro SPACE_HEADS_STOPS \
 	  --macro SPACE_FREEZE_SHIMMER --macro SPACE_FREEZE_OFF \
+	  --macro SPACE_FREEZE_STOPS --macro SPACE_ROUTING_STOPS \
 	  --macro SPACE_HEADS_DEFAULT --macro SPACE_ROUTING_E2R \
 	  --macro SPACE_ROUTING_R2E --macro SPACE_ROUTING_LOOP \
 	  --macro SPACE_INTERVAL_ROW_MIN --macro SPACE_INTERVAL_ROW_MAX \

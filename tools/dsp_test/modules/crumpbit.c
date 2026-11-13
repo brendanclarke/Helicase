@@ -117,8 +117,9 @@
  *               CB15 `rvb`: stable and bounded at every extreme of rte,
  *                    fbk, snc, ton and dpn; an RT60 of ~0.49 s (fbk 44)
  *                    decays 9..21 dB over 0.125 s; freeze holds the tail
- *                    within +-6 dB over 1 s; S091 P5 R1: every `ton`
- *                    above 63 plays bit-identically to 63;
+ *                    within +-6 dB over 1 s at mid damping (S095 P4 F1:
+ *                    the pole is flat while frozen); `dmp` (row 24) 2m and
+ *                    2m+1 play bit-identically, and 126 equals 127 (flat);
  *               CB16 `bal` (S091 P4): with balance b, the left channel is
  *                    bit-identical to a run at frq - b and balance 0, the
  *                    right to one at frq + b, for every filter type; on
@@ -1362,10 +1363,15 @@ static void law_cb9(void)
 
     expect((CRUMPBIT_ROWS_SHARED & CRUMPBIT_ROWS_SUBTYPE) == 0u &&
            (CRUMPBIT_ROWS_SHARED & CRUMPBIT_ROWS_GRN) == 0u &&
-           (CRUMPBIT_ROWS_SUBTYPE & CRUMPBIT_ROWS_GRN) == 0u,
+           (CRUMPBIT_ROWS_SUBTYPE & CRUMPBIT_ROWS_GRN) == 0u &&
+           (CRUMPBIT_ROWS_RVB & (CRUMPBIT_ROWS_SHARED |
+                                 CRUMPBIT_ROWS_SUBTYPE |
+                                 CRUMPBIT_ROWS_GRN)) == 0u,
            "CB9 stage masks disjoint");
+    /* S095 P4 F1: `rvb`'s damping row (24) is the fourth owner's. */
     expect((CRUMPBIT_ROWS_SHARED | CRUMPBIT_ROWS_SUBTYPE |
-            CRUMPBIT_ROWS_GRN) == rows, "CB9 every type row has one owner");
+            CRUMPBIT_ROWS_GRN | CRUMPBIT_ROWS_RVB) == rows,
+           "CB9 every type row has one owner");
     expect((CRUMPBIT_ROWS_SUBTYPE &
             CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_TONE)) != 0u,
            "CB9 ton is a sub-type row");
@@ -1403,6 +1409,9 @@ static void law_cb9(void)
             /* Granular rows are lanes of `grn` only. */
             if ((CRUMPBIT_ROWS_GRN & CRUMPBIT_ROW_BIT(row)) != 0u)
                 expect(v == CRUMPBIT_SUBTYPE_GRAIN, msg);
+            /* S095 P4 F1: `rvb`'s rows are lanes of `rvb` only. */
+            if ((CRUMPBIT_ROWS_RVB & CRUMPBIT_ROW_BIT(row)) != 0u)
+                expect(v == CRUMPBIT_SUBTYPE_REVERB, msg);
             /* `aux` is a lane of the sub-types that read it. */
             if (row == CRUMPBIT_PARAM_AUX)
                 expect(v == CRUMPBIT_SUBTYPE_PITCH ||
@@ -1428,6 +1437,9 @@ static void law_cb9(void)
     /* S091 P5 follow-up: `pit` lane 6 is `fin`, where `snp` was. */
     expect(crumpBit_laneMap(CRUMPBIT_SUBTYPE_PITCH)[6] ==
            CRUMPBIT_PARAM_PIT_FINE, "CB9 pit lane 6 = fin");
+    /* S095 P4 F1: `rvb` lane 10 is its damping row, where `ton` was. */
+    expect(crumpBit_laneMap(CRUMPBIT_SUBTYPE_REVERB)[10] ==
+           CRUMPBIT_PARAM_RVB_DAMP, "CB9 rvb lane 10 = dmp");
 }
 
 /* Shared helpers for CB10-CB15 -------------------------------------------- */
@@ -2417,7 +2429,9 @@ static void law_cb15(void)
                  &share);
         p3_write(&rt, CRUMPBIT_PARAM_SYNC, (uint8_t)((pass >> 2) & 1u),
                  &share);
-        p3_write(&rt, CRUMPBIT_PARAM_TONE, (pass & 8u) ? 127u : 0u, &share);
+        /* S095 P4 F1: `rvb`'s damping is its own row. */
+        p3_write(&rt, CRUMPBIT_PARAM_RVB_DAMP, (pass & 8u) ? 127u : 0u,
+                 &share);
         p3_write(&rt, CRUMPBIT_PARAM_SUB_PAN, (pass & 16u) ? 127u : 0u,
                  &share);
         for (block = 0u; block < 6900u; block++) {
@@ -2459,6 +2473,12 @@ static void law_cb15(void)
     p3_write(&rt, CRUMPBIT_PARAM_MIX, 127u, &share);
     p3_write(&rt, CRUMPBIT_PARAM_RATE, 64u, &share);
     p3_write(&rt, CRUMPBIT_PARAM_FEEDBACK, 100u, &share);
+    /*
+     * S095 P4 F1: the freeze must hold whatever the damping, so the law
+     * runs at mid damping (63, where a damped loop lost 8 dB a second
+     * before the freeze bypass); the pole is flat while frozen.
+     */
+    p3_write(&rt, CRUMPBIT_PARAM_RVB_DAMP, 63u, &share);
     cb15_run(&rt, &share, 1u, out, tail);
     {
         const double a = cb15_rms(out + 2205u, 2205u);
@@ -2471,14 +2491,16 @@ static void law_cb15(void)
     }
 
     /*
-     * (d) S091 P5 R1: the damping is low-pass only, so every `ton` above
-     * 63 plays bit-identically to 63 (flat), whatever the other rows.
+     * (d) S095 P4 F1: the damping reads crumpBit_toneK[dmp >> 1] (`rvb`'s
+     * own row 24), so `dmp` 2m and 2m+1 play bit-identically whatever the
+     * other rows (and 126 / 127 are both the exact pass-through). Pass 0
+     * checks 126 against 127; the others a random pair.
      */
     for (pass = 0u; pass < 8u; pass++) {
         static uint8_t arena_r1[2][16384];
         CrumpBitRuntime rr[2];
         fx_share_t sh[2];
-        const uint8_t ton = (uint8_t)(64u + rnd() % 64u);
+        const uint8_t even = pass ? (uint8_t)((rnd() % 64u) * 2u) : 126u;
         const uint8_t fbk = (uint8_t)(rnd() & 0x7Fu);
         const uint8_t rte = (uint8_t)(rnd() & 0x7Fu);
         uint32_t bad = 0u;
@@ -2494,8 +2516,8 @@ static void law_cb15(void)
             p3_write(&rr[k], CRUMPBIT_PARAM_MIX, 127u, &sh[k]);
             p3_write(&rr[k], CRUMPBIT_PARAM_FEEDBACK, fbk, &sh[k]);
             p3_write(&rr[k], CRUMPBIT_PARAM_RATE, rte, &sh[k]);
-            p3_write(&rr[k], CRUMPBIT_PARAM_TONE,
-                     k ? ton : CRUMPBIT_TONE_FLAT, &sh[k]);
+            p3_write(&rr[k], CRUMPBIT_PARAM_RVB_DAMP,
+                     (uint8_t)(even + k), &sh[k]);
         }
         for (block = 0u; block < 3000u; block++) {
             float l[2][32], r[2][32];
@@ -2514,8 +2536,8 @@ static void law_cb15(void)
                 bad += !same_bits(l[0][n], l[1][n]) +
                        !same_bits(r[0][n], r[1][n]);
         }
-        snprintf(msg, sizeof msg, "CB15 R1 ton %u = flat: %u samples differ",
-                 ton, bad);
+        snprintf(msg, sizeof msg, "CB15 dmp %u = %u: %u samples differ",
+                 even, even + 1u, bad);
         expect(bad == 0u, msg);
     }
     free(out);

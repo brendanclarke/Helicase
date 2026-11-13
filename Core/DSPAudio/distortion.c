@@ -53,9 +53,25 @@
 ** testing, but the current session-023 config leaves effect placement off
 ** because filter/distortion ITCM measured worse on the CPU monitor. */
 //--------------------------------------------------
+/*
+ * Set the curve from the drive row (S073; S095 P4 C3).
+ *
+ * What: k = 2(s/128) / (1 - s/128) as before; out_gain = m(s)(1 + k), with
+ * m the half-makeup factor of row s (distortion_makeup[], generated).
+ * Why: the curve added up to ~20 dB RMS with no makeup, so `drv` was the
+ * only way a clean kit reached the bus compressor; half is taken back, the
+ * shape is unchanged. Per row change (the IM_SPECIAL_INSTRUMENT_DRIVE
+ * writer, voice init): one table read in place of nothing, the division
+ * as before.
+ * Inputs: dist, drive row 0..127 (values above 127 read entry 127).
+ * Outputs: dist->shape, dist->out_gain.
+ */
 __inline void setDistortionShape(Distortion *dist, uint8_t shape)
 {
-	dist->shape = 2*(shape/128.f)/(1-(shape/128.f));
+	const uint8_t s = (shape > 127u) ? 127u : shape;
+
+	dist->shape = 2*(s/128.f)/(1-(s/128.f));
+	dist->out_gain = distortion_makeup[s] * (1.0f + dist->shape);
 }
 //--------------------------------------------------
 INITCM_EFFECT_NOINLINE void calcDistBlock(const Distortion *dist, int16_t* buf, const uint8_t size)
@@ -71,5 +87,5 @@ INITCM_EFFECT_NOINLINE void calcDistBlock(const Distortion *dist, int16_t* buf, 
 
 INITCM_EFFECT float distortion_calcSampleFloat(const Distortion *dist, float x)
 {
-	return (1+dist->shape)*x/(1+dist->shape*fabsf(x));
+	return dist->out_gain*x/(1+dist->shape*fabsf(x));
 }

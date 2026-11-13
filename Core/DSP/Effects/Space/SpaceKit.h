@@ -348,8 +348,8 @@ void sk_clear(const fx_share_t *share, uint32_t off, uint32_t bytes);
 /*
  * The drain (D25, F3). sk_drainBegin(): 1 when the share's control block is
  * owned by `owner` (the outgoing buffer user; a stale block never starts a
- * drain), then resets its counters; 0 otherwise (the switch cuts, as for
- * StereoFilter, SD11). sk_drainStep(): per drain block, scales io by the
+ * drain), then resets its counters; 0 otherwise (the switch cuts, as
+ * for OFF, SD11). sk_drainStep(): per drain block, scales io by the
  * envelope (1.0, then linear to 0 over the last SK_DRAIN_FADE_BLOCKS of
  * SK_DRAIN_BLOCKS), tracks the block peak, and returns 1 when the drain is
  * over (the peak stayed below SK_DRAIN_QUIET for SK_DRAIN_QUIET_BLOCKS, or
@@ -376,7 +376,7 @@ uint8_t sk_drainStep(effect_io_t *io);
 uint8_t sk_idleBefore(effect_io_t *io, uint8_t running);
 void sk_idleAfter(const effect_io_t *io);
 float sk_idleGain(const fx_share_t *share);
-/* Awake at full return (every runtime switch: StereoFilter never writes the block). */
+/* Awake at full return (every runtime switch: OFF never writes the block). */
 void sk_idleReset(const fx_share_t *share);
 float sk_peak4(const effect_io_t *io);
 

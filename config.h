@@ -249,7 +249,7 @@
  *
  * When DEV_MODE_DIAGNOSTIC is enabled and this id is nonzero, main.c commits
  * it through effects_changeType() immediately after normal boot Scene
- * activation. Id 1 is StereoFilter (`flt`). Production builds ignore this
+ * activation. Id 1 is CrumpBit (`cbt`). Production builds ignore this
  * hook. It exists so Steps 4–5 could exercise registry, AutoSave token, and
  * DSP initialization before a user path existed. From Step 7 the Effect
  * page's `typ` view is the normal path; the hook remains for bench diagnostics.

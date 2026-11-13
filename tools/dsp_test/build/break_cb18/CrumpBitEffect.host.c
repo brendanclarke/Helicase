@@ -833,6 +833,8 @@ static __attribute__((cold)) void crumpBit_init(void *rt_void,
     rt->filter_bal = 63u;
     /* S091 P5 follow-up: `pit` fine at its centre (the voice `fin` 63). */
     rt->pit_fine = 63u;
+    /* S095 P4 F1: `rvb` damping flat (its row's default). */
+    rt->rvb_damp = CRUMPBIT_RVB_DAMP_FLAT;
     /*
      * S091 P5 X2: no table is trusted across an entry; the first block
      * builds it for the rows the forced resolution wrote.
@@ -987,7 +989,8 @@ static __attribute__((cold)) void crumpBit_exportHandoff(const void *rt_void,
  * 15..21 (`aux` and the granular rows) are stored whatever the active
  * sub-type, so a switch keeps every value (plan §2.4). S091 P4: row 20 is
  * the grain Length (was the level jitter), row 22 the shared filter
- * balance. Inputs: runtime, row index, value
+ * balance. S095 P4 F1: row 24 is `rvb`'s damping, stored whatever the
+ * active sub-type, as the other sub-type rows. Inputs: runtime, row index, value
  * (already clamped to the descriptor maximum). Output: runtime fields.
  * Caller: effects_service(). Affiliates: crumpBit_descriptors.
  */
@@ -1023,6 +1026,8 @@ static void crumpBit_writeParam(void *rt_void, uint8_t index, uint8_t value)
     case CRUMPBIT_PARAM_GRAIN_WIDTH:    rt->grain_width = value;       break;
     /* S091 P5 follow-up: `pit`'s fine pitch (row 23). */
     case CRUMPBIT_PARAM_PIT_FINE:       rt->pit_fine = value;          break;
+    /* S095 P4 F1: `rvb`'s own damping row (row 24). */
+    case CRUMPBIT_PARAM_RVB_DAMP:       rt->rvb_damp = value;          break;
     default:                                                           break;
     }
 }
@@ -2650,9 +2655,10 @@ static inline float crumpBit_exp2Neg(float x)
  * lanes = four lines); the line delays d_k = base_k x size (`rte`), integer,
  * clamped to the buffer; the line gains g_k = 2^(lg x d_k) with lg from
  * crumpBit_reverbDecay (`fbk`, RT60 0.1-10 s), or near 1 while frozen (`snc`,
- * input muted); the per-line damping (`ton`; S091 P5 R1: low-pass only,
- * k = crumpBit_toneK[min(ton, 63)], so 63 and above are an exact
- * pass-through and the high-pass half of the row plays flat in `rvb`); the
+ * input muted); the per-line damping (`dmp`, row 24, S095 P4 F1: low-pass
+ * only, k = crumpBit_toneK[dmp >> 1], 0 the darkest, 126 and 127 (the
+ * default) an exact pass-through, and exactly flat while frozen so a freeze
+ * holds; S091 P5 R1 had read the shared `ton` row's 0..63); the
  * width (`dpn`); the per-block gate that keeps feedback and wet off until
  * `valid` covers the longest line (no stale bytes recirculate after an
  * Effect type change).
@@ -2695,12 +2701,16 @@ static CRUMPBIT_NOINLINE void crumpBit_runReverb(CrumpBitRuntime *rt,
     float side_k;
     float mix = b->mix;
     /*
-     * tone_k (R1): the damping pole, the `ton` table's low-pass half only;
-     * crumpBit_toneK[63] is exactly 1, so s_k += 1 (y_k - s_k) gives
-     * s_k = y_k bit for bit (flat).
+     * tone_k (S095 P4 F1, user: a low-pass-only tone control is 0..127, 127
+     * flat and the default; freezes should hold): the damping pole reads
+     * `rvb`'s own row (`dmp`, row 24) through the `ton` table's low-pass
+     * half, entry dmp >> 1 (0..63); crumpBit_toneK[63] is exactly 1, so 126
+     * and 127 give s_k = y_k bit for bit (flat). While frozen (`snc`) the
+     * pole is exactly flat whatever `dmp` is: a damped loop loses its highs
+     * every pass, which made a freeze at mid damping fade by 8 dB a second.
+     * Per block (a select and a shift); no per-sample change.
      */
-    const float tone_k = crumpBit_toneK[(rt->tone_raw > CRUMPBIT_TONE_FLAT)
-                                        ? CRUMPBIT_TONE_FLAT : rt->tone_raw];
+    const float tone_k = rt->sync ? 1.0f : crumpBit_toneK[rt->rvb_damp >> 1];
     float s0 = rv->damp[0];
     float s1 = rv->damp[1];
     float s2 = rv->damp[2];
@@ -3303,7 +3313,9 @@ static uint8_t crumpBit_effectiveMax(const void *rt_void, uint8_t index,
  *                                              S091 P5 follow-up; dly: none,
  *                                              S091 P6)
  *       9    spn   spn   spn   dpn   dpn     (grn: Position; rvb: width)
- *      10    ton   ton   ton   lng   ton     (grn: Length, row 20)
+ *      10    ton   ton   ton   lng   dmp     (grn: Length, row 20; rvb:
+ *                                              its damping, row 24, S095
+ *                                              P4 F1)
  *      14    -     -     aux   aux   -       (pit: interval; grn: P1)
  *      15    -     -     -     spr   -
  *   S091 P4 (plan Q11, accepted): the `grn` pool carries its performance
@@ -3351,10 +3363,11 @@ static const uint8_t crumpBit_laneMaps[CRUMPBIT_SUBTYPE_COUNT]
         CRUMPBIT_PARAM_FILTER_TYPE, CRUMPBIT_PARAM_FILTER_FREQ,
         CRUMPBIT_PARAM_FILTER_RESO, CRUMPBIT_PARAM_AUX,
         CRUMPBIT_PARAM_GRAIN_SPREAD },
+    /* S095 P4 F1: lane 10 drives `rvb`'s own damping row (`dmp`). */
     [CRUMPBIT_SUBTYPE_REVERB] = { CRUMPBIT_LANES_SHARED_HEAD,
         CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SYNC,
         CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN, CRUMPBIT_PARAM_SUB_PAN,
-        CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FILTER_TYPE,
+        CRUMPBIT_PARAM_RVB_DAMP, CRUMPBIT_PARAM_FILTER_TYPE,
         CRUMPBIT_PARAM_FILTER_FREQ, CRUMPBIT_PARAM_FILTER_RESO,
         EFFECT_LANE_NONE, EFFECT_LANE_NONE },
 };

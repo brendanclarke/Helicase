@@ -71,6 +71,8 @@
 #include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* (name asserts) */
 #include <string.h>
 #include <stdint.h>
+#include <math.h>              /* S095 P4 C5: log2f/lrintf/fmaxf (the readout) */
+#include "BusCompressor.h"     /* S095 P4 C5: busComp_meterRaw() */
 
 #define MENU_COMPACT_SCREEN_CELLS 4u
 #define MENU_STATIC_SUBPAGE_CELLS 8u
@@ -1386,6 +1388,7 @@ static const Name valueNames[NUM_NAMES] = {
     {SHORT_BUS_COMP_AMOUNT,CAT_SCENE,LONG_BUS_COMP_AMOUNT},
     {SHORT_BUS_COMP_TIME,CAT_SCENE,LONG_BUS_COMP_TIME},
     {SHORT_BUS_COMP_SIDECHAIN,CAT_SCENE,LONG_BUS_COMP_SIDECHAIN},
+    {SHORT_BUS_COMP_GR,CAT_SCENE,LONG_BUS_COMP_GR},
     /* S078 per-track run mode: run / Track / RunMode (S078 P4 relabel). */
     {SHORT_PLAY_MODE,CAT_TRACK,LONG_PLAY_MODE},
     /* S079 step specials: cdn/tim/rol/rtm/rfl on the STEP page. */
@@ -2089,6 +2092,11 @@ static uint8_t menu_patStoreUseWidgetVisible(void);
 static void menu_formatPatStoreUsePercent3(char *buf);
 static void menu_formatPatStoreUsePercent4(char *buf);
 static void menu_displayPatStoreUseEdit(void);
+/* S095 P4 C5: the bus-compressor readout (same repaint paths as StoreUse). */
+static uint8_t menu_busCompGrWidgetVisible(void);
+static void menu_busCompGrSample(void);
+static void menu_formatBusCompGr3(char *buf);
+static void menu_displayBusCompGrEdit(void);
 static void menu_formatPresetNumber3(char *dst, uint16_t zero_based_slot);
 static void menu_sendEditedParameter(uint16_t paramNr, uint8_t value);
 static void setNoteName(uint8_t num, char *buf);
@@ -12069,6 +12077,103 @@ static void menu_formatPatStoreUsePercent4(char *buf)
     buf[3] = '%';
 }
 
+/*
+ * Bus-compressor readout hold (S095 P4 C5; 8 B .bss, approved 2026-11-13).
+ *
+ * What: the loudest detector power and the deepest reduction seen since the
+ * readout last painted, -1 / +1 meaning "nothing seen". Why: the cell
+ * repaints at the CPU widget's cadence (500 ms); a drum bus's reduction
+ * changes every hit, so an instant read would show noise. The hold is fed
+ * every foreground pass while the readout is visible
+ * (menu_busCompGrSample()) and cleared when it paints.
+ * Affiliates: busComp_meterRaw(), menu_formatBusCompGr3(),
+ * menu_displayBusCompGrEdit().
+ */
+static float menu_busCompPowerHold = -1.0f;
+static float menu_busCompGrHold = 1.0f;
+
+/* Take one meter reading into the hold (foreground, every pass while shown). */
+static void menu_busCompGrSample(void)
+{
+    float power;
+    float gr;
+
+    if (!busComp_meterRaw(&power, &gr))
+        return;
+    menu_busCompPowerHold = fmaxf(menu_busCompPowerHold, power);
+    menu_busCompGrHold = fminf(menu_busCompGrHold, gr);
+}
+
+/*
+ * The held reduction in whole dB, or 0 with `off` when the compressor is
+ * off. Clears the hold. Output: nonzero when a value exists.
+ * S095 P4 F2: a paint with no sample since the last one (the first paint on
+ * arriving at the cell, a second repaint in the same pass) reads the meter
+ * once directly instead of showing `off`; `off` means busComp_meterRaw()
+ * returned 0, i.e. `cmp` is off.
+ */
+static uint8_t menu_busCompGrTake(int8_t *level_db, int8_t *gr_db)
+{
+    uint8_t have = (uint8_t)(menu_busCompGrHold <= 0.0f);
+    float l;
+
+    if (!have) {
+        menu_busCompGrSample();
+        have = (uint8_t)(menu_busCompGrHold <= 0.0f);
+    }
+    if (have) {
+        l = 3.0103f * log2f(menu_busCompPowerHold + 1.0e-12f);
+        *level_db = (int8_t)((l < -99.0f) ? -99 : (int32_t)lrintf(l));
+        *gr_db = (int8_t)((menu_busCompGrHold < -99.0f) ? -99
+                          : (int32_t)lrintf(menu_busCompGrHold));
+    }
+    menu_busCompPowerHold = -1.0f;
+    menu_busCompGrHold = 1.0f;
+    return have;
+}
+
+/*
+ * Compact cell: the held reduction in signed dB, written as the +-63 rows
+ * write signed values (numtostrps(): "  0", "- 6", "-12"), or "off".
+ */
+static void menu_formatBusCompGr3(char *buf)
+{
+    int8_t level;
+    int8_t gr;
+
+    if (!menu_busCompGrTake(&level, &gr)) {
+        memcpy(buf, "off", 3u);
+        return;
+    }
+    numtostrps(buf, gr);
+}
+
+/*
+ * Click-in view: "Comp in / GR" over "in-18dB gr -6dB" (input level from the
+ * 5 ms detector, held reduction), or "off" when cmp is off.
+ */
+static void menu_displayBusCompGrEdit(void)
+{
+    static const char title[] = "Comp in / GR";
+    int8_t level;
+    int8_t gr;
+    uint8_t i;
+
+    memset(&editDisplayBuffer[0][0], ' ', 16u);
+    memset(&editDisplayBuffer[1][0], ' ', 16u);
+    for (i = 0u; i < sizeof(title) - 1u && i < 16u; i++)
+        editDisplayBuffer[0][i] = title[i];
+    if (!menu_busCompGrTake(&level, &gr)) {
+        memcpy(&editDisplayBuffer[1][13], "off", 3u);
+        return;
+    }
+    memcpy(&editDisplayBuffer[1][0], "in", 2u);
+    numtostrps(&editDisplayBuffer[1][2], level);
+    memcpy(&editDisplayBuffer[1][5], "dB gr", 5u);
+    numtostrps(&editDisplayBuffer[1][11], gr);
+    memcpy(&editDisplayBuffer[1][14], "dB", 2u);
+}
+
 static void setNoteName(uint8_t num, char *buf)
 {
     uint8_t n = num % 12;
@@ -15098,6 +15203,11 @@ static void menu_repaintGeneric(void)
             menu_displayPatStoreUseEdit();
             return;
         }
+        if (cell.kind == MENU_CELL_STATIC &&
+            cell.static_param == PAR_BUS_COMP_GR) {
+            menu_displayBusCompGrEdit();
+            return;
+        }
 
         curParmVal = menu_cellDisplayValue(&cell);
         dtype = (uint8_t)(menu_cellDtype(&cell) & 0x0f);
@@ -15403,6 +15513,9 @@ static void menu_repaintGeneric(void)
             } else if (cell.kind == MENU_CELL_STATIC &&
                        cell.static_param == PAR_PAT_STORE_USE) {
                 menu_formatPatStoreUsePercent3(valueAsText);
+            } else if (cell.kind == MENU_CELL_STATIC &&
+                       cell.static_param == PAR_BUS_COMP_GR) {
+                menu_formatBusCompGr3(valueAsText);
             } else {
                 menu_formatCellValue3(&cell, valueAsText);
             }
@@ -15517,7 +15630,8 @@ static void menu_encoderChangeParameter(int8_t inc)
         return;
     if (cell.kind == MENU_CELL_STATIC &&
         (cell.static_param == PAR_RUNTIME_CPU_USE ||
-         cell.static_param == PAR_PAT_STORE_USE))
+         cell.static_param == PAR_PAT_STORE_USE ||
+         cell.static_param == PAR_BUS_COMP_GR))
         return;
 
     /* Held SEQ steps write lane locks, never retained menu values (D2). */
@@ -17651,7 +17765,8 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
     }
     if (cell.kind == MENU_CELL_STATIC &&
         (cell.static_param == PAR_RUNTIME_CPU_USE ||
-         cell.static_param == PAR_PAT_STORE_USE)) return;
+         cell.static_param == PAR_PAT_STORE_USE ||
+         cell.static_param == PAR_BUS_COMP_GR)) return;
 
     value = menu_cellDisplayValue(&cell);
     if (menu_cellIsLfoTargetVoice(&cell)) {
@@ -17798,6 +17913,29 @@ static uint8_t menu_patStoreUseWidgetVisible(void)
                          cell.static_param == PAR_PAT_STORE_USE);
     }
     return (uint8_t)(activePage == 1u && activeParameter >= 7u);
+}
+
+/*
+ * Report whether the compressor readout is visible (S095 P4 C5).
+ *
+ * What: the Scene settings sub-page's second screen (column 4) or the
+ * readout's own click-in view. Output: nonzero when sampling and repainting
+ * are useful. Affiliates: menu_serviceRuntimeWidgets(), PAR_BUS_COMP_GR.
+ */
+static uint8_t menu_busCompGrWidgetVisible(void)
+{
+    uint8_t activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+    uint8_t activeParameter = menuIndex & MASK_PARAMETER;
+
+    if (menu_activePage != MENU_MIDI_PAGE)
+        return 0u;
+    if (editModeActive) {
+        menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
+        return (uint8_t)(cell.kind == MENU_CELL_STATIC &&
+                         cell.static_param == PAR_BUS_COMP_GR);
+    }
+    return (uint8_t)(activePage == MENU_GLOBAL_SCENE_SUBPAGE &&
+                     activeParameter >= 4u);
 }
 
 void menu_serviceRuntimeWidgets(void)
@@ -17957,6 +18095,13 @@ void menu_serviceRuntimeWidgets(void)
 
     menu_sceneLiveRefreshService();
 
+    /*
+     * S095 P4 C5: feed the compressor readout's hold every pass while it is
+     * shown (two float compares; nothing when hidden, the page test first).
+     */
+    if (menu_activePage == MENU_MIDI_PAGE && menu_busCompGrWidgetVisible())
+        menu_busCompGrSample();
+
     if ((uint16_t)(now - menu_cpuUseLastRefresh) < MENU_CPU_USE_REFRESH_MS)
         return;
     menu_cpuUseLastRefresh = now;
@@ -17983,7 +18128,8 @@ void menu_serviceRuntimeWidgets(void)
     /* A CPU cadence also provides a cheap repaint opportunity for the
      * retained Pattern value; no Pattern bitmap rescan occurs here. */
     if (!screensaver_isActive() &&
-        (menu_cpuUseWidgetVisible() || menu_patStoreUseWidgetVisible()))
+        (menu_cpuUseWidgetVisible() || menu_patStoreUseWidgetVisible() ||
+         menu_busCompGrWidgetVisible()))
         menu_repaint();
 }
 
@@ -20502,7 +20648,8 @@ uint8_t menu_getViewedPattern(void) { return menu_shownPattern; }
  * BC18 diagnostic check: the Scene-owned compressor page stays last.
  *
  * What: verifies the named page holds cmp first (top1), cam/ctm/csc after it,
- * an empty second half (top5), and that no populated settings page follows
+ * the `cgr` readout in top5 (S095 P4 C5) and nothing after it, and that no
+ * populated settings page follows
  * it (S074 rule; S080 P2 moves the page to sub-page 3 with the four Scene
  * cells together). Why: menu cues and SELECT traversal rely on the
  * append-only placement rule. Output: silent success; on failure, a 1.5 s
@@ -20515,7 +20662,8 @@ static void menu_devCheckGlobalSceneSubPage(void)
         &menuPages[MENU_MIDI_PAGE][MENU_GLOBAL_SCENE_SUBPAGE];
     uint8_t bad = (uint8_t)(scene_page->top1 != TEXT_BUS_COMP_MODE ||
                             scene_page->top4 != TEXT_BUS_COMP_SIDECHAIN ||
-                            scene_page->top5 != TEXT_EMPTY);
+                            scene_page->top5 != TEXT_BUS_COMP_GR ||
+                            scene_page->top6 != TEXT_EMPTY);
     uint8_t sub_page;
     uint16_t t0;
 

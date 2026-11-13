@@ -422,8 +422,8 @@ fxbuf_handoff_t *fxbuf_handoffBeginExit(void)
     /*
      * S095 P1 (D24): a fresh exit describes no segments until the outgoing
      * type's export_handoff fills them (the position loop below clears
-     * slots 12..15). Without this, a type that exports none (StereoFilter,
-     * OFF) would leave the previous owner's wrap domain and gains behind,
+     * slots 12..15). Without this, a type that exports none (OFF)
+     * would leave the previous owner's wrap domain and gains behind,
      * and an entering type would feed stale audio.
      */
     h->effect_wrap_offset = 0u;

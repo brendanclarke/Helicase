@@ -1,0 +1,820 @@
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/oscillator.c ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c \
+	  -o build/oscillator -lm
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes -DOSC_POS_BEND_CAP=8 -DOSC_POS_TEST_CAP \
+	  modules/oscillator.c ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/oscillator_cap -lm
+./build/oscillator
+oscillator ring   failures: 0
+oscillator sync   failures: 0
+oscillator stock  failures: 0
+oscillator pos    failures: 0
+oscillator type   failures: 0
+oscillator sample failures: 0
+oscillator wtb    failures: 0
+oscillator itp    failures: 0
+oscillator fmramp failures: 0
+oscillator pwm    failures: 0
+oscillator failures: 0
+./build/oscillator_cap
+oscillator pos    failures: 0
+oscillator failures: 0
+mkdir -p build/break_fmr1 build/break_fmr2
+sed 's/osc_wtbFmBlendRampBlock(osc, mod, buf, size, gain, d0, dStep);/osc_wtbFmRampBlock(osc, mod, buf, size, gain, d0, dStep);/' \
+	  build/gen/Oscillator.host.c > build/break_fmr1/Oscillator.host.c
+cc -Ibuild/break_fmr1 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/oscillator.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/oscillator_break_fmr1 -lm
+oscillator_break_fmr1: caught (law FR1 fails as expected)
+sed 's/float d = d0;/float d = d0 + dStep;/' \
+	  build/gen/Oscillator.host.c > build/break_fmr2/Oscillator.host.c
+cc -Ibuild/break_fmr2 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/oscillator.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/oscillator_break_fmr2 -lm
+oscillator_break_fmr2: caught (law FR2 fails as expected)
+# S094 P1 S3 breaks: forward second read fails PW2; unlimited width slew fails PW5.
+mkdir -p build/break_pwm1 build/break_pwm2
+sed 's/const uint32_t ib = (ia - d) \& 0x3FFu;/const uint32_t ib = (ia + d) \& 0x3FFu;/' \
+	  build/gen/Oscillator.host.c > build/break_pwm1/Oscillator.host.c
+cc -Ibuild/break_pwm1 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/oscillator.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/oscillator_break_pwm1 -lm
+oscillator_break_pwm1: caught (law PW2 fails as expected)
+sed 's/if (d > OSC_PWM_SLEW_STEPS)/if (0)/' \
+	  build/gen/Oscillator.host.c > build/break_pwm2/Oscillator.host.c
+cc -Ibuild/break_pwm2 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/oscillator.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/oscillator_break_pwm2 -lm
+oscillator_break_pwm2: caught (law PW5 fails as expected)
+# S094 P4 break: Rec planned on the Saw width table must fail PW2 and PW10.
+mkdir -p build/break_pwm3
+sed 's/pl->d = oscPwmDRec\[k\];/pl->d = oscPwmDSaw[k];/' \
+	  build/gen/Oscillator.host.c > build/break_pwm3/Oscillator.host.c
+cc -Ibuild/break_pwm3 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/oscillator.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/oscillator_break_pwm3 -lm
+oscillator_break_pwm3: caught (laws PW2/PW10 fail as expected)
+python3 extract.py --src ../../Core/DSPAudio/modulationNode.c \
+	  --func modNode_interpStampOf --func modNode_setWaveInterpEnabled \
+	  --func modNode_setItpReserved --func modNode_resetTargets \
+	  --func modNode_interpClaim \
+	  --out build/gen/modulation_interp.c
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/modulation.c -o build/modulation -lm
+./build/modulation
+modulation failures: 0
+python3 extract.py --src ../../Core/MIDI/MidiVoiceControl.c \
+	  --func voiceControl_popPendingBatch --func voiceControl_prepareTrigger \
+	  --func voiceControl_fireTrigger --func voiceControl_processPending \
+	  --rename voiceControl_irqSave=sta_irqSave \
+	  --rename voiceControl_irqRestore=sta_irqRestore \
+	  --out build/gen/voice_control_pending.c
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/voice_control.c -o build/voice_control -lm
+./build/voice_control
+voice_control failures: 0
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -DBREAK_DRAIN_AFTER_FIRE modules/voice_control.c \
+	  -o build/voice_control_break -lm
+./build/voice_control_break
+FAIL: law 1: drain fourth
+FAIL: law 1: trigger voice 0 fifth
+FAIL: law 1: trigger voice 1 sixth
+FAIL: law 4: restore then drain
+FAIL: law 4: leftover voice restores first
+FAIL: law 4: drain after the leftover restore
+voice_control failures: 6
+python3 extract.py --src ../../Core/Sequencer/sequencer.c \
+	  --func seq_drainPendingAutomationTo --func seq_pendingAutomationMark \
+	  --out build/gen/sequencer_drain.c
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/sequencer.c -o build/sequencer -lm
+./build/sequencer
+sequencer failures: 0
+mkdir -p build/break_seq
+sed 's/uint8_t i = seq_pending_automation_done;/uint8_t i = 0u;/' \
+	  build/gen/sequencer_drain.c > build/break_seq/sequencer_drain.c
+cc -Ibuild/break_seq -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/sequencer.c \
+	  -o build/sequencer_break -lm
+sequencer_break: caught (law 2 fails as expected)
+python3 extract.py --src ../../Core/Sequencer/sequencer.c --func seq_trackStepSamples \
+	  --out build/gen/seq_stepsamples.c
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I../../Core/Sequencer modules/seq_steplen.c \
+	  ../../Core/Sequencer/StepScale.c -o build/seq_steplen -lm
+./build/seq_steplen
+seq_steplen: OK (0 failures)
+mkdir -p build/break_steplen
+sed 's/const uint64_t ticksQ8 = (uint64_t)stepScale_ticksQ8(scale);/const uint32_t ticksQ8 = stepScale_ticksQ8(scale);/' \
+	  build/gen/seq_stepsamples.c > build/break_steplen/seq_stepsamples.c
+cc -Ibuild/break_steplen -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I../../Core/Sequencer \
+	  modules/seq_steplen.c ../../Core/Sequencer/StepScale.c -o build/seq_steplen_break -lm
+seq_steplen_break: caught (AL-T fails as expected)
+python3 extract.py --src ../../Core/Menu/menu.h --enum Datatypes --out build/gen/im_dtypes.inc
+python3 extract.py --src ../../Core/Menu/MenuText.h --macro MENU_OSC_TYPE --out build/gen/im_menuid.inc
+python3 extract.py --src ../../Core/DSP/Instruments/Drum/DrumParameters.c \
+	  --macro ROW_SELECT_SPECIAL --out build/gen/im_rowmacro.inc
+python3 extract.py --src ../../Core/DSP/Instruments/Drum/DrumParameters.c \
+	  --macro ROW_SELECT_ONOFF_SPECIAL --out build/gen/im_onoffmacro.inc
+python3 extract.py --src ../../Core/Menu/MenuText.h \
+	  --macro ONOFF_TAG_OSC_RUN --macro ONOFF_TAG_VOICE_CHAIN \
+	  --out build/gen/im_onofftag.inc
+python3 extract.py --src ../../Core/DSP/Instruments/Drum/DrumParameters.c \
+	  --typedef drum_param_index_t --out build/gen/im_index.inc
+python3 extract.py --src ../../Core/DSP/Instruments/InstrumentManager.c \
+	  --func instrumentManager_targetValid --out build/gen/im_gate.c
+python3 extract.py --src ../../Core/Sequencer/sequencer.c --func seq_rampDtypeOk \
+	  --out build/gen/im_ramp.c
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/instrument_manager.c -o build/instrument_manager -lm
+./build/instrument_manager
+instrument_manager failures: 0
+mkdir -p build/break_gate build/break_row
+sed 's/(descriptor->flags & INSTRUMENT_PARAM_FLAG_SELECTOR)/0/' \
+	  build/gen/im_gate.c > build/break_gate/im_gate.c
+cc -Ibuild/break_gate -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/instrument_manager.c \
+	  -o build/instrument_manager_break_gate -lm
+instrument_manager_break_gate: caught (law 3 fails as expected)
+sed 's/(uint8_t)(DTYPE_MENU | (menu_ << 4))/(uint8_t)DTYPE_0B127/' \
+	  build/gen/im_rowmacro.inc > build/break_row/im_rowmacro.inc
+cc -Ibuild/break_row -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/instrument_manager.c \
+	  -o build/instrument_manager_break_row -lm
+instrument_manager_break_row: caught (law 4 fails as expected)
+mkdir -p build/break_onoff
+sed 's/DTYPE_ON_OFF | ((tag_) << 4)/DTYPE_ON_OFF/' \
+	  build/gen/im_onoffmacro.inc > build/break_onoff/im_onoffmacro.inc
+cc -Ibuild/break_onoff -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/instrument_manager.c \
+	  -o build/instrument_manager_break_onoff -lm
+instrument_manager_break_onoff: caught (law 7 fails as expected)
+python3 extract.py --src ../../Core/Hardware/SD/storageTypes.c \
+	  --func storage_naturalLower --func storage_naturalCompare \
+	  --func storage_displayNameFromLfn --out build/gen/samples_order.c
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h modules/samples.c ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c \
+	  -o build/samples -lm
+./build/samples
+samples catalogue failures: 0
+samples install   failures: 0
+rows: 600-point frames: harmonics within 0.0001 dB, other bins below -113.5 dBFS
+rows: 2,048-point frame: harmonic 100 -0.0001 dB, harmonic 700 at -110.2 dBFS
+rows: band edge (harmonic 270 of 600): -0.0010 dB, images -85.2 dBFS
+rows: 253948 B free after the big sample
+samples rows      failures: 0
+samples order     failures: 0
+samples failures: 0
+mkdir -p build/break_cat
+sed 's|install_fault = (uint8_t)(sampleFlash_eraseAllSamples() != 0);|install_fault = (uint8_t)(sampleFlash_eraseAllSamples() != 0); { sample_catalogue_header_t bh; uint32_t ba; memset(\&bh, 0, sizeof(bh)); bh.magic = SAMPLE_CATALOGUE_MAGIC; bh.version = SAMPLE_CATALOGUE_VERSION; bh.sample_entry_bytes = SAMPLE_ENTRY_BYTES; bh.wavetable_entry_bytes = WAVETABLE_ENTRY_BYTES; ba = SAMPLE_CATALOGUE_START_ADDRESS; (void)sampleFlash_writeBytes(\&ba, (const uint8_t *)\&bh, sizeof(bh)); }|' \
+	  ../../Core/SampleRom/SampleInstall.c > build/break_cat/SampleInstall.c
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I../../Core/SampleRom -I. -I../../Core/SampleRom -include cat_host.h \
+	  modules/samples.c ../../Core/SampleRom/SampleMemory.c \
+	  build/break_cat/SampleInstall.c catalogue_host.c \
+	  -o build/samples_break -lm
+samples_break: caught (catalogue law 3 fails as expected)
+mkdir -p build/break_rows
+sed 's|#define SAMPLE_INSTALL_ROW_HALF 32 |#define SAMPLE_INSTALL_ROW_HALF 16 |' \
+	  ../../Core/SampleRom/SampleInstall.c > build/break_rows/SampleInstall.c
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I../../Core/SampleRom -I. -I../../Core/SampleRom -include cat_host.h \
+	  modules/samples.c ../../Core/SampleRom/SampleMemory.c \
+	  build/break_rows/SampleInstall.c catalogue_host.c \
+	  -o build/samples_break_rows -lm
+samples_break_rows: caught (rows law 4 fails as expected)
+python3 modules/sampleoptimize.py
+sampleoptimize failures: 0
+python3 extract.py --src ../../Core/DSPAudio/SlopeEg2.h \
+	  --typedef SlopeEg2 --out build/gen/rm_slope_type.c
+python3 extract.py --src ../../Core/DSPAudio/SlopeEg2.h \
+	  --macro EG_STOPPED --macro EG_A --macro EG_D --macro EG_REPEAT \
+	  --out build/gen/rm_slope_consts.c
+python3 extract.py --src ../../Core/DSPAudio/SlopeEg2.c \
+	  --func slopeEg2_setSlope --func slopeEg2_init \
+	  --func slopeEg2_trigger \
+	  --func slopeEg2_retriggerFrom --func slopeEg2_calcSlopeValue \
+	  --func slopeEg2_calc \
+	  --out build/gen/rm_slope_eg.c
+python3 extract.py --src ../../Core/DSPAudio/SlopeEg2.h \
+	  --func slopeEg2_isAudibleGain --out build/gen/rm_audible.c
+python3 extract.py --src ../../Core/DSPAudio/BufferTools.h \
+	  --func bufferTool_floatToInt16Store --func bufferTool_satAdd16 \
+	  --func bufferTool_interpolatedGain --out build/gen/rm_buffertools.c
+python3 extract.py --src ../../Core/DSPAudio/voicePostChain.h \
+	  --func voicePost_drum --func voicePost_mixAddGainDist \
+	  --func voicePost_addGainDist --out build/gen/rm_postchain.c
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/run_modes.c -o build/run_modes -lm
+In file included from modules/run_modes.c:60:
+build/gen/rm_slope_eg.c:21:23: warning: implicit conversion from 'float' to 'uint8_t' (aka 'unsigned char') changes value from 0.5 to 0 [-Wliteral-conversion]
+   21 |         slopeEg2_setSlope(eg,0.5f);
+      |         ~~~~~~~~~~~~~~~~~    ^~~~
+1 warning generated.
+./build/run_modes
+run_modes failures: 0
+mkdir -p build/break_rm
+sed 's|v = currentGain / denom;|v = currentGain;|' \
+	  build/gen/rm_slope_eg.c > build/break_rm/rm_slope_eg.c
+cc -Ibuild/break_rm -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/run_modes.c \
+	  -o build/run_modes_break -lm
+In file included from modules/run_modes.c:60:
+build/break_rm/rm_slope_eg.c:21:23: warning: implicit conversion from 'float' to 'uint8_t' (aka 'unsigned char') changes value from 0.5 to 0 [-Wliteral-conversion]
+   21 |         slopeEg2_setSlope(eg,0.5f);
+      |         ~~~~~~~~~~~~~~~~~    ^~~~
+build/break_rm/rm_slope_eg.c:53:8: warning: variable 'denom' set but not used [-Wunused-but-set-variable]
+   53 |         float denom;
+      |               ^
+2 warnings generated.
+run_modes_break: caught (law A1 fails as expected)
+cd ../.. && python3 tools/dsp_test/check_special_tags.py
+special tags OK (252 rows, 0 mismatches)
+cd ../.. && python3 tools/alkaline/make_init_alk.py --check
+make_init_alk: init.alk matches the table (31 rows)
+cd ../.. && python3 tools/colloid/make_init_col.py --check
+make_init_col: init.col matches the table (50 rows)
+cd ../.. && python3 tools/plots/gen_stock_tables.py --check
+level H (Nyquist harmonic count): [511, 511, 337, 168, 84, 42, 21, 10, 5, 2, 1]
+C1 calibration (max |error| LSB per level 0..10; sawTable limit 6):
+   sawTable     0     0     2     4     4     4     4     5     4     4     3
+   recTable     1  1942 11185 10671 10608 10364  9725  9207  7338  9536  4276  (information)
+   triTable    24    30    57   115   223   427   786  1483  2230  4243  4095  (information)
+C2 peak/DC and C3 out-of-band: OK
+C4 regenerate == tools/plots/archive/wavetableStock.c: OK
+python3 extract.py --src ../../Core/DSPAudio/transientGenerator.h \
+	  --typedef TransientGenerator --out build/gen/vf_transient.c
+python3 extract.py --src ../../Core/DSPAudio/snapEg.h --typedef SnapEg --out build/gen/vf_snap.c
+python3 extract.py --src ../../Core/DSPAudio/voiceFold.h --body --out build/gen/voiceFold.host.h
+python3 extract.py --src ../../Core/DSPAudio/voiceFold.c --body --out build/gen/voiceFold.host.c
+python3 extract.py --src ../../Core/DSPAudio/voiceFoldTables.c --body \
+	  --out build/gen/voiceFoldTables.host.c
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -Wno-unknown-attributes modules/voicefold.c \
+	  -o build/voicefold -lm
+./build/voicefold
+voicefold failures: 0
+mkdir -p build/break_vf
+sed 's/(t \* p - kC)/(t * p)/' build/gen/voiceFold.host.c \
+	  > build/break_vf/voiceFold.host.c
+cc -Ibuild/break_vf -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -Wno-unknown-attributes \
+	  modules/voicefold.c -o build/voicefold_break -lm
+voicefold_break: caught (law F3 fails as expected)
+cd ../.. && python3 tools/plots/gen_fold_tables.py --check
+fold tables OK
+cd ../.. && python3 tools/plots/gen_pwm_tables.py --check
+pwm tables OK
+python3 extract.py --src ../../Core/DSP/Effects/FxBuffer.h \
+	  --typedef fx_share_t --typedef fxbuf_handoff_t \
+	  --macro FXBUF_ALIGN_BYTES \
+	  --macro FXBUF_VOICE_UNIT_COUNT --macro FXBUF_VOICE_UNIT_SAMPLES \
+	  --macro FXBUF_VOICE_UNIT_BYTES --macro FXBUF_EFFECT_POINTER_COUNT \
+	  --macro FXBUF_HANDOFF_POINTER_COUNT \
+	  --macro FXBUF_HANDOFF_EFFECT_POINTER_BASE \
+	  --macro FXBUF_STATE_EFFECT_WRITTEN \
+	  --macro FXBUF_SEG_SIDE_L --macro FXBUF_SEG_SIDE_R \
+	  --macro FXBUF_SEG_SIDE_BOTH --macro FXBUF_SEG_SIDE_MASK \
+	  --macro FXBUF_SEG_SIDE_SHIFT --macro FXBUF_UQ15_ONE \
+	  --macro FXBUF_OFFSET_NONE --out build/gen/cb_fxbuf.c
+python3 extract.py --src ../../Core/DSP/Effects/EffectTypes.h \
+	  --macro EFFECT_SEQ_LANE_COUNT --macro EFFECT_TYPE_OFF \
+	  --out build/gen/cb_efftypes.c
+python3 extract.py --src ../../Core/DSP/Effects/EffectsManager.h \
+	  --macro EFFECT_LANE_MORPH_SOURCE --macro EFFECT_LANE_NONE \
+	  --macro EFFECT_TYPE_CRUMPBIT \
+	  --typedef effect_io_t --typedef effect_type_ops_t \
+	  --out build/gen/cb_effects.c
+python3 extract.py --src ../../Core/DSP/Effects/CrumpBit/CrumpBitParameters.h \
+	  --typedef crumpbit_param_t --macro CRUMPBIT_PARAM_COUNT \
+	  --macro CRUMPBIT_ROW_BIT --macro CRUMPBIT_ROWS_SHARED \
+	  --macro CRUMPBIT_ROWS_SUBTYPE --macro CRUMPBIT_ROWS_GRN \
+	  --macro CRUMPBIT_SUBTYPE_DELAY --macro CRUMPBIT_SUBTYPE_COMB \
+	  --macro CRUMPBIT_SUBTYPE_PITCH --macro CRUMPBIT_SUBTYPE_GRAIN \
+	  --macro CRUMPBIT_SUBTYPE_REVERB --macro CRUMPBIT_SUBTYPE_COUNT \
+	  --macro CRUMPBIT_TONE_FLAT \
+	  --macro CRUMPBIT_PITCH_ROW_MIN --macro CRUMPBIT_PITCH_ROW_MAX \
+	  --macro CRUMPBIT_FILTER_LP --macro CRUMPBIT_FILTER_HP \
+	  --macro CRUMPBIT_FILTER_BP --macro CRUMPBIT_FILTER_UBP \
+	  --macro CRUMPBIT_FILTER_NOTCH --macro CRUMPBIT_FILTER_PEAK \
+	  --macro CRUMPBIT_FILTER_LP2 --macro CRUMPBIT_FILTER_OFF \
+	  --out build/gen/cb_params.c
+python3 extract.py --src ../../Core/DSP/Effects/CrumpBit/CrumpBitTables.h --body \
+	  --out build/gen/cb_tables.h
+python3 extract.py --src ../../Core/DSP/Effects/CrumpBit/CrumpBitTables.c --body \
+	  --out build/gen/cb_tables.c
+python3 extract.py --src ../../Core/Sequencer/StepScale.h \
+	  --macro STEP_SCALE_COUNT --macro STEP_SCALE_DEFAULT \
+	  --out build/gen/cb_stepscale.h
+python3 extract.py --src ../../Core/MIDI/MidiPitch.h \
+	  --macro MIDI_PITCH_SEMITONE_UP --func midiPitch_detune \
+	  --out build/gen/cb_midipitch.c
+python3 extract.py --src ../../Core/Sequencer/StepScale.c \
+	  --object stepScale_q8Table --func stepScale_ticksQ8 \
+	  --out build/gen/cb_stepscale.c
+python3 extract.py --src ../../Core/DSP/Effects/Space/SpaceKit.h --body \
+	  --out build/gen/SpaceKit.host.h
+python3 extract.py --src ../../Core/DSP/Effects/Space/SpaceKit.c --body \
+	  --out build/gen/SpaceKit.host.c
+python3 extract.py --src ../../Core/DSP/Effects/Space/SpaceKitDsp.c --body \
+	  --out build/gen/SpaceKitDsp.host.c
+python3 extract.py --src ../../Core/DSP/Effects/CrumpBit/CrumpBitEffect.h --body \
+	  --out build/gen/CrumpBitEffect.host.h
+python3 extract.py --src ../../Core/DSP/Effects/CrumpBit/CrumpBitEffect.c --body \
+	  --out build/gen/CrumpBitEffect.host.c
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c -o build/crumpbit -lm
+./build/crumpbit
+CB8 pass 0: peak 1.000, mean loop code 0.027 LSB
+CB8 pass 1: peak 1.000, mean loop code -0.001 LSB
+CB8 pass 2: peak 1.000, mean loop code -0.001 LSB
+CB15 decay: 15.58 dB over 0.125 s (law 15.2)
+CB15 freeze: 2.15 dB over 1 s
+CB18 grn fbk 0 (gain 0.000): echo peak 0.00 codes (floor 0.50), grew 0 times
+CB18 grn fbk 64 (gain 0.494): echo peak 0.00 codes (floor 0.99), grew 0 times
+CB18 grn fbk 100 (gain 0.772): echo peak 2.00 codes (floor 2.19), grew 0 times
+CB18 grn fbk 127 (gain 0.980): echo peak 25.00 codes (floor 25.00), grew 0 times
+CB19 every sub-type plays dly's SVF at mix 0: 0 samples differ
+CB19 a switch keeps the SVF state: 0 fields moved; jump at a switch 0.0074 (steady 0.0075)
+CB21 win step: second difference 0.0863 at a step, 0.0312 steady
+CB22 fin 63: centre 886.51 Hz (x1.0000 of fin 63; want 881.79 Hz, x1.0000)
+CB22 fin 127: centre 912.42 Hz (x1.0292 of fin 63; want 908.22 Hz, x1.0300)
+CB22 fin 0: centre 859.97 Hz (x0.9701 of fin 63; want 855.78 Hz, x0.9705)
+CB23 fade: 0 frames off (worst 1.19e-07), 0 state mismatches, over 2062 changes, 3084 ramps
+crumpbit failures: 0
+mkdir -p build/break_cb1 build/break_cb2
+sed 's/c->q_hi = sqrtf(sqrtf(/c->q_hi = (sqrtf(/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb1/CrumpBitEffect.host.c
+cc -Ibuild/break_cb1 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break1 -lm
+crumpbit_break1: caught (law CB1 fails as expected)
+sed 's/rt->ac_c_l = CRUMPBIT_CODE_MID;/rt->ac_c_l = 0;/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb2/CrumpBitEffect.host.c
+cc -Ibuild/break_cb2 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break2 -lm
+crumpbit_break2: caught (law CB4/CB5 fails as expected)
+mkdir -p build/break_cb3 build/break_cb4
+sed 's/((t == CRUMPBIT_TONE_FLAT) ? 0.0f : -1.0f)/((t == CRUMPBIT_TONE_FLAT) ? 1.0f : -1.0f)/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb3/CrumpBitEffect.host.c
+cc -Ibuild/break_cb3 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break3 -lm
+crumpbit_break3: caught (law CB4 fails as expected)
+sed 's/t->delay = (float)(len - CRUMPBIT_LOOP_GUARD);/(void)0;/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb4/CrumpBitEffect.host.c
+cc -Ibuild/break_cb4 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break4 -lm
+crumpbit_break4: caught (law CB11 seat fails as expected)
+mkdir -p build/break_cb5
+sed 's/    count += (table\[count\] <= max_samples) ? 1u : 0u;/    (void)0;/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb5/CrumpBitEffect.host.c
+cc -Ibuild/break_cb5 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break5 -lm
+crumpbit_break5: caught (law CB6 fails as expected)
+mkdir -p build/break_cb6 build/break_cb7 build/break_cb8 build/break_cb9
+sed 's/left\[n\] = crumpBit_mixFrame(hl, mid_k \* (e + o) + side_k \* (e - o),/left[n] = mid_k * (e + o) + crumpBit_mixFrame(hl, side_k * (e - o),/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb6/CrumpBitEffect.host.c
+cc -Ibuild/break_cb6 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break6 -lm
+crumpbit_break6: caught (law CB10 fails as expected)
+sed 's/k.rec_w = frozen ? k.dline : b->base;/k.rec_w = b->base;/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb7/CrumpBitEffect.host.c
+cc -Ibuild/break_cb7 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break7 -lm
+crumpbit_break7: caught (law CB14 fails as expected)
+sed 's/((1.0f - crumpBit_ratioOf(semis) \*/((-1.0f + crumpBit_ratioOf(semis) */' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb8/CrumpBitEffect.host.c
+cc -Ibuild/break_cb8 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break8 -lm
+crumpbit_break8: caught (law CB13 fails as expected)
+sed 's/        CRUMPBIT_PARAM_AUX, EFFECT_LANE_NONE },/        CRUMPBIT_PARAM_GRAIN_ST2, EFFECT_LANE_NONE },/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb9/CrumpBitEffect.host.c
+cc -Ibuild/break_cb9 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break9 -lm
+crumpbit_break9: caught (law CB9 fails as expected)
+mkdir -p build/break_cb10 build/break_cb11 build/break_cb12
+sed 's/        s->out_a -= CRUMPBIT_GRAIN_FADE_K;/        s->out_a -= 2.0f * CRUMPBIT_GRAIN_FADE_K;/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb10/CrumpBitEffect.host.c
+cc -Ibuild/break_cb10 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break10 -lm
+crumpbit_break10: caught (law CB14 fails as expected)
+sed 's/crumpBit_filterCoeffs(crumpBit_filterG\[fl\], r, &a1l/crumpBit_filterCoeffs(crumpBit_filterG[fr], r, \&a1l/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb11/CrumpBitEffect.host.c
+cc -Ibuild/break_cb11 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break11 -lm
+In file included from modules/crumpbit.c:251:
+build/break_cb11/CrumpBitEffect.host.c:3148:23: warning: unused variable 'fl' [-Wunused-variable]
+ 3148 |         const int32_t fl = (f - tilt < 0) ? 0 : ((f - tilt > 127) ? 127 : f - tilt);
+      |                       ^~
+1 warning generated.
+crumpbit_break11: caught (law CB16 fails as expected)
+sed 's/        span = (span > s_max) ? s_max : span;/        (void)s_max;/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb12/CrumpBitEffect.host.c
+cc -Ibuild/break_cb12 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break12 -lm
+crumpbit_break12: caught (law CB14 fails as expected)
+mkdir -p build/break_cb13 build/break_cb14 build/break_cb15
+sed 's/        crumpBit_dataLines\[c\] = (uint8_t)((c \& keep) ^ inv);/        crumpBit_dataLines[c] = (uint8_t)((c \& keep) | inv);/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb13/CrumpBitEffect.host.c
+cc -Ibuild/break_cb13 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break13 -lm
+crumpbit_break13: caught (law CB17 fails as expected)
+sed 's/    s.fb = crumpBit_grainFeedbackGain(rt->feedback_raw);/    s.fb = crumpBit_feedbackGain(rt->feedback_raw);/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb14/CrumpBitEffect.host.c
+cc -Ibuild/break_cb14 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break14 -lm
+crumpbit_break14: caught (law CB18 fails as expected)
+# S094 P2 AS-13: the one SVF keeps its state across a sub-type switch; a
+# switch that clears it must fail CB19 (c). (Was the S091 P5 F1
+# one-pole hand-over break; that code is gone.)
+sed 's/^    crumpBit_bytePosition(rt, &pos, &written);$/    crumpBit_bytePosition(rt, \&pos, \&written); rt->svf_l1 = 0.0f;/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb15/CrumpBitEffect.host.c
+cc -Ibuild/break_cb15 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break15 -lm
+crumpbit_break15: caught (law CB19 fails as expected)
+mkdir -p build/break_cb16 build/break_cb17 build/break_cb18
+sed 's/~(CRUMPBIT_GRAIN_MIN_PERIOD - 1u)) - ev;/0xFFFFFFFFu) - ev;/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb16/CrumpBitEffect.host.c
+cc -Ibuild/break_cb16 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break16 -lm
+crumpbit_break16: caught (law CB14 fails as expected)
+# break_cb17 (the S091 P5 one-pole's `bal` side) went with the one-pole in
+# S094 P2 AS-13; the SVF's `bal` side break above covers every sub-type.
+sed 's/        age_a = g->age_a;/        (void)0;/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb18/CrumpBitEffect.host.c
+cc -Ibuild/break_cb18 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break18 -lm
+crumpbit_break18: caught (law CB14 fails as expected)
+mkdir -p build/break_cb19 build/break_cb20
+sed 's/#define CRUMPBIT_PITCH_WIN_GLIDE      0.03563f/#define CRUMPBIT_PITCH_WIN_GLIDE      1.0f/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb19/CrumpBitEffect.host.c
+cc -Ibuild/break_cb19 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break19 -lm
+crumpbit_break19: caught (law CB21 fails as expected)
+sed 's/        q = (q > 32767) ? 32767 : q;/        (void)0;/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb20/CrumpBitEffect.host.c
+cc -Ibuild/break_cb20 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break20 -lm
+crumpbit_break20: caught (law CB20 fails as expected)
+mkdir -p build/break_cb21
+sed 's/midiPitch_detune(rt->pit_fine)) \//1.0f) \//' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb21/CrumpBitEffect.host.c
+cc -Ibuild/break_cb21 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break21 -lm
+crumpbit_break21: caught (law CB22 fails as expected)
+mkdir -p build/break_cb22
+sed 's/) < m)/) <= m)/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb22/CrumpBitEffect.host.c
+cc -Ibuild/break_cb22 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break22 -lm
+crumpbit_break22: caught (law CB1 fails as expected)
+mkdir -p build/break_cb23 build/break_cb24 build/break_cb25
+sed 's/k\.tap_inc = ((float)on - s\.tap_g) \* b->per_frame;/k.tap_inc = 0.0f;/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb23/CrumpBitEffect.host.c
+cc -Ibuild/break_cb23 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break23 -lm
+crumpbit_break23: caught (law CB23 fails as expected)
+sed 's/d = crumpBit_lowRowSamples(q, row);/d = crumpBit_lowRowSamples(q, 0u);/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb24/CrumpBitEffect.host.c
+cc -Ibuild/break_cb24 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break24 -lm
+crumpbit_break24: caught (law CB23 fails as expected)
+sed -e '/S091 P6: the tap restarts silent/{n;s/g->tap_on = 0u;/(void)0;/;}' \
+	  -e 's/(!g->tap_on || g->tap_d > len - 2u)/(!g->tap_on)/' \
+	  build/gen/CrumpBitEffect.host.c > build/break_cb25/CrumpBitEffect.host.c
+cc -Ibuild/break_cb25 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/crumpbit.c \
+	  -o build/crumpbit_break25 -lm
+crumpbit_break25: caught (law CB23 fails as expected)
+cd ../.. && python3 tools/plots/gen_crumpbit_tables.py --check
+crumpbit tables OK
+python3 extract.py --src ../../Core/DSPAudio/DiodeLadder.h --body --out build/gen/DiodeLadder.host.h
+python3 extract.py --src ../../Core/DSPAudio/DiodeLadder.c --body --out build/gen/DiodeLadder.host.c
+python3 extract.py --src ../../Core/DSP/Instruments/Alkaline/AlkalineControl.h --body --out build/gen/AlkalineControl.host.h
+python3 extract.py --src ../../Core/DSP/Instruments/Alkaline/AlkalineControl.c --body --out build/gen/AlkalineControl.host.c
+python3 extract.py --src ../../Core/DSP/Instruments/Alkaline/AlkalineTables.h --body --out build/gen/AlkalineTables.host.h
+python3 extract.py --src ../../Core/DSP/Instruments/Alkaline/AlkalineTables.c --body --out build/gen/AlkalineTables.host.c
+python3 extract.py --src ../../Core/DSP/Instruments/Alkaline/AlkalinePostTables.h --body --out build/gen/AlkalinePostTables.host.h
+python3 extract.py --src ../../Core/DSP/Instruments/Alkaline/AlkalinePostTables.c --body --out build/gen/AlkalinePostTables.host.c
+python3 extract.py --src ../../Core/DSP/Instruments/Alkaline/AlkalineSquareTable.c --body --out build/gen/AlkalineSquareTable.host.c
+python3 extract.py --src ../../Core/DSP/Instruments/Alkaline/AlkalineVoice.h --body --out build/gen/AlkalineVoice.host.h
+python3 extract.py --src ../../Core/DSP/Instruments/Alkaline/AlkalineVoice.c --body --out build/gen/AlkalineVoice.host.c
+python3 extract.py --src ../../Core/DSPAudio/wavetable.c --object sawTable --out build/gen/alk_sawTable.raw.c
+sed 's/const int16_t sawTable/int16_t sawTable/' build/gen/alk_sawTable.raw.c > build/gen/alk_sawTable.c
+python3 extract.py --src ../../Core/DSPAudio/wavetable.c --object triTable --out build/gen/alk_triTable.raw.c
+sed 's/const int16_t triTable/int16_t triTable/' build/gen/alk_triTable.raw.c > build/gen/alk_triTable.c
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -DALK_PWM_READ_FORM=0 -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/alkaline.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/alkaline_pwm_ref -lm
+./build/alkaline_pwm_ref --pwm-render build/alk_pwm_ref.bin
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/alkaline.c ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c \
+	  -o build/alkaline -lm
+./build/alkaline
+AL-R B2R: ring period 2.018 ms, decay per cycle 0.364; x1.5: 1.791 ms, 0.823
+AL-R A-R: ring period 2.040 ms, decay per cycle 0.362; x1.5: 1.791 ms, 0.831 (information: A-R is not stable at Res full with the T2-2 64-sample network, S093 P3)
+AL-R B-R: ring period 2.018 ms, decay per cycle 0.364; x1.5: 1.791 ms, 0.822
+AL-SO: tail RMS x1.5 1769.9 LSB (peak 4448), 303 max 1.4 LSB
+AL-AB: B-R re B2R +0.002 dB RMS, A-R re B2R -0.033 dB RMS
+AL-D: drive x1: -29.18 dBFS RMS, 0 full-scale samples
+AL-D: drive x2: -25.40 dBFS RMS, 0 full-scale samples
+AL-D: drive x4: -21.93 dBFS RMS, 0 full-scale samples
+AL-D: drive x8: -19.02 dBFS RMS, 0 full-scale samples
+AL-D: drive x16: -17.13 dBFS RMS, 0 full-scale samples
+AL-D: x16 largest input-pair argument 12.74 (clamp 3.5)
+AL-F: log2 abs 9.78e-06, exp2 rel 2.81e-07, prewarp rel 6.37e-06
+AL-M: t10 139.3 ms / 3.852 s (accent 174.8 ms)
+AL-W no slot: 0 sample(s), 0 phase(s), 0 position(s) differ; 0 blended block(s), 2840 between frames; RMS 1736 LSB
+AL-W slot: 0 sample(s), 0 phase(s), 0 position(s) differ; 3000 blended block(s), 2840 between frames; RMS 1410 LSB
+AL-W slot on/off: 0 sample(s), 0 phase(s), 0 position(s) differ; 1500 blended block(s), 2840 between frames; RMS 1580 LSB
+AL-W two-row loop: max 1 LSB from the float-mix reference (peak 5250); 3955 LSB from frame A alone at mix ~1
+AL-W empty catalogue: peak 0 LSB, 0 claim(s)
+AL-OD0 run 0 (drive-0 1): largest difference 0 LSB
+AL-OD0 run 1 (drive-0 0): largest difference 0 LSB
+AL-OD0 run 2 (drive-0 0): largest difference 0 LSB
+AL-OD0 run 3 (drive-0 1): largest difference 0 LSB
+AL-OD0 run 4 (drive-0 0): largest difference 0 LSB
+AL-OD0 run 5 (drive-0 0): largest difference 0 LSB
+AL-OD0 run 6 (drive-0 1): largest difference 0 LSB
+AL-OD0 run 7 (drive-0 1): largest difference 0 LSB
+AL-OD0 run 8 (drive-0 1): largest difference 0 LSB
+AL-A3: largest difference 0 ulp
+AL-OV: crest 10.78 / 7.88 / 3.39, RMS 1215 / 2574 / 2926 LSB at overdrive 0 / 64 / 127
+AL-TN: overdrive 0, high band at tone 0 -5.4 dB against tone 127
+AL-TN: overdrive 63, high band at tone 0 -5.6 dB against tone 127
+AL-TN: overdrive 127, high band at tone 0 -11.1 dB against tone 127
+AL-PW: Sqr pwm at 0 against Sqr wav +1.14 dB RMS
+AL-PW: Tri ladder input against Saw +0.13 dB
+AL-PW: Tri voice against Saw voice (golden knobs) -5.69 dB RMS
+AL-PW: read form 2 against form 0: -28.8 dB
+AL-PWW: Tri pwm at 0 against the unfused WT loop: -70.6 dB
+AL-PWW: Tri pwm at 64 against the unfused WT loop: -70.7 dB
+AL-PWW: Tri pwm at 127 against the unfused WT loop: -76.8 dB
+AL-PWW: Tri pwm at 0 against Tri wav: -69.0 dB
+AL-B: 0 failure(s)
+AL-R: 0 failure(s)
+AL-S: 0 failure(s)
+AL-N: 0 failure(s)
+AL-AB: 0 failure(s)
+AL-D: 0 failure(s)
+AL-Q: 0 failure(s)
+AL-F: 0 failure(s)
+AL-O: 0 failure(s)
+AL-X: 0 failure(s)
+AL-A: 0 failure(s)
+AL-M: 0 failure(s)
+AL-SO: 0 failure(s)
+AL-PS: 0 failure(s)
+AL-W: 0 failure(s)
+AL-TY: 0 failure(s)
+AL-OD0: 0 failure(s)
+AL-A3: 0 failure(s)
+AL-OV: 0 failure(s)
+AL-TN: 0 failure(s)
+AL-PW: 0 failure(s)
+AL-XT: 0 failure(s)
+AL-PWW: 0 failure(s)
+mkdir -p build/break_alk
+sed 's/const uint8_t legato = (uint8_t)(voice->slideLatch \&\& voice->gateLeft > 0);/const uint8_t legato = 0u;/' \
+	  build/gen/AlkalineVoice.host.c > build/break_alk/AlkalineVoice.host.c
+cc -Ibuild/break_alk -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/alkaline.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/alkaline_break -lm
+alkaline_break: caught (law AL-S fails as expected)
+mkdir -p build/break_alk_wtb
+sed 's/const float ffStep = (end - start) \* (1.0f \/ (float)OUTPUT_DMA_SIZE);/const float ffStep = 0.0f;/' \
+	  build/gen/AlkalineVoice.host.c > build/break_alk_wtb/AlkalineVoice.host.c
+cc -Ibuild/break_alk_wtb -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/alkaline.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/alkaline_break_wtb -lm
+alkaline_break_wtb: caught (law AL-W fails as expected)
+mkdir -p build/break_alk_glide
+sed 's/const float k = floorf(start) + 1.0f;/const float k = floorf(start) + 2.0f;/' \
+	  build/gen/AlkalineVoice.host.c > build/break_alk_glide/AlkalineVoice.host.c
+cc -Ibuild/break_alk_glide -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/alkaline.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/alkaline_break_glide -lm
+alkaline_break_glide: caught (law AL-W fails as expected)
+mkdir -p build/break_alk_tone build/break_alk_ovd
+sed 's/alkToneC\[ti\])/alkToneC[ti] + 0.001f)/' \
+	  build/gen/AlkalineVoice.host.c > build/break_alk_tone/AlkalineVoice.host.c
+cc -Ibuild/break_alk_tone -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/alkaline.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/alkaline_break_tone -lm
+alkaline_break_tone: caught (law AL-OD0 fails as expected)
+sed 's/alkOvdGain\[oi\],/alkOvdGain[oi] * 1.0001f,/' \
+	  build/gen/AlkalineVoice.host.c > build/break_alk_ovd/AlkalineVoice.host.c
+cc -Ibuild/break_alk_ovd -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/alkaline.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/alkaline_break_ovd -lm
+alkaline_break_ovd: caught (law AL-OD0 fails as expected)
+mkdir -p build/break_alk_pwmw
+sed 's/osc_pwmWarp(ph, wPh, wRa, wRb)/osc_pwmWarp(ph, wPh, wRb, wRa)/' \
+	  build/gen/DiodeLadder.host.c > build/break_alk_pwmw/DiodeLadder.host.c
+cc -Ibuild/break_alk_pwmw -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/alkaline.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/alkaline_break_pwmw -lm
+alkaline_break_pwmw: caught (law AL-PWW fails as expected)
+mkdir -p build/break_alk_tri
+sed 's/\[1024\])triTable/[1024])sawTable/' \
+	  build/gen/AlkalineVoice.host.c > build/break_alk_tri/AlkalineVoice.host.c
+cc -Ibuild/break_alk_tri -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/alkaline.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/alkaline_break_tri -lm
+alkaline_break_tri: caught (law AL-XT fails as expected)
+cd ../.. && python3 tools/alkaline/gen_alk_tables.py --check
+AlkalineTables.h: matches
+AlkalineTables.c: matches
+AlkalineSquareTable.c: matches
+cd ../.. && python3 tools/alkaline/gen_alk_post_tables.py --check
+alkaline post tables OK
+python3 extract.py --src ../../Core/DSPAudio/lfo.h --macro LFO_SR --out build/gen/lfo_sr.inc
+python3 extract.py --src ../../Core/DSPAudio/lfo.h --macro LFO_SINE --macro LFO_TRI \
+	  --macro LFO_SAW_UP --macro LFO_SAW_DOWN --macro LFO_REC --macro LFO_NOISE \
+	  --macro LFO_EXP_UP --macro LFO_EXP_DOWN --out build/gen/lfo_waves.inc
+python3 extract.py --src ../../Core/DSPAudio/lfoRateTable.c --object lfoRateHz \
+	  --out build/gen/lfo_rate_table.c
+python3 extract.py --src ../../Core/DSPAudio/lfo.c --func lfo_calc --func lfo_calcPhaseInc \
+	  --func lfo_setFreq --func lfo_setSync --out build/gen/lfo_funcs.c
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -Ibuild/gen modules/lfo.c -o build/lfo -lm
+In file included from modules/lfo.c:70:
+build/gen/lfo_funcs.c:90:26: warning: implicit conversion from 'unsigned int' to 'float' changes value from 4294967295 to 4294967296 [-Wimplicit-const-int-float-conversion]
+   90 |                 return freq/(LFO_SR) * 0xffffffff;
+      |                                      ~ ^~~~~~~~~~
+build/gen/lfo_funcs.c:108:26: warning: implicit conversion from 'unsigned int' to 'float' changes value from 4294967295 to 4294967296 [-Wimplicit-const-int-float-conversion]
+  108 |                 return freq/(LFO_SR) * 0xffffffff;
+      |                                      ~ ^~~~~~~~~~
+build/gen/lfo_funcs.c:157:36: warning: implicit conversion from 'unsigned int' to 'float' changes value from 4294967295 to 4294967296 [-Wimplicit-const-int-float-conversion]
+  157 |         return (lfoSyncfreq / (LFO_SR)) * 0xffffffff;
+      |                                         ~ ^~~~~~~~~~
+3 warnings generated.
+./build/lfo
+lfo LF1: 0 failure(s)
+lfo LF2: 0 failure(s)
+lfo LF3: 0 failure(s)
+lfo LF4: 0 failure(s)
+lfo LF5: 0 failure(s)
+mkdir -p build/break_lfo1 build/break_lfo2
+sed 's/lfo->sync = sync;/lfo->sync = sync; return;/' \
+	  build/gen/lfo_funcs.c > build/break_lfo1/lfo_funcs.c
+cc -Ibuild/break_lfo1 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -Ibuild/gen modules/lfo.c -o build/lfo_break1 -lm
+In file included from modules/lfo.c:70:
+build/break_lfo1/lfo_funcs.c:90:26: warning: implicit conversion from 'unsigned int' to 'float' changes value from 4294967295 to 4294967296 [-Wimplicit-const-int-float-conversion]
+   90 |                 return freq/(LFO_SR) * 0xffffffff;
+      |                                      ~ ^~~~~~~~~~
+build/break_lfo1/lfo_funcs.c:108:26: warning: implicit conversion from 'unsigned int' to 'float' changes value from 4294967295 to 4294967296 [-Wimplicit-const-int-float-conversion]
+  108 |                 return freq/(LFO_SR) * 0xffffffff;
+      |                                      ~ ^~~~~~~~~~
+build/break_lfo1/lfo_funcs.c:157:36: warning: implicit conversion from 'unsigned int' to 'float' changes value from 4294967295 to 4294967296 [-Wimplicit-const-int-float-conversion]
+  157 |         return (lfoSyncfreq / (LFO_SR)) * 0xffffffff;
+      |                                         ~ ^~~~~~~~~~
+3 warnings generated.
+lfo_break1: caught (law LF1 fails as expected)
+sed 's/lfo->sync ? 1.0f : lfo->modNodeValue/lfo->modNodeValue/' \
+	  build/gen/lfo_funcs.c > build/break_lfo2/lfo_funcs.c
+cc -Ibuild/break_lfo2 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -Ibuild/gen modules/lfo.c -o build/lfo_break2 -lm
+In file included from modules/lfo.c:70:
+build/break_lfo2/lfo_funcs.c:90:26: warning: implicit conversion from 'unsigned int' to 'float' changes value from 4294967295 to 4294967296 [-Wimplicit-const-int-float-conversion]
+   90 |                 return freq/(LFO_SR) * 0xffffffff;
+      |                                      ~ ^~~~~~~~~~
+build/break_lfo2/lfo_funcs.c:108:26: warning: implicit conversion from 'unsigned int' to 'float' changes value from 4294967295 to 4294967296 [-Wimplicit-const-int-float-conversion]
+  108 |                 return freq/(LFO_SR) * 0xffffffff;
+      |                                      ~ ^~~~~~~~~~
+build/break_lfo2/lfo_funcs.c:157:36: warning: implicit conversion from 'unsigned int' to 'float' changes value from 4294967295 to 4294967296 [-Wimplicit-const-int-float-conversion]
+  157 |         return (lfoSyncfreq / (LFO_SR)) * 0xffffffff;
+      |                                         ~ ^~~~~~~~~~
+3 warnings generated.
+lfo_break2: caught (law LF4 fails as expected)
+cd ../.. && python3 tools/plots/gen_lfo_rate_table.py --check
+lfo rate table OK
+python3 extract.py --src ../../Core/DSP/Effects/EffectsManager.h \
+	  --macro EFFECT_TYPE_DELAY --macro EFFECT_TYPE_REVERB \
+	  --macro EFFECT_TYPE_ECHO --out build/gen/sp_types.c
+python3 extract.py --src ../../Core/DSP/Effects/Space/SpaceParameters.h \
+	  --typedef space_delay_param_t --typedef space_reverb_param_t \
+	  --typedef space_echo_param_t --macro SPACE_HEADS_STOPS \
+	  --macro SPACE_FREEZE_SHIMMER --macro SPACE_FREEZE_OFF \
+	  --macro SPACE_HEADS_DEFAULT --macro SPACE_ROUTING_E2R \
+	  --macro SPACE_ROUTING_R2E --macro SPACE_ROUTING_LOOP \
+	  --macro SPACE_INTERVAL_ROW_MIN --macro SPACE_INTERVAL_ROW_MAX \
+	  --out build/gen/sp_params.c
+python3 extract.py --src ../../Core/DSP/Effects/Space/SpaceEffect.h --body \
+	  --out build/gen/SpaceEffect.host.h
+python3 extract.py --src ../../Core/DSP/Effects/Space/SpaceEffect.c --body \
+	  --out build/gen/SpaceEffect.host.c
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen modules/space.c -o build/space -lm
+./build/space
+ok   SP1 spr 63: L at 7890 want 7890 (peak 0.598)
+ok   SP1 spr 63: R at 7890 want 7890 (peak 0.598)
+ok   SP1 spr 126: L at 3945 want 3945 (peak 0.797)
+ok   SP1 spr 126: R at 7890 want 7890 (peak 0.598)
+ok   SP2 Delay: a sample is not finite or above 4.0
+ok   SP3 Reverb tail: e(0.2-0.7) 0.155 e(0.7-1.2) 0.000506 (bounded 1)
+ok   SP3 Reverb freeze+shimmer: a sample is not finite or above 8.0
+ok   SP4 Echo routing 0: energy 1.38 (bounded 1)
+ok   SP4 Echo routing 1: energy 1.34 (bounded 1)
+ok   SP4 Echo routing 2: energy 2.71 (bounded 1)
+ok   SP4 Echo: the routings give the same output
+ok   SP5: the Delay's export has no audio
+ok   SP5: no feed (or no lock) after the Reverb's init
+ok   SP5: tail energy 739 during the feed, ended at block 202, lock 0
+ok   SP6 hed: monotonic 1, stops seen 0x7f, default 2 is `3`
+ok   SP7 tim 126 (limit) spr 0: the long side returns at 96996, want 97001 +-1% (peak 0.423)
+ok   SP7 tim 126 (limit) spr 127: the long side returns at 96996, want 97001 +-1% (peak 0.423)
+ok   SP8 hld: energy second 1 6.66e+03, second 4 1.07e+03 (no growth)
+ok   SP9 rvb ton: HF energy 127 0.0915, 0 0.00051
+ok   SP10 idle: gain at mid-ramp 0.499, idle from block 1392, wakes on -60 dBFS (skipped 0, gain 1.0)
+space failures: 0
+python3 extract.py --src ../../Core/DSP/Instruments/Alkaline/AlkalineControl.h --body --out build/gen/AlkalineControl.host.h
+python3 extract.py --src ../../Core/DSP/Instruments/Alkaline/AlkalinePostTables.h --body --out build/gen/AlkalinePostTables.host.h
+python3 extract.py --src ../../Core/DSP/Instruments/Alkaline/AlkalinePostTables.c --body --out build/gen/AlkalinePostTables.host.c
+for f in ColloidTables.h ColloidTables.c ColloidOsc.h ColloidOsc.c ColloidVoice.h ColloidVoice.c; do \
+	  python3 extract.py --src ../../Core/DSP/Instruments/Colloid/$f --body --out build/gen/${f%.*}.host.${f##*.} || exit 1; \
+	done
+for t in sine_table sawTable triTable recTable; do \
+	  python3 extract.py --src ../../Core/DSPAudio/wavetable.c --object $t --out build/gen/col_$t.raw.c && \
+	  sed "s/const int16_t $t/int16_t $t/" build/gen/col_$t.raw.c > build/gen/col_$t.c || exit 1; \
+	done
+python3 extract.py --src ../../Core/DSPAudio/mixer.c --func mixer_addVoiceInt16ToOutput \
+	  --func mixer_addVoiceInt16ToOutputAndFx --func mixer_addVoiceStereoToOutput \
+	  --func mixer_addVoiceStereoToOutputAndFx --out build/gen/col_mixer_funcs.c
+cc -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/colloid.c ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/colloid -lm
+./build/colloid
+colloid CO-OSC  failures: 0
+colloid CO-POS  failures: 0
+colloid CO-W    failures: 0
+colloid CO-MOT  failures: 0
+colloid CO-INT  failures: 0
+colloid CO-SLEW failures: 0
+colloid CO-EG   failures: 0
+colloid CO-AMP  failures: 0
+colloid CO-SVF  failures: 0
+colloid CO-SER  failures: 0
+colloid CO-RTE  failures: 0
+colloid CO-POST failures: 0
+colloid CO-PWM  failures: 0
+colloid CO-WTB  failures: 0
+colloid MX-ST   failures: 0
+colloid CO-RND  failures: 0
+mkdir -p build/break_col_side
+sed 's/busS\[n\] = col_smlawt(s1, posPair, col_smulwb(s0, posPair));/busS[n] = col_smlawb(s1, posPair, col_smulwb(s0, posPair));/' \
+	  build/gen/ColloidOsc.host.c > build/break_col_side/ColloidOsc.host.c
+cc -Ibuild/break_col_side -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/colloid.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/colloid_break_side -lm
+colloid_break_side: caught (law CO-OSC fails as expected)
+mkdir -p build/break_col_frac
+sed 's/return a + (((row\[na\] - a) \* (int32_t)((ph >> 7) \& 0x7FFFu)) >> 15);/return a + (((row[na] - a) * (int32_t)((ph >> 6) \& 0xFFFFu)) >> 16);/' \
+	  build/gen/ColloidOsc.host.c > build/break_col_frac/ColloidOsc.host.c
+cc -Ibuild/break_col_frac -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/colloid.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/colloid_break_frac -lm
+colloid_break_frac: caught (law CO-OSC fails as expected)
+mkdir -p build/break_col_sus
+sed 's/if (!susOn)/if (0)/' \
+	  build/gen/ColloidVoice.host.c > build/break_col_sus/ColloidVoice.host.c
+cc -Ibuild/break_col_sus -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/colloid.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/colloid_break_sus -lm
+colloid_break_sus: caught (law CO-EG fails as expected)
+mkdir -p build/break_col_snap
+sed 's/	f->a1 = f->t1;/	(void)0;/' \
+	  build/gen/ColloidVoice.host.c > build/break_col_snap/ColloidVoice.host.c
+cc -Ibuild/break_col_snap -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/colloid.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/colloid_break_snap -lm
+colloid_break_snap: caught (law CO-SVF fails as expected)
+mkdir -p build/break_col_wlaw
+sed 's/\* (1.0f \/ COL_W_OCTAVES));/* (1.0f \/ COL_W_OCTAVES)) * 0.0f + 1.0f;/' \
+	  build/gen/ColloidVoice.host.c > build/break_col_wlaw/ColloidVoice.host.c
+cc -Ibuild/break_col_wlaw -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/colloid.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/colloid_break_wlaw -lm
+colloid_break_wlaw: caught (law CO-W fails as expected)
+mkdir -p build/break_col_slew
+sed 's/if (dw > OSC_PWM_SLEW_STEPS)/if (0)/' \
+	  build/gen/ColloidVoice.host.c > build/break_col_slew/ColloidVoice.host.c
+cc -Ibuild/break_col_slew -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/colloid.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/colloid_break_slew -lm
+colloid_break_slew: caught (law CO-PWM fails as expected)
+mkdir -p build/break_col_latch
+sed 's/const uint32_t fr = (voice->frame\[i\] < frames) ? voice->frame\[i\] : (frames - 1u);/const uint32_t fr = (osc->position * (frames - 1u)) \/ 127u;/' \
+	  build/gen/ColloidVoice.host.c > build/break_col_latch/ColloidVoice.host.c
+cc -Ibuild/break_col_latch -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/colloid.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/colloid_break_latch -lm
+colloid_break_latch: caught (law CO-WTB fails as expected)
+mkdir -p build/break_col_mx
+sed 's/(sample_mx_t)((float)smR \* panR)/(sample_mx_t)((float)smR * panL)/' \
+	  build/gen/col_mixer_funcs.c > build/break_col_mx/col_mixer_funcs.c
+cc -Ibuild/break_col_mx -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/colloid.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/colloid_break_mx -lm
+colloid_break_mx: caught (law MX-ST fails as expected)
+mkdir -p build/break_col_rng
+sed 's/voice->rnd\[i\] = (int16_t)(col_rngNext(\&rng) >> 16);/voice->rnd[i] = GetRngValue();/' \
+	  build/gen/ColloidVoice.host.c > build/break_col_rng/ColloidVoice.host.c
+cc -Ibuild/break_col_rng -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/colloid.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/colloid_break_rng -lm
+In file included from modules/colloid.c:121:
+build/break_col_rng/ColloidVoice.host.c:798:11: warning: variable 'rng' set but not used [-Wunused-but-set-variable]
+  798 |         uint32_t rng;
+      |                  ^
+1 warning generated.
+colloid_break_rng: caught (law CO-RND fails as expected)
+mkdir -p build/break_col_slew0
+sed 's/step = (voice->slew == 0u) ? 1.0e9f/step = (voice->slew == 0u) ? 1.0e-3f/' \
+	  build/gen/ColloidVoice.host.c > build/break_col_slew0/ColloidVoice.host.c
+cc -Ibuild/break_col_slew0 -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/colloid.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/colloid_break_slew0 -lm
+colloid_break_slew0: caught (law CO-SLEW fails as expected)
+mkdir -p build/break_col_group
+sed 's/iv\[COL_GROUP(i)\]/iv[0]/' \
+	  build/gen/ColloidVoice.host.c > build/break_col_group/ColloidVoice.host.c
+cc -Ibuild/break_col_group -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/colloid.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/colloid_break_group -lm
+colloid_break_group: caught (law CO-INT fails as expected)
+mkdir -p build/break_col_fold
+sed 's/int32_t v = (pos + (int32_t)((float)rnd \* scale)) % 254;/int32_t v = pos + (int32_t)((float)rnd * scale);/' \
+	  build/gen/ColloidVoice.host.c > build/break_col_fold/ColloidVoice.host.c
+cc -Ibuild/break_col_fold -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/colloid.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/colloid_break_fold -lm
+colloid_break_fold: caught (law CO-PWM fails as expected)
+mkdir -p build/break_col_rte
+sed 's/cutR = col_clamp01(voice->cut + voice->cutOfs - 63.0f \/ 127.0f);/cutR = col_clamp01(voice->cut);/' \
+	  build/gen/ColloidVoice.host.c > build/break_col_rte/ColloidVoice.host.c
+cc -Ibuild/break_col_rte -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/colloid.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/colloid_break_rte -lm
+colloid_break_rte: caught (law CO-RTE fails as expected)
+mkdir -p build/break_col_tone
+sed 's/tzL = ol + tc \* (tzL - ol);/tzL = tzL + (1.0f - tc) * (ol - tzL);/' \
+	  build/gen/ColloidVoice.host.c > build/break_col_tone/ColloidVoice.host.c
+cc -Ibuild/break_col_tone -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/colloid.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/colloid_break_tone -lm
+colloid_break_tone: caught (law CO-POST fails as expected)
+mkdir -p build/break_col_sign
+sed 's/const int32_t sign = (form == COL_PWM_SAW) ? 1 : -1;/const int32_t sign = -1;/' \
+	  build/gen/ColloidVoice.host.c > build/break_col_sign/ColloidVoice.host.c
+cc -Ibuild/break_col_sign -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize -include prelude.h -Ibuild/gen -I. -I../../Core/SampleRom -include cat_host.h -I../../Core/MIDI -Wno-unknown-attributes modules/colloid.c \
+	  ../../Core/SampleRom/SampleMemory.c ../../Core/SampleRom/SampleInstall.c catalogue_host.c -o build/colloid_break_sign -lm
+colloid_break_sign: caught (law CO-PWM fails as expected)
+cd ../.. && python3 tools/colloid/gen_col_tables.py --check
+gen_col_tables: ColloidTables.c matches

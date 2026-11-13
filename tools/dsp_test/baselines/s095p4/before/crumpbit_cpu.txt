@@ -1,0 +1,9 @@
+python3 crumpbit_cpu.py --elf ../../build/lxr02.elf --cap 184 --feed-cap 204
+feed: mix 16 + per block 127 / 32 = 20.0
+dly: loop 109 + filter 31 + (engine 140 + process 259 + manager 197) / 32 = 158.6; with the feed 178.6
+cmb: loop 109 + filter 31 + (engine 105 + process 259 + manager 108) / 32 = 154.8; with the feed 174.7
+pit: loop 106 + filter 31 + (engine 211 + process 259 + manager 108) / 32 = 155.1; with the feed 175.0
+grn: loop 114 + filter 31 + (engine 840 + process 259 + manager 108) / 32 = 182.7; with the feed 202.7
+rvb: loop 131 + filter 31 + (engine 252 + process 259 + manager 108) / 32 = 181.3; with the feed 201.3
+crumpbit cpu: worst 182.7 <= cap 184
+crumpbit cpu: feed worst 202.7 <= feed cap 204

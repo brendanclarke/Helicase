@@ -24,7 +24,8 @@
  * What:       amp and velocity gains are merged into one float multiply per
  *             sample and passed to distortion_curveSampleF() without an
  *             intermediate int16 truncation. The final int16 store happens
- *             inside the distortion curve.
+ *             inside the distortion curve (S095 P4 C3: the curve's
+ *             numerator carries the makeup; the same operations per sample).
  * Why:        the two successive int16 truncations quantised small-amplitude
  *             attack onsets to ±1 LSB, producing a HF puff audible on a pure
  *             sine retrigger. Keeping the product in float until distortion

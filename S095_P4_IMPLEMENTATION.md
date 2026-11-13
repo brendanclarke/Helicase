@@ -1902,3 +1902,326 @@ negative number on hits with `cmp St1`; turning a pot on it does nothing.
   `DEV_MODES.md`, `FILESYSTEM_SPEC.md`: StereoFilter / `flt` mentions;
   `REPOSITORY_LAYOUT.md` also gains `distortionMakeup.c`,
   `gen_dist_makeup.py`, `modules/distortion.c`.
+
+---
+
+## 14. Implementation log (this session)
+
+Working tree at `d58c0280` (source unchanged since the schedule's
+`4602b3b3`); session goal `S095_P4_FX_BUS_TWEAKS.md`. Memory expansions
+quoted in the schedule are approved by the user for this session,
+including the 8 B `.bss` readout hold (SD8).
+
+| Step | State | Notes |
+|---|---|---|
+| S0 | done | `make all` at `d58c0280`: Flash 720,068 / ITCM 15,232 / FXBUF 126,656, matching §S0. Records written to `tools/dsp_test/baselines/s095p4/before/`: `lxr02.elf`, `link_budget.txt`, `osc.txt`, `mixer.txt`, `space_cpu.txt` (dly 194.7, rvb 189.7, ech 193.1), `crumpbit_cpu.txt` (worst `grn` 182.7, rvb 181.3), `host_all.txt` (exit 0). |
+| S1 | done | StereoFilter deleted (4 files + directory), `Makefile` include/source/-Ofast rule removed, registry ids 1..4 (count 5), the union member and both registry/assert lines removed, `SVF_calcBlockZDFFloat()` and its header block removed, and the comment-only StereoFilter names updated (FxBuffer.c, SpaceKit.h, CrumpBitParameters.h/.c, config.h; `ResonantFilter.c`'s twin references too). Build clean; flash 716,204 B (T3 −3,864 B at this point); host `all` exit 0. The three `flt` card files are left for §S1.8 (yours). |
+| S2 | done | T1: `mix` row removed from all three Space types (counts 14/20/16, rows renumbered), `SPACE_LAW_MIX`/`space_tapeK_t.mix` gone, `SpaceRuntime.mix` → `wet`, dry target 0 (SD2, SD3), export hands over `rt->dry`, feed mix 1.0, lane 1 = Delay none / Reverb `siz` / Echo `hsh`, host row tables shifted. Host `space` 0 failures; `space_cpu_check` dly 194.6 / rvb 189.5 / ech 193.0, all ≤ S0. |
+| S3 | done | T2 plain text: Space text tables reduced to `tim`/`hed`/`frz`/`rtg`; `SPACE_TXT_RATIO/FBK/PCT/PRE/DECAY/SIGNED/CENTS/ENV` and `space_tenths()` gone; CrumpBit `crumpBit_formatSemitones()`, the `aux`/`p2`/`p3` semitone text and the `grn` `fbk` percent text gone (`aux` keeps `---`). Host `space`/`crumpbit` 0 failures. |
+| S4 | done | `hed`/`frz`/`rtg` store the stop (0..6, 0..2), defaults 2/0/0, letters `A B C AB AC BC ABC`; `space_stop()` replaced by `space_step()`; descriptors, laws and host SP2/SP3/SP4/SP6 updated. **Corrigendum:** the `space` host target now also extracts `SPACE_FREEZE_STOPS` and `SPACE_ROUTING_STOPS` (the extracted `SpaceEffect.c` names them, so they cannot be left out of `tools/dsp_test/Makefile`). SP6 passes (7 stops, default 2). |
+| S5 | done | `space_fbkGain()` unity at row 100, 1.2 at 127; header comment updated. Host `space` SP2/SP8 pass. |
+| S6 | done | CrumpBit `rvb` damping reads `crumpBit_toneK[ton >> 1]`; page text is the plain 0..127 row; host CB15(d) now checks `ton` 2m/2m+1 bit-identical (126 vs 127 in pass 0). **Corrigendum:** CB15(c)'s freeze law now pins `ton` 127, because 63 is mid damping by design and the test measures the freeze loop, not the damping. `crumpbit` 0 failures; `crumpbit_cpu_check` rvb 181.3 / 201.2 (caps 184 / 204). |
+| S7 | done | C1: threshold `-8 - 32a`, makeup reference −20 dBFS (`BUS_COMP_REF_POWER` 0.01), comment revised. `elf_p4_check`: `busComp_processBlock` loop exact. |
+| S8 | done | C2: `SVF_setDrive()` floor 1.0 (`1 + 5.4x²`), `SVF_init()` drive 1.0; comment added. `elf_p4_check`: `SVF_calcBlockZDF` loop exact. |
+| S9 | done | C3: generated `distortionMakeup.c` (128 floats, half makeup; values match §S9.1), `distortion.h` `out_gain` + table declaration, `setDistortionShape()` folds the makeup, both curve helpers use `out_gain`, host `modules/distortion.c` + `distortion`/`dist_makeup_table` targets added, `prelude.h` updated. Host DI1–DI4 and `dist_makeup_table` pass; `run_modes` 0 failures; `elf_p4_check`: mixer 58 hot loops equal, 0 grew (96 osc loops exact). |
+| S10 | done | C5: `busComp_meterRaw()`, `TEXT/LONG/SHORT_BUS_COMP_GR`, `PAR_BUS_COMP_GR 0xFFFC`, page column 4, valueNames triplet, `menu.c` hold/sample/take/format/edit helpers (8 B `.bss`, approved), encoder and pot guards, visibility predicate, service sampling + repaint, BC18 update. Build clean. Device readout behaviour is §S12.6. |
+| S11 | done (device items open) | `make all && make img` OK (image 716,404 B). After-records in `baselines/s095p4/after/`: Flash 716,404 (**−3,664 B** vs S0; ITCM 15,232 and FXBUF 126,656 unchanged), `host_all.txt` exit 0, `p4_check.txt` 96/96 exact loops and 0 hot loops grew, `comp_curve.txt` reproduces the plan §4.2 C1 table exactly (cam 32/48/64/96/127), `space_cpu.txt`/`crumpbit_cpu.txt` all ≤ S0. A DEV boot (registry self-check 0, no BC18 notice) and the §S12 listening steps remain yours. |
+
+---
+
+## 15. Assessment (review of the implementation, 2026-11-13)
+
+Reviewed: the working tree on top of `d58c0280` against this schedule
+(§0–§S12) and the log in §14. Every source diff was read, and the build and
+gates were re-run independently. No source was changed by the review.
+
+### 15.1 Verdict
+
+**The implementation matches the schedule.** Every step S1–S10 is in, the
+schedule decisions SD1–SD11 are followed, and every gate re-run passes. The
+two corrigenda in §14 are sound. Three findings need a decision or a small
+follow-up (§15.4: F1, F2, F3). F4 is a listening item for S12, and F5 and F6
+are open items on your side. None blocks the device run.
+
+### 15.2 Gates re-run by the review
+
+| Gate | Result |
+|---|---|
+| `make all` after touching every changed source | exit 0. Warnings: only the newlib `_close/_lseek/_read/_write` stubs and the LTO serial note (both pre-existing) |
+| Link budget | Flash 716,404 B (**−3,664 B** vs S0 720,068), ITCM 15,232 (unchanged), FXBUF 126,656 (unchanged), DTCM statics 4,396 |
+| `make -C tools/dsp_test all` | exit 0. `space` 0, `crumpbit` 0, `distortion` 0, `dist_makeup_table` ok, `run_modes` 0; every `*_break` target caught (the `voice_control failures: 6` line is the deliberate `voice_control_break` build) |
+| `elf_p4_check P4BASE=baselines/s095p4/before` | 96 baseline loops, 96 exact; mixer 58 hot loops equal, 0 grew. **No per-sample cost change** (C3's `out_gain` numerator compiles to the same loops as `1 + shape`) |
+| `space_cpu_check` | dly 194.6, rvb 189.5, ech 193.0 (S0: 194.7 / 189.7 / 193.1; caps 202.9 / 191.8 / 199.2) |
+| `crumpbit_cpu_check` | worst `grn` 182.7 (cap 184), feed worst 202.7 (cap 204); `rvb` 181.3 / 201.2 (S0 181.3 / 201.3); `pit` 155.1 = S0 |
+| `gen_dist_makeup.py --check` | ok (the committed table is the generator's output) |
+| `baselines/s095p4/after/comp_curve.txt` | equals the plan's §4.2 C1 table (cam 32/48/64/96/127 at −10/−14/−18/−22 dBFS) |
+| Stale names (`space_stop`, `SVF_calcBlockZDFFloat`, `StereoFilter`, `inv_shape`, `SPACE_*_MIX`, `k.mix`) | only in comments that record the change (`distortion.h:52`, `EffectsManager.h:71`, `SpaceEffect.h:128`) |
+
+### 15.3 Code review by step
+
+| Step | Checked | Notes |
+|---|---|---|
+| S1 T3 | ids, registry, union, asserts, Makefile, float twin, comments | Correct. Every id user names the macro. The DTCM feed stamp (`SK_CTL_MAGIC \| id`) is runtime only |
+| S2 T1 | enums, descriptors, law table, `space_tapeK_t`, `wet`, dry glide, export, feed mix, lanes, host rows | Correct. Lane rows are unique per type (the self-check codes 5/6 statically hold); dry glide `0.9 × dry` per block as specified |
+| S3 T2 | Space text kinds, formatter, CrumpBit hook | Correct. `aux` keeps `---`; `p2`/`p3`/`int`/`env` print the same numbers via the dtype |
+| S4 | `space_step()`, descriptors (max 6 / 2, defaults 2 / 0 / 0), laws, labels, host SP2/3/4/6 | Correct. Self-check code 7 (default ≤ max) statically holds. Host corrigendum (`SPACE_FREEZE_STOPS`/`SPACE_ROUTING_STOPS` extracted) is required and right |
+| S5 | `space_fbkGain()` | Correct: 100 → exactly 1.0, 127 → 1.2 |
+| S6 | `toneK[ton >> 1]`, page text, CB15(d) | Correct. CB15(c) corrigendum is right for the test, but see F1 |
+| S7 C1 | constants, threshold, comment | Correct; loop exact |
+| S8 C2 | `SVF_setDrive()`, `SVF_init()` | Correct; loop exact. See F4 |
+| S9 C3 | struct, table, `setDistortionShape()`, curve helpers, host module | Correct. All four voice types call `setDistortionShape()` in their `*_initVoice()` (`DrumVoice.c:146`, `Snare.c:95/106`, `CymbalVoice.c:89`, `HiHat.c:100`), so no live `Distortion` keeps `out_gain` 0 |
+| S10 C5 | getter, text ids (three enums + two arrays + `valueNames`), sentinel at all five `PAR_PAT_STORE_USE` sites, visibility, sampling, BC18 | Correct as scheduled. See F2 |
+
+### 15.4 Findings
+
+**F1 — CrumpBit `rvb` freeze no longer holds at the default damping
+(sound; needs your decision).**
+- **What happens:** `ton` 63 is the shared row's default (flat for the
+  tilt sub-types). Under §2.7 it is mid damping in `rvb`. The damping
+  one-pole stays in the loop while frozen (`snc` on), so a frozen tail
+  loses its highs pass after pass.
+- **Measured** (CB15(c) re-run by the review at `ton` 63 instead of the
+  pinned 127): **8.08 dB over 1 s** (at flat: 2.15 dB; the law allows
+  ±6 dB). A Scene that freezes at the default damping now fades instead of
+  holding.
+- **Recommended fix:** while frozen, the damping pole is flat:
+  `tone_k = rt->sync ? 1.0f : crumpBit_toneK[rt->tone_raw >> 1]` in
+  `crumpBit_runReverb()` (`CrumpBitEffect.c`, the `tone_k` line).
+  - Cost: per block, one select; no per-sample change.
+  - It matches what a freeze means, and CB15(c) could go back to the
+    default `ton`.
+- **Alternative:** accept it (damping then also shapes the frozen tail).
+
+**F2 — the `cgr` readout can show `off` while the compressor is on (UI,
+minor).**
+- `menu_busCompGrTake()` clears the hold on every paint, and the hold is
+  fed once per foreground pass. A paint with no sample since the last one
+  reads "nothing seen" and prints `off`. That happens on the first paint on
+  arrival at the cell, and on any second repaint within the same pass
+  (knob/marker repaints).
+- **Fix:** when the hold is empty, read `busComp_meterRaw()` once directly
+  and print `off` only when it returns 0. Foreground only; no RAM.
+
+**F3 — CrumpBit `rvb` `dmp` reads ±63 on the STEP automation page (UI,
+minor).**
+- The Effect page (compact, full and held views) goes through
+  `format_value3` and shows the plain 0..127.
+- The automation target text goes through `crumpBit_uiFormatTarget3()`,
+  which only names `sub`, so there the same row still shows ±63.
+- **Fix:** give `crumpBit_uiFormatTarget3()` the same `rvb`/`ton` case,
+  using `crumpBit_shownSubtype()`. Or accept the difference, since that
+  page shows raw targets elsewhere too.
+
+**F4 — C2 removes 8 dB of headroom in front of the voice filter (listen in
+S12.6).**
+- LP leaves through `fastTanh()`, but HP, BP, UBP, Nch and Pek leave
+  through `× FILTER_GAIN` and `__SSAT` (hard int16 clip). A resonant
+  non-LP voice at low `drv` can now hard-clip where it did not.
+- The bus also runs closer to full scale, and with `cmp off` the pack's
+  24-bit clip is hard.
+- **Listen for:** a high-`res` BP/Pek voice at `drv` 0, and a full kit
+  with `cmp off`.
+- **Fallback (plan §4.2):** the middle floor `0.7 + 5.7x²`, one line in
+  `SVF_setDrive()` and `SVF_init()`.
+
+**F5 — test card (yours, §S1.8):** the three `effects.fx` files still say
+`type=flt` (`SD_CARD/Bank/000 FluxTime`, `002 FluxTim2`,
+`027 NoBankOk`, each `11 Eris/effects.fx`). Those Scenes fail to load
+until they are changed to `type=off`.
+
+**F6 — not verifiable from this tree:**
+- `DEV_MODE_DIAGNOSTIC` is 0 (`config.h:68`), so the built image contains
+  neither the registry self-check nor BC18. Both were checked statically
+  here (§15.3); the diagnostic boot in §S11.6 needs a diagnostic build.
+- Every listening step in §S12 is still open.
+
+### 15.5 Side effects of the review
+
+The forced rebuild rewrote `build/` outputs (same sources, so the same
+image). The host run rewrote the tracked artefacts under
+`tools/dsp_test/build/`, which the implementation run had already
+modified. One scratch copy of `modules/crumpbit.c` (for the F1
+measurement) was compiled outside the tree and its temporary copy in
+`modules/` was removed.
+
+---
+
+## 16. Follow-up fixes (user decisions on §15, 2026-11-13)
+
+User decisions on §15:
+- **F1:** "for sure, we want longer freezes; the bigger issue is that for
+  ALL low-pass only ton controls, 127 should be the default."
+- **F4:** "hard clip very bad, reduce now."
+- **F2, F3:** the review's recommendations accepted.
+
+Everything below is in the tree, built and gated. Records are in
+`tools/dsp_test/baselines/s095p4/after_fixes/`.
+
+### 16.1 F1: CrumpBit `rvb` damping gets its own row (default 127), and a freeze holds
+
+**Low-pass-only tone controls, audited:**
+
+| Control | Kind | Default before | Default now |
+|---|---|---|---|
+| Space Reverb `ton` (`rvb_tone`) | LP only, 127 flat | 127 | 127 (no change) |
+| Alkaline `alk_tone` | LP only, 127 flat | 127 (`AlkalineVoice.c:272`, `init.alk`) | 127 (no change) |
+| Colloid `col_tone` | LP only, 127 flat | 127 (`ColloidVoice.c:745`, `init.col`) | 127 (no change) |
+| CrumpBit `rvb` damping | LP only, 127 flat | **63**, the shared `ton` row's default (flat for the tilt sub-types, mid damping here) | **127**, its own row |
+
+**Why a separate row:**
+- The shared `ton` row (row 11) has one default for all sub-types, and
+  the tilt sub-types (`dly`, `cmb`, `pit`) need 63 as their flat point.
+- Giving `rvb` its own row lets its default be 127 without moving the
+  tilt rows' 63.
+- It costs no RAM: `CrumpBitRuntime` had a padding byte before its union
+  (55 B of fields; it is still asserted at exactly 100 B,
+  `CrumpBitEffect.c:196`).
+
+**Changes:**
+
+| File | Change |
+|---|---|
+| `CrumpBitParameters.h` | `CRUMPBIT_PARAM_RVB_DAMP` (row 24) appended; `CRUMPBIT_PARAM_COUNT` 25; new owner mask `CRUMPBIT_ROWS_RVB`; `CRUMPBIT_RVB_DAMP_FLAT` 127; comments (row list, owners, the `ton` centre note) |
+| `CrumpBitParameters.c` | Descriptor `crump_rvb_damp` ("Reverb", "Damping", `dmp`, `DTYPE_0B127`, Morph/LFO/Pattern, default 127). The ownership asserts take the fourth mask. `rvb`'s `ton` label now uses the base name. Value hook: `ton` in `rvb` and `dmp` outside `rvb` show `---`. `crumpBit_layoutCombReverb` is split into `crumpBit_layoutComb` (as before) and `crumpBit_layoutReverb` (s3: `frz dmp wid`) |
+| `CrumpBitEffect.h` | `uint8_t rvb_damp` in the former padding byte |
+| `CrumpBitEffect.c` | Neutral value 127 at entry; `write_param` case; the `rvb` lane map's lane 10 is `dmp`. `crumpBit_runReverb()`: `tone_k = rt->sync ? 1.0f : crumpBit_toneK[rt->rvb_damp >> 1]`, so the pole is exactly flat while frozen (per block; no per-sample change) |
+| Host `crumpbit.c` | CB9: the fourth mask in the disjoint/cover checks, `rvb` rows are lanes of `rvb` only, `rvb` lane 10 = `dmp`. CB15(a): the extremes drive `dmp`. CB15(c): the freeze law now runs at **mid damping** (`dmp` 63) and must hold. CB15(d): `dmp` 2m and 2m+1 bit-identical |
+| `tools/dsp_test/Makefile` | Extracts `CRUMPBIT_ROWS_RVB` and `CRUMPBIT_RVB_DAMP_FLAT` |
+
+This also settles §15's **F3**: `dmp` is a plain `DTYPE_0B127` row, so
+it reads 0..127 on every page, the STEP automation page included.
+
+**Measured** (CB15(c)):
+
+| Damping during freeze | Loss over 1 s |
+|---|---|
+| Mid, before this fix (§15 F1) | 8.08 dB |
+| Mid, now | 2.48 dB |
+| Flat, before | 2.15 dB |
+
+The law allows ±6 dB.
+
+**Stored data (no migration):**
+- A `.fx` file without `crump_rvb_damp` loads 127 (flat).
+- A CrumpBit `rvb` Scene in the AutoSave reads whatever byte slot 24
+  held (usually 0, the darkest): reset or re-save it.
+- `ton` values stored for `rvb` are kept and ignored there; they still
+  drive `dly`/`cmb`/`pit` after a sub-type change.
+- MIDI and Pattern values reach the new row by its own key and index.
+
+### 16.2 F4: the voice filter's drive floor per type
+
+**Measured** on the host: the real `SVF_calcBlockZDF()`, full-scale saw,
+kick and noise, `drv` 0, `res` 0..127, cutoff 0.02..0.4. Figures are mean
+clipped samples / worst setting (`after_fixes/filter_clip.txt`):
+
+| Type | Output stage | Floor 0.4 (pre-P4) | Floor 1.0 (C2) |
+|---|---|---|---|
+| LP | `fastTanh` (soft) | 0 % | 0 % |
+| LP2 | clamped states × 0.883 | 0 % | 0 % |
+| HP | `__SSAT` (hard) | 0.014 % / 0.35 % | 2.1 % / 16 % |
+| BP | `__SSAT` | 0.000 % / 0.01 % | 0.34 % / 6.1 % |
+| UBP | `__SSAT` | 0 % | 0.03 % / 1.2 % |
+| Nch | `__SSAT` | 0 % | 0.02 % / 0.34 % |
+| Pek | `__SSAT` | 1.2 % / 16 % | 7.6 % / 44 % |
+
+**What was tried first:** a floor of 0.8 kept UBP and Nch clean at
+`drv` 0, but clipped them more than before mid-knob. At `drv` 48, Nch
+went from 0.65 % to 10.3 %, and UBP from 0.09 % to 0.18 %.
+
+**Decision:** every hard-clipping type returns to the pre-P4 floor (0.4);
+LP and LP2, which cannot hard-clip, keep C2's 1.0.
+
+**Change** (`ResonantFilter.c`):
+- `svf_driveFloorOffset[9]` holds an offset per type: LP 0; HP, BP,
+  UBP, Nch, Pek −0.6; LP2 and `off` 0.
+- `SVF_calcBlockZDF()`'s ZDF branch adds it to `filter->drive` once per
+  block.
+- The hard-clipping types get `0.4 + 5.4x²`, which is at most the pre-P4
+  `0.4 + 6x²` at every `drv`. They clip no more than before anywhere:
+  measured at `drv` 0..112, HP, BP and Pek clip slightly less above
+  `drv` 0, and are identical at 0.
+- The `SVF_setDrive()` comment notes the offset.
+
+**What remains:**
+- C2's level gain now applies to LP (and LP2) voices only, which reach
+  the bus 8 dB hotter than before. Non-LP voices are where they were
+  before P4.
+- The 8 dB gap between filter `off` and LP is closed; HP, BP, UBP, Nch
+  and Pek keep their pre-P4 level.
+
+**Pre-existing, not changed:** the non-LP types hard-clip under drive as
+they always have (HP 10 % of samples at `drv` 64; Pek 1.2 % even at
+`drv` 0). A real cure needs a soft output stage on those types, as LP
+has, which is a per-sample cost the CPU ceiling would have to pay for.
+That is a separate decision.
+
+**Loop gate:**
+- `elf_p4_check` no longer reports "exact", because the per-block add
+  moved the register allocation of `SVF_calcBlockZDF` (85 exact,
+  6 renamed, 5 missing).
+- Compared by length, every remaining SVF loop is unchanged (36, 38, 39,
+  87, 87, 88, 89, 91, 92 instructions). Two fragments merged away,
+  including the 97-instruction one, so the longest SVF loop went from 97
+  to 92.
+- The mixer: 58 hot loops equal, 0 grew.
+- No per-sample cost increase.
+
+### 16.3 F2: the `cgr` readout no longer shows `off` while the compressor runs
+
+`menu.c` `menu_busCompGrTake()`: when the hold is empty, it takes one
+direct reading (`menu_busCompGrSample()`) before deciding. `off` now
+appears only when `busComp_meterRaw()` returns 0, i.e. `cmp` is off.
+Foreground only; no RAM.
+
+### 16.4 Gates after the fixes
+
+| Gate | Result |
+|---|---|
+| `make all` | exit 0; only the pre-existing newlib/LTO notes |
+| Link budget | Flash 716,644 B (+240 over §15; −3,424 vs S0); ITCM 15,232; FXBUF 126,656; DTCM statics 4,396 (unchanged) |
+| `make -C tools/dsp_test all` | exit 0; `crumpbit` 0 (CB9, CB15 incl. the mid-damping freeze), `space` 0, `distortion` 0, `dist_makeup_table` ok; every break target caught |
+| Loops | as §16.2: no loop grew; mixer 58 equal |
+| `crumpbit_cpu_check` | `rvb` 181.3 / 201.2 (unchanged), worst 182.7 ≤ 184, feed 202.7 ≤ 204 |
+| `space_cpu_check` | dly 194.6, rvb 189.5, ech 193.0 (unchanged) |
+| `make img` | `build/LXRV2_lxr02.img` rewritten with these fixes (payload 716,644 B) |
+
+### 16.5 Notes
+
+- **CB15 decay figure:** the S0 record (`before/host_all.txt`) shows
+  19.48 dB, but the law built from the commit `d58c0280` (pre-P4 source,
+  scratch worktree) gives 15.58 dB. The current tree gives 15.42 dB at
+  flat damping, and repeated draws vary 15.1–15.8 dB. The 19.48 dB figure
+  is not reproducible from the pre-P4 code, so it is not a P4 change. All
+  three figures are inside the law's 9..21 dB.
+- **`tools/dsp_test/spike` `filter` target** (not part of `all`): it
+  extracts `SVF_calcBlockZDFFloat` from the repository file, which T3
+  removed, so it no longer builds against the tree. The baseline-only
+  gate still works. Drop the symbol from `FILTER_SYMS` and the float half
+  of `test_filter.c` if the kit is used again.
+- **Clip harness:** `after_fixes/filter_clip_sweep.c` and
+  `filter_clip_curve.c` reproduce §16.2. They need the extracted pre-F4
+  `SVF_calcBlockZDF` (the header comment in the sweep file gives the
+  command).
+
+### 16.6 Device steps added to §S12
+
+1. **CrumpBit `rvb`:** a fresh `rvb` is bright (`dmp` 127, flat). Turning
+   `dmp` down darkens it. Freeze at any `dmp` holds (no fade, no
+   darkening). `ton` shows `---` in `rvb`.
+2. **Filters:** LP voices are about 8 dB hotter than before P4. HP, BP,
+   UBP, Nch and Pek voices are at their pre-P4 level. With a high `res`
+   BP or Pek at `drv` 0, the clipping heard before P4 is unchanged and
+   no new clipping appears.
+3. **`cgr`:** on arriving at the cell with `cmp` on, it shows a number,
+   never `off`.
+
+### 16.7 Statements this makes out of date (additions to §13)
+
+- `EFFECTS_MODULES_DSP_REFERENCE.md` §6/§6.2: CrumpBit has 25 rows (row
+  24 `dmp`, `rvb` only); `rvb` lane 10 is `dmp`; `rvb` has its own
+  layout; the freeze holds the damping flat.
+- `EFFECTS_BUS_REFERENCE.md` §8.6: the `rvb` page (s3 `frz dmp wid`).
+- `MEMORY.md` §Effects (CrumpBit binding rules: "24 rows").
+- `INSTRUMENTS_DSP_REFERENCE.md`: the voice filter's per-type drive floor
+  (LP/LP2 1.0, the others 0.4).
