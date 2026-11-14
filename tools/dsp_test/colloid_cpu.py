@@ -18,9 +18,9 @@ What:       for each mode, from the linked ELF (the space_cpu.py method,
               path + each oscillator loop's entry/exit path + the filter
               loop's entry/exit path.
             Modes: plain (COL_OSC_COUNT oscillators, from --count), pwm (the
-            Saw/Rec pair loops, COL_PWM_COUNT 6) and pwmw (S095 P3: the
-            Sin/Tri warp loops, one oscillator per loop, 6), each stereo (rte
-            str, `par`, the dearest) and mono (`ser`).
+            Saw/Rec pair loops, COL_PWM_COUNT) and pwmw (S095 P3: the
+            Sin/Tri warp loops, one oscillator per loop, COL_PWM_WARP_COUNT), each
+            stereo (rte str, `par`, the dearest) and mono (`ser`).
 Why:        the device run is the gate (S094 P2: measured cycles per block,
             cold, dearest, stereo send, against the Basic 19,620); these
             counts are the host regression baseline, recorded at step 5 in
@@ -35,6 +35,7 @@ Affiliates: elf_looppath.py, elf_blockpath.py, space_cpu.py; ColloidVoice.c,
             ColloidOsc.c.
 """
 import argparse
+import os
 import re
 import sys
 
@@ -42,7 +43,23 @@ import elf_blockpath as B
 import elf_looppath as E
 
 FRAMES = 32
-PWM_COUNT = 6
+# S095 P5 (user, 2026-11-14): the pwm counts are read from ColloidVoice.h,
+# not repeated here, so these counts follow the firmware: COL_PWM_COUNT (8)
+# for the Saw/Rec pair loops (`pwm` modes) and COL_PWM_WARP_COUNT (6) for the
+# Sin/Tri warp loops (`pwmw` modes); before S095 P5 both were 6. The plain
+# count is still --count (it can be overridden with -DCOL_OSC_COUNT; the pwm
+# counts cannot).
+def _voice_define(name):
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..',
+                        'Core', 'DSP', 'Instruments', 'Colloid', 'ColloidVoice.h')
+    m = re.search(r'^#define\s+' + name + r'\s+(\d+)u', open(path).read(), re.M)
+    if not m:
+        sys.exit(f'colloid_cpu.py: {name} not found in ColloidVoice.h')
+    return int(m.group(1))
+
+
+PWM_COUNT = _voice_define('COL_PWM_COUNT')
+PWM_WARP_COUNT = _voice_define('COL_PWM_WARP_COUNT')
 HELPERS = ('col_svfControl', 'col_egStep', 'col_wtbBind', 'col_pspK')
 CTL = 'col_oscControl'   # S095 P3: the oscillator-control loop's own function
 
@@ -113,7 +130,7 @@ def main():
             if m:
                 want[m.group(1)] = float(m.group(2))
     fail = False
-    modes = [('plain', a.count), ('pwm', PWM_COUNT)] + ([('pwmw', PWM_COUNT)] if warp else [])
+    modes = [('plain', a.count), ('pwm', PWM_COUNT)] + ([('pwmw', PWM_WARP_COUNT)] if warp else [])
     for typ, n in modes:
         store, add = {'plain': ('col_oscPairStore', 'col_oscPairAdd'),
                       'pwm': ('col_pwmPairStore', 'col_pwmPairAdd'),

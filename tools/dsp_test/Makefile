@@ -545,6 +545,8 @@ alkaline_tables:
 #               rte    the right filter ignores fro              -> CO-RTE
 #               tone   a k-form tone, not exact when open        -> CO-POST
 #               sign   Saw played as Rec                         -> CO-PWM
+#             S095 P5 (user 2026-11-14):
+#               join   rejoining oscillators glide, not land      -> CO-JOIN
 #             colloid_tables checks ColloidTables.c against its generator;
 #             colloid_cpu_check prints the linked counts (colloid_cpu.py),
 #             against COL_BASE when given.
@@ -673,6 +675,18 @@ colloid: $(GEN)/Oscillator.host.h $(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables
 	@if ./build/colloid_break_slew0 >/dev/null 2>&1; then \
 	  echo "colloid_break_slew0: FAILED (a slw 0 that slews not caught)"; exit 1; \
 	else echo "colloid_break_slew0: caught (law CO-SLEW fails as expected)"; fi
+	# S095 P5 (user, 2026-11-14): rejoining oscillators glide instead of
+	# landing (the oscLive test removed from the pitch slew) -> CO-JOIN.
+	mkdir -p build/break_col_join
+	sed 's/if (jump || i >= live || fabsf(d) <= step)/if (jump || fabsf(d) <= step)/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_join/ColloidVoice.host.c
+	@grep -q 'if (jump || fabsf(d) <= step)' build/break_col_join/ColloidVoice.host.c || \
+	  { echo "colloid_break_join: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_join $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_join -lm
+	@if ./build/colloid_break_join >/dev/null 2>&1; then \
+	  echo "colloid_break_join: FAILED (rejoining oscillators that glide not caught)"; exit 1; \
+	else echo "colloid_break_join: caught (law CO-JOIN fails as expected)"; fi
 	mkdir -p build/break_col_group
 	sed 's/iv\[COL_GROUP(i)\]/iv[0]/' \
 	  $(GEN)/ColloidVoice.host.c > build/break_col_group/ColloidVoice.host.c

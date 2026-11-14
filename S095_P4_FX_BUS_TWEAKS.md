@@ -2,7 +2,9 @@
 
 - **Status:** plan, written 2026-11-13 from the tree at `4602b3b3`. Nothing
   changed in the source. Every question is answered (user, 2026-11-13,
-  §5); the next step is the schedule.
+  §5); the next step is the schedule. Implemented
+  (`S095_P4_IMPLEMENTATION.md`). §7 (2026-11-14) adds the Colloid's
+  measured resource use on the P4 image.
 - **Items:**
   - T1: the Space types (Delay, Reverb, Echo) lose `mix`;
   - T2: which CrumpBit and Space rows show plain numbers (decided); the
@@ -562,3 +564,87 @@ how it sounds now.
   `fbk` unity at 106 (§2.6).
 - `S095_P1_IMPLEMENTATION.md` §S18 row list (`mix`, the zone rule for
   `hed`/`frz`/`rtg`).
+
+---
+
+## 7. Colloid resource use on the P4 image (device, 2026-11-14)
+
+**The run.** One Scene of six Colloids, played and edited for about
+9 minutes, Effect off, compressor on. The image is the P4 image after the
+fixes in `S095_P4_IMPLEMENTATION.md` §16 (`SD_CARD_COL/LXRV2_lxr02.img`
+is byte-identical to `build/LXRV2_lxr02.img`), a DEV_MODE_LOGGING build.
+
+- Data: 371 cycle-probe windows of 2,048 blocks each.
+- Record: `tools/dsp_test/baselines/s095p5/device_probe_colloid6.txt`,
+  which has the per-window table and the final settings read from
+  `SD_CARD_COL/.hcprms1`.
+
+**P4 does not change the Colloid:**
+
+- C2 changes `SVF_setDrive()`, the drum voices' `ResonantFilter`. The
+  Colloid uses its own TPT filter (`ColSvf`).
+- C3 changes `Distortion`. The Colloid has no Distortion.
+- T1–T3 are on the Effect side.
+
+So these are the Colloid's costs as S095 P3 left it. They are also the
+first device figures for the Colloid (P3 §10.9 step 3).
+
+### 7.1 Resources
+
+| Resource | Colloid | Limit | Margin |
+|---|---|---|---|
+| CPU, one voice, dearest mode seen (`wtb`, 12 oscillators, `str`) | 17,433 cycles per block on average; highest window 17,504 | Basic share 19,620 | 2,187 (11 %), ≈ 68 cycles per sample |
+| CPU, highest window of any voice in the run | 17,807 (start of the run, `wav` Saw, `str`) | 19,620 | 1,813 |
+| CPU, six Colloids, whole mixer block | highest window average 116,867 (74.6 %); highest block 127,968 (81.7 %) | 152,004 average cap (97 %) | ≈ 35,000 with the Effect off. An Effect at its 16,634 share would put the average at about 85 % |
+| Voice struct | 1,112 B (`sizeof`, measured 2026-11-14) | slot reserve 1,264 B | 152 B |
+| Other RAM | none | | |
+| ITCM (the oscillator loops) | 15,232 / 16,384 B in total (P4 left it unchanged) | | 1,152 B |
+| Flash | 716,644 / 753,664 B in total (`after_fixes/link_budget.txt`) | | 37,020 B |
+
+### 7.2 Cost by mode
+
+Each figure is one slot: async plus sync render, in cycles per block,
+with cycles per sample in brackets.
+
+| Mode | Cycles per block |
+|---|---|
+| `wtb`, 12 oscillators, `str` | 17,433 (545) |
+| `wav` Saw, 12, `str` | 16,693 … 17,272 (522 … 540) |
+| `pwm` Sin, 6, `str` (the warp form) | 15,393 (481) |
+| `pwm` Saw / Rec, 6, `str` (the two-read form) | 14,608 … 14,651 (457) |
+| `pwm` Rec, 6, mono route (with LFO, slew and overdrive) | 14,117 (441) |
+
+- **Mono route:** about 500 cycles cheaper than `str`.
+- **Async (control) work:** 3,100 … 3,500 cycles per block with 12
+  oscillators, 2,400 … 2,500 with 6.
+- **Against the host:** `plain12-par` counts 382.1 instructions per
+  sample on the host (`s095p3/colloid_cpu.txt`). The device measured
+  16,693 … 17,272 cycles per block for that mode, so the Colloid runs at
+  1.37 … 1.41 cycles per instruction.
+- **Constant cost holds:** each slot's figure stayed flat while the global
+  Morph was moved (segment B in the record).
+
+### 7.3 Conclusions
+
+- **The Colloid fits the Basic share at 12 oscillators in every mode
+  measured.** The C-D2 fallback (`COL_OSC_COUNT` 10) is not needed.
+- **The worst case per voice is `wtb` 12 `str`.** LFO dispatch is
+  charged to the mixer's `ctl` section, not to the slot, and the mono
+  route is cheaper.
+- **Not measured: a lone Colloid in a mixed Scene** (with drums and an
+  active Effect). The first voice of an engine in each block pays for
+  loading that engine's code into the I-cache:
+  - in this run, the first of five identical `wav` voices cost about
+    400 more than the other four (segment A: 17,160 against 16,693 …
+    16,850);
+  - the Alkaline, whose ladder runs from flash, paid about 2,200 more
+    (S094 P2 run 2, segment D).
+
+  Allow about 500 for a lone `wtb` Colloid, which leaves about 1,700 of
+  margin. One mixed-Scene probe would confirm the figure.
+- **What this means for S095 P5:** `S095_P5_COLLOID_ALKALINE_ADVANCED_FX.md`
+  §2.2.
+- **Since then (2026-11-14):** `pwm` Saw / Rec render 8 oscillators and
+  Sin / Tri 6 (`S095_P4_IMPLEMENTATION.md` §17–§18). The dearest modes are
+  `wtb` 12 and `pwm` Saw / Rec 8, both ≈ 17,500 *est.* (≈ 18,000 alone),
+  so the Basic margin is about 1,600.

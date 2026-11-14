@@ -128,8 +128,37 @@
 #error "COL_OSC_COUNT: add its 1 / sqrt(N) here"
 #endif
 #define COL_NORM_WAV          (COL_INV_SQRT_COUNT / 32768.0f)
-#define COL_NORM_PWM          (0.408248290f / 32768.0f)   /* 1 / sqrt(6) */
-_Static_assert(COL_PWM_COUNT == 6u, "COL_NORM_PWM is 1 / sqrt(6)");
+/*
+ * COL_NORM_PWM for the eight pwm oscillators (S095 P5, user 2026-11-14).
+ *
+ * What:       1 / (full scale x sqrt(8)); was 1 / sqrt(6) with six. Since the
+ *             split later the same day it is the pulse forms' (Saw/Rec)
+ *             constant; COL_NORM_PWM_WARP below is the warp forms'.
+ * Why:        the oscillators are free-running and detuned, so they add by
+ *             power: 1 / sqrt(N) keeps the stack's level into the drive the
+ *             same at any N (C-D12). The assert ties the constant to
+ *             COL_PWM_COUNT, so a later count change cannot leave it stale.
+ * Headroom:   the bound is all eight oscillators at the same sign at once.
+ *             With pos 0 the Rec stack is a square, |x| = 1 per oscillator,
+ *             so the bound is sqrt(8) x COL_HEADROOM 0.5 = 1.41. That is
+ *             inside the drive's +-1.5 clamp at drv 0. The 12-oscillator
+ *             stack's bound is sqrt(12) x 0.5 = 1.73.
+ */
+#define COL_NORM_PWM          (0.353553391f / 32768.0f)   /* 1 / sqrt(8) */
+_Static_assert(COL_PWM_COUNT == 8u, "COL_NORM_PWM is 1 / sqrt(8)");
+/*
+ * COL_NORM_PWM_WARP for the six warp oscillators (S095 P5, user 2026-11-14).
+ *
+ * What:       1 / (full scale x sqrt(6)): pwm Sin and Tri render
+ *             COL_PWM_WARP_COUNT (6) oscillators (ColloidVoice.h).
+ * Why:        the same power rule as COL_NORM_PWM, for the warp count, so a
+ *             Sin/Tri <-> Saw/Rec change keeps the stack's level into the
+ *             drive. The value is the S095 P3 constant (six for every form).
+ * Headroom:   six warp oscillators at the same sign: sqrt(6) x 0.5 = 1.22,
+ *             inside the drive's +-1.5 clamp.
+ */
+#define COL_NORM_PWM_WARP     (0.408248290f / 32768.0f)   /* 1 / sqrt(6) */
+_Static_assert(COL_PWM_WARP_COUNT == 6u, "COL_NORM_PWM_WARP is 1 / sqrt(6)");
 #define COL_HEADROOM          0.5f
 #define COL_PSP_GAIN          5.0f
 #define COL_PSP_EXP           1.39308169f
@@ -545,8 +574,10 @@ static inline float col_pwmScale(const ColloidVoice *voice)
  *               dtn^2 x 250 / 1200 (F5);
  *             - the slew (F3, Q1): pitchCur moves toward the target by at
  *               most `step` octaves this block (a constant rate), or lands
- *               on it when within a step or when `jump` is set (slw 0, or
- *               the voice's first note);
+ *               on it when within a step, when `jump` is set (the voice's
+ *               first note; slw 0 lands through its huge step), or when the
+ *               oscillator rejoins (S095 P5: o >= voice->oscLive, the count
+ *               the last block rendered);
  *             - f = 2^pitchCur x osc.modNodeValue (the LFO / velocity pitch
  *               multiplier after the slew, Q2), clamped to 0.45 fs;
  *               inc = f x 2^32 / fs;
@@ -556,7 +587,8 @@ static inline float col_pwmScale(const ColloidVoice *voice)
  *               oscPwmTriLift[width], Saw/Rec the sawTable octave row;
  *               Saw/Rec/Tri under wav, the octave row of that table;
  *             - pwm: the width index slews toward col_pwmTarget() by at most
- *               OSC_PWM_SLEW_STEPS (2) per block; Saw/Rec take pwD =
+ *               OSC_PWM_SLEW_STEPS (2) per block, or lands on it when the
+ *               oscillator rejoins (S095 P5, as the pitch); Saw/Rec take pwD =
  *               oscPwmDSaw / oscPwmDRec[index] and add their level
  *               oscPwmLevel*Q14[index] to the stack's sum;
  *             - the position: the motion phase advances by rate x colMotK[o];
@@ -570,12 +602,20 @@ static inline float col_pwmScale(const ColloidVoice *voice)
  *             so interval and note changes arrive staggered (the user's
  *             "lazily get to their destination pitch at the slew rate").
  *             Lower notes sit nearer the centre and move less (w, C-D14).
- * Inputs:     voice (parameters, osc, the bind, rnd, frame, pitchCur), count
- *             (COL_OSC_COUNT or COL_PWM_COUNT), base (log2 Hz), step (octaves
- *             per block), jump, isPwm, isWtb.
+ * Inputs:     voice (parameters, osc, the bind, rnd, frame, pitchCur,
+ *             oscLive), count (COL_OSC_COUNT, or under pwm
+ *             COL_PWM_FORM_COUNT(): 6 Sin/Tri, 8 Saw/Rec), base (log2 Hz),
+ *             step (octaves per block), jump, isPwm, isWtb.
  * Outputs:    pitchCur[], inc[], row[], pwPos[], pwD[], motPhase[],
- *             posPair[]. Returns the pwm level factor: under Saw/Rec the mean
- *             of oscPwmLevel*Q14[width] / 16,384, else 1.
+ *             posPair[], oscLive (= count). Returns the pwm level factor:
+ *             under Saw/Rec the mean of oscPwmLevel*Q14[width] / 16,384,
+ *             else 1.
+ * Rejoin:     S095 P5 (user, 2026-11-14). The oscillators past the last
+ *             block's count did not run; their pitchCur and pwPos are where
+ *             they stopped. Landing them keeps the stack together: a change
+ *             of typ or of the pwm form never brings oscillators back
+ *             gliding. One compare per oscillator per block; nothing per
+ *             sample.
  * Cost:       one alk_exp2f() per oscillator per block (it replaces P2's
  *             colRatio[] lookup and first-order detune); no per-sample work.
  *             noinline and the loop kept rolled: -Ofast otherwise inlined and
@@ -618,6 +658,8 @@ static __attribute__((noinline)) float col_oscControl(ColloidVoice *voice, const
 	/* pwm: the centre width and the spread scale, once per block */
 	const int32_t pwPos0 = (int32_t)(osc->position & 127u);
 	const float pwScale = col_pwmScale(voice);
+	/* S095 P5: oscillators from here on rejoin this block (see Rejoin) */
+	const uint32_t live = voice->oscLive;
 	float iv[COL_GROUPS];
 	int32_t qEven = 0;
 	int32_t levelSum = 0;
@@ -634,8 +676,9 @@ static __attribute__((noinline)) float col_oscControl(ColloidVoice *voice, const
 		const float d = target - voice->pitchCur[i];
 		float f;
 
-		/* the slew: a constant rate in log pitch; land within one step */
-		if (jump || fabsf(d) <= step)
+		/* the slew: a constant rate in log pitch; land within one step, or
+		 * at once when the oscillator rejoins (S095 P5) */
+		if (jump || i >= live || fabsf(d) <= step)
 			voice->pitchCur[i] = target;
 		else
 			voice->pitchCur[i] += (d > 0.0f) ? step : -step;
@@ -644,10 +687,14 @@ static __attribute__((noinline)) float col_oscControl(ColloidVoice *voice, const
 		if (isPwm) {
 			int32_t dw = (int32_t)col_pwmTarget(pwPos0, voice->rnd[i], pwScale) - (int32_t)voice->pwPos[i];
 
-			if (dw > OSC_PWM_SLEW_STEPS)
-				dw = OSC_PWM_SLEW_STEPS;
-			else if (dw < -OSC_PWM_SLEW_STEPS)
-				dw = -OSC_PWM_SLEW_STEPS;
+			/* the slew; a rejoining oscillator (i >= live) lands on its
+			 * width instead (S095 P5) */
+			if (i < live) {
+				if (dw > OSC_PWM_SLEW_STEPS)
+					dw = OSC_PWM_SLEW_STEPS;
+				else if (dw < -OSC_PWM_SLEW_STEPS)
+					dw = -OSC_PWM_SLEW_STEPS;
+			}
 			voice->pwPos[i] = (uint8_t)((int32_t)voice->pwPos[i] + dw);
 			if (isPwmD) {
 				voice->pwD[i] = dTab[voice->pwPos[i] & 127u];
@@ -683,6 +730,8 @@ static __attribute__((noinline)) float col_oscControl(ColloidVoice *voice, const
 				qEven = q;
 		}
 	}
+	/* the next block's rejoin test (S095 P5) */
+	voice->oscLive = (uint8_t)count;
 	return isPwmD ? (float)levelSum * (1.0f / 16384.0f) / (float)count : 1.0f;
 }
 
@@ -777,6 +826,7 @@ void Colloid_initVoice(ColloidVoice *voice)
 	/* the pitch lands on its targets until the first note has sounded one
 	 * block (S095 P3 F3): a load never sweeps in from 0 Hz */
 	voice->pitchJump = 1u;
+	voice->oscLive = 0u;   /* S095 P5: every oscillator rejoins on the first block */
 	voice->ampLast = 0.0f;
 	voice->inGain = COL_NORM_WAV;
 	voice->inGainR = COL_NORM_WAV;
@@ -838,7 +888,18 @@ void Colloid_calcVoiceAsync(ColloidVoice *voice)
 	OscInfo *const osc = &voice->osc;
 	const uint8_t isPwm = (uint8_t)(osc->oscType == OSC_TYPE_PWM);
 	const uint8_t isWtb = (uint8_t)(osc->oscType == OSC_TYPE_WTB);
-	const uint32_t count = isPwm ? COL_PWM_COUNT : COL_OSC_COUNT;
+	/*
+	 * The block's oscillator count (S095 P5, user 2026-11-14).
+	 *
+	 * What:       COL_OSC_COUNT (12) under wav and wtb; under pwm
+	 *             COL_PWM_FORM_COUNT(): 6 for the warp forms Sin/Tri, 8 for
+	 *             the pulse forms Saw/Rec (ColloidVoice.h). isWarp also picks
+	 *             the bus normalisation below.
+	 * Why:        the sync block renders the same count from the same test
+	 *             (COL_PWM_IS_WARP()), so the control and the audio agree.
+	 */
+	const uint8_t isWarp = (uint8_t)(isPwm && COL_PWM_IS_WARP(osc->waveform));
+	const uint32_t count = isPwm ? COL_PWM_FORM_COUNT(osc->waveform) : COL_OSC_COUNT;
 	/*
 	 * The effective sustain switch (C-D8, C-D19).
 	 *
@@ -918,14 +979,16 @@ void Colloid_calcVoiceAsync(ColloidVoice *voice)
 	 * The bus into the drive (C-D12): 1 / (full scale x sqrt(N)) x
 	 * COL_HEADROOM (S095 P3: the stack's peaks stay inside the shaper at drv
 	 * 0) times the drive gain 2^(4 drv); under pwm Saw/Rec times the stack's
-	 * mean level (S095 P3 F2). wtb with no table installed is silenced here (the rows
+	 * mean level (S095 P3 F2). S095 P5: N is the block's count, so pwm uses
+	 * COL_NORM_PWM_WARP (1 / sqrt(6)) for Sin/Tri and COL_NORM_PWM
+	 * (1 / sqrt(8)) for Saw/Rec. wtb with no table installed is silenced here (the rows
 	 * point at a stock row so the loops still read valid memory). str: the
 	 * right channel's own gain from driveR. Mono: inGainR is the gain into
 	 * the second filter, 2^(4 driveR) (Q7; 1 at drv 0, dro 0, as P2's
 	 * shaper-only stage), folded into the first filter's output mix by the
 	 * render loop.
 	 */
-	norm = COL_HEADROOM * (isPwm ? COL_NORM_PWM * level
+	norm = COL_HEADROOM * (isPwm ? (isWarp ? COL_NORM_PWM_WARP : COL_NORM_PWM) * level
 	                    : ((isWtb && !osc->sampleCacheData) ? 0.0f : COL_NORM_WAV));
 	voice->inGain = norm * alk_exp2f(COL_DRIVE_OCT * col_clamp01(voice->drive));
 	voice->inGainR = ((voice->route == COL_RTE_STR || voice->route >= COL_RTE_COUNT) ? norm : 1.0f)
@@ -1133,10 +1196,11 @@ void Colloid_calcVoiceSyncBlock(ColloidVoice *voice, int16_t *buf, uint8_t size)
 	 * What:       the oscillator loops, the first storing the buses and every
 	 *             further one adding:
 	 *               typ pwm, wav Sin or Tri: col_warpStore/Add per oscillator
-	 *                 (COL_PWM_COUNT), W/ra/rb from oscPwmSin* or oscPwmTri*
-	 *                 at the oscillator's width index;
-	 *               typ pwm, wav Saw or Rec: col_pwmPairStore/Add per pair,
-	 *                 sign +1 (Saw) or -1 (Rec);
+	 *                 (COL_PWM_WARP_COUNT, 6 since S095 P5), W/ra/rb from
+	 *                 oscPwmSin* or oscPwmTri* at the oscillator's width index;
+	 *               typ pwm, wav Saw or Rec: col_pwmPairStore/Add per pair
+	 *                 (COL_PWM_COUNT, 8 since S095 P5), sign +1 (Saw) or -1
+	 *                 (Rec);
 	 *               otherwise: col_oscPairStore/Add per pair (COL_OSC_COUNT);
 	 *             then the filter/output loop of the route (rte str stereo,
 	 *             any other value mono).
@@ -1152,12 +1216,12 @@ void Colloid_calcVoiceSyncBlock(ColloidVoice *voice, int16_t *buf, uint8_t size)
 	uint32_t j;
 
 	(void)size;   /* the voice always renders OUTPUT_DMA_SIZE */
-	if (isPwm && form <= COL_PWM_TRI) {
+	if (isPwm && COL_PWM_IS_WARP(form)) {
 		const uint32_t *const tW  = (form == COL_PWM_SIN) ? oscPwmSinW  : oscPwmTriW;
 		const uint32_t *const tRa = (form == COL_PWM_SIN) ? oscPwmSinRa : oscPwmTriRa;
 		const uint32_t *const tRb = (form == COL_PWM_SIN) ? oscPwmSinRb : oscPwmTriRb;
 
-		for (j = 0u; j < COL_PWM_COUNT; j++) {
+		for (j = 0u; j < COL_PWM_WARP_COUNT; j++) {
 			const uint32_t k = voice->pwPos[j] & 127u;
 			/* the oscillator's Q15 position into the low half */
 			const uint32_t pq = (j & 1u) ? (voice->posPair[j >> 1] >> 16)

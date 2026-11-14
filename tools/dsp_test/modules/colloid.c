@@ -61,7 +61,15 @@
  *                       ones (test_mixer());
  *               CO-RND  (device fix) with the RNG stuck on one value (the
  *                       device between refreshes), the twelve trigger draws
- *                       and the twelve start phases are all distinct.
+ *                       and the twelve start phases are all distinct;
+ *               CO-JOIN (S095 P5, user 2026-11-14) the count follows the pwm
+ *                       form (oscLive 8 under Saw/Rec, 6 under Sin/Tri, 12
+ *                       under wav); an oscillator that starts rendering
+ *                       again lands on its target pitch and width in its
+ *                       first block while the others still slew: pwm Sin ->
+ *                       Saw (oscillators 6, 7) and pwm -> wav (8..11).
+ *                       CO-PWM's form bus sums each form's own count
+ *                       (COL_PWM_FORM_COUNT()).
  * Why:        S095 P2 draft §11 step 3; the schedule's gates for steps 2
  *             and 4.
  * Inputs:     generated fragments (Makefile target colloid).
@@ -122,10 +130,10 @@ int16_t GetRngValue(void)
 
 #define BLK OUTPUT_DMA_SIZE
 enum { G_OSC, G_POS, G_W, G_MOT, G_INT, G_SLEW, G_EG, G_AMP, G_SVF, G_SER, G_RTE, G_POST,
-       G_PWM, G_WTB, G_MX, G_RND, G_N };
+       G_PWM, G_WTB, G_MX, G_RND, G_JOIN, G_N };
 static const char *g_name[G_N] = { "CO-OSC", "CO-POS", "CO-W", "CO-MOT", "CO-INT", "CO-SLEW",
                                    "CO-EG", "CO-AMP", "CO-SVF", "CO-SER", "CO-RTE", "CO-POST",
-                                   "CO-PWM", "CO-WTB", "MX-ST", "CO-RND" };
+                                   "CO-PWM", "CO-WTB", "MX-ST", "CO-RND", "CO-JOIN" };
 static unsigned g_fail[G_N];
 
 static void fail(int g, const char *what, double a, double b)
@@ -632,7 +640,8 @@ static void check_pwm_form(uint8_t form)
 	Colloid_calcVoiceSyncBlock(&V, L, BLK);
 	for (n = 0u; n < BLK; n++) {
 		int32_t m = 0;
-		for (i = 0u; i < COL_PWM_COUNT; i++) {
+		/* S095 P5: each form renders its own count (6 Sin/Tri, 8 Saw/Rec) */
+		for (i = 0u; i < COL_PWM_FORM_COUNT(form); i++) {
 			const uint32_t at = ph[i] + n * V.inc[i];
 			const uint32_t k = V.pwPos[i] & 127u;
 			int32_t v;
@@ -822,6 +831,58 @@ static void test_rnd(void)
 	host_rng_stuck = 0;
 }
 
+/*
+ * CO-JOIN (S095 P5, user 2026-11-14): the count per pwm form, and rejoining
+ * oscillators landing.
+ *
+ * What:       a pwm Saw voice settles at note 63 (slw 0); Sin renders 6, so
+ *             oscillators 6 and 7 stop at that pitch. Then, at a slow slw,
+ *             a note an octave up and pos 0 -> 127 start the six slewing;
+ *             back to Saw, 6 and 7 must sit exactly on the new target pitch
+ *             (dtn 0, intervals 0: every target is the base) and on their
+ *             width target in that first block, while oscillator 0 is still
+ *             on its way. Then typ wav: 8..11 land the same way.
+ * Why:        without ColloidVoice.oscLive the rejoining oscillators glided
+ *             from where they stopped (the break build colloid_break_join
+ *             removes the test and must fail here).
+ */
+static void test_join(void)
+{
+	unsigned i;
+	float want;
+	voice_init(); host_running = 1u;
+	Colloid_setOscType(&V, COL_TYP_PWM);
+	V.detune = 0.0f; V.slew = 0u; V.posSpread = 0.6f;
+	V.osc.waveform = COL_PWM_SAW; V.osc.position = 0u;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	block(); block();
+	if (V.oscLive != COL_PWM_COUNT) fail(G_JOIN, "Saw count", V.oscLive, COL_PWM_COUNT);
+	V.osc.waveform = COL_PWM_SIN;
+	block();
+	if (V.oscLive != COL_PWM_WARP_COUNT) fail(G_JOIN, "Sin count", V.oscLive, COL_PWM_WARP_COUNT);
+	/* an octave up, slowly; the trigger snaps every width, so pos moves after it */
+	V.slew = 120u;
+	Colloid_triggerVoice(&V, 0u, 100u, 75u);
+	V.osc.position = 127u;
+	want = V.pitchCur[6] + 1.0f;
+	block();
+	V.osc.waveform = COL_PWM_SAW;
+	block();
+	for (i = COL_PWM_WARP_COUNT; i < COL_PWM_COUNT; i++) {
+		const uint8_t w = col_pwmTarget((int32_t)(V.osc.position & 127u), V.rnd[i], col_pwmScale(&V));
+		if (fabsf(V.pitchCur[i] - want) > 1e-5f) fail(G_JOIN, "Sin -> Saw: rejoin pitch", i, V.pitchCur[i] - want);
+		if (V.pwPos[i] != w) fail(G_JOIN, "Sin -> Saw: rejoin width", V.pwPos[i], w);
+	}
+	if (fabsf(V.pitchCur[0] - want) < 1e-3f) fail(G_JOIN, "oscillator 0 not still slewing", V.pitchCur[0], want);
+	/* pwm -> wav: 8..11 rejoin */
+	Colloid_setOscType(&V, COL_TYP_WAV);
+	V.osc.waveform = COL_WAVE_SAW;
+	block();
+	if (V.oscLive != COL_OSC_COUNT) fail(G_JOIN, "wav count", V.oscLive, COL_OSC_COUNT);
+	for (i = COL_PWM_COUNT; i < COL_OSC_COUNT; i++)
+		if (fabsf(V.pitchCur[i] - want) > 1e-5f) fail(G_JOIN, "pwm -> wav: rejoin pitch", i, V.pitchCur[i] - want);
+}
+
 int main(void)
 {
 	unsigned g, total = 0u;
@@ -844,6 +905,7 @@ int main(void)
 	test_wtb();
 	test_mixer();
 	test_rnd();
+	test_join();
 	for (g = 0u; g < G_N; g++) {
 		printf("colloid %-7s failures: %u\n", g_name[g], g_fail[g]);
 		total += g_fail[g];

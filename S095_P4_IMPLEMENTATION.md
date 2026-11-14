@@ -2225,3 +2225,362 @@ Foreground only; no RAM.
 - `MEMORY.md` §Effects (CrumpBit binding rules: "24 rows").
 - `INSTRUMENTS_DSP_REFERENCE.md`: the voice filter's per-type drive floor
   (LP/LP2 1.0, the others 0.4).
+
+---
+
+## 17. Colloid `pwm` oscillator count 6 → 8 (user, 2026-11-14)
+
+A Colloid change, not part of the P4 plan. It is logged here because it is
+built on the P4 image and was decided from the P4 image's device run
+(`S095_P4_FX_BUS_TWEAKS.md` §7). `typ` `wav` and `wtb` keep 12
+oscillators; `typ` `pwm` renders 8 instead of 6.
+
+### 17.1 Decision
+
+| | Value |
+|---|---|
+| Asked | "leave it at 12 standard but increase PWM to 8" (user, 2026-11-14) |
+| Why 8 | The six-Colloid run measured `pwm` Sin 6 at 15,393 cycles per block, about 4,200 under the Basic share. Each extra `pwm` oscillator costs about 1,400. 8 is the most that fits |
+| Why not 9 | The Saw/Rec loops render pairs, so 9 needs a new one-oscillator loop. An odd stack cannot balance (detune and home positions cannot sum to 0). `pwm` Sin 9 ≈ 19,700, about 20,200 alone: over the share |
+| Why not 10 | `pwmw10-par` 454.2 instructions per sample ≈ 21,100 cycles per block: over the share by about 1,500 |
+| Why not 14 plain | `plain14-par` 423.5 ≈ 19,300 (`wtb`), about 19,800 alone: over the share |
+
+### 17.2 What changed
+
+**`Core/DSP/Instruments/Colloid/ColloidVoice.h`**
+
+- `#define COL_PWM_COUNT 6u` → `8u`. The static asserts (even, 2 ..
+  `COL_OSC_COUNT`) are unchanged and pass.
+- The oscillator-count comment block gains an "S095 P5" paragraph (What,
+  Why, Cost, Tables, Level). It records:
+  - the measurement and the host counts the decision rests on;
+  - why 9, 10 and 14 were refused;
+  - that `pwm` Sin 8 is now the Colloid's dearest mode;
+  - that no RAM is added (the arrays are already `COL_OSC_MAX` = 12);
+  - the table balance and the level rule.
+- The pitch-group comment: eight `pwm` oscillators are two per group
+  (they were 2, 2, 1, 1 with six, so `in2` and `in3` had one oscillator
+  each under `pwm`).
+
+**`Core/DSP/Instruments/Colloid/ColloidVoice.c`**
+
+- `COL_NORM_PWM`: `0.408248290f / 32768.0f` (1/√6) → `0.353553391f /
+  32768.0f` (1/√8).
+- The static assert becomes `COL_PWM_COUNT == 8u`, "COL_NORM_PWM is 1 /
+  sqrt(8)".
+- A new comment block above the constant gives:
+  - **What:** the constant's value.
+  - **Why:** the oscillators add by power, so 1/√N keeps the stack's level
+    into the drive the same at any count. The assert ties the constant
+    to the count.
+  - **Headroom:** the worst case is all eight at the same sign. With
+    `pos` 0 the Rec stack is a square, so the bound is √8 × `COL_HEADROOM`
+    0.5 = 1.41, inside the drive's ±1.5 clamp at `drv` 0. The 12-oscillator
+    stack's bound is 1.73, for comparison.
+- Nothing else: every loop and the control path already take
+  `COL_PWM_COUNT`. These are `col_oscControl()` through `count`, the Saw/Rec
+  mean level (`levelSum / count`), the warp loop `j < COL_PWM_COUNT`, the
+  pair loop `j < COL_PWM_COUNT / 2u`, and the trigger's width targets over
+  `COL_OSC_MAX`.
+
+**`Core/DSP/Instruments/Colloid/ColloidTables.h`**
+
+- Comments only. `colDetC` and `colHome` are described as balanced over
+  the eight `pwm` oscillators, and `colHome` as two-sided per group among
+  both the twelve and the eight.
+- The table values are unchanged. The first eight `colDetC` (−0.06, 0.06,
+  −0.22, 0.22, 0.58, −0.58, 1.0, −1.0) sum to 0, and so do the first eight
+  `colHome` (−0.30, 0.30, 0.48, −0.48, 0.63, −0.63, −0.76, 0.76). Each
+  group (o mod 4) has one member either side in both tables.
+
+**`tools/colloid/gen_col_tables.py`**
+
+- New `pwm_count()`, with a docstring. It reads `COL_PWM_COUNT` from
+  `ColloidVoice.h` (regex on the `#define`), so the count is not repeated
+  in the script; `PWM_COUNT = pwm_count()`.
+- `text()`: the balance assert covers `DETC[:PWM_COUNT]` /
+  `HOME[:PWM_COUNT]` (was `[:6]`). The two-sided-group assert runs over all
+  twelve and over the `pwm` prefix. A new assert requires the count to be
+  even and 2 .. 12.
+- The module docstring (`colDetC`, `colHome`, Inputs) and the table comment
+  are updated.
+- `import re` is added.
+- The generated `ColloidTables.c` is byte-identical: `--check` reports
+  "matches".
+
+**`tools/dsp_test/colloid_cpu.py`**
+
+- `PWM_COUNT = 6` → `_pwm_count()`, which reads `COL_PWM_COUNT` from
+  `ColloidVoice.h` (the same rule as the generator). A comment block
+  explains it, and that `--count` still sets the plain count.
+- The docstring's modes line now names `COL_PWM_COUNT` instead of 6.
+- `import os` is added.
+- The mode names follow: `pwm8-*`, `pwmw8-*`.
+
+**Not changed:** `ColloidOsc.c/.h` (the loops), `ColloidParameters.c`,
+`init.col`, `make_init_col.py`, the host laws in `modules/colloid.c`
+(they already loop over `COL_PWM_COUNT`), and `tools/dsp_test/Makefile`.
+
+### 17.3 Resources
+
+| Resource | Before | After |
+|---|---|---|
+| Flash | 716,644 B | 716,660 B (+16): `Colloid_calcVoiceSyncBlock` 472 → 484 B, and the rest is alignment |
+| ITCM | 15,232 B | 15,232 B (the pair and warp loops are unchanged) |
+| DTCM statics / FXBUF | 4,396 / 126,656 | unchanged |
+| RAM | | none: `ColloidVoice` stays 1,112 B, because the arrays already hold 12 |
+| Host, instructions per sample, `pwmw` (Sin/Tri) `par` | 326.1 | **389.4** |
+| `pwm` (Saw/Rec) `par` | 324.1 | 386.1 |
+| `pwmw` / `pwm` `ser` | 300.0 / 298.0 | 363.3 / 360.0 |
+| `plain12-par` / `-ser` | 382.1 / 356.0 | 381.4 / 355.3 |
+| Device, `pwm` Sin, cycles per block (estimate: 15,393 measured + 63.3 × 1.4 × 32) | 15,393 (measured) | ≈ 18,200 … 18,400; ≈ 18,700 … 18,900 for a lone voice |
+| Device, `pwm` Saw/Rec (estimate) | ≈ 14,630 (measured) | ≈ 17,400 |
+| Colloid dearest mode | `wtb` 12: 17,433 (measured) | **`pwm` Sin 8** ≈ 18,300 (estimate). Basic share 19,620 |
+
+- **The per-block change is only in the sync block.** `plain12` fell by
+  0.7 per sample (24 instructions per block) because LTO laid out
+  `Colloid_calcVoiceSyncBlock` differently: its straight path in
+  `elf_blockpath.py` went from 72 to 48.
+- **Its dispatch is unchanged.** The same two dispatch loops (warp per
+  oscillator, pair per pair) and the same calls are there, and the
+  async, `col_oscControl`, the envelope, the filter control and every
+  oscillator and render loop have identical paths.
+- **CPU rule:** this raises the Colloid's worst per-sample cost within its
+  Basic share, by user decision. The S094 P2 §21 cycle budget is the gate.
+  The device probe in §17.5 confirms the estimate.
+
+### 17.4 Gates
+
+All records are in `tools/dsp_test/baselines/s095p5/pwm8/`.
+
+| Gate | Result |
+|---|---|
+| Before (`before/`) | `make all && make img` on the tree before the change. The image is byte-identical to the tested card image `SD_CARD_COL/LXRV2_lxr02.img`. Recorded: `lxr02.elf`, `link_budget.txt`, `elf_p4_snapshot` (`osc.txt` 94 loops, `mixer.txt` 79), `colloid_cpu.txt`, `host_all.txt` (exit 0) |
+| `make all` | exit 0; only the newlib `_close`/`_lseek`/`_read`/`_write` notes, as before |
+| `make img` | `build/LXRV2_lxr02.img`, payload 716,660 B |
+| Link budget (`after/link_budget.txt`) | Flash 716,660 / 753,664 (headroom 37,004); ITCM 15,232; DTCM 4,396; FXBUF 126,656 (margin 3,776) |
+| `gen_col_tables.py --check` | "ColloidTables.c matches" (the eight-oscillator asserts pass) |
+| `make -C tools/dsp_test all` (`after/host_all.txt`) | exit 0. Every Colloid law passes with 8, including CO-PWM, which checks each `pwm` form's bus against a restatement of all `COL_PWM_COUNT` oscillators, the width fold, the `pos` 0 width, the slew and the arrival. Every break build is still caught. Apart from the commands, the output differs from `before/` only by one line number in a host warning (`ColloidVoice.host.c:798` → `:812`, the longer comment) |
+| `elf_p4_check P4BASE=baselines/s095p5/pwm8/before` (`after/p4_check.txt`) | 94 baseline loops, 94 exact, 0 renamed, 0 missing; mixer 58 hot loops equal, 0 grew |
+| `colloid_cpu.py` (`after/colloid_cpu.txt`) | the table in §17.3. **This file is now the Colloid's host baseline**: `COL_BASE=baselines/s095p5/pwm8/after/colloid_cpu.txt` (the S095 P3 file names `pwm6` modes and no longer matches) |
+
+### 17.5 Device steps (yours)
+
+1. **CPU:** run the cycle probe on a Scene of Colloids in `pwm` Sin (the
+   dearest form) and `pwm` Rec, both `str`. Expected: about 18,200 …
+   18,400 cycles per block per voice for Sin and about 17,400 for Rec,
+   under 19,620. Listen for underruns with six of them.
+2. **Sound:** existing `pwm` patches play 8 oscillators. `in2` and `in3`
+   now have two oscillators each (they had one), so intervals sound fuller
+   and the stack thicker. The level into the filter is the same by power;
+   check the `pos` 0 Rec stack at `drv` 0 for clipping (the bound is 1.41,
+   under the ±1.5 clamp).
+3. **No stored data changes:** the count is not stored, so there is
+   nothing to reset.
+
+### 17.6 Statements this makes out of date (for you to update)
+
+- `S095_P2_DRAFT_COLLOID.md` and `S095_P3_COLLOID_FOLLOW_UPS.md`: 6 `pwm`
+  oscillators, the 2, 2, 1, 1 groups, and `pwm6` host counts.
+- **Done (2026-11-14):** `S095_P5_COLLOID_ALKALINE_ADVANCED_FX.md` was
+  updated to match (§0, §2.2, §3.1, §3.3, new §3.4, §5, Q3, Q4, Q6). The
+  entry is kept for the record. Its §0, §2.2, §3.3, Q3, Q4 and Q6 had:
+  the Colloid's dearest mode and the rooms derived from it. `pwm` Sin 8
+  (≈ 18,300; ≈ 18,800 alone) replaces `wtb` 12 (17,433). The Advanced
+  Colloid's room falls from about 3,900 to about 3,000 cycles per block
+  (≈ 94 per sample). SRR plus the kernel (≈ 90 at 1.4 cycles per
+  instruction) then just fits, the phaser does not, and the Basic Colloid
+  has about 800 left (too little for Q4's SRR).
+- `knowledge_files/`: no specification states the `pwm` count. The Colloid
+  entries that a later knowledge update adds should say 12 / 8.
+
+---
+
+## 18. Colloid `pwm` warp forms back to 6; rejoining oscillators land (user, 2026-11-14)
+
+This follows §17 on the same day: "what if we drop pwm sin specifically
+back to 6?", then "sure". It is built on the §17 tree.
+
+### 18.1 Decision
+
+| | Value |
+|---|---|
+| Counts | `wav` / `wtb` 12 (unchanged); `pwm` Saw / Rec **8** (§17); `pwm` Sin / Tri **6** (back to the S095 P3 count) |
+| Why Sin and Tri together | Both forms run the same warp loops (`col_warpStore` / `col_warpAdd`) at the same cost. Cutting Sin alone would leave `pwm` Tri 8 at ≈ 18,300 as the dearest mode |
+| What it buys | `pwm` Sin 8 (≈ 18,300 *est.*) is gone. The dearest modes are `wtb` 12 (17,433 measured) and `pwm` Saw / Rec 8 (≈ 17,400 *est.*), both ≈ 17,500 with §18.4's control cost: about 1,600 cycles per block of Basic margin for a lone voice and about 3,800 in an Advanced slot |
+| Sound | Saw / Rec keep two oscillators per pitch group. Sin / Tri are 2, 2, 1, 1 (`in2`, `in3` one each), as in S095 P3 |
+| Rejoin fix | Asked for together with the split: an oscillator that starts rendering again lands on its target pitch and width. It no longer glides from where it stopped (§18.3) |
+
+### 18.2 What changed in the firmware
+
+**`Core/DSP/Instruments/Colloid/ColloidVoice.h`**
+
+- `#define COL_PWM_WARP_COUNT 6u`, added after `COL_PWM_COUNT` (8u). Its
+  static assert requires an even value, 2 .. `COL_PWM_COUNT`, with the
+  reason in its message: the stereo positions are packed in pairs
+  (`posPair[o / 2]`), so an odd last oscillator would have none.
+- `COL_PWM_COUNT` now means the pulse forms' count (Saw / Rec) and the
+  most `pwm` renders.
+- The count comment block gains a second S095 P5 paragraph (What, Why,
+  Sound, Rule, Even, Rejoin). Rule: the count now follows `typ` and the
+  `pwm` form, and `wav` can be moved by an LFO, Morph or automation, so
+  the count can change from block to block. `wav` already switched
+  between the warp and pair loops before, and the slot is charged for its
+  dearest form.
+- New `COL_PWM_IS_WARP(w)` (`w <= COL_PWM_TRI`; a byte past Rec plays
+  Rec, a pulse form) and `COL_PWM_FORM_COUNT(w)`, after
+  `COL_PWM_WAVE_COUNT`, with a comment block. They are the one test the
+  async and the sync block share, so control and audio never render
+  different counts in the same block.
+- The pitch-group comment states both stacks: 8 Saw / Rec two per group;
+  6 Sin / Tri 2, 2, 1, 1.
+- New member `uint8_t oscLive` after `pitchJump`, with a comment block
+  (What, Why, RAM). It holds how many oscillators the last block rendered.
+  It sits in the padding before `ampLast`: `sizeof(ColloidVoice)` is still
+  1,112 B (`arm-none-eabi-gcc` + `nm -S` on the tree).
+
+**`Core/DSP/Instruments/Colloid/ColloidVoice.c`**
+
+- **`COL_NORM_PWM`'s comment:** it is now the pulse forms' constant
+  (1/√8).
+- **New `COL_NORM_PWM_WARP`:** `0.408248290f / 32768.0f` (1/√6), with
+  `_Static_assert(COL_PWM_WARP_COUNT == 6u, …)`. Its comment block gives
+  What, Why (the same power rule, so a Sin/Tri ↔ Saw/Rec change keeps the
+  level) and Headroom: √6 × 0.5 = 1.22, inside ±1.5.
+- **`Colloid_calcVoiceAsync()`:** the count is
+  `isPwm ? COL_PWM_FORM_COUNT(osc->waveform) : COL_OSC_COUNT`, behind a
+  new `isWarp`. The normalisation selects `COL_NORM_PWM_WARP` or
+  `COL_NORM_PWM` by `isWarp`. A comment block covers the count, and the
+  bus comment explains N.
+- **`col_oscControl()`:**
+  - `const uint32_t live = voice->oscLive` once per block;
+  - the pitch slew lands when `jump || i >= live || fabsf(d) <= step`;
+  - the `pwm` width clamp runs only for `i < live`, so a rejoining
+    oscillator takes its full target width;
+  - `voice->oscLive = (uint8_t)count` before the return;
+  - the function's comment gains the rejoin rule in What, `oscLive` in
+    Inputs and Outputs, and a Rejoin paragraph.
+- **`Colloid_calcVoiceSyncBlock()`:** the warp branch tests
+  `COL_PWM_IS_WARP(form)` (was `form <= COL_PWM_TRI`, the same values) and
+  loops to `COL_PWM_WARP_COUNT`. The comment names both counts.
+- **`Colloid_initVoice()`:** `voice->oscLive = 0u`, so every oscillator
+  rejoins on the first block.
+
+**`Core/DSP/Instruments/Colloid/ColloidTables.h`:** comments only. Both
+`pwm` stacks balance (the first 8 and the first 6 entries of `colDetC` and
+`colHome` each sum to 0), and the eight Saw / Rec oscillators are two-sided
+per group.
+
+**Not changed:** `ColloidOsc.c/.h` (every per-sample loop), `ColloidTables.c`
+(byte-identical), `ColloidParameters.c`, `init.col`, `Colloid_setOscType()`
+(it already reseats every width on a `typ` change; the rejoin covers the
+pitch).
+
+### 18.3 The rejoin bug this fixes (found by the new law)
+
+- **The cause:** an oscillator outside the block's count keeps its
+  `pitchCur` and `pwPos`. When it rendered again, it slewed from those at
+  the `slw` rate.
+- **The new break build shows the size** (the fix removed, `slw` 120):
+  - `pwm` Sin → Saw: oscillators 6 and 7 came back an octave off;
+  - `pwm` → `wav`: oscillators 8 … 11 came back 8 octaves low, from
+    `pitchCur` 0 set at init (the first note's jump only covers the
+    oscillators rendering at the time).
+- **Before S095 P5** the same happened on every `typ` change from `pwm`
+  to `wav`/`wtb`, for oscillators 6 … 11. With `slw` 0 they landed in one
+  block, so it was audible only with a slew set.
+
+### 18.4 Tools and host
+
+**`tools/colloid/gen_col_tables.py`**
+
+- `pwm_count()` becomes `voice_define(name)`, which reads any
+  `#define <name> <N>u` from `ColloidVoice.h`.
+  `PWM_COUNTS = (COL_PWM_COUNT, COL_PWM_WARP_COUNT)`.
+- The balance assert runs for each stack (even, 2 .. 12, `DETC[:n]` and
+  `HOME[:n]` sum to 0).
+- The two-sided-group assert runs over the twelve and over each stack
+  with at least two members per group (n ≥ 8). With 6, groups 2 and 3
+  have one member each, as in S095 P3, so they cannot be two-sided.
+- The docstrings and comments are updated.
+- `--check`: "ColloidTables.c matches".
+
+**`tools/dsp_test/colloid_cpu.py`:** `_pwm_count()` becomes
+`_voice_define(name)`. `PWM_COUNT` (8) prices the `pwm` modes and the new
+`PWM_WARP_COUNT` (6) the `pwmw` modes. The comment and docstring are
+updated.
+
+**`tools/dsp_test/modules/colloid.c`**
+
+- `check_pwm_form()` sums `COL_PWM_FORM_COUNT(form)` oscillators per form
+  (was `COL_PWM_COUNT` for every form).
+- New law **CO-JOIN** (`test_join()`, with a comment block; header list
+  updated; `G_JOIN`, "CO-JOIN"). It checks:
+  - `oscLive` is 8 under Saw, 6 under Sin and 12 under `wav`;
+  - after Sin → Saw at `slw` 120, with a new note an octave up and `pos`
+    0 → 127, oscillators 6 and 7 sit exactly on the new pitch (1e-5) and
+    on `col_pwmTarget()` in their first block, while oscillator 0 is
+    still slewing;
+  - after `pwm` → `wav`, oscillators 8 … 11 sit on the pitch.
+
+**`tools/dsp_test/Makefile`:** new break build `colloid_break_join`. It
+uses `sed` to drop `i >= live ||` from the pitch slew and must fail
+CO-JOIN, which it does: "Sin -> Saw: rejoin pitch (6, −0.9999)", "pwm ->
+wav: rejoin pitch (8, −8.03)". The break list in the comment is updated.
+
+### 18.5 Resources
+
+| Resource | §17 (8 for every `pwm` form) | §18 |
+|---|---|---|
+| Flash | 716,660 B | 716,772 B (+112) |
+| ITCM / DTCM / FXBUF | 15,232 / 4,396 / 126,656 | unchanged |
+| RAM | — | none (`oscLive` in padding; `ColloidVoice` 1,112 B) |
+| Host `pwmw` (Sin/Tri) `par`, instructions per sample | 389.4 (8) | **326.5** (6) |
+| Host `pwm` (Saw/Rec) `par` | 386.1 | 387.6 |
+| Host `plain12-par` | 381.4 | 383.5 |
+| Device, dearest mode (*est.*) | `pwm` Sin 8 ≈ 18,300 | `wtb` 12 ≈ 17,500; `pwm` Saw/Rec 8 ≈ 17,470 |
+
+- **Every per-sample loop is unchanged.** The +1.5 … 2.1 per sample is
+  per-block control work.
+- **The control loop:** `col_oscControl()`'s oscillator loop is 175
+  instructions on its longest path, up from 170 (the rejoin compares on
+  the pitch and the width), × the count, per block. The straight path is
+  188 (was 186).
+- **The async:** its straight path is 301 (was 296), for the form test.
+- **Against the image before S095 P5** (`plain12-par` 382.1): +1.4 per
+  sample, ≈ +63 cycles per block on the device.
+
+### 18.6 Gates
+
+Records are in `tools/dsp_test/baselines/s095p5/warp6/`: `lxr02.elf`,
+`link_budget.txt`, `colloid_cpu.txt`, `p4_check.txt`, `host_all.txt`.
+
+| Gate | Result |
+|---|---|
+| `make all` / `make img` | exit 0; only the newlib and LTO notes; image payload 716,772 B |
+| `sizeof(ColloidVoice)` | 1,112 B (0x458) |
+| `gen_col_tables.py --check` | matches |
+| `make -C tools/dsp_test colloid` | every law 0, CO-JOIN included; all 17 break builds caught, `join` included |
+| `make -C tools/dsp_test all` | exit 0. The only nonzero count is the deliberate `voice_control_break` (6), as in every earlier record |
+| `elf_p4_check P4BASE=baselines/s095p5/pwm8/before` | 94 loops exact; mixer 58 hot loops equal, 0 grew |
+| `colloid_cpu.py` | the table in §18.5. **This is now the Colloid's host baseline:** `COL_BASE=baselines/s095p5/warp6/colloid_cpu.txt` |
+
+### 18.7 Device steps (yours)
+
+1. **CPU:** probe a Scene of Colloids in `wtb` 12 and in `pwm` Rec 8
+   (`str`). Expected about 17,500 each, against 19,620. `pwm` Sin is back
+   at about 15,400.
+2. **Rejoin:** with `slw` high, switch `wav` Sin ↔ Saw under `pwm`, and
+   `typ` `pwm` → `wav`. No oscillator should glide in; before, the second
+   case brought four oscillators in from far below.
+3. **Level:** a Sin/Tri ↔ Saw/Rec switch keeps the same loudness into the
+   filter (each form is normalised by its own count).
+
+### 18.8 Statements this makes out of date (for you to update)
+
+- §17's figures for `pwm` Sin/Tri 8 (they now apply to Saw/Rec only), and
+  the §17.6 note on P5's rooms.
+- `S095_P5_COLLOID_ALKALINE_ADVANCED_FX.md`: updated to match in this
+  session (§2.2, §3.3, §3.4, §0, Q3, Q4, Q6).
+- `S095_P2_DRAFT_COLLOID.md`, `S095_P3_COLLOID_FOLLOW_UPS.md`: the `pwm`
+  count (6 for every form) and the 2, 2, 1, 1 groups (now Sin/Tri only).

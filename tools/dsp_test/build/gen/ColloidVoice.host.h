@@ -48,18 +48,72 @@
  *             Basic share (19,620 cycles per block, cold, parallel, stereo
  *             send); if 12 does not fit, COL_OSC_COUNT becomes 10 here and
  *             nothing else changes (the arrays keep 12 entries).
+ * S095 P5 (user, 2026-11-14): 12 plain / 8 PWM.
+ *   What:     COL_PWM_COUNT 6 -> 8: four pairs for the Saw/Rec pair loops,
+ *             eight calls of the Sin/Tri warp loops. COL_OSC_COUNT stays 12.
+ *   Why:      the six-Colloid device run (tools/dsp_test/baselines/s095p5/
+ *             device_probe_colloid6.txt) left pwm mode about 4,000 cycles
+ *             under the share (pwm Sin 6: 15,393). Host counts on the S095 P4
+ *             image price 8 at pwmw8-par 390.2 / pwm8-par 386.9 instructions
+ *             per sample (was 326.1 / 324.1), about 18,300 cycles per block
+ *             for pwm Sin at the device's 1.4 cycles per instruction, about
+ *             18,900 for a lone voice: inside 19,620. 9 needs a one-
+ *             oscillator Saw/Rec loop and cannot balance the stack; 10
+ *             (about 21,100) is over the share.
+ *   Cost:     pwm Sin 8 becomes the Colloid's dearest mode (wtb 12: 17,433
+ *             measured). No RAM: the arrays already hold COL_OSC_MAX (12).
+ *   Tables:   the first eight colDetC and colHome entries sum to 0 and give
+ *             every pitch group two members, one either side (gen_col_
+ *             tables.py asserts both), so the eight balance like the six did.
+ *   Level:    COL_NORM_PWM is 1 / sqrt(8) (ColloidVoice.c), so the stack's
+ *             power into the drive is unchanged.
+ * S095 P5 (user, 2026-11-14, later the same day): the warp forms back to 6.
+ *   What:     COL_PWM_COUNT (8) is now the count of the pwm pulse forms, Saw
+ *             and Rec (the two-read pair loops), and the most pwm renders.
+ *             COL_PWM_WARP_COUNT (6) is the count of the warp forms, Sin and
+ *             Tri (col_warpStore/Add, one oscillator per call). The form is
+ *             osc.waveform under typ pwm (COL_PWM_SIN..COL_PWM_REC; past Rec
+ *             plays Rec), the same rule col_oscControl() and the sync block
+ *             use; COL_PWM_IS_WARP() below is that test.
+ *   Why:      pwm Sin 8 (host pwmw8-par 389.4, about 18,300 cycles per block)
+ *             had become the Colloid's dearest mode and took most of the
+ *             Basic margin and the Advanced Colloid's FX room. Sin and Tri
+ *             share the warp loops at the same cost, so both drop: pwm Sin 6
+ *             is 15,393 measured. The dearest modes are then wtb 12 (17,433
+ *             measured) and pwm Saw / Rec 8 (about 17,400): about 1,700 of
+ *             Basic margin for a lone voice and about 3,900 in an Advanced
+ *             slot.
+ *   Sound:    Saw/Rec keep two oscillators per pitch group; Sin/Tri have
+ *             2, 2, 1, 1 (in2 and in3 one each), as before S095 P5.
+ *   Rule:     the count now follows typ and the pwm form. wav can be moved by
+ *             an LFO, Morph or automation, so the count can change from one
+ *             block to the next; the wav row already switched between the
+ *             warp and the pair loops before this change. The slot is charged
+ *             for its dearest form (CPU_USE_DSP_AUDIT.md: headroom is the
+ *             worst case), so no form is a saving the budget relies on.
+ *   Even:     the warp count stays even: col_oscControl() packs the stereo
+ *             positions in pairs (posPair[o / 2]), so an odd last oscillator
+ *             would have none.
+ *   Rejoin:   an oscillator that starts rendering again lands on its target
+ *             pitch and width in its first block (ColloidVoice.oscLive,
+ *             col_oscControl()); it does not glide from where it stopped.
  * Constant:   the count follows the mode, never a parameter value: every
- *             block of a given typ renders exactly this many oscillators.
+ *             block of a given typ and form renders exactly this many
+ *             oscillators.
  */
 #ifndef COL_OSC_COUNT
 #define COL_OSC_COUNT         12u
 #endif
-#define COL_PWM_COUNT         6u
+#define COL_PWM_COUNT         8u
+#define COL_PWM_WARP_COUNT    6u
 #define COL_PAIR_MAX          (COL_OSC_MAX / 2u)
 _Static_assert(COL_OSC_COUNT >= 2u && COL_OSC_COUNT <= COL_OSC_MAX &&
                (COL_OSC_COUNT % 2u) == 0u, "COL_OSC_COUNT: an even 2..12");
 _Static_assert(COL_PWM_COUNT >= 2u && COL_PWM_COUNT <= COL_OSC_COUNT &&
                (COL_PWM_COUNT % 2u) == 0u, "COL_PWM_COUNT: an even 2..COL_OSC_COUNT");
+_Static_assert(COL_PWM_WARP_COUNT >= 2u && COL_PWM_WARP_COUNT <= COL_PWM_COUNT &&
+               (COL_PWM_WARP_COUNT % 2u) == 0u,
+               "COL_PWM_WARP_COUNT: an even 2..COL_PWM_COUNT (positions are packed in pairs)");
 
 /*
  * osc.waveform under typ wav (S095 P2, C-D20).
@@ -98,6 +152,24 @@ _Static_assert(COL_PWM_COUNT >= 2u && COL_PWM_COUNT <= COL_OSC_COUNT &&
 #define COL_PWM_SAW           2u
 #define COL_PWM_REC           3u
 #define COL_PWM_WAVE_COUNT    4u
+
+/*
+ * The pwm form's oscillator count (S095 P5, user 2026-11-14).
+ *
+ * What:       COL_PWM_IS_WARP(w) is 1 for the warp forms, Sin (0) and Tri
+ *             (1), given osc.waveform under typ pwm; a byte past Rec plays
+ *             Rec, a pulse form, so the test is w <= COL_PWM_TRI.
+ *             COL_PWM_FORM_COUNT(w) is that form's oscillator count:
+ *             COL_PWM_WARP_COUNT (6) for Sin/Tri, COL_PWM_COUNT (8) for
+ *             Saw/Rec.
+ * Why:        one definition for the async (count, level) and the sync block
+ *             (the warp loop's bound), so the two can never render different
+ *             counts in the same block.
+ * Accessors:  Colloid_calcVoiceAsync(), Colloid_calcVoiceSyncBlock();
+ *             tools/dsp_test/modules/colloid.c.
+ */
+#define COL_PWM_IS_WARP(w)    ((uint32_t)(w) <= COL_PWM_TRI)
+#define COL_PWM_FORM_COUNT(w) (COL_PWM_IS_WARP(w) ? COL_PWM_WARP_COUNT : COL_PWM_COUNT)
 _Static_assert(COL_PWM_WAVE_COUNT == OSC_PWM_WAVE_COUNT,
                "the Colloid's pwm list is the platform's");
 
@@ -150,8 +222,10 @@ _Static_assert(COL_PWM_WAVE_COUNT == OSC_PWM_WAVE_COUNT,
  *
  * What:       oscillator o plays group o mod 4: 0 the root, 1..3 the intervals
  *             in1..in3 (interval[0..2], PM63 bytes, 63 = 0 semitones). Twelve
- *             oscillators are three per group; the six pwm oscillators are
- *             2, 2, 1, 1.
+ *             oscillators are three per group. Under pwm (S095 P5) the eight
+ *             Saw/Rec oscillators are two per group; the six Sin/Tri
+ *             oscillators are 2, 2, 1, 1 (in2 and in3 one each), as all six
+ *             were in S095 P3.
  * Why:        three literal bipolar intervals (the user's note) in place of
  *             P2's sixteen preset sets; o mod 4 spreads every group over the
  *             stereo field and the detune spread (ColloidTables.h colHome,
@@ -254,6 +328,23 @@ typedef struct ColloidVoiceStruct
 	/* --- state: control --- */
 	uint8_t  note;          /* last trigger note */
 	uint8_t  pitchJump;     /* 1 from init until a trigger, 2 for that trigger's block */
+	/*
+	 * oscLive (S095 P5, user 2026-11-14): how many oscillators the last
+	 * block rendered (0 after init).
+	 *
+	 * What:       col_oscControl() lands every oscillator o >= oscLive on its
+	 *             target pitch (and, under pwm, its target width) in the
+	 *             block it starts rendering again, then stores this block's
+	 *             count.
+	 * Why:        an oscillator outside the count keeps the pitch and width
+	 *             it had when it stopped. Without this, a typ pwm -> wav
+	 *             change (oscillators 6/8..11) or a pwm Sin/Tri -> Saw/Rec
+	 *             change (oscillators 6, 7) brought them back gliding from
+	 *             there at the slw rate, out of step with the rest.
+	 * RAM:        none: it sits in the padding before ampLast, so
+	 *             sizeof(ColloidVoice) stays 1,112 B.
+	 */
+	uint8_t  oscLive;
 	float    ampLast;       /* the amp level at the end of the previous block */
 	float    inGain;        /* this block's bus-to-drive gain, left / first filter */
 	float    inGainR;       /* this block's bus-to-drive gain, right (str) or

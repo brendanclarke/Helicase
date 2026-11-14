@@ -9,12 +9,15 @@
  *                                   -1..+1: the twelve P2 magnitudes, laid
  *                                   out so that every pitch group (o mod 4,
  *                                   S095 P3 F4) has a low, a near-centre and
- *                                   a high member and the six pwm
- *                                   oscillators balance;
+ *                                   a high member and each pwm stack
+ *                                   balances (S095 P5: the first eight,
+ *                                   Saw/Rec, and the first six, Sin/Tri,
+ *                                   each sum to 0);
  *               colHome[o]          oscillator o's home stereo position,
  *                                   -1..+1: every group has members on both
- *                                   sides and the six pwm oscillators
- *                                   balance;
+ *                                   sides, among the twelve and among the
+ *                                   eight Saw/Rec oscillators, and both pwm
+ *                                   stacks (eight, six) balance (S095 P5);
  *               colMotK[o]          oscillator o's motion rate ratio,
  *                                   0.71..1.37 (no two in step).
  * Why:        constants instead of exp/log in the control path: the
