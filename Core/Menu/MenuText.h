@@ -286,6 +286,21 @@ static const char alkWaveNames[][4] = {
 #define ONOFF_TAG_COL_ROUTE        5u
 #define ONOFF_TAG_COL_FILT_TYPE    6u
 /*
+ * The Tetrakt's layer switch (S096 P1, plan §4.3).
+ *
+ * What:       ONOFF_TAG_TKT_LAYERS 7 (lon, tktLayerNames). The row's dtype
+ *             byte is DTYPE_ON_OFF | (7 << 4). Tag 7 was free (MenuText.h
+ *             l. 275-277: 4, 7 and 8-15).
+ * Why:        the 4-bit mask is one selector with 16 named stops, so every
+ *             3-character view (step automation, lane search, MIDI Learn,
+ *             the clamp, the automation range) follows menu_onoffTagNames()
+ *             with no new code; the VOICE page shows it as four bit cells
+ *             (SD1).
+ * Accessors:  TetraktParameters.c (the lon row); menu.c menu_onoffTagNames().
+ * Affiliates: TKT_LAYER_MASK_COUNT (TetraktVoice.h): asserted in menu.c.
+ */
+#define ONOFF_TAG_TKT_LAYERS       7u
+/*
  * Colloid name tables (S095 P2; S095 P3). [0] = count, then 3-character
  * names (menu.c copies exactly 3 characters, so shorter names are
  * space-padded).
@@ -308,6 +323,16 @@ static const char colFiltTypeNames[][4] = {
 };
 static const char colWaveNames[][4] = {
     {4}, {"Saw"},{"Rec"},{"Tri"},{"Sin"},
+};
+/*
+ * The Tetrakt's layer-switch names (S096 P1, plan §4.3). [0] = count, then
+ * the 16 masks in value order (bit 0 = A .. bit 3 = D): the letters of the
+ * layers that a trigger restarts; "---" none, "all" every layer. Every name
+ * fits the 3-character cell (the P4 `hed` precedent).
+ */
+static const char tktLayerNames[][4] = {
+    {16}, {"---"},{"A  "},{"B  "},{"AB "},{"C  "},{"AC "},{"BC "},{"ABC"},
+          {"D  "},{"AD "},{"BD "},{"ABD"},{"CD "},{"ACD"},{"BCD"},{"all"},
 };
 /*
  * Wavefolder type names: the wav cell under WFd (S089 P2).

@@ -1,0 +1,18 @@
+mkdir -p build
+python3 elf_loopdump.py --elf ../../build/lxr02.elf --sym SVF_calcBlockZDF --sym calcFmBlock --sym calcNextOscSampleBlock --sym calcNextOscSampleRingBlock --sym calcNextOscSampleSyncBlock --sym calcNoiseRingBlock --sym calcSampleOscFmBlock --sym calcSampleOscRingBlock --sym calcSampleOscSyncBlock --sym calcSineRingBlock --sym calcSineSyncBlock --sym calcWavetableOscRingBlock --sym calcWavetableOscSyncBlock --sym oscSection_renderOldCarrier --sym osc_buildLoopSyncList --sym osc_buildSyncList --sym osc_renderTypedFmRamp --sym osc_setFreq --sym osc_slpFmBlock --sym osc_slpFmRampBlock --sym osc_slpPlainBlock --sym osc_slpRingBlock --sym osc_slpSyncBlock --sym osc_smpFmBlock --sym osc_smpFmRampBlock --sym osc_smpPlainBlock --sym osc_smpRingBlock --sym osc_smpSyncBlock --sym osc_wtbBlendBlock --sym osc_wtbFmBlendBlock --sym osc_wtbFmBlendRampBlock --sym osc_wtbFmBlock --sym osc_wtbFmRampBlock --sym osc_wtbPlainBlock --sym osc_wtbPlanBlock --sym osc_wtbRingBlendBlock --sym osc_wtbRingBlock --sym osc_wtbSyncBlendBlock --sym osc_wtbSyncBlock --sym transient_calcUserBlock --sym voiceFold_asnLoop --sym voiceFold_chbLoop --sym voiceFold_fd2Loop --sym voiceFold_process --sym voiceFold_sinLoop --sym voiceFold_triLoop --sym busComp_processBlock --sym osc_pwmDPlainBlock --sym osc_pwmWtPlainBlock --sym osc_pwmWsPlainBlock --sym osc_pwmDFmBlock --sym osc_pwmWtFmBlock --sym osc_pwmWsFmBlock --sym osc_pwmDFmRampBlock --sym osc_pwmWtFmRampBlock --sym osc_pwmWsFmRampBlock --sym osc_pwmDRingBlock --sym osc_pwmWtRingBlock --sym osc_pwmWsRingBlock --sym osc_pwmDSyncBlock --sym osc_pwmWtSyncBlock --sym osc_pwmWsSyncBlock \
+	  --out build/p4_osc_now.txt
+elf_loopdump: 94 loops in 61 symbols -> build/p4_osc_now.txt
+python3 elf_loopdump.py --compare baselines/s096p1/before/osc.txt build/p4_osc_now.txt
+elf_loops: 94 baseline loops, 94 exact, 0 renamed, 0 missing; 94 loops now
+python3 elf_loopdump.py --elf ../../build/lxr02.elf --sym mixer_calcNextSampleBlock \
+	  --out build/p4_mixer_now.txt
+elf_loopdump: 76 loops in 1 symbols -> build/p4_mixer_now.txt
+python3 elf_hotloops.py --compare baselines/s096p1/before/mixer.txt build/p4_mixer_now.txt
+GREW mixer_calcNextSampleBlock base#48 hot 22 -> now#31 hot 23: vmov s15, lr ; cmp.w r0, lr, lsr #20 ; mov.w r1, lr, lsr #20 ; mov.w r3, #0 ; vcvt.f32.u32 s13, s15 ; bcc.n +58 ; ldr r3, [sp, #80] @ 0x50 ; cmp lr, r5 ; ldrsb 
+GREW mixer_calcNextSampleBlock base#58 hot 29 -> now#56 hot 30: ldrsh.w r5, [r1, #2]! ; vmov s15, r5 ; vcvt.f32.s32 s15, s15 ; vmul.f32 s15, s15, s11 ; vcvt.u32.f32 s15, s15 ; vmov r5, s15 ; add.w r5, r0, r5, lsl #17 ; add r
+GREW mixer_calcNextSampleBlock base#60 hot 28 -> now#58 hot 29: ldrsh.w r5, [r1, #2]! ; vmov s15, r5 ; vcvt.f32.s32 s15, s15 ; vmul.f32 s15, s15, s11 ; vcvt.u32.f32 s15, s15 ; vmov r5, s15 ; add.w r5, r0, r5, lsl #17 ; add r
+GREW mixer_calcNextSampleBlock base#61 hot 14 -> now#3 hot 19: add r2, ip ; cmp r0, r3 ; str.w r3, [r8, #80] @ 0x50 ; mov r0, r2 ; bls.n +EXIT ; ldr r0, [pc, #848] @ (+EXIT) ; add r3, ip ; ldr.w r0, [r0, #2056] @ 0x808 ; sx
+GREW mixer_calcNextSampleBlock base#64 hot 22 -> now#31 hot 23: vmov s15, lr ; cmp.w r0, lr, lsr #20 ; mov.w r1, lr, lsr #20 ; mov.w r3, #0 ; vcvt.f32.u32 s13, s15 ; bcc.n +58 ; ldr r3, [sp, #80] @ 0x50 ; cmp lr, r5 ; ldrsb 
+GREW mixer_calcNextSampleBlock base#65 hot 22 -> now#31 hot 23: vmov s15, lr ; cmp.w r0, lr, lsr #20 ; mov.w r1, lr, lsr #20 ; mov.w r3, #0 ; vcvt.f32.u32 s13, s15 ; bcc.n +58 ; ldr r3, [sp, #80] @ 0x50 ; cmp lr, r5 ; ldrsb 
+elf_hotloops: 52 hot loops equal, 0 shrank, 6 grew (21 other fragments not compared)
+make: *** [elf_p4_check] Error 1

@@ -38,6 +38,7 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/DSP/Instruments/HiHat \
           -ICore/DSP/Instruments/Alkaline \
           -ICore/DSP/Instruments/Colloid \
+          -ICore/DSP/Instruments/Tetrakt \
           -ICore/DSP/Effects \
           -ICore/DSP/Effects/CrumpBit \
           -ICore/DSP/Effects/Space \
@@ -117,6 +118,7 @@ SRCS = \
   Core/DSP/Instruments/HiHat/HiHatParameters.c \
   Core/DSP/Instruments/Alkaline/AlkalineParameters.c \
   Core/DSP/Instruments/Colloid/ColloidParameters.c \
+  Core/DSP/Instruments/Tetrakt/TetraktParameters.c \
   Core/DSP/Effects/FxBuffer.c \
   Core/DSP/Effects/EffectsManager.c \
   Core/DSP/Effects/CrumpBit/CrumpBitParameters.c \
@@ -162,6 +164,8 @@ DSP_SRCS = \
   Core/DSP/Instruments/Colloid/ColloidOsc.c \
   Core/DSP/Instruments/Colloid/ColloidTables.c \
   Core/DSP/Instruments/Colloid/ColloidVoice.c \
+  Core/DSP/Instruments/Tetrakt/TetraktTables.c \
+  Core/DSP/Instruments/Tetrakt/TetraktVoice.c \
   Core/DSP/Instruments/Cymbal/CymbalVoice.c \
   Core/DSPAudio/Decay.c \
   Core/DSPAudio/DiodeLadder.c \
@@ -277,6 +281,20 @@ $(BUILD)/Core/DSP/Instruments/Colloid/ColloidOsc.o: Core/DSP/Instruments/Colloid
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 $(BUILD)/Core/DSP/Instruments/Colloid/ColloidTables.o: Core/DSP/Instruments/Colloid/ColloidTables.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+
+# S096 P1: the Tetrakt engine and its tables are DSP: -Ofast like the
+# Colloid. -fno-lto for the S095 P2 reason (Makefile comment above): outside
+# the LTO unit the Tetrakt cannot shift LTO's partitioning of the other
+# engines' loops (gated by elf_p4_check, S11); its entry points are noinline
+# calls from InstrumentManager, and it calls the platform's
+# osc_userBind()/osc_renderTyped() as ordinary externals.
+# TetraktParameters.c stays in SRCS (-O2), as the other tables.
+$(BUILD)/Core/DSP/Instruments/Tetrakt/TetraktVoice.o: Core/DSP/Instruments/Tetrakt/TetraktVoice.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+$(BUILD)/Core/DSP/Instruments/Tetrakt/TetraktTables.o: Core/DSP/Instruments/Tetrakt/TetraktTables.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 

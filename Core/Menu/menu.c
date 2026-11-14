@@ -67,6 +67,7 @@
 #include "Oscillator.h"
 #include "AlkalineVoice.h"     /* S094 P4: ALK_WAVE_COUNT (the name assert) */
 #include "ColloidVoice.h"      /* S095 P2: COL_WAVE_COUNT, the COL_* counts (the name asserts) */
+#include "TetraktVoice.h"      /* S096 P1: TKT_LAYER_MASK_COUNT (the name assert) */
 #include "transientGenerator.h"   /* S087 P3: transient list with user one-shots */
 #include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* (name asserts) */
 #include <string.h>
@@ -2149,6 +2150,14 @@ typedef struct {
     uint8_t scene_setting;
     uint8_t slot;
     uint8_t descriptor_index;
+    /*
+     * Bit cell (S096 P1 SD1): b + 1 when this instrument cell shows and edits
+     * bit b of its row (the Tetrakt's lon), else 0. Zero by default, so every
+     * memset-built cell is an ordinary cell. descriptor_index stays the row:
+     * automation, search, held lookup, MIDI Learn, pot clear and live record
+     * treat the four bit cells as the one row (plan R5).
+     */
+    uint8_t bit_plus1;
     const ParamDescriptor *descriptor;
     /* Effect page cell identity; meaningful only for MENU_CELL_EFFECT. */
     menuEffects_cell_t fx;
@@ -3340,6 +3349,13 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value,
 {
     uint8_t dtype = (uint8_t)(menu_cellDtype(cell) & 0x0fu);
 
+    /*
+     * S096 P1 SD2: a bit cell's held or working value is the row's mask; the
+     * cell shows its own bit (its dtype is the plain on/off).
+     */
+    if (cell && cell->kind == MENU_CELL_INSTRUMENT && cell->bit_plus1)
+        value = (uint8_t)((value >> (cell->bit_plus1 - 1u)) & 1u);
+
     /* Per-track play mode shows its 0..5 name (S078 §4.1). */
     if (cell && cell->kind == MENU_CELL_STATIC &&
         cell->static_param == PAR_TRACK_PLAY_MODE) {
@@ -3985,6 +4001,64 @@ static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
         return;
     }
 
+    /*
+     * S096 P1 SD2 (plan §4.3, R5): a bit cell on held steps writes the whole
+     * mask.
+     *
+     * What:       the mask seed is the working cache, else the held lock,
+     *             else the row's Normal value; a turn right sets this cell's
+     *             bit, left clears it; every held step stores the mask (the
+     *             step's layer set). Every visible bit cell of the same row
+     *             takes the mask as its working value, so the four redraw
+     *             together and are underlined at once. Only the turned cell
+     *             is held back from the underline for the edit flash.
+     * Why:        a step lock is a snapshot of all four layers (T-Q8): the
+     *             page shows that the moment one cell is toggled.
+     */
+    if (cell.kind == MENU_CELL_INSTRUMENT && cell.bit_plus1) {
+        const kit_instrument_slot_t *slotData =
+            scene_instrumentSlotConst(scene_getActiveIndex(), cell.slot);
+        const uint8_t bit = (uint8_t)(1u << (cell.bit_plus1 - 1u));
+        uint8_t mask;
+        uint8_t p;
+
+        if (va_underlineSuppressed & (uint8_t)(0x10u << knobNr))
+            mask = va_workingValue[knobNr];
+        else if (va_resolveHeldValue(target, &stored7))
+            mask = va_storedToParam(stored7);
+        else if (slotData && cell.descriptor_index < INSTRUMENT_PARAM_COUNT)
+            mask = slotData->parameter_images.instrument_parameters[cell.descriptor_index];
+        else
+            mask = 0u;
+        if (delta > 0)
+            mask |= bit;
+        else if (delta < 0)
+            mask &= (uint8_t)~bit;
+        mask &= 0x0Fu;
+        for (i = 0u; i < va_heldCount; i++) {
+            if (patSvc_writeStepAutomation(
+                    menu_shownPattern, menu_activeVoice,
+                    buttonHandler_visibleStep(va_heldOrder[i]), target, mask))
+                wrote = 1u;
+        }
+        if (wrote) {
+            va_searchSetBit(cell.descriptor_index);
+            for (p = 0u; p < 4u; p++) {
+                menu_cell_t other = menu_resolveCell(activePage, p);
+
+                if (other.kind == MENU_CELL_INSTRUMENT && other.bit_plus1 &&
+                    other.descriptor_index == cell.descriptor_index) {
+                    va_workingValue[p] = mask;
+                    va_underlineSuppressed |= (uint8_t)(0x10u << p);
+                }
+            }
+            va_underlineSuppressed |= (uint8_t)(1u << knobNr);
+            va_lastEditTick = time_sysTick;
+            menu_knobs_dirty = 1u;
+        }
+        return;
+    }
+
     /* Seed: working cache if validity bit set, else the stored parameter value,
      * else the read-only displayed endpoint for first creation. */
     if (va_underlineSuppressed & (uint8_t)(0x10u << knobNr))
@@ -4620,6 +4694,9 @@ static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position)
                                                        subPage,
                                                        position,
                                                        &cell.descriptor_index);
+        /* S096 P1 SD1: which bit of the row a bit cell shows (0: none). */
+        cell.bit_plus1 = instrumentManager_menuCellBitPlus1(slot->type, subPage,
+                                                            position);
         if (!cell.descriptor &&
             cell.descriptor_index == INSTRUMENT_MENU_SKIP) {
             cell.kind = MENU_CELL_STATIC;
@@ -5107,6 +5184,9 @@ static uint8_t menu_cellDtype(const menu_cell_t *cell)
             return DTYPE_0B255;
         return DTYPE_0B127;
     }
+    /* S096 P1 SD2: a bit cell is a plain on/off (tag 0: on / off, 0..1). */
+    if (cell->kind == MENU_CELL_INSTRUMENT && cell->bit_plus1)
+        return DTYPE_ON_OFF;
     if (cell->kind == MENU_CELL_INSTRUMENT ||
         cell->kind == MENU_CELL_KIT_SETTING)
         return cell->descriptor ? cell->descriptor->dtype : DTYPE_0B127;
@@ -5145,6 +5225,14 @@ static uint16_t menu_cellDisplayValue(const menu_cell_t *cell)
             scene_instrumentSlotConst(scene_getActiveIndex(), cell->slot);
         if (!slot || cell->descriptor_index >= INSTRUMENT_PARAM_COUNT)
             return 0u;
+        /*
+         * S096 P1 SD2: a bit cell shows its bit of the row's Normal value (the
+         * switch is a selector: S078's non-morphable rule, Normal in either
+         * view).
+         */
+        if (cell->bit_plus1)
+            return (uint16_t)((slot->parameter_images.instrument_parameters[cell->descriptor_index]
+                               >> (cell->bit_plus1 - 1u)) & 1u);
         return voiceModeShowMorph
             ? slot->parameter_images.morph_instrument_parameters[cell->descriptor_index]
             : slot->parameter_images.instrument_parameters[cell->descriptor_index];
@@ -5220,6 +5308,26 @@ static uint8_t menu_cellCommitValueEx(const menu_cell_t *cell, uint16_t value,
      * (panel), menu_commitTargetEdit() (MIDI).
      */
     const uint8_t morphView = (uint8_t)(panel && voiceModeShowMorph);
+    /*
+     * S096 P1 SD2: a bit cell commits the whole row. The 0/1 value becomes the
+     * row's Normal value with that bit set or cleared, and the commit
+     * continues as an ordinary cell of the row (R12, AutoSave, the edit-mask
+     * fan-out and MIDI echo see one row edit).
+     */
+    if (cell->kind == MENU_CELL_INSTRUMENT && cell->bit_plus1) {
+        const kit_instrument_slot_t *slot =
+            scene_instrumentSlotConst(scene_getActiveIndex(), cell->slot);
+        menu_cell_t row = *cell;
+        uint8_t mask;
+
+        if (!slot || cell->descriptor_index >= INSTRUMENT_PARAM_COUNT)
+            return 0u;
+        mask = slot->parameter_images.instrument_parameters[cell->descriptor_index];
+        mask = (uint8_t)(value ? (mask | (1u << (cell->bit_plus1 - 1u)))
+                               : (mask & ~(1u << (cell->bit_plus1 - 1u))));
+        row.bit_plus1 = 0u;
+        return menu_cellCommitValueEx(&row, (uint16_t)(mask & 0x0Fu), panel);
+    }
     /* Effect page cells are owned by menuEffects.c (Session 072 step 7). */
     if (cell->kind == MENU_CELL_EFFECT) {
         if (panel)
@@ -6556,9 +6664,14 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
     switch (dtype) {
     case DTYPE_TARGET_SELECTION_VELO:
     case DTYPE_TARGET_SELECTION_LFO:
-        if (cell->kind == MENU_CELL_INSTRUMENT)
+        if (cell->kind == MENU_CELL_INSTRUMENT) {
             menu_formatInstrumentTargetShort(raw, valueAsText);
-        else
+            /* S096 P1 SD3: a Tetrakt velocity group names all four layers:
+             * tn* for tnA (plan §4.2). LFO targets keep their layer letter. */
+            if (dtype == DTYPE_TARGET_SELECTION_VELO &&
+                instrumentManager_targetIsVelocityGroup(raw))
+                valueAsText[2] = '*';
+        } else
             menu_displayModTargetShort(value, valueAsText);
         break;
     case DTYPE_AUTOM_TARGET:
@@ -12308,6 +12421,21 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
         return;
     }
     /*
+     * S096 P1: a Tetrakt sample row (tkt_sample_a..d) names the installed
+     * sample at its value: the catalogue's 8-character name and its sNN code;
+     * a value past the installed count names nothing (blank, "---" in the
+     * compact cell). The count is the row's clamp (InstrumentManager.c
+     * instrumentManager_waveDomainMax()).
+     */
+    if (isInstrument && strncmp(cell->descriptor->file_key, "tkt_sample_", 11u) == 0) {
+        if (value < samples) {
+            sampleMemory_getDisplayName(value, name);
+            memcpy(nameDst, name, SAMPLE_DISPLAY_NAME_LEN);
+            menu_formatUserShortName('s', value, codeDst);
+        }
+        return;
+    }
+    /*
      * S095 P2 (C-D20): a Colloid slot's osc1 under wav lists Saw, Rec, Tri,
      * Sin (colWaveNames). S095 P3 F2: under pwm it takes the shared pwm
      * branch below (Sin, Tri, Saw, Rec: the platform's list and order); under
@@ -12533,6 +12661,7 @@ static const char (*menu_onoffTagNames(uint8_t tag))[4]
     /* S095 P2: the Colloid's selectors (MenuText.h ONOFF_TAG_COL_*) */
     case ONOFF_TAG_COL_ROUTE:      return colRouteNames;      /* S095 P3 F9 */
     case ONOFF_TAG_COL_FILT_TYPE:  return colFiltTypeNames;
+    case ONOFF_TAG_TKT_LAYERS:     return tktLayerNames;      /* S096 P1 */
     default:                    return oscRunNames;
     }
 }
@@ -12696,6 +12825,9 @@ _Static_assert((sizeof(colRouteNames) / sizeof(colRouteNames[0])) - 1u == COL_RT
                "colRouteNames must list str and every filter type (S095 P3)");
 _Static_assert((sizeof(colFiltTypeNames) / sizeof(colFiltTypeNames[0])) - 1u == COL_FT_COUNT,
                "colFiltTypeNames must list every filter type");
+/* S096 P1: the layer-switch names list every 4-bit mask (TetraktVoice.h). */
+_Static_assert((sizeof(tktLayerNames) / sizeof(tktLayerNames[0])) - 1u == TKT_LAYER_MASK_COUNT,
+               "tktLayerNames must list the 16 layer sets");
 _Static_assert((sizeof(foldTypeNames) / sizeof(foldTypeNames[0])) - 1u ==
                    VOICE_FOLD_COUNT &&
                (sizeof(foldTypeLongNames) / sizeof(foldTypeLongNames[0])) - 1u ==
@@ -15299,9 +15431,21 @@ static void menu_repaintGeneric(void)
             } else switch (dtype) {
             case DTYPE_TARGET_SELECTION_VELO:
             case DTYPE_TARGET_SELECTION_LFO:
-                if (cell.kind == MENU_CELL_INSTRUMENT)
+                if (cell.kind == MENU_CELL_INSTRUMENT) {
                     menu_displayInstrumentTargetFull(curParmVal);
-                else if (curParmVal == INSTRUMENT_PARAM_INVALID)
+                    /*
+                     * S096 P1 SD3: a Tetrakt velocity group: '*' after the long
+                     * name (columns 8-15), as the compact cell's tn*.
+                     */
+                    if (dtype == DTYPE_TARGET_SELECTION_VELO &&
+                        instrumentManager_targetIsVelocityGroup(curParmVal)) {
+                        uint8_t c = 15u;
+
+                        while (c > 8u && editDisplayBuffer[1][c] == ' ')
+                            c--;
+                        editDisplayBuffer[1][(c < 15u) ? c + 1u : 15u] = '*';
+                    }
+                } else if (curParmVal == INSTRUMENT_PARAM_INVALID)
                     memcpy(&editDisplayBuffer[1][0], menuText_off, 3);
                 else
                     menu_displayModTargetFull(value);
@@ -15477,6 +15621,12 @@ static void menu_repaintGeneric(void)
                        cell.kind == MENU_CELL_KIT_SETTING) {
                 menu_copyPaddedField(&editDisplayBuffer[0][4u * i],
                                      cell.descriptor->short_name, 3u);
+                /* S096 P1 SD2: a bit cell is named on + its layer: onA .. onD. */
+                if (cell.kind == MENU_CELL_INSTRUMENT && cell.bit_plus1) {
+                    editDisplayBuffer[0][4u * i]      = 'o';
+                    editDisplayBuffer[0][4u * i + 1u] = 'n';
+                    editDisplayBuffer[0][4u * i + 2u] = (char)('A' + cell.bit_plus1 - 1u);
+                }
             } else if (cell.kind == MENU_CELL_STATIC) {
                 memcpy(&editDisplayBuffer[0][4u * i],
                        shortNames[valueNames[cell.text_id].shortName], 3);

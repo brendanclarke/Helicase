@@ -60,11 +60,12 @@ OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
         crumpbit_elf_check crumpbit_cpu_check alkaline alkaline_tables \
         elf_p4_snapshot elf_p4_check seq_steplen lfo lfo_rate_table alk_post_tables \
         space space_cpu_check colloid colloid_tables colloid_cpu_check \
+        tetrakt tetrakt_tables tetrakt_cpu_check \
         distortion dist_makeup_table
 all: oscillator modulation voice_control sequencer seq_steplen instrument_manager samples \
      sampleoptimize run_modes special_tags stock_tables voicefold fold_tables pwm_tables \
      crumpbit crumpbit_tables alkaline alkaline_tables alk_post_tables lfo lfo_rate_table \
-     space colloid colloid_tables distortion dist_makeup_table
+     space colloid colloid_tables distortion dist_makeup_table tetrakt tetrakt_tables
 
 $(GEN):
 	mkdir -p $(GEN)
@@ -371,6 +372,7 @@ special_tags:
 	cd $(ROOT) && python3 tools/dsp_test/check_special_tags.py
 	cd $(ROOT) && python3 tools/alkaline/make_init_alk.py --check
 	cd $(ROOT) && python3 tools/colloid/make_init_col.py --check
+	cd $(ROOT) && python3 tools/tetrakt/make_init_tkt.py --check
 
 stock_tables:
 	cd $(ROOT) && python3 tools/plots/gen_stock_tables.py --check
@@ -744,6 +746,108 @@ colloid_tables:
 colloid_cpu_check:
 	python3 colloid_cpu.py --elf $(FW_ELF) --count $(COL_COUNT) $(if $(COL_BASE),--baseline $(COL_BASE))
 
+# ---------------------------------------------------------------------------
+# S096 P1: the Tetrakt.
+#
+# What:       tetrakt builds modules/tetrakt.c on the real TetraktVoice.c and
+#             TetraktTables.c (extracted), the real Oscillator.c read and bind,
+#             colEgK[] (ColloidTables.c), squareRootLut[] and the sample
+#             catalogue, and runs laws TK-TRIG .. TK-VEL; then three break
+#             builds, each of which must fail its law:
+#               fade   R1 restarts at once (FADE becomes START in the trigger)
+#                                                                  -> TK-TRIG
+#               bias   the clip(b) subtraction removed             -> TK-DRV
+#               srr    the 127 entry read through the formula (0.99999)
+#                                                                  -> TK-SRR
+#               guard  the ring guard's copy removed (S096 P1 §17)
+#                                                                  -> TK-RING
+#               gain   the read without the bound sample's gain (§19)
+#                                                                  -> TK-READ
+#               frac   the read without its interpolation (§19)    -> TK-READ
+#             tetrakt_tables checks TetraktTables.c against its generator;
+#             tetrakt_cpu_check prints the linked counts (tetrakt_cpu.py).
+# Accessors:  make -C tools/dsp_test tetrakt | tetrakt_tables | tetrakt_cpu_check.
+TKT := $(ROOT)/Core/DSP/Instruments/Tetrakt
+tetrakt: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c $(GEN)/oscPwmTables.host.h \
+	$(GEN)/oscPwmTables.host.c $(GEN)/oscPwmWarp.host.h | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/Alkaline/AlkalineControl.h --body \
+	  --out $(GEN)/AlkalineControl.host.h
+	$(EX) --src $(COL)/ColloidTables.h --body --out $(GEN)/ColloidTables.host.h
+	$(EX) --src $(COL)/ColloidTables.c --body --out $(GEN)/ColloidTables.host.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/squareRootLut.c --object squareRootLut \
+	  --out $(GEN)/tkt_squareRootLut.c
+	for f in TetraktTables.h TetraktTables.c TetraktVoice.h TetraktVoice.c; do \
+	  $(EX) --src $(TKT)/$$f --body --out $(GEN)/$${f%.*}.host.$${f##*.} || exit 1; \
+	done
+	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c $(CAT_HOST_SRC) -o build/tetrakt -lm
+	./build/tetrakt
+	mkdir -p build/break_tkt_fade
+	sed 's/L->stage = TKT_STAGE_FADE;/L->stage = TKT_STAGE_START;/' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_fade/TetraktVoice.host.c
+	@grep -q 'TKT_STAGE_PLAY \&\& L->env >= TKT_QUIET)' build/break_tkt_fade/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_fade: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_fade $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_fade -lm
+	@if ./build/tetrakt_break_fade >/dev/null 2>&1; then \
+	  echo "tetrakt_break_fade: FAILED (a restart without the fade not caught)"; exit 1; \
+	else echo "tetrakt_break_fade: caught (law TK-TRIG fails as expected)"; fi
+	mkdir -p build/break_tkt_bias
+	sed 's/d = tkt_clip(x \* dG + dB) - dCB;/d = tkt_clip(x * dG + dB);/' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_bias/TetraktVoice.host.c
+	@grep -q 'd = tkt_clip(x \* dG + dB);' build/break_tkt_bias/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_bias: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_bias $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_bias -lm
+	@if ./build/tetrakt_break_bias >/dev/null 2>&1; then \
+	  echo "tetrakt_break_bias: FAILED (a drive offset not caught)"; exit 1; \
+	else echo "tetrakt_break_bias: caught (law TK-DRV fails as expected)"; fi
+	mkdir -p build/break_tkt_srr
+	sed 's/L->srrRate = tktSrrRate\[tkt_idx(srr)\];/L->srrRate = 0.9999f;/' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_srr/TetraktVoice.host.c
+	@grep -q 'L->srrRate = 0.9999f;' build/break_tkt_srr/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_srr: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_srr $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_srr -lm
+	@if ./build/tetrakt_break_srr >/dev/null 2>&1; then \
+	  echo "tetrakt_break_srr: FAILED (an inexact full rate not caught)"; exit 1; \
+	else echo "tetrakt_break_srr: caught (law TK-SRR fails as expected)"; fi
+	mkdir -p build/break_tkt_guard
+	sed 's/line\[0\] = ring\[TKT_RING - 1u\];/(void)0;/' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_guard/TetraktVoice.host.c
+	@! grep -q 'line\[0\] = ring\[TKT_RING - 1u\];' build/break_tkt_guard/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_guard: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_guard $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_guard -lm
+	@if ./build/tetrakt_break_guard >/dev/null 2>&1; then \
+	  echo "tetrakt_break_guard: FAILED (a stale ring guard not caught)"; exit 1; \
+	else echo "tetrakt_break_guard: caught (law TK-RING fails as expected)"; fi
+	mkdir -p build/break_tkt_gain
+	sed 's/const float rs = L->bindGain \* (1.0f \/ 4096.0f);/const float rs = 1.0f \/ 4096.0f;/' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_gain/TetraktVoice.host.c
+	@grep -q 'const float rs = 1.0f / 4096.0f;' build/break_tkt_gain/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_gain: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_gain $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_gain -lm
+	@if ./build/tetrakt_break_gain >/dev/null 2>&1; then \
+	  echo "tetrakt_break_gain: FAILED (a missing bind gain not caught)"; exit 1; \
+	else echo "tetrakt_break_gain: caught (law TK-READ fails as expected)"; fi
+	mkdir -p build/break_tkt_frac
+	sed 's/(int32_t)(ph \& 0xFFFu) \* /0 * /' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_frac/TetraktVoice.host.c
+	@grep -q '0 \* ((int32_t)data' build/break_tkt_frac/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_frac: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_frac $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_frac -lm
+	@if ./build/tetrakt_break_frac >/dev/null 2>&1; then \
+	  echo "tetrakt_break_frac: FAILED (a read without interpolation not caught)"; exit 1; \
+	else echo "tetrakt_break_frac: caught (law TK-READ fails as expected)"; fi
+
+tetrakt_tables:
+	cd $(ROOT) && python3 tools/tetrakt/gen_tkt_tables.py --check
+
+tetrakt_cpu_check:
+	python3 tetrakt_cpu.py --elf $(FW_ELF) $(if $(TKT_BASE),--baseline $(TKT_BASE))
+
 # S094 P1 S4: the post-filter and A3 tables (generator mirror and neutral
 # entries).
 alk_post_tables:
@@ -779,7 +883,11 @@ FW_ELF ?= $(ROOT)/build/lxr02.elf
 # the root `make clean` removes $(ROOT)/build (S093 P5). S093 P8 re-baselines
 # the ten wavetable readers: removing their 8-bit copies (D9) and using the
 # fixed 1,024-point read replaces their P4 loops by design.
-P4BASE ?= baselines/s093p8
+# S096 P1 §17 (D4) re-baselines from the accepted Tetrakt image: the
+# Tetrakt's osc_renderTyped() call moved the LTO partitions, so 16 loops
+# changed register text at equal instruction counts and osc_wtbPlanBlock
+# unrolled (worst block 199 -> 120); the mixer's 58 loops are equal.
+P4BASE ?= baselines/s096p1/p4base
 P4_OSC_SYMS := SVF_calcBlockZDF calcFmBlock calcNextOscSampleBlock \
   calcNextOscSampleRingBlock calcNextOscSampleSyncBlock calcNoiseRingBlock \
   calcSampleOscFmBlock calcSampleOscRingBlock calcSampleOscSyncBlock \

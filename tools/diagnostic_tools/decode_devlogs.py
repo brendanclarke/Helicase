@@ -1112,7 +1112,9 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
         # is 2048 blocks; 216 MHz / (44108.07 / 32) = 156,705 cycles a block.
         budget = 216e6 / (44108.07291666667 / 32.0)
         if (flags & 7) < 6:
-            types = {0: "drm", 1: "snr", 2: "cym", 3: "hat", 4: "alk"}
+            # S096 P1: the Colloid (5) and the Tetrakt (6) are named too
+            # (the probe's type field is InstrumentManager.h's enum).
+            types = {0: "drm", 1: "snr", 2: "cym", 3: "hat", 4: "alk", 5: "col", 6: "tkt"}
             typ = flags >> 3
             blk = (value >> 16) & 0xFFFF
             ren = value & 0xFFFF

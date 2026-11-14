@@ -35,6 +35,9 @@ TABLES = {
     # S095 P3 F10: instrument_drive (the post-filter overdrive) is the Drum
     # twin's INSTRUMENT_DRIVE, as the Alkaline's.
     'COL': 'Core/DSP/Instruments/Colloid/ColloidParameters.c',
+    # S096 P1: the Tetrakt. Its special rows are the LFO's three (rate, sync,
+    # offset), as every engine's; every tkt_* key is generic.
+    'TKT': 'Core/DSP/Instruments/Tetrakt/TetraktParameters.c',
 }
 ENUM = 'Core/DSP/Instruments/InstrumentManager.h'
 REGISTRY = 'Core/DSP/Instruments/InstrumentManager.c'

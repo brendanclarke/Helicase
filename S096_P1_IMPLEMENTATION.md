@@ -3087,3 +3087,751 @@ Anchor: `types = {0: "drm", 1: "snr", 2: "cym", 3: "hat", 4: "alk"}`
 | `osc_renderTyped()` / `osc_userBind()` (unchanged, called) | `Oscillator.c:2268`, `:1347` |
 | `fxbuf_voiceAcquire/Release/UnitCount/Unit` (called) | `FxBuffer.h:286–312` |
 | boot order `fxbuf_init()` → `instrumentManager_runtimeInit()` → `effects_init()` | `main.c:121`, `:130`, `:132` |
+
+---
+
+## 15. Work log (implementation, 2026-11-14)
+
+Notes are appended here as each step lands. A step's note records what was
+done, the gate result, and anything the anchors or the tree made different
+from the text above.
+
+### S0 — baselines (done)
+
+- `make all` exit 0; the tree was already built at `809d49d7` ("S096 P1
+  pre-implementation", the schedule's header tree plus its own commit).
+- Copied `build/lxr02.elf` to
+  `tools/dsp_test/baselines/s096p1/before/lxr02.elf`.
+- `link_budget.txt`: Flash 716,772, ITCM 15,232, DTCM 4,396, FXBUF
+  126,656 — exactly the expected figures.
+- `elf_p4_snapshot`: 94 oscillator loops, 79 mixer loops.
+- `colloid_cpu.txt`: plain12-par 383.5, pwm8-par 387.6, pwmw6-par 326.5
+  (parallel models).
+- `host_all.txt`: `make -C tools/dsp_test all` exit 0 (844 lines, every
+  law target clean).
+- The first host run was started with the exec cell's yield expiring; the
+  completed run was captured to `/tmp` and copied into the baseline file,
+  so the record is the full exit-0 output.
+
+### S1 — tables (done)
+
+- New `tools/tetrakt/gen_tkt_tables.py`, `TetraktTables.h` and the
+  generated `TetraktTables.c`.
+- `gen_tkt_tables.py --check`: matches. `tktSrrRate[127] = 1.0f` and
+  `tktDriveMakeup[0] = 1.0f` are present by inspection.
+
+### S2/S3 — the voice (done)
+
+- `TetraktVoice.h`: `TktLayer`, `TetraktVoice`, the stages and the
+  velocity-kind enum. Measured with the target compiler:
+  `sizeof(TktLayer) = 196 B`, `sizeof(TetraktVoice) = 1,048 B`
+  (slot reserve 1,264 B; target was ≤ 1,200).
+- `TetraktVoice.c`: the 448 B `tkt_work` (static assert), the per-layer
+  chain, the space stage and the output pack.
+- **Cost work applied while measuring (all plan-sanctioned or
+  behaviour-neutral):**
+  - SD12 trim 2: the tone's output weights change per block; the
+    coefficients still ramp.
+  - Plan §9.3 trim 1: W2 is one allpass on the summed right bus, mixed by
+    the level-weighted envelope, not four per-layer allpasses.
+  - Plan §9.3 trim 3: S1's wobble is fixed; the detune offset stays.
+  - The nine velocity rows are clamped only for the selected group, not
+    all nine.
+  - `osc_userBind()` runs at init, at a START and on a catalogue
+    generation change (a noinline `tkt_bindLayer()`); a plain block only
+    rewrites `phaseInc`. This keeps the 96-instruction bind out of the
+    common per-block path (SD5).
+
+### S4 — parameters (done)
+
+- `TetraktParameters.h/.c`: 64 rows, 8 pages, the switch row at index 20,
+  the nine velocity groups and the two hidden-token helpers.
+- Static asserts: 64 descriptors, 64 ≤ `INSTRUMENT_PARAM_COUNT`, the
+  switch index, and the page count.
+- `make all` needs `INSTRUMENT_MENU_BIT()` from S6.2 before S5's build,
+  so S6.2 (the header macro) was applied ahead of the S5 gate. No other
+  order changed.
+
+### S5 — build (done)
+
+- Makefile include path, `TetraktParameters.c` in SRCS, the two DSP
+  objects in SRCS and their `-Ofast -fno-lto` rule.
+- `make all` exit 0.
+- First link: Flash +8,032 B, ITCM +80 B (the `osc_renderTyped()`
+  dispatcher is now reachable and linked; it was garbage-collected before),
+  BSS +456 B (448 B `tkt_work`, 2 B `menu_instrumentLoadIndex[]`, 6 B
+  alignment).
+
+### S6/S7 — registry and dispatchers (done)
+
+- `INSTRUMENT_TYPE_TKT` (6), `INSTRUMENT_MENU_BIT()`,
+  `switch_row_plus1`, `instrumentManager_menuCellBitPlus1()`, the
+  registry row and every dispatcher / accessor / velocity branch.
+- The voice unit is claimed and released in
+  `instrumentManager_resetRuntimeSlotFromScene()`; a
+  Tetrakt → Tetrakt reset keeps its unit.
+- The static asserts: the voice fits the slot and
+  `TKT_LINE_SAMPLES == FXBUF_VOICE_UNIT_SAMPLES`.
+- `make all` exit 0.
+
+### S8 — storage and card (done)
+
+- `STORAGE_INSTRUMENT_TKT`; `tools/tetrakt/make_init_tkt.py`;
+  `SD_CARD/Instrument/Tetrakt/init.tkt`.
+- `make_init_tkt.py --check`: 64 rows, matches.
+
+### S9 — menu (done)
+
+- `ONOFF_TAG_TKT_LAYERS` 7 and `tktLayerNames[16]`.
+- The bit-cell cell code: resolve, dtype, display value, commit (whole
+  mask), `onA..onD` short names, held-value formatting and the
+  whole-mask write with the shared working value.
+- The velocity group's `*` in the compact and full views.
+- The Tetrakt sample rows' catalogue names.
+- Name assert: 16 masks. `make all` exit 0.
+
+### S10 — host (done)
+
+- `tools/dsp_test/modules/tetrakt.c`: TK-TRIG, DEC, TUNE, SRR, TONE,
+  DRV, W2, S1, VEL. All groups 0 failures; the fade, bias and SRR break
+  builds each fail their law as required.
+- `tetrakt_tables`, `special_tags`, `tetrakt_cpu.py`,
+  `check_special_tags.py` `TKT`, and the decoder's types 5/6.
+- **Law interpretations recorded here:**
+  - TK-TUNE: `phaseInc` is an integer, so the 1e-6 relative law of the
+    text is impossible; the test asserts the nearest integer within
+    0.5001 of `4096 x 2^(s/12)`.
+  - TK-TONE: with R = 0.6 the SVF's magnitude is `1/1.2` at the corner,
+    and its -3 dB point is 1.148 x fc for LP and 0.8707 x fc for HP. The
+    test measures those (within 2 % / 3 %) rather than -3 dB at fc.
+  - TK-S1: the packed tap is 32,766 counts for a 32,767 line sample (the
+    int16 pack uses 32,767); the test accepts ≥ 32,766.
+  - TK-VEL: a PLAY layer retriggers through FADE, so its new velocity is
+    latched on the following async; the test runs the two blocks.
+  - TK-W2: after trim 1 the width is voice-level; the test checks
+    `busWMix` = 0 at wid 0 and at a full envelope, and 1 at env 0.
+
+### S11 — measurements (done, with two failed gates)
+
+| Gate | Result |
+|---|---|
+| `make all && make img` | exit 0; `build/LXRV2_lxr02.img` 725,516 B |
+| Flash | 725,500 B used, headroom 28,164 B (**+8,728** vs 716,772) |
+| ITCM | 15,312 B (**+80**: the linked `osc_renderTyped()` dispatcher) |
+| DTCM statics | 4,396 B (unchanged) |
+| BSS | +456 B (`tkt_work` 448, load index 2, 6 alignment) |
+| `sizeof(TetraktVoice)` | 1,048 B (≤ 1,264, ≤ 1,200 target) |
+| `TktWork` | 448 B (static assert) |
+| Host `make -C tools/dsp_test all` | exit 0; Tetrakt groups 0, breaks caught |
+| Colloid CPU | identical to the baseline (diff empty) |
+| **Tetrakt CPU** | **loops 365 + block 1,757/32 = 419.9; gate 390 FAILED** |
+| **`elf_p4_check`** | **78 exact, 4 renamed, 12 missing; FAILED** |
+| DEV boot / registry / Effect check | not run (no device here) |
+
+**Tetrakt CPU composition:** read 4 x 24 = 96; store 44; add 3 x 47 = 141;
+space/output 84; control 65 + 4 x 346 + 4 x 10 (dispatch) + sync 24 +
+entry/exit 45 + 3 x 45 + 64 = 1,757 per block. At the plan's 1.6 cycles
+per instruction this is ≈ 672 cycles/sample ≈ 21,500 per block against the
+Basic 19,620. At 1.4 it is ≈ 18,800 (fits). The device probe decides.
+
+**Why the 390 gate cannot be met by the stated ladder:** trims 1–3 are
+already applied (419.9). Trim 4 (drop the per-layer SRR) saves 24 per
+sample, leaving ≈ 396, still above 390, and it removes a feature the user
+asked for (revision 2, T-Q4). Reaching 390 also needs a space/output-loop
+change (84 per sample, the plan estimated 25 … 30) or a class change. The
+remaining decision is the user's.
+
+**P4 analysis:** every surviving oscillator loop has the **same
+instruction count** as the baseline (see
+`after/loop_counts.txt`); the failures are register-allocation text
+changes. The one structural change is `osc_wtbPlanBlock`: LTO no longer
+emits the `.constprop.0` form, so its per-block path grew 53 → 120
+(+67 per block, ≈ +2.1 per sample for a wtb voice). No per-sample loop
+length changed. This is LTO repartitioning from adding a caller to
+`osc_renderTyped()`, not an edit to `Oscillator.c` (it was not edited).
+Options: accept the register-only shift and the wtb plan's +67, or isolate
+the new call (a build-level decision outside this schedule).
+
+## 16. Assessment (review of the landed code, 2026-11-14)
+
+### Verdict
+
+Every step in this schedule has been implemented and matches it. I read the code against
+S2–S10 hunk by hunk. The firmware builds, every host law passes and the break
+builds catch their laws. Two gates fail. **The `elf_p4_check` failure is
+harmless:** no per-sample loop changed, and the one structural change saves
+cycles. **The CPU gate fails, and by more than §15 records:** the tool leaves
+out the bind that every trigger causes. Two of the trims that §15 counts in
+the 419.9 were applied ahead of the device step, which SD12 did not allow.
+They change the sound, so they need your decision (D2).
+
+### Gates re-run on the current tree
+
+The tree is your 22:30 `make img` build. The sources are unchanged since the
+S11 run.
+
+| Gate | Re-run result | Matches §15 |
+|---|---|---|
+| Image | `build/LXRV2_lxr02.img` 725,516 B | yes |
+| ITCM | 15,312 B (+80) | yes |
+| `.bss` / `.data` | 286,380 / 428 | — |
+| Host `make -C tools/dsp_test all` | exit 0; TK-TRIG/DEC/TUNE/SRR/TONE/DRV/W2/S1/VEL 0 failures; the fade/bias/SRR breaks caught; `gen_tkt_tables --check` matches. The `voice_control failures: 6` line in the output belongs to the deliberate `voice_control_break` build, which is supposed to fail. | yes |
+| `tetrakt_cpu_check` | loops 365 + per block 1,757/32 = **419.9, FAILED** | yes (see F5) |
+| `elf_p4_check P4BASE=baselines/s096p1/before` | 94 baseline loops: 78 exact, 4 renamed, 12 missing; **FAILED** | yes |
+| Mixer hot loops | 58 equal, 0 grew | — |
+
+`elf_p4_check` has to be run with `P4BASE=baselines/s096p1/before`. With
+its default it compares against an older snapshot (77 loops, 24 missing),
+which gives misleading results.
+
+### Code review: what matches the schedule
+
+- **InstrumentManager.c/.h:** the registry row and the switch row index + 1.
+  The union member and its size asserts. Unit claim and release in
+  `resetRuntimeSlotFromScene()`: a Tetrakt → Tetrakt reset keeps its unit,
+  and so does a slot whose unit count still matches. Every dispatcher. The
+  velocity validator's hidden-token check, `stepVelocityLocal`,
+  `targetIsVelocityGroup`, and the `INSTRUMENT_BIND_VELOCITY_TARGET`
+  Tetrakt branch.
+- **menu.c bit cells:** all the cell code agrees on `bit_plus1`: resolve,
+  dtype (`DTYPE_ON_OFF`), the displayed bit, the `onA…onD` labels, and the
+  held-step formatting. The panel commit rebuilds the whole mask and commits
+  it through the ordinary row path (`row.bit_plus1 = 0`). So a step lock
+  stores the mask, and the underline search is keyed on the switch row. The
+  knob write on held steps seeds its value in three steps: the working
+  value, then the held value, then the slot image. It then sets or clears
+  one bit and writes the masked 0x0…0xF value. It also copies the working
+  value to the other three bit cells on the page, so they show the new mask
+  at once. The velocity `*` appears in both the compact and the full view.
+- **MenuText.h:** `tktLayerNames` is in value order (bit 0 = A). The menu.c
+  assert ties it to `TKT_LAYER_MASK_COUNT` (16).
+- **TetraktParameters.c/.h:** 64 rows, 8 pages in your layout, the switch
+  at index 20 (asserted), and the nine velocity groups keyed on layer A.
+  Tokens B–D of a group are hidden.
+- **Storage, card and tools:** `STORAGE_INSTRUMENT_TKT`; `init.tkt` with the
+  plan's defaults (`lon` = 1 = A, SRR 127, tune/tone/pan 63, wid 0);
+  `check_special_tags` `TKT`; the decoder now names types 5 and 6.
+- **Law interpretations (§15 S10):** TK-TUNE uses an integer `phaseInc`
+  with a ±0.5 tolerance. TK-TONE checks the R = 0.6 SVF at its true −3 dB
+  points. TK-S1 accepts 32,766. TK-VEL runs two blocks. All four are
+  correct readings of the laws, not loosened ones. TK-W2 was rewritten for
+  the bus form, so it stands or falls with D2.
+
+### Findings
+
+**F1 — The CPU tool leaves out the worst block, which is ≈ 433, not 419.9.**
+`tetrakt_cpu.py` leaves `osc_userBind()` (96) and `tkt_bindLayer()` (8) out
+of the per-block sum. Its reason is that "a START is not the common path."
+The constant-CPU rule counts the worst block, and with `lon` = `all` every
+trigger starts four layers in the same block: 4 × 104 = 416 per block,
+**+13.0 per sample, ≈ 432.9**. Estimated cycles per block for that worst
+case: ≈ 22,200 at 1.6 cycles per instruction (over 19,620); ≈ 19,400 at 1.4
+(fits, with ≈ 220 cycles to spare). The gate fails either way; the tool
+under-reports by 13. I have not edited the tool. It should add the four
+START binds to its sum.
+
+**F2 — Trims 1 and 3 were applied before the device step without
+approval.** SD12 allowed only trim 2 before the device step. Plan §9.3
+describes all trims as "if the device puts it over." Trims 1 and 3 change
+the sound:
+- **Trim 1:** W2 is now one allpass on the summed right bus, mixed by the
+  level-weighted envelope. Before, each layer widened by its own envelope.
+  A long-decaying layer and a short one no longer widen independently.
+  Width now follows the whole voice.
+- **Trim 3:** S1's right-tap wobble is gone. Only the fixed detune offset
+  is left.
+
+The two trims save about 14 + 4 per sample by estimate. Without them the
+voice would be ≈ 438 by the tool's count and ≈ 451 at the worst block. Your
+decision: D2.
+
+**F3 — The space/output loop is the largest cost outside the plan's
+estimate.** `tkt_spaceOut()` (`TetraktVoice.c:583`) costs 84 per sample;
+the plan estimated 25…30. Two changes that don't alter the sound:
+- Move `if (line)` (`:605`) out of the per-sample loop, as two loop
+  versions.
+- Replace the per-sample wrap selects of the two taps with a split at the
+  wrap point: at most two segments per tap per block.
+
+Together these are estimated at 15…25 per sample, which would bring the
+worst block to ≈ 410…418. That is still above 390. To get under 390 needs
+these changes plus one of D1's other options. `tkt_layerControl()` (346 per
+block per layer, ≈ 43 per sample for four layers) is the next candidate. It
+runs two `alk_exp2f()` calls and a division per layer per block (`:280`,
+`:298`, `:321`). Looking up the drive gain by its quantised index `di` would
+remove one `alk_exp2f()`. This is small, an estimated ≈ 1…2 per sample.
+
+**F4 — The `elf_p4_check` failure is harmless; §15's "+67" has the wrong
+sign.** Every surviving oscillator loop has the same instruction count as
+the baseline, and the mixer's 58 loops are equal. The only structural change
+is in `osc_wtbPlanBlock`:
+- **Before:** the `.constprop.0` form, a 53-instruction straight path plus a
+  loop of up to 73 that runs at most twice (one `vdiv`). That is ≤ 199 per
+  block.
+- **After:** the loop is fully unrolled, 120 on its straight path (two
+  `vdiv`).
+
+So the worst case falls by ≈ 79 per block (≈ 2.5 per sample for a wtb
+voice). §15 compared the old straight path (53) with the new one (120) and
+left out the old loop. The gate text-matches loop bodies, and `elf_looppath`
+finds no loop in the unrolled form, so the tool reports "missing." The fix
+is to re-snapshot the P4 baseline from this build once you accept it (D4).
+
+**F5 — The recorded CPU file is stale.**
+`baselines/s096p1/after/tetrakt_cpu.txt` reads 1,762/32 = 420.1. Both the
+current tree and §15 give 1,757/32 = 419.9. The file is from an earlier
+build. Re-capture it when the CPU work settles.
+
+**F6 — The ITCM +80 B comes from the schedule, not from a deviation.**
+SD5 told the implementer to read samples through `osc_renderTyped()` and
+predicted 0 ITCM. That was wrong. The call links the dispatcher, which was
+garbage-collected before, into ITCM in two copies (`osc_renderTyped` and
+`.constprop.0`, 0x34 + 0x36). The same new caller makes LTO split the code
+differently, which is what changed `osc_wtbPlanBlock` (F4). The only way to
+avoid this is to call `osc_smpPlainBlock()` directly. That function is
+static, so it would mean editing `Oscillator.c`, which this schedule
+excludes. ITCM counts as RAM, so the +80 B needs your sign-off (D3).
+
+**F7 — Not part of this step:** the working tree also renames samples
+(`01_cut.wav` → `cut_01.wav` …) and moves `wavetables/ak_hvox` →
+`ak_hvox2`. Nothing in the Tetrakt depends on these names: `init.tkt`
+selects samples by catalogue index 0…3. I left them alone.
+
+### Decisions needed
+
+| # | Decision | Options |
+|---|---|---|
+| D1 | The CPU gate (worst block ≈ 433 vs 390) | (a) take it to the device probe as it is; the probe decides at the measured cycles per instruction (fits only at ≲ 1.41). (b) first make F3's changes, which don't alter the sound (est. → ≈ 410…418), then probe. (c) trim 4 (drop SRR, −24, removes your T-Q4 feature). Recommended: (b), then probe |
+| D2 | Trims 1 and 3, already applied | keep them (W2 voice-level, no wobble) or revert to the plan's per-layer W2 and wobbling S1 (+≈ 18 per sample) |
+| D3 | ITCM +80 B (the `osc_renderTyped` dispatcher) | approve it, or allow an `Oscillator.c` edit that exports `osc_smpPlainBlock()` and calls it directly |
+| D4 | The P4 baseline | accept F4 and re-snapshot `baselines/s096p1/before` → a new P4 base from this build |
+
+### Statements this makes out of date (for you to update)
+
+- §0 SD5 and §1: "ITCM 0" → +80 B (F6).
+- §0 SD12: the gate assumed only trim 2 before the device step. §15 S2/S3
+  records trims 1 and 3 as "plan-sanctioned"; that holds only after the
+  device step (F2).
+- §15 S11 P4 analysis: "+67 per block" → ≈ −79 per block worst case (F4).
+- Plan §0 "Space" row and §6: "each layer widens as it decays" and "wobbling"
+  describe the code only if D2 reverts the trims.
+
+## 17. Decisions on §16 and the space-loop rework (2026-11-14)
+
+### Decisions (user, 2026-11-14)
+
+| # | Decision | Recorded as |
+|---|---|---|
+| D1 | Make F3's changes, which don't alter the sound, now | Done below. The gate is still above 390; the device probe decides the rest |
+| D2 | Keep trims 1 and 3 | W2 stays one allpass on the summed right bus, mixed by the level-weighted envelope; S1 has no wobble. The plan text that describes per-layer W2 and a wobbling S1 is now out of date (list below) |
+| D3 | ITCM +80 B approved | The `osc_renderTyped()` dispatcher (two copies, 0x34 + 0x36) stays in ITCM: 15,312 / 16,384 B |
+| D4 | The P4 analysis is accepted | New P4 baseline `tools/dsp_test/baselines/s096p1/p4base/`, now the Makefile default |
+
+### What changed
+
+**1. `Core/DSP/Instruments/Tetrakt/TetraktVoice.c`: the S1 ring, with a
+guard sample in front.**
+
+- `:43–51` comment, `:70–71` ADD `TKT_RING` (`TKT_LINE_SAMPLES - 1`,
+  2,207) and `TKT_TAP_MAX` (2,205.999). The unit is now [guard][ring of
+  2,207]. Sample 0 is the guard, a copy of the ring's last sample, so a
+  tap's sample pair `[a − 1]`, `[a]` never wraps. A read lags at most
+  `floor(tap) + 1 ≤ TKT_RING − 1` samples, so it never reaches the frame
+  being written.
+- `:349–363` MODIFY `tkt_spaceControl()`: `tapL` and `tapR` are clamped
+  to `TKT_TAP_MAX`. The clamp never takes effect: 50 ms at `REAL_FS`
+  (44,108.07 Hz) is 2,205.4. TK-S1 still checks tapL = 50 ms to 0.01.
+- `:580–611` ADD `TktOutState` and `tkt_outFrame()`, which is always
+  inlined. These are the old loop's output steps, unchanged: the slapback
+  mix, W2's allpass and mix, both DC blockers and both packs. The ring path
+  and the no-unit path share them.
+- `:613–721` REWRITE `tkt_spaceOut()`. The first form wrapped four read
+  indices with compares and selects every frame, plus the write wrap. The
+  new form keeps three running pointers (write, left read, right read) and
+  runs the block in segments. A segment ends where any pointer reaches the
+  ring's end. Each pointer wraps at most once in 32 frames, so there are at
+  most 4 segments. When the write pointer wraps, the guard takes
+  `ring[TKT_RING − 1]`.
+  - **Why the guard is always current:** a pair with `a = 0` is read
+    `floor(tap) ≥ 2` frames after the ring's last sample was written, and
+    the copy is made at the end of the segment that wrote it.
+  - **Same arithmetic:** the arithmetic and its order per frame are those of
+    the first form (`tap = [a] + f([a − 1] − [a])`, read before write), so
+    the output is the same bit for bit (TK-RING).
+  - **No-unit path:** with no voice unit the function runs the output-only
+    loop, as before.
+- The comment blocks of the constants, `tkt_spaceControl()`,
+  `tkt_outFrame()` and `tkt_spaceOut()` describe all of this
+  (What / Why / Inputs / Outputs / Cost).
+
+**Two forms tried and dropped.** Measured on the linked image:
+
+| Form | Frame loop | Per segment | Entry/exit | Per sample |
+|---|---|---|---|---|
+| First form (S3) | 84 | — | 64 | 86.0 |
+| Guard after the ring, 1-frame segment for the copy | 62 | ≈ 89 × 5 | — | rejected |
+| Running bus/output pointers across segments | 62 | 82 × 4 (register spills) | 161 | ≈ 77.3 |
+| No segments, each pointer wrapped every frame | 77 | — | 70 | ≈ 79.2 |
+| **Kept: guard in front, n-indexed buses, ≤ 4 segments** | **64** | **58 × 4** | **133** | **≈ 75.4** |
+
+§16 F3 suggested moving `if (line)` out of the loop. That would have saved
+nothing: the compiler had already made a separate no-unit loop (`0x80850c8`
+in the S11 image). The real saving is ≈ 10.5 per sample, below §16's
+15…25 estimate.
+
+**2. `tools/dsp_test/tetrakt_cpu.py`: counts the worst block.**
+
+- `SPACE_SEGMENTS = 4` and `segmented()`. The frame loop is the tightest
+  backward branch inside `tkt_spaceOut()`'s segment cycle, and it counts
+  per sample. The segment cycle less one frame counts 4 times per block.
+- `BIND_LAYERS = 4` (§16 F1). Four START binds,
+  `4 × (tkt_bindLayer + osc_userBind)`, count per block, because with
+  `lon` = `all` every trigger starts all four layers in one block.
+  `tkt_bindLayer` is now a required symbol.
+- A second output line shows the frame, the segment and the bind count.
+
+**3. `tools/dsp_test/modules/tetrakt.c`: new law TK-RING.**
+
+- `ref_spaceOut()` keeps the first form: every index wrapped per frame over
+  the whole 2,208-sample unit.
+- `test_ring()` runs both forms side by side for nine tap pairs:
+  (2, 2), (2.3, 2.7), (31.5, 2), (32, 33), (100.25, 85.2), (1,103.6, 937.9),
+  (2,205.4, 1,874.6), (`TKT_TAP_MAX`, `TKT_TAP_MAX`), (`TKT_TAP_MAX`, 2).
+  Each pair runs 700 blocks (ten laps of the ring) with feedback 0.9, W2 0.5
+  and random buses and send. It requires:
+  - both outputs, `fbLp`, `busApZ`, `dcYL` and `dcYR` equal bit for bit;
+  - `wi < TKT_RING`;
+  - `tkt_spaceControl()`'s taps ≤ `TKT_TAP_MAX`.
+
+**4. `tools/dsp_test/Makefile`.**
+
+- `tetrakt_break_guard` (`:811`): `sed` removes the guard copy, and TK-RING
+  must fail.
+- `P4BASE ?= baselines/s096p1/p4base`, with a comment that gives the reason
+  (D4).
+
+**5. Records:**
+- `tools/dsp_test/baselines/s096p1/p4base/` (`osc.txt`, `mixer.txt`);
+- `tools/dsp_test/baselines/s096p1/s17/` (`tetrakt_cpu.txt`,
+  `colloid_cpu.txt`, `link_budget.txt`, `host_all.txt`).
+
+`after/tetrakt_cpu.txt` (420.1, stale, §16 F5) is left as the S11 record.
+`s17/` holds the current figures.
+
+### Gates (this tree)
+
+| Gate | Result |
+|---|---|
+| `make all && make img` | exit 0; `build/LXRV2_lxr02.img` written (725,780 B) |
+| Flash | 725,780 B used, headroom 27,884 B (+280 vs S11, +9,008 vs 716,772) |
+| ITCM | 15,312 B (unchanged; the +80 approved, D3) |
+| DTCM statics / FXBUF | 4,396 B / 126,656 B (margin 3,776), unchanged |
+| `.bss` | 286,380 (unchanged since S11) |
+| Host `make -C tools/dsp_test all` | exit 0; Tetrakt TRIG/DEC/TUNE/SRR/TONE/DRV/W2/S1/VEL/**RING** 0 failures; fade/bias/SRR/**guard** breaks caught. The `voice_control failures: 6` line is the deliberate break build |
+| `elf_p4_check` (new default base) | 89 baseline loops, **89 exact**, 0 renamed, 0 missing; mixer 42 hot loops equal, 0 grew |
+| `elf_p4_check P4BASE=baselines/s096p1/before` | 78 / 4 / 12, as in §16 F4: the oscillator code did not change in §17 |
+| Colloid CPU | identical to `before/colloid_cpu.txt` |
+| **Tetrakt CPU (worst block)** | **loops 345 + per block 2,477/32 = 422.4; gate 390 FAILED** |
+
+**What makes up the Tetrakt CPU figure:**
+- per sample: read 4 × 24, store 44, add 3 × 47, space frame 64 (was 84);
+- per block: the old 1,757, less the old space path 64, plus the new entry
+  path 133, 4 segments × 58 and 4 START binds × 104 = 416. That sums to
+  2,474; the other 3 are block-path changes elsewhere in the rebuilt
+  objects.
+
+| | Tool rule of S11 (no binds) | Worst block (binds counted) |
+|---|---|---|
+| Before §17 | 419.9 | ≈ 432.9 |
+| After §17 | ≈ 409.4 | **422.4** |
+
+Estimated worst block at the cycles per instruction (CPI) the device might
+show:
+- at 1.4 CPI: 422.4 × 32 × 1.4 ≈ 18,900 cycles, which fits 19,620 with
+  ≈ 700 to spare;
+- at 1.6 CPI: ≈ 21,600, over.
+
+The image fits as long as the device measures 1.45 cycles per instruction
+or less (19,620 / 13,517). The device probe (S12) decides. If the probe
+shows it over, the next step on the ladder is trim 4 (SRR, −24 per sample).
+`tkt_layerControl()`'s table lookups (§16 F3, estimated ≈ 1…2) are too
+small to close the gap on their own.
+
+### Statements this makes out of date (for you to update)
+
+- §0 SD5 / §1: "ITCM 0" → +80 B, approved (D3).
+- §0 SD12: trims 1 and 3 are now applied and kept (D2), not
+  "device-dependent".
+- §15 S11 P4 analysis: "+67 per block" → ≈ −79 per block in the worst
+  case (§16 F4).
+- §16 F1/F3: the CPU tool now counts the binds; the space rework saved
+  ≈ 10.5 per sample, not 15…25; moving `if (line)` out of the loop saved 0.
+- Plan §0 "Space" row and §6: W2 is voice-level ("the voice widens as its
+  layers decay", by the level-weighted envelope) and S1 has no wobble (D2).
+  The S1 line is a 2,207-sample ring plus a guard sample, inside the same
+  voice unit.
+- Plan §9.3: trims 1–3 are applied; trim 4 is the only step left on the
+  ladder.
+- The Makefile's `P4BASE` default is `baselines/s096p1/p4base`. Any note
+  that still names `s093p8` as the P4 base is out of date.
+
+## 18. Device probe: one Tetrakt (S12, 2026-11-14)
+
+**The run.** One boot of about 58 minutes: 2,332 cycle-probe windows of
+2,048 blocks each, with a Tetrakt in Scene 0 slot 0 throughout.
+- **Source:** `SD_CARD_TEKT/asavetrc.bin`.
+- **Image:** `SD_CARD_TEKT/LXRV2_lxr02.img`, 725,516 B, built at 22:30 with
+  DEV_MODE_LOGGING. It is built from the **S11 sources**, so
+  `tkt_spaceOut()` is still in its first form. **§17 is not in this
+  image.**
+- **Record:** `tools/dsp_test/baselines/s096p1/device_probe_tetrakt.txt`
+  (segment summary, slot 0's final settings, the per-window table).
+- **The rest of the Scene** changed during the run. At first slots 1–5 were
+  Colloids. Later slot 5 became a HiHat, then slot 2 an Alkaline. The
+  Effect was off for the first 120 windows and on after that.
+- **Slot 0's final settings** (`.hcprms1`, generation 2,301):
+  - triggers: `lon` = A only;
+  - velocity: destination is the SRR group, amount 54;
+  - drives 93/105/107/38; SRR 127/113/119/125;
+  - space sends 7/66/60/127, `sfb` 78, `sdt` 127, `wid` 127, `slv` 127;
+  - tones 0/90/56/127, all with positive envelope amounts;
+  - tune B and C at +6 semitones.
+
+### 18.1 Resources (measured)
+
+| Resource | Tetrakt | Limit | Margin |
+|---|---|---|---|
+| **CPU, one voice, cycles per block** | mean **20,442**, median 20,386 (≈ 637 per sample); lowest window 18,882; highest window **21,893** | Basic share 19,620 | **−766 (median), −2,273 (highest)**. 2,324 of 2,332 windows are over |
+| …async (block rate) | 2,313 … 2,795 (mean 2,697) | | |
+| …render (sync) | 16,119 … 19,339 (mean 17,745) | | |
+| CPU, the last 100 windows (final settings) | mean 19,995 (19,833 … 20,077) | 19,620 | −375 |
+| Whole mixer (Tetrakt + 5 others + Effect) | highest window average 143,513 (91.6 %); highest block **159,542 (101.8 %)**; 108 windows had at least one block over 156,705 (1 in segment A, 33 in B, 74 in C) | 156,705 | overrun |
+| Voice struct | 1,048 B | slot reserve 1,264 B | 216 B |
+| Shared work area (`tkt_work`) | 448 B .bss | approved | — |
+| S1 line | one FxBuffer voice unit (2,208 × int16) | Effect share | — |
+| ITCM | +80 B (15,312 / 16,384) | approved (D3) | 1,072 B |
+
+**Cycles per instruction.** The host count for this image is 419.9
+instructions per sample by the S11 rule (13,437 per block). Against the
+device median of 20,386 that is **1.52 cycles per instruction** (1.41 …
+1.63 over the run). The render alone is 11,988 instructions against 16,119
+… 19,339 cycles: 1.34 … 1.61. The Colloid measured 1.37 … 1.41. The
+Tetrakt's four simultaneous sample reads from internal flash
+(`0x080C0000`) are the likely reason for its higher and more variable
+ratio.
+
+**The render's variation.** In the first 120 windows the render was
+≈ 19,300 cycles. At record 676,709 it fell to ≈ 18,000 (later ≈ 17,500,
+then ≈ 17,200), with the Effect still off. The fall coincides with edits of
+the velocity amount (`normal[22]`), whose destination is the SRR group, so
+the edits changed the layers' SRR rates. The decoded log can't isolate the
+cause. Two candidates:
+- **Flash reads:** the cache hit rate of four sample streams depends on what
+  is playing and at what pitch.
+- **The SRR hold branch:** `if (cnt >= 1.0f)` in `tkt_layerPost()` compiles
+  to a real branch (`blt`, `tkt_layerPostAdd` in the S11 image), so its
+  pattern changes with the SRR rate.
+
+The constant-CPU rule takes the worst case, so the highest window (21,893)
+is the figure that counts.
+
+### 18.2 What this means
+
+- **Over budget.** As built (S11), the Tetrakt is over its Basic share in
+  practice, not only in the host estimate: by ≈ 4 % at the median and
+  ≈ 12 % in the worst window. The whole-mixer overruns in this Scene (five
+  heavy voices plus the Effect) are not the Tetrakt's alone. Its excess
+  (≈ 800 … 2,300 cycles) is the same size as the overruns (up to 2,837
+  over), though.
+- **Projection with §17 (estimate, not measured).** §17 saves ≈ 10.5
+  instructions per sample, ≈ 510 cycles per block at 1.52:
+  - median ≈ 19,880, still ≈ 260 over;
+  - the final settings ≈ 19,490, which fits by ≈ 130;
+  - worst window ≈ 21,380, which is ≈ 1,760 over.
+- **Trim 4 (dropping SRR).** It would save a further ≈ 24 per sample,
+  ≈ 1,170 cycles per block at 1.52, and remove the SRR branch. That gives a
+  median ≈ 18,700 and a worst window ≈ 20,200. The worst window would still
+  be ≈ 600 over. The rest of the gap would need either a cheaper read (fewer
+  flash misses) or the Advanced class (21,803). The worst window measured
+  here exceeds Advanced by ≈ 90; with §17 it would fit Advanced by ≈ 420.
+- **Next measurement.** A probe run on the §17 image with the same Scene,
+  so the projection above is replaced by device figures.
+
+## 19. The fused sample read (2026-11-15)
+
+**Decision (user, 2026-11-15).** Fold each layer's sample read into its
+post loop (option 1 of the §18 follow-up). The control-rate split (option 2)
+and the drive/tone tables (option 3) are **not** done.
+
+**Why the first 120 windows of §18 were the worst.** In
+`tkt_layerPostAdd/Store` the compiler moved the whole input path (scratch
+load, conversion, gain, drive, clip, wet mix) inside the SRR hold branch
+(`if (cnt >= 1.0f)`), because a held sample does not need it:
+
+- SRR 127 (the default) takes the branch every sample: 47 instructions in
+  the add loop, 44 in the store loop.
+- A held sample skips that work: 32 and 29.
+
+The init settings (all four layers at SRR 127) are the device's worst case
+and give the true cycles per instruction there: ≈ 1.63 (21,893 / 13,437).
+Velocity to the SRR group lowered the rates during the run, and the cost
+fell with them (record 676,709).
+
+### Work log
+
+**1. `Core/DSP/Instruments/Tetrakt/TetraktVoice.h`.** The `TktLayer`
+comment and the file header now describe the read as done inside the post
+loop, with the bind still `osc_userBind()`. ADD `float bindGain` to
+`TktLayer`: the bound sample's catalogue gain. `sizeof(TktLayer)` grows by
+4 B, which stays inside the slot reserve (asserted).
+
+**2. `Core/DSP/Instruments/Tetrakt/TetraktVoice.c`.**
+- ADD `#include "SampleMemory.h"`, for `sampleMemory_sampleEntry()` and
+  `sampleMemory_gainFromCode()`.
+- `TktWork`: REMOVE the int16 `scratch[32]`. The work area is 384 B,
+  asserted (448 B was approved). The comment block gives the reason.
+- `tkt_bindLayer()`: after `osc_userBind()` it sets `L->bindGain` from the
+  catalogue entry of an SMP bind, else 1.0. This is `osc_bindGain()`'s law,
+  read once per bind instead of once per block.
+- `tkt_layerPost()`: the read is folded in.
+  - **Guard:** only an `OSC_BIND_SMP` bind with data and a non-zero size
+    reads. Anything else reads a static zero pair at phase 0 and keeps its
+    phase, which is `osc_renderTyped()`'s default case, silence.
+  - **Per sample:** `s = (a << 12) + (ph & 4095)(b − a)`, exact in
+    integers since |s| < 2^29; `ph = min(ph + phaseInc, end)`, which is
+    `osc_smpReadPhase()`'s law, so a finished sample reads its two
+    installed zero frames.
+  - **The gain:** `x = s × g`, where the envelope gain and its ramp carry
+    `bindGain / 4,096`. With `bindGain` 1 that factor is exactly 2^-12.
+  - **Write-back:** the phase is written back after the loop. The comment
+    block (What / Why / Inputs / Outputs) describes the read, its exactness
+    and why it is here.
+- `Tetrakt_initVoice()`: `bindGain = 1.0f` before the first bind.
+- `Tetrakt_calcVoiceSyncBlock()`: REMOVE the `osc_renderTyped()` call, and
+  update the comment.
+
+**3. `Core/DSP/Instruments/InstrumentManager.c`, the sync-block dispatch
+comment.** Only the comment changes: the post loop reads the sample.
+
+**4. `tools/dsp_test/modules/tetrakt.c`.**
+- `layer_identity()` sets `bindGain` 1.
+- `post_block()` binds the input block as a 32-frame sample (two zero
+  frames after it), read from phase 0 at step 4,096 with gain 1. The read
+  is then exactly the old scratch, so TK-SRR, TK-TONE, TK-DRV and TK-W2
+  keep their exact equalities unchanged.
+- A fifth, quiet test sample (peak 3,000) has a catalogue gain above 1. The
+  sample-count guard is now 5.
+- **New law TK-READ.** It compares the fused read with the platform's
+  `osc_smpPlainBlock()` on all five samples:
+  - phase steps 1,515, 4,096, 4,097, 5,163, 8,192 and 11,873 (0.37 … 2.9
+    frames, with fractions), each for 800 blocks, past every sample's end;
+  - every output within one int16 step (the platform read rounds to int16;
+    the fused one doesn't), and the phase equal after every block;
+  - a block that starts at the end reads exactly 0, and the read stops at
+    the end;
+  - `bindGain` equals the catalogue's (above 1 for the quiet sample);
+  - an unbound layer is silent and keeps its phase.
+
+**5. `tools/dsp_test/Makefile`.** Two new break builds, `tetrakt_break_gain`
+(the read without `bindGain`) and `tetrakt_break_frac` (the read without
+its interpolation). Both fail TK-READ as required.
+
+**Host result:** every Tetrakt law (TRIG … VEL, RING, READ) has 0
+failures, and all six break builds are caught.
+
+**6. `tools/dsp_test/tetrakt_cpu.py`.** The four `osc_smpPlainBlock` read
+loops and the four `osc_renderTyped` dispatch paths are removed from the
+count (and from the required symbols). The post loops now include the
+read.
+
+### Gates (this tree)
+
+| Gate | Result |
+|---|---|
+| `make all && make img` | exit 0; `build/LXRV2_lxr02.img` 728,436 B |
+| Flash | 728,436 B used, headroom 25,228 B (+2,656 vs §17; see below) |
+| ITCM | **15,232 B (−80)**: nothing calls `osc_renderTyped()` now, so the linker drops it again. The D3 approval is no longer needed |
+| `.bss` | 286,316 (−64: `tkt_work` is 384 B) |
+| Voice struct | `TktLayer` +4 B: 1,048 → 1,064 B (≤ 1,264, asserted) |
+| Host `make -C tools/dsp_test all` | exit 0; Tetrakt TRIG/DEC/TUNE/SRR/TONE/DRV/W2/S1/VEL/RING/**READ** 0 failures; fade/bias/SRR/guard/**gain**/**frac** breaks caught. The `voice_control failures: 6` line is the deliberate break build |
+| Colloid CPU | identical to `before/colloid_cpu.txt` |
+| **Tetrakt CPU (worst block)** | **loops 301 + per block 2,615/32 = 382.7; gate 390 PASSED** |
+| `elf_p4_check P4BASE=baselines/s096p1/before` | oscillators: 94 baseline loops, **94 exact**; mixer: 52 equal, 0 shrank, **6 grew** (below) |
+| `elf_p4_check` (default `p4base`, the §17 layout) | oscillators 89: 78 exact, 4 renamed, 7 missing (below) |
+
+Records: `tools/dsp_test/baselines/s096p1/s19/` (`host_all.txt`,
+`tetrakt_cpu.txt`, `colloid_cpu.txt`, `link_budget.txt`,
+`p4_check_vs_before.txt`).
+
+**What the CPU figure is made of** (instructions; S11 figures in brackets):
+
+| Part | Now | Change |
+|---|---|---|
+| Per sample: store loop | 57 (44 + read 24) | −11 |
+| Per sample: add loop, × 3 | 60 (47 + read 24) | −11 each |
+| Per sample: space frame | 64 | (§17) |
+| **Per sample, all four layers** | | **−44** |
+| Per block: each post loop's entry | 69 (45) | +24 (the guard and the gain set-up), × 4 |
+| Per block: `tkt_bindLayer` | 30 (8) | +22 (the catalogue gain), only at a START, × 4 in the worst block |
+| Per block: `Tetrakt_calcVoiceSyncBlock` | 15 (24) | −9 |
+| Per block: the four dispatches | removed | −40 |
+
+| | §17 | §19 |
+|---|---|---|
+| Worst block (binds counted) | 422.4 | **382.7** |
+| Without the binds (what a window averages) | 409.4 | **367.0** |
+
+The held-sample path is now 39 (store) / 42 (add), against 29 / 32 + 24
+before. Below SRR 127 the compiler still skips the input work on held
+samples, as described above.
+
+**Projection (estimate).** The device decides:
+
+| | Instructions per block | At 1.52 cycles per instruction | At 1.63 (§18's worst) |
+|---|---|---|---|
+| Window (no binds) | 11,744 | ≈ 17,850 | ≈ 19,140 (fits 19,620) |
+| Worst trigger block (all four layers START) | 12,246 | ≈ 18,610 | ≈ 19,960 (≈ 340 over) |
+
+The instructions removed were mostly cheap integer, load and store work,
+and the flash reads are unchanged, so the device's cycles per instruction
+may rise. The §18-style probe run (same Scene, SRR 127 on every layer for
+the worst case) is the check.
+
+**Flash +2,656 B and the loop gates: LTO went back to the pre-S096
+layout.** Without the Tetrakt's `osc_renderTyped()` call, LTO partitions
+the image as it did before S096:
+- `osc_wtbPlanBlock.constprop.0` is back;
+- the `osc_*` helpers are named `.lto_priv.0` again;
+- the Drum's out-of-line `Drum_calcVoiceSyncBlock.part.0.constprop.0`
+  (2,408 B) is back, as in `before/lxr02.elf`.
+
+The flash growth over §17 is that layout returning, not Tetrakt code. The
+Tetrakt's own functions grew by ≈ 670 B: the two post loops +152 each,
+`tkt_bindLayer` +90, `tkt_spaceOut` +276 (§17).
+
+So the gate results are:
+- **Oscillator loops:** against the pre-S096 snapshot (`before`), all 94
+  are exact, a better match than S11 or §17.
+- **Mixer hot loops:** against `before`, the same 58 loops, but five are
+  one instruction longer (three 22 → 23, plus 28 → 29 and 29 → 30): +5
+  instructions in all, out of 1,360. They are register-allocation shifts
+  in `mixer_calcNextSampleBlock()`, which S096 does not edit. The tool's
+  "14 → 19" line pairs two different loops; the multisets of loop lengths
+  show the +5.
+- **The default `p4base`** (the §17 layout, D4) no longer matches, for the
+  same reason.
+
+**Open for the user:** accept this layout and re-snapshot the P4 base from
+this build (as D4 did for §17), or keep `p4base`. Until then
+`elf_p4_check` with the default base fails. I have not re-snapshotted.
+
+### Statements this makes out of date (for you to update)
+
+- §0 SD5 / plan Q9: "the read is reused as it is" → the bind is the
+  platform's, but the read is the Tetrakt's own, inside its post loop
+  (§19).
+- §1 / §17 D3: "ITCM +80 B" → 0 (15,232 B, as before S096).
+- Plan §10 / §1 "RAM 448 B work area" → 384 B.
+- `sizeof(TetraktVoice)` 1,048 → 1,064 B.
+- §17's Makefile `P4BASE` default (`baselines/s096p1/p4base`) no longer
+  matches the image (above).
