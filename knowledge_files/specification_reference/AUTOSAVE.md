@@ -821,8 +821,13 @@ is recorded in `SETTINGS_BANK_LOAD_REIMPLEMENT.md`.
 mechanics and its interaction with AutoSave's dirty mask are specified here
 because the writer that clears the flag is the AutoSave drain itself.
 
-The current physical schema is one exact
-`#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat` header plus 161 data rows.
+The current physical schema is a
+`#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat<TAB>alk` header plus 161 data rows.
+The header lists the registry tokens in enum order; a header that is a
+leading part of that list (written before later types were appended) is
+accepted and rewritten in full by the next register write (S093 P4). Any
+other header is rejected, and the rejection path regenerates the register
+with every row `R`, which discards the AutoSave payload.
 Bank/Scene/Kit rows are `name<TAB>source[<TAB>R]`; Instrument rows are
 `name<TAB>source<TAB>type[<TAB>R]`, where type is mandatory. The complete
 Pattern rows 129..144 and Effect rows 145..160 use the non-Instrument grammar

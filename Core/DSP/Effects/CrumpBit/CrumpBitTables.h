@@ -60,12 +60,6 @@
  * - crumpBit_grainDensity[d]: negative Density d = 1..63 -> the mean
  *   trigger interval as a fraction of N (1 at d = 1, ~20 ms at d = 63 with
  *   the whole arena; plan Q6). Entry 0 is unused.
- * S091 P5 output filter table (plan F1, Q6):
- * - crumpBit_onePoleK[frq]: the one-pole coefficient k (s += k (x - s)) of
- *   the `grn`/`rvb` output filter, matched so its -3 dB point is the TPT
- *   SVF's at `res` 0 for the same index (crumpBit_filterG[frq]); 0 at frq 0
- *   (closed), strictly increasing, below 1. A lookup replaces two divides
- *   per block.
  * Why tables: CrumpBit's per-block work runs inside the render
  * (mixer_calcNextSampleBlock()); a lookup replaces an expf, a fastTan
  * division and a valueShaper division per block, and one curve makes the
@@ -99,6 +93,5 @@ extern const float crumpBit_reverbDecay[CRUMPBIT_TABLE_SIZE];
 extern const float crumpBit_grainTime[CRUMPBIT_TABLE_SIZE];
 extern const uint8_t crumpBit_grainStopCc[CRUMPBIT_GRAIN_STOPS];
 extern const float crumpBit_grainDensity[CRUMPBIT_DENSITY_STEPS + 1u];
-extern const float crumpBit_onePoleK[CRUMPBIT_TABLE_SIZE];
 
 #endif /* CRUMP_BIT_TABLES_H_ */

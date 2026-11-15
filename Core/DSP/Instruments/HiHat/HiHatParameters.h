@@ -13,8 +13,10 @@
  */
 #define HIHAT_PARAM_DESCRIPTOR_COUNT 43u /* S088: + osc1_run. S089 P2: + voice_chain. */
 #define HIHAT_MENU_PAGE_COUNT       8u
+/* S094 P2 (user): Basic (choke kept). The Advanced class (two per Scene,
+** instrumentManager_typeSelectableForSceneSlot()) is kept for future types. */
 #define HIHAT_INSTRUMENT_TYPE_FLAGS \
-    (INSTRUMENT_FLAG_ADVANCED | INSTRUMENT_FLAG_CHOKE)
+    (INSTRUMENT_FLAG_BASIC | INSTRUMENT_FLAG_CHOKE)
 
 extern const ParamDescriptor hihat_param_descriptors[];
 extern const uint8_t hihat_param_descriptor_count;

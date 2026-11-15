@@ -8,7 +8,8 @@
 #               voice_control       modules/voice_control.c (+ break build)
 #               sequencer           modules/sequencer.c (+ break build)
 #               instrument_manager  modules/instrument_manager.c (+ 2 breaks)
-#               samples             modules/samples.c (+ break build)
+#               samples             modules/samples.c (+ catalogue and row
+#                                   resampler break builds)
 #               crumpbit            modules/crumpbit.c (+ 25 breaks: P6
 #                                   `dly` curve, R4 AC seed, P2 flat tone, P2
 #                                   seat delay clamp, P2 Rate-limit probe;
@@ -28,6 +29,11 @@
 #               sampleoptimize      modules/sampleoptimize.py
 #               special_tags        check_special_tags.py
 #               stock_tables        tools/plots/gen_stock_tables.py --check
+#               alkaline            modules/alkaline.c (S093 P0: DiodeLadder,
+#                                   AlkalineControl, AlkalineVoice over the
+#                                   real Oscillator.c; + legato, wtb blend
+#                                   ramp and wtb glide breaks)
+#               alkaline_tables     tools/alkaline/gen_alk_tables.py --check
 #             A break build compiles a deliberately broken copy and must fail.
 # Why:        keeps the laws earlier sessions proved runnable against today's
 #             source. The effects retry kit is spike/ (its own Makefile).
@@ -50,11 +56,17 @@ OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
 
 .PHONY: all clean oscillator modulation voice_control sequencer \
         instrument_manager samples sampleoptimize run_modes special_tags \
-        stock_tables voicefold fold_tables crumpbit crumpbit_tables \
-        crumpbit_elf_check crumpbit_cpu_check
-all: oscillator modulation voice_control sequencer instrument_manager samples \
-     sampleoptimize run_modes special_tags stock_tables voicefold fold_tables \
-     crumpbit crumpbit_tables
+        stock_tables voicefold fold_tables pwm_tables crumpbit crumpbit_tables \
+        crumpbit_elf_check crumpbit_cpu_check alkaline alkaline_tables \
+        elf_p4_snapshot elf_p4_check seq_steplen lfo lfo_rate_table alk_post_tables \
+        space space_cpu_check colloid colloid_tables colloid_cpu_check \
+        tetrakt tetrakt_tables tetrakt_cpu_check \
+        distortion dist_makeup_table
+all: oscillator modulation voice_control sequencer seq_steplen instrument_manager samples \
+     sampleoptimize run_modes special_tags stock_tables voicefold fold_tables pwm_tables \
+     crumpbit crumpbit_tables alkaline alkaline_tables alk_post_tables lfo lfo_rate_table \
+     space colloid colloid_tables distortion dist_makeup_table tetrakt tetrakt_tables \
+     buscomp
 
 $(GEN):
 	mkdir -p $(GEN)
@@ -67,12 +79,21 @@ $(GEN)/Oscillator.host.h: $(ROOT)/Core/DSPAudio/Oscillator.h | $(GEN)
 	$(EX) --src $< --body --out $@
 $(GEN)/Oscillator.host.c: $(ROOT)/Core/DSPAudio/Oscillator.c | $(GEN)
 	$(EX) --src $< --body --out $@
+$(GEN)/oscPwmTables.host.h: $(ROOT)/Core/DSPAudio/oscPwmTables.h | $(GEN)
+	$(EX) --src $< --body --out $@
+$(GEN)/oscPwmTables.host.c: $(ROOT)/Core/DSPAudio/oscPwmTables.c | $(GEN)
+	$(EX) --src $< --body --out $@
+# S094 P4: the shared pwm warp (Oscillator.c and DiodeLadder.c include it).
+$(GEN)/oscPwmWarp.host.h: $(ROOT)/Core/DSPAudio/oscPwmWarp.h | $(GEN)
+	$(EX) --src $< --body --out $@
 
 # S089 P3 breaks (fmramp group): the ramp dispatcher sending wtb to the
 # one-frame twin must fail FR1; the depth stepped before its first use
 # (d = d0 + dStep) must fail FR2. Each break edits the generated
 # Oscillator.host.c and is found first through its own -I directory.
-oscillator: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c
+oscillator: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
+	$(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables.host.c \
+	$(GEN)/oscPwmWarp.host.h
 	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/oscillator.c $(CAT_HOST_SRC) \
 	  -o build/oscillator -lm
 	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) -DOSC_POS_BEND_CAP=8 -DOSC_POS_TEST_CAP \
@@ -94,6 +115,37 @@ oscillator: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c
 	@if ./build/oscillator_break_fmr2 >/dev/null 2>&1; then \
 	  echo "oscillator_break_fmr2: FAILED (ramp step-order break not caught)"; exit 1; \
 	else echo "oscillator_break_fmr2: caught (law FR2 fails as expected)"; fi
+	# S094 P1 S3 breaks: forward second read fails PW2; unlimited width slew fails PW5.
+	mkdir -p build/break_pwm1 build/break_pwm2
+	sed 's/const uint32_t ib = (ia - d) \& 0x3FFu;/const uint32_t ib = (ia + d) \& 0x3FFu;/' \
+	  $(GEN)/Oscillator.host.c > build/break_pwm1/Oscillator.host.c
+	@grep -q '(ia + d) & 0x3FFu' build/break_pwm1/Oscillator.host.c || \
+	  { echo "oscillator_break_pwm1: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_pwm1 $(HOSTFLAGS) $(OSC_HOST_INC) modules/oscillator.c \
+	  $(CAT_HOST_SRC) -o build/oscillator_break_pwm1 -lm
+	@if ./build/oscillator_break_pwm1 >/dev/null 2>&1; then \
+	  echo "oscillator_break_pwm1: FAILED (a forward second read not caught)"; exit 1; \
+	else echo "oscillator_break_pwm1: caught (law PW2 fails as expected)"; fi
+	sed 's/if (d > OSC_PWM_SLEW_STEPS)/if (0)/' \
+	  $(GEN)/Oscillator.host.c > build/break_pwm2/Oscillator.host.c
+	@grep -q 'if (0)' build/break_pwm2/Oscillator.host.c || \
+	  { echo "oscillator_break_pwm2: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_pwm2 $(HOSTFLAGS) $(OSC_HOST_INC) modules/oscillator.c \
+	  $(CAT_HOST_SRC) -o build/oscillator_break_pwm2 -lm
+	@if ./build/oscillator_break_pwm2 >/dev/null 2>&1; then \
+	  echo "oscillator_break_pwm2: FAILED (an unlimited width step not caught)"; exit 1; \
+	else echo "oscillator_break_pwm2: caught (law PW5 fails as expected)"; fi
+	# S094 P4 break: Rec planned on the Saw width table must fail PW2 and PW10.
+	mkdir -p build/break_pwm3
+	sed 's/pl->d = oscPwmDRec\[k\];/pl->d = oscPwmDSaw[k];/' \
+	  $(GEN)/Oscillator.host.c > build/break_pwm3/Oscillator.host.c
+	@grep -q 'pl->d = oscPwmDSaw\[k\];' build/break_pwm3/Oscillator.host.c || \
+	  { echo "oscillator_break_pwm3: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_pwm3 $(HOSTFLAGS) $(OSC_HOST_INC) modules/oscillator.c \
+	  $(CAT_HOST_SRC) -o build/oscillator_break_pwm3 -lm
+	@if ./build/oscillator_break_pwm3 >/dev/null 2>&1; then \
+	  echo "oscillator_break_pwm3: FAILED (Rec width table break not caught)"; exit 1; \
+	else echo "oscillator_break_pwm3: caught (laws PW2/PW10 fail as expected)"; fi
 
 modulation: $(GEN)/Oscillator.host.h
 	$(EX) --src $(ROOT)/Core/DSPAudio/modulationNode.c \
@@ -103,6 +155,55 @@ modulation: $(GEN)/Oscillator.host.h
 	  --out $(GEN)/modulation_interp.c
 	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/modulation.c -o build/modulation -lm
 	./build/modulation
+
+# S094 P1 S1: the real LFO phase law and rate table (modules/lfo.c).
+# Breaks: (1) the sync writer storing the byte only (lfo_setSync() without
+# its recomputation) must fail LF1; (2) lfo_calc() scaling by modNodeValue
+# while synced must fail LF4.
+lfo: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/lfo.h --macro LFO_SR --out $(GEN)/lfo_sr.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/lfo.h --macro LFO_SINE --macro LFO_TRI \
+	  --macro LFO_SAW_UP --macro LFO_SAW_DOWN --macro LFO_REC --macro LFO_NOISE \
+	  --macro LFO_EXP_UP --macro LFO_EXP_DOWN --out $(GEN)/lfo_waves.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/lfoRateTable.c --object lfoRateHz \
+	  --out $(GEN)/lfo_rate_table.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/lfo.c --func lfo_calc --func lfo_calcPhaseInc \
+	  --func lfo_setFreq --func lfo_setSync --out $(GEN)/lfo_funcs.c
+	$(HOSTCC) $(HOSTFLAGS) -I$(GEN) modules/lfo.c -o build/lfo -lm
+	./build/lfo
+	mkdir -p build/break_lfo1 build/break_lfo2
+	sed 's/lfo->sync = sync;/lfo->sync = sync; return;/' \
+	  $(GEN)/lfo_funcs.c > build/break_lfo1/lfo_funcs.c
+	$(HOSTCC) -Ibuild/break_lfo1 $(HOSTFLAGS) -I$(GEN) modules/lfo.c -o build/lfo_break1 -lm
+	@if ./build/lfo_break1 >/dev/null 2>&1; then \
+	  echo "lfo_break1: FAILED (a store-only sync writer not caught)"; exit 1; \
+	else echo "lfo_break1: caught (law LF1 fails as expected)"; fi
+	sed 's/lfo->sync ? 1.0f : lfo->modNodeValue/lfo->modNodeValue/' \
+	  $(GEN)/lfo_funcs.c > build/break_lfo2/lfo_funcs.c
+	$(HOSTCC) -Ibuild/break_lfo2 $(HOSTFLAGS) -I$(GEN) modules/lfo.c -o build/lfo_break2 -lm
+	@if ./build/lfo_break2 >/dev/null 2>&1; then \
+	  echo "lfo_break2: FAILED (a synced LFO following the overlay not caught)"; exit 1; \
+	else echo "lfo_break2: caught (law LF4 fails as expected)"; fi
+
+lfo_rate_table:
+	cd $(ROOT) && python3 tools/plots/gen_lfo_rate_table.py --check
+
+# S095 P4 C3: the voice distortion curve with its makeup (modules/distortion.c)
+# on the real helpers and the real generated table.
+distortion: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/distortionMakeup.c \
+	  --object distortion_makeup --out $(GEN)/dist_table.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/distortion.h \
+	  --func distortion_curveSample16 --func distortion_curveSampleF \
+	  --out $(GEN)/dist_curve.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/distortion.c \
+	  --func setDistortionShape --func distortion_calcSampleFloat \
+	  --out $(GEN)/dist_shape.c
+	$(HOSTCC) $(HOSTFLAGS) -I$(GEN) modules/distortion.c -o build/distortion -lm
+	./build/distortion
+
+dist_makeup_table:
+	cd $(ROOT) && python3 tools/plots/gen_dist_makeup.py --check
 
 # Break: the old trigger-then-drain order (-DBREAK_DRAIN_AFTER_FIRE); the
 # program reports law 1 failing and exits 0 only when it does.
@@ -134,6 +235,26 @@ sequencer: | $(GEN)
 	@if ./build/sequencer_break >/dev/null 2>&1; then \
 	  echo "sequencer_break: FAILED (the cursor-start break was not caught)"; \
 	  exit 1; else echo "sequencer_break: caught (law 2 fails as expected)"; fi
+
+# S093 P4: law AL-T. seq_trackStepSamples() against the real step-scale table
+# and a double-precision reference. Break: the tick product in 32 bits (it
+# overflows at every tempo) must fail AL-T.
+seq_steplen: | $(GEN)
+	$(EX) --src $(ROOT)/Core/Sequencer/sequencer.c --func seq_trackStepSamples \
+	  --out $(GEN)/seq_stepsamples.c
+	$(HOSTCC) $(HOSTFLAGS) -I$(ROOT)/Core/Sequencer modules/seq_steplen.c \
+	  $(ROOT)/Core/Sequencer/StepScale.c -o build/seq_steplen -lm
+	./build/seq_steplen
+	mkdir -p build/break_steplen
+	sed 's/const uint64_t ticksQ8 = (uint64_t)stepScale_ticksQ8(scale);/const uint32_t ticksQ8 = stepScale_ticksQ8(scale);/' \
+	  $(GEN)/seq_stepsamples.c > build/break_steplen/seq_stepsamples.c
+	@grep -q 'const uint32_t ticksQ8' build/break_steplen/seq_stepsamples.c || \
+	  { echo "seq_steplen_break: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_steplen $(HOSTFLAGS) -I$(ROOT)/Core/Sequencer \
+	  modules/seq_steplen.c $(ROOT)/Core/Sequencer/StepScale.c -o build/seq_steplen_break -lm
+	@if ./build/seq_steplen_break >/dev/null 2>&1; then \
+	  echo "seq_steplen_break: FAILED (the 32-bit product was not caught)"; \
+	  exit 1; else echo "seq_steplen_break: caught (AL-T fails as expected)"; fi
 
 # Breaks: the gate without its SELECTOR branch (law 3); the row as
 # DTYPE_0B127 (law 4).
@@ -198,6 +319,18 @@ samples: | $(GEN)
 	@if ./build/samples_break >/dev/null 2>&1; then \
 	  echo "samples_break: FAILED (early-header break not caught)"; exit 1; \
 	else echo "samples_break: caught (catalogue law 3 fails as expected)"; fi
+	mkdir -p build/break_rows
+	sed 's|#define SAMPLE_INSTALL_ROW_HALF 32 |#define SAMPLE_INSTALL_ROW_HALF 16 |' \
+	  $(ROOT)/Core/SampleRom/SampleInstall.c > build/break_rows/SampleInstall.c
+	@grep -q 'SAMPLE_INSTALL_ROW_HALF 16 ' build/break_rows/SampleInstall.c || \
+	  { echo "samples_break_rows: sed did not apply"; exit 1; }
+	$(HOSTCC) $(HOSTFLAGS) -I$(ROOT)/Core/SampleRom $(CAT_HOST_INC) \
+	  modules/samples.c $(ROOT)/Core/SampleRom/SampleMemory.c \
+	  build/break_rows/SampleInstall.c catalogue_host.c \
+	  -o build/samples_break_rows -lm
+	@if ./build/samples_break_rows >/dev/null 2>&1; then \
+	  echo "samples_break_rows: FAILED (H = 16 kernel not caught)"; exit 1; \
+	else echo "samples_break_rows: caught (rows law 4 fails as expected)"; fi
 
 sampleoptimize:
 	python3 modules/sampleoptimize.py
@@ -238,6 +371,9 @@ run_modes: | $(GEN)
 
 special_tags:
 	cd $(ROOT) && python3 tools/dsp_test/check_special_tags.py
+	cd $(ROOT) && python3 tools/alkaline/make_init_alk.py --check
+	cd $(ROOT) && python3 tools/colloid/make_init_col.py --check
+	cd $(ROOT) && python3 tools/tetrakt/make_init_tkt.py --check
 
 stock_tables:
 	cd $(ROOT) && python3 tools/plots/gen_stock_tables.py --check
@@ -265,8 +401,578 @@ voicefold: | $(GEN)
 	  echo "voicefold_break: FAILED (DC-term break not caught)"; exit 1; \
 	else echo "voicefold_break: caught (law F3 fails as expected)"; fi
 
+# S093 P0: the Alkaline engine (DiodeLadder.c, AlkalineControl.c,
+# AlkalineVoice.c, the generated tables) over the whole real Oscillator.c and
+# the real sawTable. Laws AL-B, AL-R, AL-S, AL-N, AL-AB (modules/alkaline.c).
+# Break: the legato rule ignored (every note retriggers) must fail AL-S.
+ALK := $(ROOT)/Core/DSP/Instruments/Alkaline
+ALK_GEN := $(GEN)/DiodeLadder.host.h $(GEN)/DiodeLadder.host.c \
+           $(GEN)/AlkalineControl.host.h $(GEN)/AlkalineControl.host.c \
+           $(GEN)/AlkalineTables.host.h $(GEN)/AlkalineTables.host.c \
+           $(GEN)/AlkalineSquareTable.host.c \
+           $(GEN)/AlkalineVoice.host.h $(GEN)/AlkalineVoice.host.c \
+	           $(GEN)/alk_sawTable.c $(GEN)/alk_triTable.c $(GEN)/oscPwmTables.host.h \
+	           $(GEN)/oscPwmTables.host.c $(GEN)/oscPwmWarp.host.h
+alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
+	$(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables.host.c \
+	$(GEN)/oscPwmWarp.host.h | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/DiodeLadder.h --body --out $(GEN)/DiodeLadder.host.h
+	$(EX) --src $(ROOT)/Core/DSPAudio/DiodeLadder.c --body --out $(GEN)/DiodeLadder.host.c
+	$(EX) --src $(ALK)/AlkalineControl.h --body --out $(GEN)/AlkalineControl.host.h
+	$(EX) --src $(ALK)/AlkalineControl.c --body --out $(GEN)/AlkalineControl.host.c
+	$(EX) --src $(ALK)/AlkalineTables.h --body --out $(GEN)/AlkalineTables.host.h
+	$(EX) --src $(ALK)/AlkalineTables.c --body --out $(GEN)/AlkalineTables.host.c
+	$(EX) --src $(ALK)/AlkalinePostTables.h --body --out $(GEN)/AlkalinePostTables.host.h
+	$(EX) --src $(ALK)/AlkalinePostTables.c --body --out $(GEN)/AlkalinePostTables.host.c
+	$(EX) --src $(ALK)/AlkalineSquareTable.c --body --out $(GEN)/AlkalineSquareTable.host.c
+	$(EX) --src $(ALK)/AlkalineVoice.h --body --out $(GEN)/AlkalineVoice.host.h
+	$(EX) --src $(ALK)/AlkalineVoice.c --body --out $(GEN)/AlkalineVoice.host.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object sawTable --out $(GEN)/alk_sawTable.raw.c
+	sed 's/const int16_t sawTable/int16_t sawTable/' $(GEN)/alk_sawTable.raw.c > $(GEN)/alk_sawTable.c
+# S094 P4: the real triangle for the Tri laws (AL-XT, AL-PWW).
+	$(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object triTable --out $(GEN)/alk_triTable.raw.c
+	sed 's/const int16_t triTable/int16_t triTable/' $(GEN)/alk_triTable.raw.c > $(GEN)/alk_triTable.c
+# S094 P1 S5: the pwm read-form reference (ALK_PWM_READ_FORM 0, both reads
+# interpolated) renders build/alk_pwm_ref.bin for law AL-PW (P-D6 evidence).
+	$(HOSTCC) $(HOSTFLAGS) -DALK_PWM_READ_FORM=0 $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_pwm_ref -lm
+	./build/alkaline_pwm_ref --pwm-render build/alk_pwm_ref.bin
+	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c $(CAT_HOST_SRC) \
+	  -o build/alkaline -lm
+	./build/alkaline
+	mkdir -p build/break_alk
+	sed 's/const uint8_t legato = (uint8_t)(voice->slideLatch \&\& voice->gateLeft > 0);/const uint8_t legato = 0u;/' \
+	  $(GEN)/AlkalineVoice.host.c > build/break_alk/AlkalineVoice.host.c
+	@grep -q 'legato = 0u;' build/break_alk/AlkalineVoice.host.c || \
+	  { echo "alkaline_break: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break -lm
+	@if ./build/alkaline_break >/dev/null 2>&1; then \
+	  echo "alkaline_break: FAILED (legato break not caught)"; exit 1; \
+	else echo "alkaline_break: caught (law AL-S fails as expected)"; fi
+# S093 P8 revision 3: two break proofs for the wavetable glide and blend.
+# (1) the blend's mix held at its start value (no per-sample ramp): law
+#     AL-W "slot" must fail (the reference ramps from start to end).
+	mkdir -p build/break_alk_wtb
+	sed 's/const float ffStep = (end - start) \* (1.0f \/ (float)OUTPUT_DMA_SIZE);/const float ffStep = 0.0f;/' \
+	  $(GEN)/AlkalineVoice.host.c > build/break_alk_wtb/AlkalineVoice.host.c
+	@grep -q 'const float ffStep = 0.0f;' build/break_alk_wtb/AlkalineVoice.host.c || \
+	  { echo "alkaline_break_wtb: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk_wtb $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break_wtb -lm
+	@if ./build/alkaline_break_wtb >/dev/null 2>&1; then \
+	  echo "alkaline_break_wtb: FAILED (a blend without its ramp not caught)"; exit 1; \
+	else echo "alkaline_break_wtb: caught (law AL-W fails as expected)"; fi
+# (2) the glide may cross a frame boundary inside a block (the boundary
+#     one frame further on): the position law of AL-W must fail.
+	mkdir -p build/break_alk_glide
+	sed 's/const float k = floorf(start) + 1.0f;/const float k = floorf(start) + 2.0f;/' \
+	  $(GEN)/AlkalineVoice.host.c > build/break_alk_glide/AlkalineVoice.host.c
+	@grep -q 'floorf(start) + 2.0f;' build/break_alk_glide/AlkalineVoice.host.c || \
+	  { echo "alkaline_break_glide: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk_glide $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break_glide -lm
+	@if ./build/alkaline_break_glide >/dev/null 2>&1; then \
+	  echo "alkaline_break_glide: FAILED (a glide across a frame boundary not caught)"; exit 1; \
+	else echo "alkaline_break_glide: caught (law AL-W fails as expected)"; fi
+# S094 P1 S4 breaks for P9-D7 (AL-OD0 must fail): (1) the tone not open at
+# 127 (c + 0.001); (2) the overdrive gain not exactly 1 at 0 (x 1.0001).
+	mkdir -p build/break_alk_tone build/break_alk_ovd
+	sed 's/alkToneC\[ti\])/alkToneC[ti] + 0.001f)/' \
+	  $(GEN)/AlkalineVoice.host.c > build/break_alk_tone/AlkalineVoice.host.c
+	@grep -q 'alkToneC\[ti\] + 0.001f' build/break_alk_tone/AlkalineVoice.host.c || \
+	  { echo "alkaline_break_tone: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk_tone $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break_tone -lm
+	@if ./build/alkaline_break_tone >/dev/null 2>&1; then \
+	  echo "alkaline_break_tone: FAILED (a closed tone at 127 not caught)"; exit 1; \
+	else echo "alkaline_break_tone: caught (law AL-OD0 fails as expected)"; fi
+	sed 's/alkOvdGain\[oi\],/alkOvdGain[oi] * 1.0001f,/' \
+	  $(GEN)/AlkalineVoice.host.c > build/break_alk_ovd/AlkalineVoice.host.c
+	@grep -q 'alkOvdGain\[oi\] \* 1.0001f' build/break_alk_ovd/AlkalineVoice.host.c || \
+	  { echo "alkaline_break_ovd: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk_ovd $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break_ovd -lm
+	@if ./build/alkaline_break_ovd >/dev/null 2>&1; then \
+	  echo "alkaline_break_ovd: FAILED (an overdrive gain off 1 at 0 not caught)"; exit 1; \
+	else echo "alkaline_break_ovd: caught (law AL-OD0 fails as expected)"; fi
+# S094 P4 breaks: a swapped warp (ra / rb) must fail AL-PWW; the Tri wav
+# read on the Saw row must fail AL-XT.
+	mkdir -p build/break_alk_pwmw
+	sed 's/osc_pwmWarp(ph, wPh, wRa, wRb)/osc_pwmWarp(ph, wPh, wRb, wRa)/' \
+	  $(GEN)/DiodeLadder.host.c > build/break_alk_pwmw/DiodeLadder.host.c
+	@grep -q 'osc_pwmWarp(ph, wPh, wRb, wRa)' build/break_alk_pwmw/DiodeLadder.host.c || \
+	  { echo "alkaline_break_pwmw: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk_pwmw $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break_pwmw -lm
+	@if ./build/alkaline_break_pwmw >/dev/null 2>&1; then \
+	  echo "alkaline_break_pwmw: FAILED (a swapped warp not caught)"; exit 1; \
+	else echo "alkaline_break_pwmw: caught (law AL-PWW fails as expected)"; fi
+	mkdir -p build/break_alk_tri
+	sed 's/\[1024\])triTable/[1024])sawTable/' \
+	  $(GEN)/AlkalineVoice.host.c > build/break_alk_tri/AlkalineVoice.host.c
+	@grep -qF 'ALK_WAVE_TRI) ? (const int16_t (*)[1024])sawTable' \
+	  build/break_alk_tri/AlkalineVoice.host.c || \
+	  { echo "alkaline_break_tri: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk_tri $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break_tri -lm
+	@if ./build/alkaline_break_tri >/dev/null 2>&1; then \
+	  echo "alkaline_break_tri: FAILED (a Tri read on the Saw row not caught)"; exit 1; \
+	else echo "alkaline_break_tri: caught (law AL-XT fails as expected)"; fi
+
+alkaline_tables:
+	cd $(ROOT) && python3 tools/alkaline/gen_alk_tables.py --check
+
+# ---------------------------------------------------------------------------
+# S095 P2: the Colloid.
+#
+# What:       colloid builds modules/colloid.c on the real ColloidTables.c,
+#             ColloidOsc.c and ColloidVoice.c (extracted, the ITCM section
+#             removed), the real stock tables and PWM width table and the
+#             real catalogue code, and runs laws CO-OSC .. CO-WTB; then eight
+#             break builds, each of which must fail its law:
+#               side   the second oscillator's position from the low half
+#                      (SMLAWB for SMLAWT)                       -> CO-OSC
+#               frac   a 16-bit fraction (>> 6, >> 16)           -> CO-OSC
+#               sus    the sustain stage ignores the switch      -> CO-EG
+#               snap   the ramp does not start on the target     -> CO-SVF
+#               wlaw   w(f) held at 1                            -> CO-W
+#               slew   the pwm width jumps                       -> CO-PWM
+#               latch  wtb frames follow pos mid-note            -> CO-WTB
+#               mx     the right side panned by panL (step 2)   -> MX-ST
+#               rng    a hardware read per oscillator draw      -> CO-RND
+#             S095 P3 (legato removed with the tie row):
+#               slew0  slw 0 slews instead of landing            -> CO-SLEW
+#               group  every oscillator on the root's group      -> CO-INT
+#               fold   the pwm width fold without the modulo     -> CO-PWM
+#               rte    the right filter ignores fro              -> CO-RTE
+#               tone   a k-form tone, not exact when open        -> CO-POST
+#               sign   Saw played as Rec                         -> CO-PWM
+#             S095 P5 (user 2026-11-14):
+#               join   rejoining oscillators glide, not land      -> CO-JOIN
+#             colloid_tables checks ColloidTables.c against its generator;
+#             colloid_cpu_check prints the linked counts (colloid_cpu.py),
+#             against COL_BASE when given.
+# Accessors:  make -C tools/dsp_test colloid | colloid_tables |
+#             colloid_cpu_check [COL_COUNT=10] [COL_BASE=baselines/s095p2/colloid_cpu.txt].
+COL := $(ROOT)/Core/DSP/Instruments/Colloid
+COL_GEN := $(GEN)/ColloidTables.host.h $(GEN)/ColloidTables.host.c \
+           $(GEN)/ColloidOsc.host.h $(GEN)/ColloidOsc.host.c \
+           $(GEN)/ColloidVoice.host.h $(GEN)/ColloidVoice.host.c
+COL_COUNT ?= 12
+colloid: $(GEN)/Oscillator.host.h $(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables.host.c \
+	$(GEN)/oscPwmWarp.host.h | $(GEN)
+	$(EX) --src $(ALK)/AlkalineControl.h --body --out $(GEN)/AlkalineControl.host.h
+	$(EX) --src $(ALK)/AlkalinePostTables.h --body --out $(GEN)/AlkalinePostTables.host.h
+	$(EX) --src $(ALK)/AlkalinePostTables.c --body --out $(GEN)/AlkalinePostTables.host.c
+	for f in ColloidTables.h ColloidTables.c ColloidOsc.h ColloidOsc.c ColloidVoice.h ColloidVoice.c; do \
+	  $(EX) --src $(COL)/$$f --body --out $(GEN)/$${f%.*}.host.$${f##*.} || exit 1; \
+	done
+	for t in sine_table sawTable triTable recTable; do \
+	  $(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object $$t --out $(GEN)/col_$$t.raw.c && \
+	  sed "s/const int16_t $$t/int16_t $$t/" $(GEN)/col_$$t.raw.c > $(GEN)/col_$$t.c || exit 1; \
+	done
+	$(EX) --src $(ROOT)/Core/DSPAudio/mixer.c --func mixer_addVoiceInt16ToOutput \
+	  --func mixer_addVoiceInt16ToOutputAndFx --func mixer_addVoiceStereoToOutput \
+	  --func mixer_addVoiceStereoToOutputAndFx --out $(GEN)/col_mixer_funcs.c
+	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c $(CAT_HOST_SRC) -o build/colloid -lm
+	./build/colloid
+	mkdir -p build/break_col_side
+	sed 's/busS\[n\] = col_smlawt(s1, posPair, col_smulwb(s0, posPair));/busS[n] = col_smlawb(s1, posPair, col_smulwb(s0, posPair));/' \
+	  $(GEN)/ColloidOsc.host.c > build/break_col_side/ColloidOsc.host.c
+	@grep -q 'col_smlawb(s1, posPair, col_smulwb' build/break_col_side/ColloidOsc.host.c || \
+	  { echo "colloid_break_side: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_side $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_side -lm
+	@if ./build/colloid_break_side >/dev/null 2>&1; then \
+	  echo "colloid_break_side: FAILED (the second position from the low half not caught)"; exit 1; \
+	else echo "colloid_break_side: caught (law CO-OSC fails as expected)"; fi
+	mkdir -p build/break_col_frac
+	sed 's/return a + (((row\[na\] - a) \* (int32_t)((ph >> 7) \& 0x7FFFu)) >> 15);/return a + (((row[na] - a) * (int32_t)((ph >> 6) \& 0xFFFFu)) >> 16);/' \
+	  $(GEN)/ColloidOsc.host.c > build/break_col_frac/ColloidOsc.host.c
+	@grep -q '(ph >> 6) \& 0xFFFFu)) >> 16' build/break_col_frac/ColloidOsc.host.c || \
+	  { echo "colloid_break_frac: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_frac $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_frac -lm
+	@if ./build/colloid_break_frac >/dev/null 2>&1; then \
+	  echo "colloid_break_frac: FAILED (a 16-bit fraction not caught)"; exit 1; \
+	else echo "colloid_break_frac: caught (law CO-OSC fails as expected)"; fi
+	mkdir -p build/break_col_sus
+	sed 's/if (!susOn)/if (0)/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_sus/ColloidVoice.host.c
+	@grep -q 'if (0)' build/break_col_sus/ColloidVoice.host.c || \
+	  { echo "colloid_break_sus: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_sus $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_sus -lm
+	@if ./build/colloid_break_sus >/dev/null 2>&1; then \
+	  echo "colloid_break_sus: FAILED (a sustain that ignores the switch not caught)"; exit 1; \
+	else echo "colloid_break_sus: caught (law CO-EG fails as expected)"; fi
+	mkdir -p build/break_col_snap
+	sed 's/	f->a1 = f->t1;/	(void)0;/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_snap/ColloidVoice.host.c
+	@grep -q '(void)0;' build/break_col_snap/ColloidVoice.host.c || \
+	  { echo "colloid_break_snap: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_snap $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_snap -lm
+	@if ./build/colloid_break_snap >/dev/null 2>&1; then \
+	  echo "colloid_break_snap: FAILED (a ramp that does not start on its target not caught)"; exit 1; \
+	else echo "colloid_break_snap: caught (law CO-SVF fails as expected)"; fi
+	mkdir -p build/break_col_wlaw
+	sed 's/\* (1.0f \/ COL_W_OCTAVES));/* (1.0f \/ COL_W_OCTAVES)) * 0.0f + 1.0f;/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_wlaw/ColloidVoice.host.c
+	@grep -q '0.0f + 1.0f' build/break_col_wlaw/ColloidVoice.host.c || \
+	  { echo "colloid_break_wlaw: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_wlaw $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_wlaw -lm
+	@if ./build/colloid_break_wlaw >/dev/null 2>&1; then \
+	  echo "colloid_break_wlaw: FAILED (w(f) held at 1 not caught)"; exit 1; \
+	else echo "colloid_break_wlaw: caught (law CO-W fails as expected)"; fi
+	mkdir -p build/break_col_slew
+	sed 's/if (dw > OSC_PWM_SLEW_STEPS)/if (0)/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_slew/ColloidVoice.host.c
+	@grep -q 'if (0)' build/break_col_slew/ColloidVoice.host.c || \
+	  { echo "colloid_break_slew: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_slew $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_slew -lm
+	@if ./build/colloid_break_slew >/dev/null 2>&1; then \
+	  echo "colloid_break_slew: FAILED (a pwm width that jumps not caught)"; exit 1; \
+	else echo "colloid_break_slew: caught (law CO-PWM fails as expected)"; fi
+	mkdir -p build/break_col_latch
+	sed 's/const uint32_t fr = (voice->frame\[i\] < frames) ? voice->frame\[i\] : (frames - 1u);/const uint32_t fr = (osc->position * (frames - 1u)) \/ 127u;/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_latch/ColloidVoice.host.c
+	@grep -q 'osc->position \* (frames' build/break_col_latch/ColloidVoice.host.c || \
+	  { echo "colloid_break_latch: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_latch $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_latch -lm
+	@if ./build/colloid_break_latch >/dev/null 2>&1; then \
+	  echo "colloid_break_latch: FAILED (frames that follow pos mid-note not caught)"; exit 1; \
+	else echo "colloid_break_latch: caught (law CO-WTB fails as expected)"; fi
+	mkdir -p build/break_col_mx
+	sed 's/(sample_mx_t)((float)smR \* panR)/(sample_mx_t)((float)smR * panL)/' \
+	  $(GEN)/col_mixer_funcs.c > build/break_col_mx/col_mixer_funcs.c
+	@grep -q 'smR \* panL' build/break_col_mx/col_mixer_funcs.c || \
+	  { echo "colloid_break_mx: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_mx $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_mx -lm
+	@if ./build/colloid_break_mx >/dev/null 2>&1; then \
+	  echo "colloid_break_mx: FAILED (a right side panned by panL not caught)"; exit 1; \
+	else echo "colloid_break_mx: caught (law MX-ST fails as expected)"; fi
+	mkdir -p build/break_col_rng
+	sed 's/voice->rnd\[i\] = (int16_t)(col_rngNext(\&rng) >> 16);/voice->rnd[i] = GetRngValue();/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_rng/ColloidVoice.host.c
+	@grep -q 'voice->rnd\[i\] = GetRngValue();' build/break_col_rng/ColloidVoice.host.c || \
+	  { echo "colloid_break_rng: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_rng $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_rng -lm
+	@if ./build/colloid_break_rng >/dev/null 2>&1; then \
+	  echo "colloid_break_rng: FAILED (per-oscillator RNG reads not caught)"; exit 1; \
+	else echo "colloid_break_rng: caught (law CO-RND fails as expected)"; fi
+
+	mkdir -p build/break_col_slew0
+	sed 's/step = (voice->slew == 0u) ? 1.0e9f/step = (voice->slew == 0u) ? 1.0e-3f/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_slew0/ColloidVoice.host.c
+	@grep -q '1.0e-3f' build/break_col_slew0/ColloidVoice.host.c || \
+	  { echo "colloid_break_slew0: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_slew0 $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_slew0 -lm
+	@if ./build/colloid_break_slew0 >/dev/null 2>&1; then \
+	  echo "colloid_break_slew0: FAILED (a slw 0 that slews not caught)"; exit 1; \
+	else echo "colloid_break_slew0: caught (law CO-SLEW fails as expected)"; fi
+	# S095 P5 (user, 2026-11-14): rejoining oscillators glide instead of
+	# landing (the oscLive test removed from the pitch slew) -> CO-JOIN.
+	mkdir -p build/break_col_join
+	sed 's/if (jump || i >= live || fabsf(d) <= step)/if (jump || fabsf(d) <= step)/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_join/ColloidVoice.host.c
+	@grep -q 'if (jump || fabsf(d) <= step)' build/break_col_join/ColloidVoice.host.c || \
+	  { echo "colloid_break_join: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_join $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_join -lm
+	@if ./build/colloid_break_join >/dev/null 2>&1; then \
+	  echo "colloid_break_join: FAILED (rejoining oscillators that glide not caught)"; exit 1; \
+	else echo "colloid_break_join: caught (law CO-JOIN fails as expected)"; fi
+	mkdir -p build/break_col_group
+	sed 's/iv\[COL_GROUP(i)\]/iv[0]/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_group/ColloidVoice.host.c
+	@grep -q 'base + iv\[0\]' build/break_col_group/ColloidVoice.host.c || \
+	  { echo "colloid_break_group: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_group $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_group -lm
+	@if ./build/colloid_break_group >/dev/null 2>&1; then \
+	  echo "colloid_break_group: FAILED (every oscillator on the root not caught)"; exit 1; \
+	else echo "colloid_break_group: caught (law CO-INT fails as expected)"; fi
+	mkdir -p build/break_col_fold
+	sed 's/int32_t v = (pos + (int32_t)((float)rnd \* scale)) % 254;/int32_t v = pos + (int32_t)((float)rnd * scale);/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_fold/ColloidVoice.host.c
+	@grep -q 'int32_t v = pos + (int32_t)((float)rnd \* scale);' build/break_col_fold/ColloidVoice.host.c || \
+	  { echo "colloid_break_fold: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_fold $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_fold -lm
+	@if ./build/colloid_break_fold >/dev/null 2>&1; then \
+	  echo "colloid_break_fold: FAILED (a width fold without the modulo not caught)"; exit 1; \
+	else echo "colloid_break_fold: caught (law CO-PWM fails as expected)"; fi
+	mkdir -p build/break_col_rte
+	sed 's/cutR = col_clamp01(voice->cut + (voice->cutOfs - 63.0f \/ 127.0f));/cutR = col_clamp01(voice->cut);/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_rte/ColloidVoice.host.c
+	@grep -q 'cutR = col_clamp01(voice->cut);' build/break_col_rte/ColloidVoice.host.c || \
+	  { echo "colloid_break_rte: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_rte $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_rte -lm
+	@if ./build/colloid_break_rte >/dev/null 2>&1; then \
+	  echo "colloid_break_rte: FAILED (a right filter that ignores fro not caught)"; exit 1; \
+	else echo "colloid_break_rte: caught (law CO-RTE fails as expected)"; fi
+	@# S096 P2 F5: the pulse's second read without its glide, and the warp
+	@# without its W glide, must fail CO-PWG.
+	mkdir -p build/break_col_pwg build/break_col_wpg
+	sed 's/const uint32_t j0 = i0 - (uint32_t)(((int32_t)width\[0\] - (int32_t)width0\[0\]) \* 131072);/const uint32_t j0 = i0;/' \
+	  $(GEN)/ColloidOsc.host.c > build/break_col_pwg/ColloidOsc.host.c
+	@grep -q 'const uint32_t j0 = i0;' build/break_col_pwg/ColloidOsc.host.c || \
+	  { echo "colloid_break_pwg: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_pwg $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_pwg -lm
+	@if ./build/colloid_break_pwg >/dev/null 2>&1; then \
+	  echo "colloid_break_pwg: FAILED (a pulse width that steps not caught)"; exit 1; \
+	else echo "colloid_break_pwg: caught (law CO-PWG fails as expected)"; fi
+	sed 's/w += (uint32_t)dW;    \/\* S096 P2 F5: the glide \*\//(void)dW;/' \
+	  $(GEN)/ColloidOsc.host.c > build/break_col_wpg/ColloidOsc.host.c
+	@grep -q '(void)dW;' build/break_col_wpg/ColloidOsc.host.c || \
+	  { echo "colloid_break_wpg: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_wpg $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_wpg -lm
+	@if ./build/colloid_break_wpg >/dev/null 2>&1; then \
+	  echo "colloid_break_wpg: FAILED (a warp boundary that jumps not caught)"; exit 1; \
+	else echo "colloid_break_wpg: caught (law CO-PWG fails as expected)"; fi
+	mkdir -p build/break_col_tone
+	sed 's/tzL = ol + tc \* (tzL - ol);/tzL = tzL + (1.0f - tc) * (ol - tzL);/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_tone/ColloidVoice.host.c
+	@grep -q 'tzL = tzL + (1.0f - tc)' build/break_col_tone/ColloidVoice.host.c || \
+	  { echo "colloid_break_tone: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_tone $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_tone -lm
+	@if ./build/colloid_break_tone >/dev/null 2>&1; then \
+	  echo "colloid_break_tone: FAILED (a k-form tone not caught)"; exit 1; \
+	else echo "colloid_break_tone: caught (law CO-POST fails as expected)"; fi
+	mkdir -p build/break_col_sign
+	sed 's/const int32_t sign = (form == COL_PWM_SAW) ? 1 : -1;/const int32_t sign = -1;/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_sign/ColloidVoice.host.c
+	@grep -q 'const int32_t sign = -1;' build/break_col_sign/ColloidVoice.host.c || \
+	  { echo "colloid_break_sign: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_sign $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_sign -lm
+	@if ./build/colloid_break_sign >/dev/null 2>&1; then \
+	  echo "colloid_break_sign: FAILED (Saw played as Rec not caught)"; exit 1; \
+	else echo "colloid_break_sign: caught (law CO-PWM fails as expected)"; fi
+
+colloid_tables:
+	cd $(ROOT) && python3 tools/colloid/gen_col_tables.py --check
+
+colloid_cpu_check:
+	python3 colloid_cpu.py --elf $(FW_ELF) --count $(COL_COUNT) $(if $(COL_BASE),--baseline $(COL_BASE))
+
+# ---------------------------------------------------------------------------
+# S096 P1: the Tetrakt.
+#
+# What:       tetrakt builds modules/tetrakt.c on the real TetraktVoice.c and
+#             TetraktTables.c (extracted), the real Oscillator.c read and bind,
+#             colEgK[] (ColloidTables.c), squareRootLut[] and the sample
+#             catalogue, and runs laws TK-TRIG .. TK-VEL; then three break
+#             builds, each of which must fail its law:
+#               fade   R1 restarts at once (FADE becomes START in the trigger)
+#                                                                  -> TK-TRIG
+#               bias   the clip(b) subtraction removed             -> TK-DRV
+#               srr    the 127 entry read through the formula (0.99999)
+#                                                                  -> TK-SRR
+#               guard  the ring guard's copy removed (S096 P1 §17)
+#                                                                  -> TK-RING
+#               gain   the read without the bound sample's gain (§19)
+#                                                                  -> TK-READ
+#               frac   the read without its interpolation (§19)    -> TK-READ
+#             tetrakt_tables checks TetraktTables.c against its generator;
+#             tetrakt_cpu_check prints the linked counts (tetrakt_cpu.py).
+# Accessors:  make -C tools/dsp_test tetrakt | tetrakt_tables | tetrakt_cpu_check.
+TKT := $(ROOT)/Core/DSP/Instruments/Tetrakt
+tetrakt: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c $(GEN)/oscPwmTables.host.h \
+	$(GEN)/oscPwmTables.host.c $(GEN)/oscPwmWarp.host.h | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/Alkaline/AlkalineControl.h --body \
+	  --out $(GEN)/AlkalineControl.host.h
+	$(EX) --src $(COL)/ColloidTables.h --body --out $(GEN)/ColloidTables.host.h
+	$(EX) --src $(COL)/ColloidTables.c --body --out $(GEN)/ColloidTables.host.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/squareRootLut.c --object squareRootLut \
+	  --out $(GEN)/tkt_squareRootLut.c
+	for f in TetraktTables.h TetraktTables.c TetraktVoice.h TetraktVoice.c; do \
+	  $(EX) --src $(TKT)/$$f --body --out $(GEN)/$${f%.*}.host.$${f##*.} || exit 1; \
+	done
+	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c $(CAT_HOST_SRC) -o build/tetrakt -lm
+	./build/tetrakt
+	mkdir -p build/break_tkt_fade
+	sed 's/L->stage = TKT_STAGE_FADE;/L->stage = TKT_STAGE_START;/' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_fade/TetraktVoice.host.c
+	@grep -q 'TKT_STAGE_PLAY \&\& L->env >= TKT_QUIET)' build/break_tkt_fade/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_fade: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_fade $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_fade -lm
+	@if ./build/tetrakt_break_fade >/dev/null 2>&1; then \
+	  echo "tetrakt_break_fade: FAILED (a restart without the fade not caught)"; exit 1; \
+	else echo "tetrakt_break_fade: caught (law TK-TRIG fails as expected)"; fi
+	mkdir -p build/break_tkt_bias
+	sed 's/d = tkt_clip(x \* dG + dB) - dCB;/d = tkt_clip(x * dG + dB);/' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_bias/TetraktVoice.host.c
+	@grep -q 'd = tkt_clip(x \* dG + dB);' build/break_tkt_bias/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_bias: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_bias $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_bias -lm
+	@if ./build/tetrakt_break_bias >/dev/null 2>&1; then \
+	  echo "tetrakt_break_bias: FAILED (a drive offset not caught)"; exit 1; \
+	else echo "tetrakt_break_bias: caught (law TK-DRV fails as expected)"; fi
+	mkdir -p build/break_tkt_srr
+	sed 's/L->srrRate = tktSrrRate\[tkt_idx(srr)\];/L->srrRate = 0.9999f;/' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_srr/TetraktVoice.host.c
+	@grep -q 'L->srrRate = 0.9999f;' build/break_tkt_srr/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_srr: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_srr $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_srr -lm
+	@if ./build/tetrakt_break_srr >/dev/null 2>&1; then \
+	  echo "tetrakt_break_srr: FAILED (an inexact full rate not caught)"; exit 1; \
+	else echo "tetrakt_break_srr: caught (law TK-SRR fails as expected)"; fi
+	mkdir -p build/break_tkt_guard
+	sed 's/line\[0\] = ring\[TKT_RING - 1u\];/(void)0;/' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_guard/TetraktVoice.host.c
+	@! grep -q 'line\[0\] = ring\[TKT_RING - 1u\];' build/break_tkt_guard/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_guard: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_guard $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_guard -lm
+	@if ./build/tetrakt_break_guard >/dev/null 2>&1; then \
+	  echo "tetrakt_break_guard: FAILED (a stale ring guard not caught)"; exit 1; \
+	else echo "tetrakt_break_guard: caught (law TK-RING fails as expected)"; fi
+	mkdir -p build/break_tkt_gain
+	sed 's/const float rs = L->bindGain \* (1.0f \/ 4096.0f);/const float rs = 1.0f \/ 4096.0f;/' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_gain/TetraktVoice.host.c
+	@grep -q 'const float rs = 1.0f / 4096.0f;' build/break_tkt_gain/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_gain: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_gain $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_gain -lm
+	@if ./build/tetrakt_break_gain >/dev/null 2>&1; then \
+	  echo "tetrakt_break_gain: FAILED (a missing bind gain not caught)"; exit 1; \
+	else echo "tetrakt_break_gain: caught (law TK-READ fails as expected)"; fi
+	mkdir -p build/break_tkt_frac
+	sed 's/(int32_t)(ph \& 0xFFFu) \* /0 * /' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_frac/TetraktVoice.host.c
+	@grep -q '0 \* ((int32_t)data' build/break_tkt_frac/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_frac: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_frac $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_frac -lm
+	@if ./build/tetrakt_break_frac >/dev/null 2>&1; then \
+	  echo "tetrakt_break_frac: FAILED (a read without interpolation not caught)"; exit 1; \
+	else echo "tetrakt_break_frac: caught (law TK-READ fails as expected)"; fi
+
+tetrakt_tables:
+	cd $(ROOT) && python3 tools/tetrakt/gen_tkt_tables.py --check
+
+# S096 P2 F6: the bus compressor's sidechain duck (law BC-SC), and a break
+# build whose duck always lands in one block (it must fail BC-SC).
+buscomp: | $(GEN)
+	$(EX) --src $(ROOT)/Core/Bank/Scene/SceneData.h --typedef scene_bus_comp_field_t \
+	  --macro SCENE_BUS_COMP_MODE_OFF --macro SCENE_BUS_COMP_MODE_ST1 \
+	  --macro SCENE_BUS_COMP_MODE_ST2 --macro SCENE_BUS_COMP_SIDECHAIN_OFF \
+	  --out $(GEN)/sc_scene.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/BusCompressor.c --body \
+	  --out $(GEN)/BusCompressor.host.c
+	$(HOSTCC) $(HOSTFLAGS) modules/buscomp.c -o build/buscomp -lm
+	./build/buscomp
+	mkdir -p build/break_bc_sc
+	sed 's/const float n = busComp_scAttackBlocks(t \* 127.0f);/const float n = 0.0f * busComp_scAttackBlocks(t * 127.0f);/' \
+	  $(GEN)/BusCompressor.host.c > build/break_bc_sc/BusCompressor.host.c
+	@grep -q 'const float n = 0.0f \* busComp_scAttackBlocks' build/break_bc_sc/BusCompressor.host.c || \
+	  { echo "buscomp_break_sc: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_bc_sc $(HOSTFLAGS) modules/buscomp.c -o build/buscomp_break_sc -lm
+	@if ./build/buscomp_break_sc >/dev/null 2>&1; then \
+	  echo "buscomp_break_sc: FAILED (a duck that always snaps not caught)"; exit 1; \
+	else echo "buscomp_break_sc: caught (law BC-SC fails as expected)"; fi
+
+tetrakt_cpu_check:
+	python3 tetrakt_cpu.py --elf $(FW_ELF) $(if $(TKT_BASE),--baseline $(TKT_BASE))
+
+# S094 P1 S4: the post-filter and A3 tables (generator mirror and neutral
+# entries).
+alk_post_tables:
+	cd $(ROOT) && python3 tools/alkaline/gen_alk_post_tables.py --check
+
+# ---------------------------------------------------------------------------
+# S093 P4: linked-image loop gates for the Alkaline integration.
+#
+# What:       elf_p4_snapshot writes the baseline loop dumps of a known-good
+#             image (the P3 image, before any Alkaline code is linked):
+#               - every oscillator, filter, transient and fold symbol
+#                 (P4_OSC_SYMS), with elf_loopdump.py;
+#               - mixer_calcNextSampleBlock(), whose voice renders are inlined.
+#             elf_p4_check dumps the current image the same way and compares:
+#               - elf_loopdump.py --compare: 0 MISSING per-sample loops
+#                 (RENAMED passes; dispatch fragments may move);
+#               - elf_hotloops.py --compare on the mixer: 0 GREW. LTO re-lays
+#                 the mixer out when the set of inlined engines changes
+#                 (P3 §2.3), so a GREW is checked by source pairing on the -g
+#                 twins (elf_loopsrc.py, S093_P5 §3.2) before it is accepted or
+#                 rejected.
+# Why:        MEMORY.md (S089 ceiling): adding Alkaline must not lengthen any
+#             other engine's per-sample loop. The S086 targets were removed in
+#             f3805478; this is their replacement against a P4 baseline.
+# Inputs:     FW_ELF (default: the firmware build output); P4BASE (the tracked
+#             baseline folder).
+# Outputs:    $(P4BASE)/osc.txt, $(P4BASE)/mixer.txt; build/p4_*_now.txt;
+#             exit 1 on a MISSING or GREW.
+# Accessors:  make -C tools/dsp_test elf_p4_snapshot | elf_p4_check.
+# Affiliates: elf_loopdump.py, elf_hotloops.py, elf_loopsrc.py; S093_P3 §2.3.
+FW_ELF ?= $(ROOT)/build/lxr02.elf
+# The baselines are records, so they live in the tree, not in a build folder:
+# the root `make clean` removes $(ROOT)/build (S093 P5). S093 P8 re-baselines
+# the ten wavetable readers: removing their 8-bit copies (D9) and using the
+# fixed 1,024-point read replaces their P4 loops by design.
+# S096 P1 §17 (D4) re-baselines from the accepted Tetrakt image: the
+# Tetrakt's osc_renderTyped() call moved the LTO partitions, so 16 loops
+# changed register text at equal instruction counts and osc_wtbPlanBlock
+# unrolled (worst block 199 -> 120); the mixer's 58 loops are equal.
+P4BASE ?= baselines/s096p1/p4base
+P4_OSC_SYMS := SVF_calcBlockZDF calcFmBlock calcNextOscSampleBlock \
+  calcNextOscSampleRingBlock calcNextOscSampleSyncBlock calcNoiseRingBlock \
+  calcSampleOscFmBlock calcSampleOscRingBlock calcSampleOscSyncBlock \
+  calcSineRingBlock calcSineSyncBlock calcWavetableOscRingBlock \
+  calcWavetableOscSyncBlock oscSection_renderOldCarrier osc_buildLoopSyncList \
+  osc_buildSyncList osc_renderTypedFmRamp osc_setFreq osc_slpFmBlock \
+  osc_slpFmRampBlock osc_slpPlainBlock osc_slpRingBlock osc_slpSyncBlock \
+  osc_smpFmBlock osc_smpFmRampBlock osc_smpPlainBlock osc_smpRingBlock \
+  osc_smpSyncBlock osc_wtbBlendBlock osc_wtbFmBlendBlock osc_wtbFmBlendRampBlock \
+  osc_wtbFmBlock osc_wtbFmRampBlock osc_wtbPlainBlock osc_wtbPlanBlock \
+  osc_wtbRingBlendBlock osc_wtbRingBlock osc_wtbSyncBlendBlock osc_wtbSyncBlock \
+  transient_calcUserBlock voiceFold_asnLoop voiceFold_chbLoop voiceFold_fd2Loop \
+  voiceFold_process voiceFold_sinLoop voiceFold_triLoop busComp_processBlock \
+  osc_pwmDPlainBlock osc_pwmWtPlainBlock osc_pwmWsPlainBlock \
+  osc_pwmDFmBlock osc_pwmWtFmBlock osc_pwmWsFmBlock \
+  osc_pwmDFmRampBlock osc_pwmWtFmRampBlock osc_pwmWsFmRampBlock \
+  osc_pwmDRingBlock osc_pwmWtRingBlock osc_pwmWsRingBlock \
+  osc_pwmDSyncBlock osc_pwmWtSyncBlock osc_pwmWsSyncBlock
+# S094 P1 S3: the fifteen PWM loops (.itcm.s094p1) join the gate from the s3
+# snapshot on, so S4/S5 must leave them unchanged.
+
+elf_p4_snapshot:
+	mkdir -p $(P4BASE)
+	python3 elf_loopdump.py --elf $(FW_ELF) $(foreach s,$(P4_OSC_SYMS),--sym $(s)) \
+	  --out $(P4BASE)/osc.txt
+	python3 elf_loopdump.py --elf $(FW_ELF) --sym mixer_calcNextSampleBlock \
+	  --out $(P4BASE)/mixer.txt
+
+elf_p4_check:
+	mkdir -p build
+	python3 elf_loopdump.py --elf $(FW_ELF) $(foreach s,$(P4_OSC_SYMS),--sym $(s)) \
+	  --out build/p4_osc_now.txt
+	python3 elf_loopdump.py --compare $(P4BASE)/osc.txt build/p4_osc_now.txt
+	python3 elf_loopdump.py --elf $(FW_ELF) --sym mixer_calcNextSampleBlock \
+	  --out build/p4_mixer_now.txt
+	python3 elf_hotloops.py --compare $(P4BASE)/mixer.txt build/p4_mixer_now.txt
+
 fold_tables:
 	cd $(ROOT) && python3 tools/plots/gen_fold_tables.py --check
+
+pwm_tables:
+	cd $(ROOT) && python3 tools/plots/gen_pwm_tables.py --check
 
 # S091 P1/P2/P3: the real CrumpBitEffect.c and its generated tables against
 # the references in modules/crumpbit.c (laws CB1-CB22; CB1-CB4, CB10, CB16,
@@ -331,6 +1037,8 @@ CB_GEN := $(GEN)/cb_fxbuf.c $(GEN)/cb_efftypes.c $(GEN)/cb_effects.c \
           $(GEN)/cb_params.c \
           $(GEN)/cb_stepscale.c $(GEN)/cb_stepscale.h \
           $(GEN)/cb_tables.h $(GEN)/cb_tables.c $(GEN)/cb_midipitch.c \
+          $(GEN)/SpaceKit.host.h $(GEN)/SpaceKit.host.c \
+          $(GEN)/SpaceKitDsp.host.c \
           $(GEN)/CrumpBitEffect.host.h $(GEN)/CrumpBitEffect.host.c
 crumpbit: | $(GEN)
 	$(EX) --src $(ROOT)/Core/DSP/Effects/FxBuffer.h \
@@ -340,17 +1048,24 @@ crumpbit: | $(GEN)
 	  --macro FXBUF_VOICE_UNIT_BYTES --macro FXBUF_EFFECT_POINTER_COUNT \
 	  --macro FXBUF_HANDOFF_POINTER_COUNT \
 	  --macro FXBUF_HANDOFF_EFFECT_POINTER_BASE \
-	  --macro FXBUF_STATE_EFFECT_WRITTEN --out $(GEN)/cb_fxbuf.c
+	  --macro FXBUF_STATE_EFFECT_WRITTEN \
+	  --macro FXBUF_SEG_SIDE_L --macro FXBUF_SEG_SIDE_R \
+	  --macro FXBUF_SEG_SIDE_BOTH --macro FXBUF_SEG_SIDE_MASK \
+	  --macro FXBUF_SEG_SIDE_SHIFT --macro FXBUF_UQ15_ONE \
+	  --macro FXBUF_OFFSET_NONE --out $(GEN)/cb_fxbuf.c
 	$(EX) --src $(ROOT)/Core/DSP/Effects/EffectTypes.h \
-	  --macro EFFECT_SEQ_LANE_COUNT --out $(GEN)/cb_efftypes.c
+	  --macro EFFECT_SEQ_LANE_COUNT --macro EFFECT_TYPE_OFF \
+	  --out $(GEN)/cb_efftypes.c
 	$(EX) --src $(ROOT)/Core/DSP/Effects/EffectsManager.h \
 	  --macro EFFECT_LANE_MORPH_SOURCE --macro EFFECT_LANE_NONE \
+	  --macro EFFECT_TYPE_CRUMPBIT \
 	  --typedef effect_io_t --typedef effect_type_ops_t \
 	  --out $(GEN)/cb_effects.c
 	$(EX) --src $(ROOT)/Core/DSP/Effects/CrumpBit/CrumpBitParameters.h \
 	  --typedef crumpbit_param_t --macro CRUMPBIT_PARAM_COUNT \
 	  --macro CRUMPBIT_ROW_BIT --macro CRUMPBIT_ROWS_SHARED \
 	  --macro CRUMPBIT_ROWS_SUBTYPE --macro CRUMPBIT_ROWS_GRN \
+	  --macro CRUMPBIT_ROWS_RVB --macro CRUMPBIT_RVB_DAMP_FLAT \
 	  --macro CRUMPBIT_SUBTYPE_DELAY --macro CRUMPBIT_SUBTYPE_COMB \
 	  --macro CRUMPBIT_SUBTYPE_PITCH --macro CRUMPBIT_SUBTYPE_GRAIN \
 	  --macro CRUMPBIT_SUBTYPE_REVERB --macro CRUMPBIT_SUBTYPE_COUNT \
@@ -374,6 +1089,12 @@ crumpbit: | $(GEN)
 	$(EX) --src $(ROOT)/Core/Sequencer/StepScale.c \
 	  --object stepScale_q8Table --func stepScale_ticksQ8 \
 	  --out $(GEN)/cb_stepscale.c
+	$(EX) --src $(ROOT)/Core/DSP/Effects/Space/SpaceKit.h --body \
+	  --out $(GEN)/SpaceKit.host.h
+	$(EX) --src $(ROOT)/Core/DSP/Effects/Space/SpaceKit.c --body \
+	  --out $(GEN)/SpaceKit.host.c
+	$(EX) --src $(ROOT)/Core/DSP/Effects/Space/SpaceKitDsp.c --body \
+	  --out $(GEN)/SpaceKitDsp.host.c
 	$(EX) --src $(ROOT)/Core/DSP/Effects/CrumpBit/CrumpBitEffect.h --body \
 	  --out $(GEN)/CrumpBitEffect.host.h
 	$(EX) --src $(ROOT)/Core/DSP/Effects/CrumpBit/CrumpBitEffect.c --body \
@@ -516,14 +1237,17 @@ crumpbit: | $(GEN)
 	  echo "crumpbit_break14: FAILED (grn echo curve break not caught)"; \
 	  exit 1; \
 	else echo "crumpbit_break14: caught (law CB18 fails as expected)"; fi
-	sed 's/        rt->svf_l1 = rt->svf_l2;/        (void)0;/' \
+	# S094 P2 AS-13: the one SVF keeps its state across a sub-type switch; a
+	# switch that clears it must fail CB19 (c). (Was the S091 P5 F1
+	# one-pole hand-over break; that code is gone.)
+	sed 's/^    crumpBit_bytePosition(rt, &pos, &written);$$/    crumpBit_bytePosition(rt, \&pos, \&written); rt->svf_l1 = 0.0f;/' \
 	  $(GEN)/CrumpBitEffect.host.c > build/break_cb15/CrumpBitEffect.host.c
-	@grep -q '        (void)0;' \
+	@grep -q '&written); rt->svf_l1 = 0.0f;' \
 	  build/break_cb15/CrumpBitEffect.host.c
 	$(HOSTCC) -Ibuild/break_cb15 $(HOSTFLAGS) modules/crumpbit.c \
 	  -o build/crumpbit_break15 -lm
 	@if ./build/crumpbit_break15 >/dev/null 2>&1; then \
-	  echo "crumpbit_break15: FAILED (filter hand-over break not caught)"; \
+	  echo "crumpbit_break15: FAILED (filter state on a switch not caught)"; \
 	  exit 1; \
 	else echo "crumpbit_break15: caught (law CB19 fails as expected)"; fi
 	mkdir -p build/break_cb16 build/break_cb17 build/break_cb18
@@ -537,16 +1261,8 @@ crumpbit: | $(GEN)
 	  echo "crumpbit_break16: FAILED (grain block-end break not caught)"; \
 	  exit 1; \
 	else echo "crumpbit_break16: caught (law CB14 fails as expected)"; fi
-	sed 's/const float kl = crumpBit_onePoleK\[fl\];/const float kl = crumpBit_onePoleK[fr];/' \
-	  $(GEN)/CrumpBitEffect.host.c > build/break_cb17/CrumpBitEffect.host.c
-	@grep -q 'const float kl = crumpBit_onePoleK\[fr\];' \
-	  build/break_cb17/CrumpBitEffect.host.c
-	$(HOSTCC) -Ibuild/break_cb17 $(HOSTFLAGS) modules/crumpbit.c \
-	  -o build/crumpbit_break17 -lm
-	@if ./build/crumpbit_break17 >/dev/null 2>&1; then \
-	  echo "crumpbit_break17: FAILED (one-pole bal side break not caught)"; \
-	  exit 1; \
-	else echo "crumpbit_break17: caught (law CB16 fails as expected)"; fi
+	# break_cb17 (the S091 P5 one-pole's `bal` side) went with the one-pole in
+	# S094 P2 AS-13; the SVF's `bal` side break above covers every sub-type.
 	sed 's/        age_a = g->age_a;/        (void)0;/' \
 	  $(GEN)/CrumpBitEffect.host.c > build/break_cb18/CrumpBitEffect.host.c
 	@grep -q '        (void)0;' \
@@ -679,5 +1395,83 @@ crumpbit_elf_check:
 # + (engine per block + crumpBit_process() per block on that filter's
 # branch + the manager's clamps, `dly`'s with its curve-limit search) / 32
 # (crumpbit_cpu.py; needs `make all` at the repository root first).
+# S094 P2 AS-13: `grn`/`rvb` run the resonant SVF again (the S091 P5 one-pole
+# is gone): `grn` measured 180.8 and `rvb` 179.4 per frame (were 165.6 /
+# 163.9); `dly`/`cmb`/`pit` 1 lower. The cap moves from S091 P5's 170 to 181,
+# inside the Effect's cycle share (16,634 per block,
+# S094_P2_ALKALINE_SAVINGS.md §21, §23).
+# S095 P1 (S095_P1_IMPLEMENTATION.md §S18): steady cap 184 (the prefix,
+# seat fast path and LTO re-layout: `grn` 181.5 -> 183.7 with the fixed
+# jump-table tool), and --feed-cap 204: each sub-type plus the type-change
+# feed (sk_feedMix) or the growth wait after it, whichever is dearer. The
+# feed fits the Effect's own share; nothing is taken from Advanced.
+# S095 P1 (§S18): the Space types' host laws (modules/space.c) on the real
+# DSP (SpaceEffect.c with the kit and CrumpBit's `dly` curve), after the
+# crumpbit target's extractions.
+space: crumpbit
+	$(EX) --src $(ROOT)/Core/DSP/Effects/EffectsManager.h \
+	  --macro EFFECT_TYPE_DELAY --macro EFFECT_TYPE_REVERB \
+	  --macro EFFECT_TYPE_ECHO --out $(GEN)/sp_types.c
+	$(EX) --src $(ROOT)/Core/DSP/Effects/Space/SpaceParameters.h \
+	  --typedef space_delay_param_t --typedef space_reverb_param_t \
+	  --typedef space_echo_param_t --macro SPACE_HEADS_STOPS \
+	  --macro SPACE_FREEZE_SHIMMER --macro SPACE_FREEZE_OFF \
+	  --macro SPACE_FREEZE_STOPS --macro SPACE_ROUTING_STOPS \
+	  --macro SPACE_HEADS_DEFAULT --macro SPACE_ROUTING_E2R \
+	  --macro SPACE_ROUTING_R2E --macro SPACE_ROUTING_LOOP \
+	  --macro SPACE_INTERVAL_ROW_MIN --macro SPACE_INTERVAL_ROW_MAX \
+	  --out $(GEN)/sp_params.c
+	$(EX) --src $(ROOT)/Core/DSP/Effects/Space/SpaceEffect.h --body \
+	  --out $(GEN)/SpaceEffect.host.h
+	$(EX) --src $(ROOT)/Core/DSP/Effects/Space/SpaceEffect.c --body \
+	  --out $(GEN)/SpaceEffect.host.c
+	$(HOSTCC) $(HOSTFLAGS) modules/space.c -o build/space -lm
+	./build/space
+	@# S096 P2 F1: the stereo and mono linear reads without their fraction
+	@# (back to a frame-stepped read) must fail SP11.
+	mkdir -p build/break_sp_lin2 build/break_sp_lin1
+	sed 's/\*l = al + f \* /*l = al + 0.0f * /' \
+	  $(GEN)/SpaceEffect.host.c > build/break_sp_lin2/SpaceEffect.host.c
+	@grep -q '\*l = al + 0.0f \* ' build/break_sp_lin2/SpaceEffect.host.c || \
+	  { echo "space_break_lin2: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_sp_lin2 $(HOSTFLAGS) modules/space.c -o build/space_break_lin2 -lm
+	@if ./build/space_break_lin2 >/dev/null 2>&1; then \
+	  echo "space_break_lin2: FAILED (a frame-stepped Delay head not caught)"; exit 1; \
+	else echo "space_break_lin2: caught (law SP11 fails as expected)"; fi
+	sed 's/return a + f \* ((float)t\[i + 1\] - a);/return a + 0.0f * ((float)t[i + 1] - a);/' \
+	  $(GEN)/SpaceEffect.host.c > build/break_sp_lin1/SpaceEffect.host.c
+	@grep -q 'return a + 0.0f \* ((float)t' build/break_sp_lin1/SpaceEffect.host.c || \
+	  { echo "space_break_lin1: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_sp_lin1 $(HOSTFLAGS) modules/space.c -o build/space_break_lin1 -lm
+	@if ./build/space_break_lin1 >/dev/null 2>&1; then \
+	  echo "space_break_lin1: FAILED (a frame-stepped Echo head not caught)"; exit 1; \
+	else echo "space_break_lin1: caught (law SP11 fails as expected)"; fi
+
+# S095 P1 (§S18): the Space types' instructions per frame (space_cpu.py).
+space_cpu_check:
+	python3 space_cpu.py --elf $(ROOT)/build/lxr02.elf
+
 crumpbit_cpu_check:
-	python3 crumpbit_cpu.py --elf $(ROOT)/build/lxr02.elf --cap 170
+	python3 crumpbit_cpu.py --elf $(ROOT)/build/lxr02.elf --cap 184 --feed-cap 204
+
+# ---------------------------------------------------------------------------
+# S094 P4: dump the shipped pwm and stock waves for the PWM investigation.
+#
+# What:       builds modules/pwm_dump.c on the real Oscillator.c (host build)
+#             and the real stock tables (extracted from wavetable.c, const
+#             removed), runs it, and writes build/pwm_dump.csv for
+#             tools/plots/plot_s094p4_pwm.py. Not part of `all`: it checks
+#             nothing.
+# Accessors:  make -C tools/dsp_test pwm_dump.
+pwm_dump: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
+	$(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables.host.c \
+	$(GEN)/oscPwmWarp.host.h | $(GEN)
+	for t in sine_table sawTable triTable recTable; do \
+	  $(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object $$t --out $(GEN)/pd_$$t.raw.c && \
+	  sed "s/const int16_t $$t/int16_t $$t/" $(GEN)/pd_$$t.raw.c > $(GEN)/pd_$$t.c || exit 1; \
+	done
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/Alkaline/AlkalineSquareTable.c --body \
+	  --out $(GEN)/AlkalineSquareTable.host.c
+	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/pwm_dump.c $(CAT_HOST_SRC) \
+	  -o build/pwm_dump -lm
+	./build/pwm_dump > build/pwm_dump.csv

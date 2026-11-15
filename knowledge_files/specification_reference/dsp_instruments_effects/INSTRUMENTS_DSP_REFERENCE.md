@@ -4,11 +4,22 @@ How the six instrument voices are rendered, how their parameters reach the
 DSP, how modulation (LFO, velocity, Morph, step automation) works, what each
 part costs, and how to change or extend it.
 
-- **Current as of:** Session 088 close (2026-10-29). S088 added the
-  oscillator run modes `osc1_run` (`rst`/`fre`/`itp`, §6.1), gain-matched
-  retrigger (`slopeEg2_retriggerFrom()`, §6.3), post-chain gain ramps
-  and float-through distortion (§6.5, §6.6), FM depth ramp, filter
-  coefficient slew (`SVF_recalcFreqSlew()`, §6.2), itp crossfade
+- **Current as of:** Session 094 (2026-11-12). S094 added VCA overdrive and
+  tone to Alkaline (§5.5), PWM oscillator type (`ALK_TYP_PWM`, §5.5;
+  `OSC_TYPE_PWM`, §6.1), Tri waveform for both `wav` and `pwm`, LFO sync
+  fix and `lfoRateHz[128]` table (§7.1), `CRASH` removal from the stock
+  list (§6.1), and `IM_SPECIAL_LFO_SYNC` (§4.4). Cymbal/HiHat moved to
+  Basic (`INSTRUMENT_FLAG_BASIC`). S093 added the Alkaline
+  instrument (TB-303 emulation, §5.5): diode-ladder filter B2R, per-octave
+  Q8 square table, gate timer, 303 sequencing rules, `pos` and `alk_attack`
+  rows, extended resonance. S092 (pre-implementation) produced the circuit
+  models, SPICE simulations and DSP equations — see
+  `ALKALINE_MODELLING_REFERENCE.md`. S093 P3 removed the `Re3`/`Sw3` stock
+  table waves (§6.1.2). S088 added the oscillator run modes `osc1_run`
+  (`rst`/`fre`/`itp`, §6.1), gain-matched retrigger
+  (`slopeEg2_retriggerFrom()`, §6.3), post-chain gain ramps and
+  float-through distortion (§6.5, §6.6), FM depth ramp, filter coefficient
+  slew (`SVF_recalcFreqSlew()`, §6.2), itp crossfade
   (`OscCarrierSnapshot`, `oscSection_renderOldCarrier()`), and block-rate
   fader smoothing in the mixer. S087 added the oscillator type system
   (`osc1_type`: `wav`/`smp`/`slp`/`wtb`, §6.1), sample flash catalogue
@@ -25,6 +36,10 @@ part costs, and how to change or extend it.
   S074 added the sidechain tap (§2). S083 Q1 made a MIDI write a menu
   edit.
 - **Related documents:**
+  - `ALKALINE_MODELLING_REFERENCE.md`: circuit models, SPICE simulations
+    and DSP equations for the Alkaline (TB-303) instrument (S092);
+  - `ALKALINE_MODULE_REFERENCE.md`: Alkaline firmware module layout, files,
+    control path, sequencing rules, cost and extension guide (S093);
   - `MIXER_SYSTEM_DSP_REFERENCE.md`: what happens to a voice block after it
     leaves the instrument (decimation, mixer, FX bus, output);
   - `EFFECTS_MODULES_DSP_REFERENCE.md`: each Effect module's DSP, binding
@@ -145,23 +160,25 @@ tap is foreground-only, like the rest of the funnel.
 
 ### 3.1 Tagged runtime slots
 
-- `InstrumentManager.c` owns `runtime_slots[6]`, a union of the four engine
-  structures, 1,192 B per slot (twice the largest engine, `DrumVoice`,
-  596 B since S085), 7,152 B in SRAM1. The reserve follows
-  `sizeof(DrumVoice)` automatically, so every byte added to `DrumVoice`
-  costs 12 B of SRAM (2 × 6 slots).
-  `_Static_assert`s keep every engine inside the reserve.
+- `InstrumentManager.c` owns `runtime_slots[6]`, a union of the five engine
+  structures, 1,264 B per slot (twice the largest engine, `DrumVoice`,
+  632 B), 7,584 B in SRAM1. The reserve follows `sizeof(DrumVoice)`
+  automatically, so every byte added to `DrumVoice` costs 12 B of SRAM
+  (2 × 6 slots). `_Static_assert`s keep every engine inside the reserve.
 
   | Engine | Struct | Bytes |
   |---|---|---:|
-  | Drum | `DrumVoice` | 588 |
-  | Snare | `SnareVoice` | 420 |
-  | Cymbal | `CymbalVoice` | 476 |
-  | HiHat | `HiHatVoice` | 484 |
+  | Drum | `DrumVoice` | 632 |
+  | Snare | `SnareVoice` | 452 |
+  | Cymbal | `CymbalVoice` | 508 |
+  | HiHat | `HiHatVoice` | 520 |
+  | Alkaline | `AlkalineVoice` | 548 |
 
   Building blocks: `OscInfo` 72 B, `ResonantFilter` 36 B, `Lfo` 124 B,
   `ModulationNode` 44 B, `SlopeEg2` 28 B, `DecayEg` 12 B,
-  `TransientGenerator` 24 B, `Distortion` 8 B.
+  `TransientGenerator` 24 B, `Distortion` 8 B, `DiodeLadder` 232 B,
+  `DiodeLadderNet` 288 B at r6 (S093 P4). The engine sizes are the M7
+  `sizeof` probe; the union did not grow when Alkaline joined.
 - `runtime_slot_type[6]` is a **runtime type shadow**. The active Scene can
   change at once while a slot is still ringing with the old instrument; the
   shadow keeps rendering the type whose parameters are actually loaded.
@@ -193,6 +210,27 @@ Every per-slot operation goes through a `switch` on the runtime type in
 | `instrumentManager_recalcSlotFilter()` | `SVF_recalcFreq(&voice->filter)` |
 | `instrumentManager_runtimePan()` / `instrumentManager_runtimeVolume()` | `voice->pan` / `voice->vol` |
 | `instrumentManager_runtimeLfo()`, `_filter()`, `_ampEg()`, `_pitchEg()`, `_distortion()`, `_transient()`, `_oscBySelector()` | accessors used by the special writers and the LFO code |
+
+**Alkaline (S093 P4).** The fifth row adds a case to every switch above:
+`Alkaline_initVoice()`, `Alkaline_triggerVoice()`,
+`Alkaline_calcVoiceAsync()`, `Alkaline_calcVoiceSyncBlock()`,
+`Alkaline_isQuiet()`, `runtimePan()`/`runtimeVolume()`, `&voice->lfo`, and
+`&voice->osc` for the `osc1_` keys and `IM_SPECIAL_OSC1`. Two spots are
+type-specific:
+
+- `instrumentManager_ampEnvelopeQuiet()` finds no `SlopeEg2` for Alkaline, so
+  the generic test would call a sounding note quiet. It returns
+  `Alkaline_isQuiet()` instead: gate closed, ACCENT lane low and the OTA
+  current (before the make-up) below 1e-7 A.
+- `instrumentManager_triggerTrack()` passes
+  `seq_trackStepSamples(trigger_track)` to `Alkaline_triggerVoice()`, because
+  the 303 gate is 7/12 of a step. The step length is read from the triggering
+  track, not the slot: track 7 plays slot 5 with its own scale (B-9).
+
+`instrumentManager_filter()`, `_ampEg()`, `_pitchEg()`, `_distortion()`,
+`_transient()`, `_recalcSlotFilter()` and `_slotUsesSrr()` keep their
+`default:` answers (0 / no-op): Alkaline has no filter object, slope
+envelope, distortion stage, transient, prewarp recalc or SRR.
 
 ---
 
@@ -287,6 +325,7 @@ write (up to 20 `strcmp`, 2 `strstr` and 7 `strncmp`).
 | `TRANSIENT_FREQ` | `transient->pitch = 1 + (v/33.9 − 0.75)` |
 | `INSTRUMENT_DRIVE` | `setDistortionShape(v)` (§6.6) |
 | `LFO_RATE` | `lfo_setFreq(v)` (§7.1) |
+| `LFO_SYNC` (S094) | `lfo_setSync(v)` — writer 23; `IM_SPECIAL_WRITER_COUNT` 24. Five `lfo_sync` rows become `ROW_MENU_SPECIAL`. |
 
 - `valueShaperF2F(x, s)` and `valueShaperI2F(v, s)` (`valueShaper.h`) apply
   the curve `(1+k)x/(1+k|x|)` with `k = 2s/(1.0001 − s)`.
@@ -310,7 +349,7 @@ marking.
 
 ## 5. Voice engines
 
-All four render into an int16 buffer in place, in 32-sample blocks. **None
+All five render into an int16 buffer in place, in 32-sample blocks. **None
 applies channel volume**: the mixer applies `vol` after decimation, so the FX
 send taps a pre-volume signal that includes distortion (Session 072).
 Scratch buffers are `static int16_t[OUTPUT_DMA_SIZE]`; **variable-length
@@ -539,7 +578,138 @@ render is wrapped in `osc_positionBendApply(&osc, 1)` /
 **Modulator resets:** Cymbal resets `modOsc`/`modOsc2` to phase 0 on every
 trigger; **HiHat does not** (and the Drum FM oscillator never resets).
 
-### 5.5 Where each engine's hot code runs
+### 5.5 Alkaline (`AlkalineVoice.c`, Basic)
+
+The TB-303 voice (S092 design; S093 P3–P6 implementation). For the circuit
+modelling, SPICE simulation and DSP equations see
+`ALKALINE_MODELLING_REFERENCE.md`; for the full module layout, control path
+and extension guide see `ALKALINE_MODULE_REFERENCE.md`. Its descriptor table is
+`AlkalineParameters.c`: 28 rows and eight sub-pages (S093 P6: `coa tun wav
+pos` under OSC, `atk dec` under AEG, `dst amt sld` under mod, `acc` under
+click, `cut res env drv` on one FILTER screen, the Drum LFO page, `vol pan`
+under MIX; the FM page is empty). `alk_attack` (26) and `osc1_position` (27)
+are appended, so every stored index, automation ID and NRPN number of rows
+0–25 is unchanged.
+
+**Signal path.** After the trigger:
+
+```
+osc table wave (sawTable | alkSqrTable[octave]) --x driveGain--> B2R ladder
+  --OTA (iAbc x makeup)--> prewarped ladder current --> int16 buf --mixer vol/pan-->
+```
+
+- **Oscillator.** Stays a table wave (S093 P3 §9.5): `SAW` reads `sawTable`
+  and `ALK_WAVE_SQUARE` reads `alkSqrTable[octave]` (the D8 per-octave Q8
+  table, `AlkalineSquareTable.c`). The pitch is computed at control rate
+  from `midiFreq` (coarse) + the note + the fine byte, plus Tuning (±700
+  cents centred at byte 63) and the slide lag (a 22 ms one-pole in log2 Hz);
+  `osc_setTableFreq()` multiplies `pitchMod` and `modNodeValue` and sets
+  `phaseInc`/`tableOffset` directly, without `osc_setFreq()`'s cache. The
+  `coa` row's LFO/velocity target is `osc.modNodeValue`, so modulation moves
+  the pitch (T1-7).
+- **`pos` (S093 P6).** `osc1_position`: 0 leaves the oscillator free-running
+  (the 303's VCO, the pre-P6 sound bit for bit); 1–127 sets the phase to
+  pos/128 of a cycle at every non-legato trigger, so a note always starts at
+  the same point of the waveform. A move bends `phaseInc` for one block
+  (13 instructions, +0.41 per sample), landing on the new offset with no
+  drift; Alkaline recomputes `phaseInc` each block, so no restore is needed.
+  Legato notes keep the running phase.
+- **Ladder.** `DiodeLadder_renderB2Osc()` fuses the oscillator's table read
+  into the B2R per-sample loop (bit-identical to `calcWavetableOscBlock()`
+  then `DiodeLadder_renderB2()`, law AL-X). B2R is the chosen kernel: rungs
+  0-1 nonlinear, rungs 2-3 linear, 3 VDIV per sample. The linked loop is
+  214 instructions including the oscillator (standalone 213; G3).
+- **Network.** N1 at 64 samples (T2-2), **6 block-system states on one
+  balanced basis common to every Res point** (r6): `DiodeLadder_setNet()`
+  interpolates the 13 table points per block (S093 P6; 0.125 spacing in
+  k_eff over 0..1.5), `dl_slowUpdate()` solves
+  `DL_NET_ROWS` = 3 rows per phase over the two phases, updates the u
+  asymptote (50 Hz) at the latch and the v asymptote (120 Hz) at the
+  commit, and ramps the new outputs over the next window. The audio loop
+  reads the ramped u/v steps.
+- **OTA.** The BA662A output is one sample late (the [3/2] Pade); int16 full
+  scale is 7 V at OTA pin 6 (`DL_OUT_SCALE`), so a driven signal keeps its
+  headroom. The output make-up is applied to the OTA current, not the
+  buffer: `2^(ALK_MAKEUP_OCT (1 - drive))` (B-2), default
+  `ALK_MAKEUP_OCT 1.0` (+6 dB at x1, 0 dB at x16), set by ear on the device.
+- **Drive.** `driveGain = 16^drive = 2^(4 drive)` with `drive` = byte/127
+  (x1 at 0, x4 at mid, x16 at 1; S093 P6 doubled the former x8), cost 0.
+- **Resonance and self-oscillation (S093 P6).** The Res knob runs the
+  effective feedback `k_eff = ALK_RES_KMAX x knob` with `ALK_RES_KMAX` 1.5,
+  so the 303's maximum sits at byte ≈ 85 and above it is new. For k > 1 the
+  model adds an ideal transformer at the VR4a wiper (`V(W) = k V(TP6)`, TP6
+  supplying k x the W-side current); at k = 1 it is the stock wire to 4e-8.
+  The accent sweep's VR4b gang stays physical: `min(k_eff, 1)`. The 64-sample
+  network holds: at the calibration point k_eff 1.5 rings 1.791 ms at 0.823
+  per cycle, and above the threshold with a high cutoff it sustains a
+  bounded tone (AL-SO). The prewarp table has 16 points (k_eff 0.1 steps to
+  1.5, held at c(1) = 1.470 above 1). Cost 0 per sample (measured).
+- **Control path** (`AlkalineControl.c`, control rate; Tier 1/Tier 2): the
+  expo converter (two fixed-point passes warm-started from the last ladder
+  current, `ALK_EXPO_PASSES 2`; one pass was 20-30 cents off at strikes), MEG
+  (C62/N53, one Newton step on the diode stack; S093 P6 decay range:
+  `r = ALK_MEG_R_MIN + ALK_MEG_R_SPAN x taper(decay)`, fitted to −20 % at
+  decay 0 and +50 % at decay 1 against the 303's 68 k + 1 M; the accent
+  branch keeps 68 k + 250 Ω), the accent network (VR7
+  shared by the C13 sweep and the C36 VCA branch; the 5 x 5 nodal solve
+  written as a 2 x 2 in (W7, W), one solve per block, T2-3 lagged accent
+  with `ALK_ACC_SOLVES 1`), VEG (C42 attack/recovery with its delay) and
+  the TPT prewarp `tan(x)/x`. S093 P6 `alk_attack`: the VEG attack is the
+  303's CPU trigger-pulse width, interpolated from the generated 9-point
+  `alkVegAttack[]` (delay, 8 tau and the per-block factor). Byte 0 is the
+  former 0.70 ms trigger bit for bit (2.11 ms SPICE 10→90 %); 127 is 0.55 ms
+  (5.15 ms). The exponential shape stays; the attack is heard after rests
+  and long notes, as on the circuit. The interpolation runs in the trigger
+  (main loop), and `alkVeg_step()` multiplies by the stored factor (one
+  instruction fewer per block). Fast `alk_log2f()`/`alk_exp2f()` replace libm.
+  The five 303 knobs use `alk_taper()`; `ALK_MAKEUP_OCT` is the only level
+  trim.
+- **Sequencing (the 303 rules).** A trigger latches the note, ACCENT
+  (velocity >= 101, not 100) with a one-step ACCENT lane, and the slide flag
+  from the previous note. A note after a slide-flagged note whose gate is
+  still open is **legato**: no MEG strike, no VEG trigger, the pitch glides
+  (22 ms). The gate is 7/12 of a step (3.5 of 6 clocks), rounded to the
+  nearest sample and counted down 32 per block; a slide-flagged note holds
+  its gate through the next step (step + 7/12). Slide into a rest closes the
+  gate first. `stepSamples` comes from `seq_trackStepSamples(trigger_track)`
+  (96 PPQ Q8.8 x 44,108 Hz, 64-bit product); a MIDI note-off does not end
+  the gate (B-6).
+- **Attack after a rest (S093 P6).** The trigger-width attack changes the
+  C42 discharge after silence; on running 16ths C42 has not recharged
+  (τ 1.5 s), so those notes open almost at once whatever the setting. That
+  is the circuit's behaviour, kept on purpose.
+- **Platform.** The trigger makes the same three calls as
+  `Drum_triggerVoice()` for its slot: `lfo_retrigger(source_slot)`,
+  `modNode_updateValue(&velocityModulators[source_slot], vel)` and
+  `instrumentManager_applyVelocityModulationTarget()`. Velocity is the
+  accent, so there is no `velo_vol_on_off` row.
+- **Morph/storage.** The 22 image rows are MORPHABLE (28 rows minus
+  `alk_wave`,
+  `velo_mod_dest` and the four LFO targets); `alk_wave` is a SELECTOR, so
+  automation steps between Saw and Sqr and Morph never blends them.
+  `init.alk` writes every key in table order; `[morph]` holds the MORPHABLE
+  rows; the LFO voices are `self` and the target selectors `255`.
+  `Alkaline_initVoice()` loads the same bytes.
+- **Cost.** Whole voice, linked after S093 P6 (G3-G5): fused loop 214
+  (3 VDIV) + 1,230 per block / 32 (9 VDIV) = **252.5 per sample**, against
+  the Drum ceiling 261.3 (frozen and P4 re-measured). The per-block part is
+  async 884 + sync-block entry/exit 332 + dispatch 14: the `pos` bend +13,
+  the VEG factor −1, drive and MEG +0. `Alkaline_isQuiet()` is used for
+  a Scene swap. Basic: it may take any slot, and `slotUsesSrr()` is 0.
+- **S094 P1 S4: VCA overdrive and tone.** `otaIn` overdrive and a one-pole
+  low-pass tone filter (`toneC` in `c` form) added to the B2R loop. Overdrive
+  0 / Tone 127 = bit-identical to S093. Drive gain and makeup from tables
+  (`AlkalinePostTables.c/.h`). Rows 29 `instrument_drive` and 30 `alk_tone`
+  appended; mix page: vol pan ton drv.
+- **S094 P1 S5: PWM type.** `ALK_TYP_PWM` 2u (fused mode 3,
+  `DiodeLadder_renderB2OscPwm()`, read form 2: 204 instructions).
+  `ALK_TYP_COUNT` 3.
+- **S094 P4: Tri waveform.** `wav` gains Tri (index 2; 0 per sample in fused
+  loop). `pwm` gains Tri (index 2). `ALK_WAVE_COUNT` 2 -> 3.
+- **Post-filter overdrive constants.** `OVD_OCT` 5.0 (gain x1..x32),
+  `OVD_MAKEUP_OCT` -2.5.
+
+### 5.6 Where each engine's hot code runs
 
 The oscillator block functions are in ITCM (`INITCM`), zero wait states
 (since S085 P1 also the sync/ring copies, their dispatchers and the
@@ -578,12 +748,15 @@ function's per-sample loops with a P2 baseline and fails if one grew.
   | 0 | `SINE` | `Sin` | `calcSineBlock` |
   | 1–3 | `TRI SAW REC` | `Tri Saw Rec` | `calcWavetableOscBlock(table)` |
   | 4 | `NOISE` | `Noi` | `calcNoiseBlock` |
-  | 5 | `CRASH` | `Cym` | `calcSampleOscBlock` (the built-in crash sample) |
-  | 6–7 | `SQ3 SW3` (`OSC_STOCK_FIRST`..`OSC_STOCK_LAST`) | `Re3 Sw3` | the table loops, through `osc_stockTables[]` (S086) |
+
+  S094 P1 S2: `CRASH` removed; `OSC_STOCK_LAST` is now `NOISE`;
+  `OSC_SAMPLE_START` 6 -> 5. The built-in crash sample becomes a card
+  sample (`02_crash.wav`).
 
   `waveformNames` (`MenuText.h`) must have exactly `OSC_SAMPLE_START`
   entries (a `_Static_assert` in `menu.c`). Inserting a waveform renumbers
-  the catalogue entries (S086 did, 6+ → 8+, with no kit migration).
+  the catalogue entries (S086 did, 6+ → 8+; S093 P3 removed `Re3`/`Sw3`,
+  8+ → 6+; S094 removed `CRASH`, 6+ → 5+; none with a migration, §6.1.2).
 
 - **Oscillator type system (S087, `osc1_type`):** the `typ` row on the main
   oscillator selects which reader serves `wav` values ≥ `OSC_SAMPLE_START`:
@@ -594,6 +767,10 @@ function's per-sample loops with a P2 baseline and fails if one grew.
   | `smp` (1) | `OSC_TYPE_SMP` | one-shot sample reader (`osc_smp*Block`, §6.1.4) |
   | `slp` (2) | `OSC_TYPE_SLP` | looped sample reader (`osc_slp*Block`, §6.1.4) |
   | `wtb` (3) | `OSC_TYPE_WTB` | wavetable reader with frame blending (§6.1.5) |
+  | `pwm` (4) | `OSC_TYPE_PWM` | S094 P1 S3: pulse-width modulation; `OSC_TYPE_MODLIST` 4 -> 5 (never stored); `OSC_BIND_PWM` 3. Hybrid mechanism: warp (W) for Sin/Tri, two-read (D) for Saw/Rec. Integer Q15/Q14 interpolation. 15 ITCM loops. |
+
+  S094 P4: PWM position law fix. Old: pos 64 = unmodified, mirror-symmetric.
+  New: pos 0 = 50 %, pos 127 = narrowest. Position-indexed tables.
 
   `typ` is a **selector row**: `INSTRUMENT_PARAM_FLAG_SELECTOR` (0x08),
   `DTYPE_MENU` with id `MENU_OSC_TYPE`. Not morphable, stored single-ended,
@@ -663,8 +840,7 @@ function's per-sample loops with a P2 baseline and fails if one grew.
   interpolators' `itg + 1` read (S086). The S087 sample/wavetable readers
   use Q20.12 phase (`OSC_SAMPLE_PHASE_SHIFT` 12), supporting up to 2²⁰
   points per sample (§6.1.4).
-- **Wavetables:** `sawTable`, `triTable`, `recTable` (`wavetable.c`) and the
-  stock waves `sq3Table`, `sw3Table` (`wavetableStock.c`, generated) are 11
+- **Wavetables:** `sawTable`, `triTable`, `recTable` (`wavetable.c`) are 11
   band-limited octaves × 1,024 samples (22,528 B each, program flash), every
   level peaking at 32,767. `osc_isTableWave()` names this set. `osc_setFreq()` picks the
   octave with `freqToTableIndex()`: the number of the ten edges
@@ -795,7 +971,7 @@ osc_positionBendRestore(&osc);       /* immediately after */
   (it returns early when the frequency is unchanged), so a bend left in it
   would become a lasting pitch error.
 - The step lives in `OscInfo`, not in a local variable, so nothing stays
-  live across the render that LTO inlines into the mixer (§5.5, §10).
+  live across the render that LTO inlines into the mixer (§5.6, §10).
 
 **What it sounds like.** A held `pos` is a phase shift. A moving `pos` is a
 frequency change for that block: an LFO on `pos` is phase modulation (a
@@ -837,46 +1013,38 @@ re-anchors.
 build; it compiles the header's own constants block) and
 `elf86_mixer_check`.
 
-#### 6.1.2 Stock table waves (S086)
+#### 6.1.2 Stock table waves: removed in S093
 
-`Re3` (`SQ3`, a TB-303 square) and `Sw3` (`SW3`, a 303 saw) are fixed
-`const int16_t [11][1024]` tables like `sawTable`, read by the same loops
-(plain, FM, sync and ring) at the same cost.
+S086 added `Re3` (`SQ3`, `wav` 6) and `Sw3` (`SW3`, `wav` 7), two fixed
+`const int16_t [11][1024]` tables played by the Tri/Saw/Rec loops through a
+variable pointer (`osc_stockTables[]`). **S093 P3 removed them from the
+firmware** (`S093_P0_ALKALINE_C_FUNCTIONS_CODE.md` §10, user decision D14):
+they were digitised from a TB-303's *filtered output*, not its oscillator,
+and their 45,056 B of flash went to the Alkaline instrument, which plays the
+real 303 waves (its own square table and the stock `Saw`).
 
-- **Dispatch:** `osc_stockTables[]` (`Oscillator.c`) maps `waveform −
-  OSC_STOCK_FIRST` to the table, with a `_Static_assert` on its length.
-  Each dispatcher (`calcNextOscSampleBlock`, `calcNextOscSampleFmBlock`,
-  `osc_renderPlainWave`, `osc_renderSyncWave`, `calcNextOscSampleRingBlock`)
-  has one case group for all stock waves with this **variable** pointer;
-  `osc_setFreq()` gives them `osc_calcWavetableFreqValue()`. One
-  variable-pointer site per dispatcher avoids constant-argument call sites
-  (which make LTO re-specialise the existing clones, §10).
-- **Sync:** `osc_syncWaveform()` includes them (an interpolated stock slave
-  takes the synced phase rule). `osc_syncClockInc()` scales only `CRASH`
-  and user samples by `<< 5`; the stock waves are 2³²-per-cycle clocks like
-  the tables (testing `>= CRASH` would make a stock master reset 32× too
-  often).
-- **Trigger start phase:** the engines test `osc_isTableWave()`, so the
-  stock waves restart at `0xff << 20` × offset like the tables.
-- **Generation:** `tools/gen_stock_tables.py` reads
-  `tools/plots/stock_wave_harmonics.csv` (the harmonic recipe made by
-  `tools/plots/plot_stock_waves.py` from the user's reference captures) and
-  writes `Core/DSPAudio/wavetableStock.c`. Each level is the recipe's
-  harmonics through a per-level gain curve **measured from `sawTable`**
-  (g = |SAW(k)|·k/|SAW(1)|, a Hann-like taper), synthesised at 1,024
-  points, scaled to a 32,767 peak. Built-in checks: C1 rebuilds `sawTable`
-  within 6 LSB (`recTable`/`triTable` do not follow this taper: they roll
-  off more slowly and carry a −20…−60 dB tail above the level's Nyquist
-  harmonic, so they are printed for information), C2 peak/DC, C3
-  out-of-band, C4 `--check` (regenerates byte-identical;
-  `make -C tools/dsp_test stock_tables`). Review plot:
-  `tools/plots/plot_stock_tables.py`.
-- **Level:** peak-normalised like every table, so `Re3` plays about 8 dB and
-  `Sw3` about 2 dB quieter than `Rec`/`Saw` (crest factor).
-- **Flash:** 22,528 B per wave. The fixed `phase >> 22` / `& 1023` indexing
-  needs 1,024 points at every level; shorter upper levels would need a new
-  reader (and change the sound by −35…−67 dB at the top octaves).
-  `ReA`/`TrA`/`SwA` from the same recipe are deferred.
+- **Firmware now:** the built-in waves are `SINE..CRASH` (0–5);
+  `OSC_STOCK_LAST` = `CRASH` (the `wav` clamp and menu range);
+  `OSC_SAMPLE_START` = 6. `osc_isTableWave()` is Tri/Saw/Rec only.
+- **Stored data (no migration):** an osc1 `wav` of 6/7 clamps to `Cym`; a
+  modulator `wav` value v now selects what v + 2 selected (user entries
+  moved down two places).
+- **The specification is kept:** the recipe
+  `tools/plots/stock_wave_harmonics.csv` (also `ReA`/`TrA`/`SwA`), its
+  digitiser `tools/plots/plot_stock_waves.py` and source capture, and the
+  generator `tools/plots/gen_stock_tables.py`. The generator writes
+  `tools/plots/archive/wavetableStock.c` (outside the build); its checks C1
+  (rebuilds `sawTable` within 6 LSB), C2 peak/DC, C3 out-of-band and C4
+  (`--check`, byte-identical) still run as
+  `make -C tools/dsp_test stock_tables`.
+- **To restore them:** follow "Another stock table wave" (§9.4) with
+  `--out Core/DSPAudio/wavetableStock.c`: restore the externs, the
+  constants after `CRASH`, `osc_stockTables[]` and its case groups in the
+  five dispatchers and `osc_setFreq()`, the names, and move
+  `OSC_SAMPLE_START` up again (which renumbers the user samples back). The
+  S086 dispatch rule still applies: one variable-pointer case group per
+  dispatcher, never constant-argument sites (§10). Levels are
+  peak-normalised (`Re3` ≈ 8 dB, `Sw3` ≈ 2 dB quieter than `Rec`/`Saw`).
 
 #### 6.1.3 Modulator `wav` list (S087)
 
@@ -1118,6 +1286,37 @@ byte is a fold type index, not a waveform selector.
   all three fused post-chains to avoid the int16→float→int16 round-trip that
   quantized small-amplitude attack onsets to ±1 LSB.
 
+### 6.8 Diode ladder (`DiodeLadder.c/.h`)
+
+- **Three kernels, one called.** `DiodeLadder_renderB2()` (B2R) is the
+  shipped kernel; `_renderB()` (B-R, all four rungs nonlinear) and
+  `_renderA()` (A-R, linear rungs, 2 VDIV) exist for measurement and are
+  dropped by `--gc-sections`. B2R: rungs 0-1 nonlinear, rungs 2-3 linear,
+  3 VDIV per sample.
+- **N1 network.** The linear 303 network is split from the per-sample ladder;
+  each Res point stores the block system `phi`, `gam`, `cs`, `ga`, `d`
+  (`DiodeLadderNet`). At r6 the system has 6 states on one balanced basis
+  (`gen_alk_tables.py reduced_basis()`): 288 B per point, 13 points over
+  k_eff 0..1.5 (S093 P6).
+- **T2-2 phases.** `dl_slowUpdate()` advances the block system once per
+  `ALK_NET_BLOCK` (64) samples: the latched means and the Res blend, then
+  `DL_NET_ROWS` (3) state rows per chunk, with the outputs committed on the
+  last chunk and ramped over the next window. The per-sample ladder reads
+  the ramped `uStep`/`vStep`; no network state is solved inside the audio
+  loop.
+- **A-R is not stable with the 64-sample network** (the ring grows 3.4x per
+  cycle at Res full, K5); it would need the 32-sample network. B-R is stable
+  and +0.002 dB RMS from B2R at the 303's drive (AL-AB; A-R is -0.033 dB;
+  the law's limit is 0.3 dB).
+- **Output.** int16 full scale is 7 V at OTA pin 6 (`DL_OUT_SCALE`); the OTA
+  control current is ramped per sample and the make-up scales that current.
+  The secant gains and the one-sample-late OTA are part of the kernel; do
+  not move them into the voice.
+- **Cost.** The linked B2R + fused oscillator read loop is 214 instructions
+  (3 VDIV). `DiodeLadderNet` is 288 B and `DiodeLadder` 232 B at r6; both fit
+  the voice slot (548 B total for `AlkalineVoice`, S093 P6: +4 B `keep`,
+  +4 B `attack`).
+
 ---
 
 ## 7. Modulation
@@ -1133,6 +1332,8 @@ byte is a fold type index, not a waveform selector.
 - **Rate:** `lfo_setFreq(v)`: `f = ((v+1)/128)³ · 200 Hz`; the phase
   increment is `f / (44,108/32) · 2³²`, so the LFO steps once per block.
   Sync modes 1..11 (4/1 … 1/32) derive the rate from `seq_getBpm()`.
+- **S094 P1 S1: LFO sync fix.** New `lfoRateHz[128]` table: frq 0 = stopped,
+  1 = 100 s period, semitone grid 63..127. `LFO_MAX_F` removed.
 - **Retrigger:** values 0–7: off (0), v1–v6 (1–6), scn (7,
   `LFO_RETRIGGER_SCENE`). Values 1–6 reset the phase to the offset on a
   trigger from the corresponding track. Value 7 (`scn`) preserves the LFO
@@ -1267,12 +1468,14 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 
 | Stage | Instructions per sample | Divisions |
 |---|---:|---:|
-| Sine / wavetable oscillator (incl. the stock waves `Re3`/`Sw3`, S086) | 23 / 24 | 0 |
+| Sine / wavetable oscillator | 23 / 24 | 0 |
 | FM wavetable / FM sine carrier | 35 / 30 | 0 |
 | Noise | 12–13 | 0 |
 | Crash sample / FM crash | 30 / 38 | 0 |
 | S087 `slp` plain / FM (inside loop) / ring / `smp` ring | 27 / 49–50 / 42 / 38 | 0 |
 | S087 `wtb` blend inner (plain/FM/ring/sync) | 34–38 / 42–46 / 43–47 / 44–48 | 0 |
+| S093 P8 `wtb` readers, 16-bit only, fixed 1,024-point read (linked): plain / blend, FM / FM blend, FM ramp / FM blend ramp, ring / ring blend, sync / sync blend | 22 / 33, 30 / 41, 31 / 42, 30 / 42, 32 / 45 | 0 |
+| S093 P8 linked crash loops: plain (in `calcNextOscSampleBlock`) / FM / ring / sync | 30 / 32 / 33 / 36 | 0 |
 | Transient sample / S087 sample click | 22 / 20 | 0 |
 | Saturating buffer add | about 4–5 (two samples per step) | 0 |
 | Sync reset-list builder (S085) | 7 | 0 |
@@ -1284,6 +1487,9 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 | Drum post-chain | 32 (was 38 in three passes) | 1 |
 | Snare post-chain | 30 (was 35) | 1 |
 | Cymbal/HiHat post-chain | 25 (was 28) | 1 |
+| S093 Alkaline fused oscillator + B2R ladder (linked) | 214 | 3 |
+| S094 Alkaline fused wav + B2R + tone + overdrive (linked) | see §5.5 | 3 |
+| S094 Alkaline fused PWM + B2R (linked) | 204 | 3 |
 
 ### 8.2 Per-voice estimate (worst case, per sample)
 
@@ -1295,10 +1501,30 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 | Snare | noise 13 + filter 95 + transient 22 + add 5 + osc 24 + post 30 | 190 instructions, 3 divisions |
 | Cymbal | 2 mod osc 48 + add 5 + FM carrier 35 + filter 95 + transient 22 + post 25 | 230 instructions, 3 divisions |
 | HiHat | as Cymbal | 230 instructions, 3 divisions |
+| Alkaline (B2R, r6, linked, S094: wav/wtb with tone) | fused loop + tone + overdrive + per block | 263.7 per sample, 3 divisions + 9 per block |
 
 Add waveform interpolation (about one extra oscillator render each, at most
 two per block) and the mixer per slot (decimator 12–18, dry path 28–46, plus
 the send; `MIXER_SYSTEM_DSP_REFERENCE.md`).
+
+**S093 linked figures (P4 image, `build/lxr02.elf`).** The per-sample loop is
+measured on the linked image; the per-block part is counted by
+`control_cost.py --elf` and checked with `elf_blockpath.py`:
+
+| Item | Instructions | VDIV | Where |
+|---|---:|---:|---|
+| G3 fused oscillator + B2R loop | 214 | 3 | `Alkaline_calcVoiceSyncBlock.constprop.0` |
+| G4 control async | 884 | 9 | `Alkaline_calcVoiceAsync`, helpers inlined |
+| G4 sync-block entry/exit | 332 | 0 | linked per block |
+| G4 dispatch | 14 | 0 | `instrumentManager_calcSlotAsync` |
+| G4 per block | 1,230 | 9 | (S093 P6; P4 was 1,218) |
+| G5 whole voice | 214 + 1,230/32 = 252.5 | 3 + 9/32 | (S093 P6) |
+| Drum ceiling (frozen and P4 re-measured) | 222.5 + 922/32 + 10 = 261.3 | 3 | `tools/dsp_test/baselines/s093p4/drum_ceiling.txt` |
+
+The stub-link count is 1,285 (async 915 + sync block 356 + dispatch 14). LTO
+inlines the fixed-count control helpers on the linked image, so the linked
+async is 884 (872 in P4) with no loops of its own; the audio loop is excluded from the
+per-block figure. G5 is static: the device `cpu` widget decides (K1).
 
 **Drum oscillator section by mod mode (S085, instructions per sample).**
 Standalone objects, and in brackets the linked image (LTO moves the
@@ -1333,6 +1559,42 @@ ITCM went from 8,512 (S086) to 15,032 (S087 D, before P1 v1 removal) to
 12,640 (after P1). The transient sample click adds 20 instructions per
 sample vs 22 for built-in clicks.
 
+**S093 P8 (measured on the linked P6 and P8 images, 2026-11-10;
+`CPU_USE_DSP_AUDIT.md` items 72–79).**
+- **The dearest choice per oscillator** is set by crash and `slp`, never by
+  a wavetable reader:
+  - plain oscillators and modulators: crash 30 (the S087 figure "27" above
+    assumed `slp`; with crash selectable the dearest is 30);
+  - FM carriers: `slp` 51 (Drum, ramp twin) / 50 (Cymbal/HiHat);
+  - ring and sync carriers: `slp` 42 / 41.
+  
+  So P8's shorter wavetable readers (§8.1) changed no voice's worst case.
+- **Per voice, no slot held:**
+
+  | Voice | Dearest | Per sample |
+  |---|---|---:|
+  | Drum (Basic ceiling) | `fm`: `slp` FM ramp 51 + crash modulator 30 | 261.3, 3 VDIV |
+  | Cymbal / HiHat (Advanced; measured, not frozen) | T+D: crash modulators 30 + 30, sum ≈ 2.5, `slp` FM 50, filter 92, click 22, post 25; per block ≈ 1,006; SRR 10 | ≈ 292.9, 3 VDIV |
+  | Alkaline (S094, wav/wtb no slot, with tone) | fused loop + per block | 263.7, 3 + 9/32 VDIV |
+  | Alkaline (S094, pwm) | fused PWM loop + per block | 256.6, 3 + 9/32 VDIV |
+  | Alkaline (S094, wtb slot held) | fused loop + blend + per block | 276.7, 3 + 9/32 VDIV |
+  | Drum (Basic ceiling) | `fm`: `slp` FM ramp 51 + crash modulator 30 | 257.8, 3 VDIV |
+  | Cymbal / HiHat (now Basic, S094 P2: `INSTRUMENT_FLAG_BASIC` set) | as above | ≈ 292.9, 3 VDIV |
+
+- **The interpolation slots:** the S087 "+10..+13" above is the blend's
+  premium over the same reader. It is not what a slot adds to the worst
+  case:
+  - a wavetable blend on a plain oscillator adds 33 − 30 = 3 (P6: 8);
+  - a blended carrier adds 0, being below its voice's dearest setting;
+  - an `itp` fade adds 45 (old carrier plain, up to 30, + the
+    15-instruction crossfade).
+
+  The two-slot pool is therefore charged **90**, set by the `itp` fade.
+- **Decided, not yet in the tree (S093 P8 revision 3):** the Alkaline
+  wavetable claims a slot and blends frames: 256.5 per sample without a
+  slot, 271.5 with one. The slot-held figure is over 261.3 and accepted for
+  now; its +15 is below the pool's per-slot 45.
+
 ### 8.3 Share of the budget (audit estimates, ±50 %)
 
 From `CPU_USE_DSP_AUDIT.md` (S073 audit, before the refactor): six voice ZDF
@@ -1351,6 +1613,18 @@ switch plus the setter; filter cutoff costs one `fastTan()` division);
 divisions); `osc_setFreq()` when the frequency changed. Amortised over 32
 samples these are a few percent at most. The Morph worker and LFOs on voice
 Morph add foreground (non-render) cost.
+
+**S093 Alkaline (linked, P6).** Per block: `Alkaline_calcVoiceAsync` 884 (9
+VDIV), the sync block's entry/exit 332 and the dispatcher 14 = **1,230 (9
+VDIV)**. The fused audio loop (214, 3 VDIV) is the per-sample part and is
+excluded here. The P4 figure was 1,218; P6 adds 13 (`pos` bend) and removes
+1 (the VEG factor); drive and MEG are unchanged. The stub-link count was
+1,285 (915 + 356 + 14). LTO inlined
+`alkAcc_step()` (4), `alkMeg_step()` (4), `alk_expoCurrent()` (3) and the
+3-row network chunk into the async path, so `control_cost.py --elf` weights
+the sync block's audio loop at 0 and sees no loops in the async path.
+`seq_trackStepSamples()` costs one `__aeabi_uldivmod` per trigger in the
+main loop, not per block (K9).
 
 ---
 
@@ -1380,7 +1654,7 @@ General rules for every change:
 ### 9.1 Add a parameter to an existing instrument
 
 1. Add the engine struct member if the DSP needs new state (check the struct
-   still fits the slot reserve, 2 × `sizeof(DrumVoice)` = 1,192 B; the
+   still fits the slot reserve, 2 × `sizeof(DrumVoice)` = 1,264 B; the
    `_Static_assert` will tell you). A byte added to `DrumVoice` itself
    grows all six slots by 2 B each. Per-oscillator state can often go into
    `OscInfo` padding at no cost (S086 used offsets 18–19 and 33; S087
@@ -1392,7 +1666,7 @@ General rules for every change:
 3. Choose flags and a `mod_domain`. Only rows with a continuous domain can be
    LFO or velocity targets.
 4. If the value needs conversion, give the row a special tag (`ROW_SPECIAL`)
-   or add a new writer (§9.2). If the key would match an old string rule,
+   or add a new writer (§9.3). If the key would match an old string rule,
    the tag must agree: run `make -C tools/dsp_test special_tags`.
 5. Place it on a menu page (`*_menu_pages[]`; each page row has exactly 16
    cells, four screens of four). Keep the row on one line in the table:
@@ -1401,7 +1675,56 @@ General rules for every change:
    file round trip, AutoSave restore and old files without the key
    (`FILESYSTEM_SPEC.md`: missing keys take defaults).
 
-### 9.2 Add a special writer
+### 9.2 Add an instrument type
+
+This is the checklist S093 P4 followed for Alkaline; every item was needed
+in the tree.
+
+1. **Enum and registry.** Add `INSTRUMENT_TYPE_<X>` **before**
+   `INSTRUMENT_TYPE_UNKNOWN`; UNKNOWN is the count of real types, so every
+   type-sized array and every `type >= UNKNOWN` guard grows with it. Add a
+   **designated** registry row in `instrument_registry[]`
+   (`[INSTRUMENT_TYPE_X] = { ... }`) with a **3-character** lowercase token,
+   the `.ext`, the display label, the `/Instrument/<Dir>` component, flags,
+   descriptors and pages. The `_Static_assert`s pin the row count;
+   `check_special_tags.py registry_check()` pins the enum order and the
+   token width. Add the row before running the tag gate (the check reads the
+   designated rows).
+2. **Files.** `Core/DSP/Instruments/<Type>/<Type>Voice.c/.h` (struct and
+   init/trigger/async/sync-block functions taking an instance pointer) and
+   `<Type>Parameters.c/.h` (rows, pages, label, flags). The label must fit 8
+   LCD cells; the Load Morph row shows its first 5 characters plus `Mrp`.
+3. **Runtime.** Add the struct to `InstrumentRuntimeSlot` (the union is
+   sized by 2 x `sizeof(DrumVoice)`; assert the fit), a private
+   `instrumentManager_<type>Runtime()` accessor, and a case in every
+   dispatcher of §3.2, including `instrumentManager_osc()`'s `osc1_` key
+   form and `_oscBySelector()`. Add the `ampEnvelopeQuiet()` branch if the
+   engine has no `SlopeEg2`, and pass the triggering track's step length if
+   the trigger needs it.
+4. **Build.** Add the include path; the parameter file to `SRCS` (ordinary
+   `-O2`); the engine and any DSP tables/helpers to `DSP_SRCS`; and an
+   explicit per-file `-Ofast` rule (the pattern rule covers only
+   `Core/DSPAudio/`).
+5. **Host proof.** Add the table to `check_special_tags.py`
+   `TABLES['<TOK>']` (the registry check fails without it), its special
+   writer tags, and an init-file generator/check if the type needs a first
+   instrument (`SD_CARD/Instrument/<Dir>/`, one file in the writer's exact
+   form, `[morph]` = MORPHABLE rows, `self` for own-slot LFO voices).
+6. **Storage.** The type text, extension and folder come from the registry
+   (`storage_instrumentTypeToText()` is a registry lookup). **Append** the
+   type, never insert or reorder: the `/.hcnames` header check accepts an
+   older header only as a leading part of the current token list, and a
+   rejected header discards every Scene's AutoSave payload
+   (`FILESYSTEM_SPEC.md`, the type registry). AutoSave stores the 3-byte
+   token. Check boot repair/index for the new folder and
+   the Instrument Load/Save round trip.
+7. **Class.** Decide Basic or Advanced from the measured worst-case cost; an
+   Advanced type counts towards the limit of two per Scene. A type that
+   needs audio memory uses FxBuffer voice units (4,416 B each, at most two
+   per slot; `EFFECTS_MODULES_DSP_REFERENCE.md` §3) and must clear what it
+   reads unless it adopts content from the handoff record.
+
+### 9.3 Add a special writer
 
 1. Add `IM_SPECIAL_<NAME>` before `IM_SPECIAL_WRITER_COUNT` (at most 31
    writers fit bits 0–4).
@@ -1411,7 +1734,7 @@ General rules for every change:
    `check_special_tags.py` do not know them; extend both so the proof keeps
    covering every row.
 
-### 9.3 Add a filter type, oscillator waveform or distortion mode
+### 9.4 Add a filter type, oscillator waveform or distortion mode
 
 - These files serve every voice and the Effects. Prove the existing modes are
   unchanged (S0) with the bench (`DSP_TEST.md` §6.2), then test the new mode
@@ -1428,14 +1751,16 @@ General rules for every change:
   them, which changes stored values. (`calcNextOscSample()`/`calcFm()`, the
   per-sample variants, have no callers.)
 - **Another stock table wave** (`ReA`/`TrA`/`SwA` are ready in the recipe):
-  1. add a line to `WAVES` in `tools/gen_stock_tables.py` and run it (then
-     `make -C tools/dsp_test stock_tables`);
+  1. add a line to `WAVES` in `tools/plots/gen_stock_tables.py` and run it
+     with `--out Core/DSPAudio/wavetableStock.c` (and add that file to
+     `DSP_SRCS`);
   2. add the `extern` in `wavetable.h`;
-  3. add the constant after `SW3`, move `OSC_STOCK_LAST` and
-     `OSC_SAMPLE_START`;
-  4. add the table to `osc_stockTables[]` (the assert checks the length);
+  3. add the constant after `CRASH` (S093: the stock table waves were
+     removed, §6.1.2), move `OSC_STOCK_LAST` and `OSC_SAMPLE_START`;
+  4. restore `osc_stockTables[]` and its one case group per dispatcher (the
+     assert checks the length);
   5. add the name to `waveformNames` (the assert checks the count);
-  6. extend the host tests (`test_osc_stock.c`, `test_osc_pos.c` P1).
+  6. extend the host tests (`modules/oscillator.c` stock and pos groups).
   It costs 22,528 B of program flash and renumbers the user samples.
 - **Oscillator modes and types under the CPU rule (S085, user):** "no
   increase in CPU cycles overall".
@@ -1477,29 +1802,6 @@ General rules for every change:
 - Distortion: add a mode selector rather than changing
   `distortion_curveSample16()`; keep the fused post-chains using one shared
   expression per mode.
-
-### 9.4 Add an instrument type
-
-1. `Core/DSP/Instruments/<Type>/`: `<Type>Voice.c/.h` (struct and
-   init/trigger/async/render functions taking an instance pointer) and
-   `<Type>Parameters.c/.h` (descriptors, menu pages, display label, type
-   flags).
-2. Registry row in `InstrumentManager.c` (`instrument_registry[]`: type,
-   three-letter token, display label, extension, storage directory, flags,
-   descriptors, menu pages) and a new `INSTRUMENT_TYPE_*`.
-3. Add the struct to the runtime union and a case in every dispatcher (§3.2),
-   including the accessors used by the special writers.
-4. Makefile: the voice `.c` into `DSP_SRCS` **and** an explicit `-Ofast`
-   rule (the pattern rule covers only `Core/DSPAudio/`); the parameter file
-   into the normal sources; the include path.
-5. Decide Basic or Advanced from the measured worst-case cost; an Advanced
-   type counts towards the limit of two per Scene.
-6. Storage: the type token, extension and `/Instrument/<dir>` come from the
-   registry; check boot index creation and HCNAMES type fields
-   (`FILESYSTEM_SPEC.md`).
-7. A type that needs audio memory uses FxBuffer voice units (4,416 B each, at
-   most two per slot; `EFFECTS_MODULES_DSP_REFERENCE.md` §3). It must clear
-   what it reads unless it adopts content from the handoff record.
 
 ### 9.5 Add a modulation destination kind
 
@@ -1589,7 +1891,7 @@ fields from `ModulationNode`.
   `ringDepthQ15`; the S085 sync/ring oscillator family in `.itcm.s085`;
   the no-CPU-increase gate and its tooling (`085_SESSION_HANDOFF_LOG.md`).
   An earlier S085 attempt (oscillator types, run modes, render pool) reached
-  100 % CPU on hardware and was rolled back (§9.3; the 085 log §2).
+  100 % CPU on hardware and was rolled back (§9.4; the 085 log §2).
 - Session 086: stock table waves `Re3`/`Sw3` (`SQ3`/`SW3`, `wav` 6–7; user
   samples moved to 8+), generated by `tools/gen_stock_tables.py` and played
   by the table loops; `osc_syncClockInc()` fixed for them. The `pos` row

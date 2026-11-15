@@ -1,0 +1,7 @@
+python3 colloid_cpu.py --elf ../../build/lxr02.elf --count 12 
+plain12-par: loops 283 + per block 3444/32 = 390.6
+plain12-ser: loops 257 + per block 3441/32 = 364.5
+pwm6-par: loops 304 + per block 2319/32 = 376.5
+pwm6-ser: loops 278 + per block 2316/32 = 350.4
+pwmw6-par: loops 307 + per block 2323/32 = 379.6
+pwmw6-ser: loops 281 + per block 2320/32 = 353.5

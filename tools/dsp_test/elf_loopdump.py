@@ -2,11 +2,14 @@
 """Dump and compare the per-sample loop bodies of firmware symbols (S086 S1).
 
 What:       disassembles the linked firmware ELF and, for every function whose
-            base name is listed (any .constprop/.isra/.part suffix included),
+            base name is listed (any .constprop/.isra/.part/.lto_priv suffix
+            included),
             extracts each backward-branch loop body (the instructions from the
             branch target up to the branch). Addresses are removed and branch
             targets are written as offsets from the loop start, so a loop
-            that only moved compares equal. Only per-sample loops are kept:
+            that only moved compares equal; a target outside the body (an
+            exit or a veneer) is written as +EXIT. Only per-sample loops are
+            kept:
             a body holding a jump table, literal data, a call or a function
             return is dispatch code, not a loop. --compare reports every
             baseline loop that no longer exists under the same base name in
@@ -42,7 +45,10 @@ HEAD = re.compile(r'^([0-9a-f]+) <([^>]+)>:$')
 ROW = re.compile(r'^\s*([0-9a-f]+):\s+(\S+)\s*(.*)$')
 TARGET = re.compile(r'\b([0-9a-f]+) <[^>]+>')
 WORD = re.compile(r'\b0x[0-9a-f]{8}\b|\b[0-9a-f]{8}\b')
-SUFFIX = re.compile(r'(\.(constprop|isra|part|cold)\.\d+)+$')
+# S093 P4: .lto_priv.N is the same class of LTO suffix as .constprop.N (it
+# appears when a fifth engine changes the partition); elf_looppath.py's
+# SUFFIX already lists it.
+SUFFIX = re.compile(r'(\.(lto_priv|constprop|isra|part|cold)\.\d+)+$')
 DISPATCH = re.compile(r'(\btbb\b|\btbh\b|\.word|\.short|\bbl\b|\bbx\b|\bpop\b|ldmia\.w sp!)')
 REG = re.compile(r'\b(r\d+|ip|lr|sl|fp|s\d+|d\d+)\b')
 BRANCH = re.compile(
@@ -88,7 +94,12 @@ def loops(rows):
         body = []
         for a, o, g in rows:
             if lo <= a <= addr:
-                g = TARGET.sub(lambda x: '+%d' % (int(x.group(1), 16) - lo), g)
+                # S093 P4: a target outside lo..addr is a loop exit (or a
+                # veneer); its distance is layout, not loop cost, so it is
+                # one token. Targets inside the body keep their offset.
+                g = TARGET.sub(
+                    lambda x: '+%d' % (int(x.group(1), 16) - lo)
+                    if lo <= int(x.group(1), 16) <= addr else '+EXIT', g)
                 g = WORD.sub('ADDR', g)
                 body.append(re.sub(r'\s+', ' ', (o + ' ' + g)).strip())
         if any(DISPATCH.search(b) for b in body):

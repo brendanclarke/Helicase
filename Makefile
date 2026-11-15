@@ -36,9 +36,12 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/DSP/Instruments/Snare \
           -ICore/DSP/Instruments/Cymbal \
           -ICore/DSP/Instruments/HiHat \
+          -ICore/DSP/Instruments/Alkaline \
+          -ICore/DSP/Instruments/Colloid \
+          -ICore/DSP/Instruments/Tetrakt \
           -ICore/DSP/Effects \
-          -ICore/DSP/Effects/StereoFilter \
           -ICore/DSP/Effects/CrumpBit \
+          -ICore/DSP/Effects/Space \
           -ICore/Bank/Scene \
           -ICore/Bank/Scene/Pattern \
           -ICore/Sequencer \
@@ -113,11 +116,15 @@ SRCS = \
   Core/DSP/Instruments/Snare/SnareParameters.c \
   Core/DSP/Instruments/Cymbal/CymbalParameters.c \
   Core/DSP/Instruments/HiHat/HiHatParameters.c \
+  Core/DSP/Instruments/Alkaline/AlkalineParameters.c \
+  Core/DSP/Instruments/Colloid/ColloidParameters.c \
+  Core/DSP/Instruments/Tetrakt/TetraktParameters.c \
   Core/DSP/Effects/FxBuffer.c \
   Core/DSP/Effects/EffectsManager.c \
-  Core/DSP/Effects/StereoFilter/StereoFilterParameters.c \
   Core/DSP/Effects/CrumpBit/CrumpBitParameters.c \
   Core/DSP/Effects/CrumpBit/CrumpBitTables.c \
+  Core/DSP/Effects/Space/SpaceKit.c \
+  Core/DSP/Effects/Space/SpaceParameters.c \
   Core/MIDI/MidiBuffer.c \
   Core/MIDI/MidiDin.c \
   Core/MIDI/MidiTransport.c \
@@ -149,21 +156,35 @@ DSP_SRCS = \
   Core/DSPAudio/1PoleLp.c \
   Core/DSPAudio/BufferTools.c \
   Core/DSPAudio/BusCompressor.c \
+  Core/DSP/Instruments/Alkaline/AlkalineControl.c \
+  Core/DSP/Instruments/Alkaline/AlkalineSquareTable.c \
+  Core/DSP/Instruments/Alkaline/AlkalineTables.c \
+  Core/DSP/Instruments/Alkaline/AlkalinePostTables.c \
+  Core/DSP/Instruments/Alkaline/AlkalineVoice.c \
+  Core/DSP/Instruments/Colloid/ColloidOsc.c \
+  Core/DSP/Instruments/Colloid/ColloidTables.c \
+  Core/DSP/Instruments/Colloid/ColloidVoice.c \
+  Core/DSP/Instruments/Tetrakt/TetraktTables.c \
+  Core/DSP/Instruments/Tetrakt/TetraktVoice.c \
   Core/DSP/Instruments/Cymbal/CymbalVoice.c \
   Core/DSPAudio/Decay.c \
+  Core/DSPAudio/DiodeLadder.c \
   Core/DSPAudio/distortion.c \
   Core/DSPAudio/dither.c \
   Core/DSP/Instruments/Drum/DrumVoice.c \
   Core/DSP/Instruments/HiHat/HiHat.c \
-  Core/DSP/Effects/StereoFilter/StereoFilterEffect.c \
   Core/DSP/Effects/CrumpBit/CrumpBitEffect.c \
+  Core/DSP/Effects/Space/SpaceKitDsp.c \
+  Core/DSP/Effects/Space/SpaceEffect.c \
   Core/DSPAudio/lfo.c \
+  Core/DSPAudio/lfoRateTable.c \
+  Core/DSPAudio/distortionMakeup.c \
   Core/DSPAudio/mixer.c \
   Core/DSPAudio/modulationNode.c \
   Core/DSPAudio/Oscillator.c \
+  Core/DSPAudio/oscPwmTables.c \
   Core/DSPAudio/random.c \
   Core/DSPAudio/ResonantFilter.c \
-  Core/DSPAudio/Samples.c \
   Core/DSPAudio/SlopeEg2.c \
   Core/DSPAudio/snapEg.c \
   Core/DSP/Instruments/Snare/Snare.c \
@@ -172,8 +193,7 @@ DSP_SRCS = \
   Core/DSPAudio/transientTables.c \
   Core/DSPAudio/voiceFold.c \
   Core/DSPAudio/voiceFoldTables.c \
-  Core/DSPAudio/wavetable.c \
-  Core/DSPAudio/wavetableStock.c
+  Core/DSPAudio/wavetable.c
 
 # -Ofast for DSP: enables -ffast-math (float reordering, NaN/Inf assumptions)
 CFLAGS_DSP = $(subst -O2,-Ofast,$(CFLAGS))
@@ -220,15 +240,82 @@ $(BUILD)/Core/DSP/Instruments/HiHat/HiHat.o: Core/DSP/Instruments/HiHat/HiHat.c 
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
 
-# StereoFilter DSP runs with the fast-math policy; registry/descriptor control
-# sources remain ordinary -O2 sources in SRCS.
-$(BUILD)/Core/DSP/Effects/StereoFilter/StereoFilterEffect.o: Core/DSP/Effects/StereoFilter/StereoFilterEffect.c | $(BUILD)
+# S093 P4: the Alkaline engine and its control path are DSP: -Ofast like the
+# other engines (the P3 counts and the constant-cost loops assume it). The two
+# table files are data; -Ofast changes nothing for them and keeps them with
+# their users.
+$(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineVoice.o: Core/DSP/Instruments/Alkaline/AlkalineVoice.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+$(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineControl.o: Core/DSP/Instruments/Alkaline/AlkalineControl.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+$(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineTables.o: Core/DSP/Instruments/Alkaline/AlkalineTables.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+$(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineSquareTable.o: Core/DSP/Instruments/Alkaline/AlkalineSquareTable.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+# S094 P1 S4: the post-filter and A3 tables (data, with their user).
+$(BUILD)/Core/DSP/Instruments/Alkaline/AlkalinePostTables.o: Core/DSP/Instruments/Alkaline/AlkalinePostTables.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+# S095 P2: the Colloid engine, its oscillator loops and its tables are DSP:
+# -Ofast like the Alkaline (the measured counts and the constant-cost loops
+# assume it). ColloidParameters.c stays in SRCS (-O2), as the other tables.
+#
+# -fno-lto on these three objects (S095 P2, measured): with them in the LTO
+# unit, the larger program shifted LTO's partitioning and ten Drum-family PWM
+# loops (osc_pwmWt/Ws Fm, FmRamp, Ring, Sync; osc_smpFm, smpFmRamp) were
+# re-laid as predicated forms, 1 to 3 instructions longer per sample, though
+# their source is unchanged. Outside the LTO unit the Colloid leaves every
+# other engine's code generation as it was: every oscillator loop equal to
+# the step 0 image, the mixer 0 grew, the Alkaline ladder loops equal. The
+# Colloid loses nothing it needs from LTO: its entry points are noinline
+# calls from InstrumentManager, and its helpers are its own. Cost: +544 B of
+# flash and +24 B of ITCM against the LTO build.
+$(BUILD)/Core/DSP/Instruments/Colloid/ColloidVoice.o: Core/DSP/Instruments/Colloid/ColloidVoice.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+$(BUILD)/Core/DSP/Instruments/Colloid/ColloidOsc.o: Core/DSP/Instruments/Colloid/ColloidOsc.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+$(BUILD)/Core/DSP/Instruments/Colloid/ColloidTables.o: Core/DSP/Instruments/Colloid/ColloidTables.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+
+# S096 P1: the Tetrakt engine and its tables are DSP: -Ofast like the
+# Colloid. -fno-lto for the S095 P2 reason (Makefile comment above): outside
+# the LTO unit the Tetrakt cannot shift LTO's partitioning of the other
+# engines' loops (gated by elf_p4_check, S11); its entry points are noinline
+# calls from InstrumentManager, and it calls the platform's
+# osc_userBind()/osc_renderTyped() as ordinary externals.
+# TetraktParameters.c stays in SRCS (-O2), as the other tables.
+$(BUILD)/Core/DSP/Instruments/Tetrakt/TetraktVoice.o: Core/DSP/Instruments/Tetrakt/TetraktVoice.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+$(BUILD)/Core/DSP/Instruments/Tetrakt/TetraktTables.o: Core/DSP/Instruments/Tetrakt/TetraktTables.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+
+# CrumpBit DSP (S074) runs with the fast-math policy; its
+# descriptor, layout and page-hook source stays an ordinary -O2 source in SRCS.
+$(BUILD)/Core/DSP/Effects/CrumpBit/CrumpBitEffect.o: Core/DSP/Effects/CrumpBit/CrumpBitEffect.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
 
-# CrumpBit DSP (S074) runs with the fast-math policy like StereoFilter; its
-# descriptor, layout and page-hook source stays an ordinary -O2 source in SRCS.
-$(BUILD)/Core/DSP/Effects/CrumpBit/CrumpBitEffect.o: Core/DSP/Effects/CrumpBit/CrumpBitEffect.c | $(BUILD)
+# S095 P1: the Space kit's per-frame half (the feed read, the drain envelope)
+# runs with the fast-math policy like CrumpBit. Its init-time half
+# (SpaceKit.c) is an ordinary -O2 source in SRCS: a per-file -Os was tried
+# and has no effect under -flto (the link step re-optimizes at -O2; the image
+# was byte-identical).
+$(BUILD)/Core/DSP/Effects/Space/SpaceKitDsp.o: Core/DSP/Effects/Space/SpaceKitDsp.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+
+# S095 P1: the Space types' DSP and ops, the fast-math policy like CrumpBit;
+# their descriptors and page text (SpaceParameters.c) stay in SRCS.
+$(BUILD)/Core/DSP/Effects/Space/SpaceEffect.o: Core/DSP/Effects/Space/SpaceEffect.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
 

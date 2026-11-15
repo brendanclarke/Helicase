@@ -1,0 +1,3 @@
+python3 tetrakt_cpu.py --elf ../../build/lxr02.elf 
+tetrakt: loops 301 + per block 2613/32 = 382.7
+  spaceOut frame 64, segment 57 x 4; binds 4 x START

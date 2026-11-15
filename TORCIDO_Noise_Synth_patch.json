@@ -1,0 +1,952 @@
+{
+  "schema": "helicase.aira_modular_patch.v0",
+  "patch_name": "TORCIDO_Noise_Synth",
+  "objective": "Human- and LLM-readable description of the Roland AIRA Modular Customizer patch, suitable as a starting point for implementing an equivalent DSP graph in C.",
+  "source_files": {
+    "image": {
+      "path": "patch.png",
+      "sha256": "550147568a9e361c482f2da0a8bbf8c7417032c2736085c4916ea222748848ed",
+      "dimensions_px": {
+        "width": 600,
+        "height": 823
+      }
+    },
+    "binary_patch": {
+      "path": "TORCIDO_Noise_Synth.bin",
+      "sha256": "dfdc1885856e29ecfe2ad5f3da768b4cc60ab2aa6a07071d6d0fc02e1d8f2d2e",
+      "size_bytes": 1212,
+      "header_magic": "HabPatchFile0001",
+      "patch_type": "AiraEfx Patch"
+    }
+  },
+  "extraction_notes": {
+    "confidence": "module settings mixed, routing user-confirmed",
+    "summary": "Module identities and many settings are visible in the screenshot and partly mirrored by low-byte values in the .bin file. The .bin connection matrix is preserved exactly below, but its undocumented endpoint index mapping has not been fully decoded. The named routing graph has been updated from user-confirmed patch-cord descriptions.",
+    "important_caveat": "For C implementation, treat the user-confirmed routing graph as the current authoritative patch topology. Treat raw binary matrix entries as evidence to refine a future AIRA patch decoder, not as the primary endpoint naming source yet."
+  },
+  "control_value_scale": {
+    "knob_percent_0_to_100": {
+      "0": "fully counter-clockwise / minimum",
+      "50": "center / noon",
+      "100": "fully clockwise / maximum"
+    },
+    "bipolar_external_cv": {
+      "-100": "maximum negative external voltage",
+      "0": "zero volts / center",
+      "100": "maximum positive external voltage"
+    },
+    "notes": "Knob values marked visual_estimate_percent are estimated from the screenshot and should be treated as approximate implementation starting points, not calibrated device readings."
+  },
+  "modules": [
+    {
+      "id": "ring_mod",
+      "display_name": "Ring Mod",
+      "type": "ring_modulator",
+      "panel_position": "top_left",
+      "binary_evidence": {
+        "possible_module_id": 3,
+        "records": [
+          {
+            "offset_hex": "0x28",
+            "bytes_decimal": [3, 0, 0, 25, 0, 68, 0, 100]
+          },
+          {
+            "offset_hex": "0x30",
+            "bytes_decimal": [100, 53, 100, 0, 0, 0, 0, 0]
+          }
+        ],
+        "interpretation_confidence": "medium"
+      },
+      "settings": {
+        "on_off": {
+          "value": "on",
+          "source": "visual",
+          "confidence": "high"
+        }
+      },
+      "ports": [
+        {
+          "id": "on_off_cv",
+          "direction": "input",
+          "role": "gate_or_cv_control_for_ring_mod_on_off"
+        },
+        {
+          "id": "in",
+          "direction": "input",
+          "role": "carrier_audio_or_signal_input"
+        },
+        {
+          "id": "mod_in",
+          "direction": "input",
+          "role": "modulator_audio_or_signal_input"
+        },
+        {
+          "id": "out",
+          "direction": "output",
+          "role": "ring_modulated_signal"
+        }
+      ]
+    },
+    {
+      "id": "sqr_oscillator",
+      "display_name": "SQR Oscillator",
+      "type": "square_oscillator",
+      "panel_position": "top_center_left",
+      "binary_evidence": {
+        "possible_module_id": 5,
+        "record": {
+          "offset_hex": "0x38",
+          "bytes_decimal": [5, 1, 0, 0, 0, 0, 0, 0]
+        },
+        "interpretation_confidence": "medium_low"
+      },
+      "settings": {
+        "range_or_octave": {
+          "display_label_estimate": "16",
+          "visual_estimate_percent_0_to_100": 35,
+          "source": "visual_estimate",
+          "confidence": "low"
+        },
+        "color": {
+          "visual_estimate_percent_0_to_100": 47,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "fine": {
+          "visual_estimate_percent_0_to_100": 50,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "level": {
+          "visual_estimate_percent_0_to_100": 43,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        }
+      },
+      "ports": [
+        {
+          "id": "sync_trig_in",
+          "direction": "input",
+          "role": "oscillator_sync_or_trigger"
+        },
+        {
+          "id": "color_cv_in",
+          "direction": "input",
+          "role": "wave_shape_color_modulation"
+        },
+        {
+          "id": "level_cv_in",
+          "direction": "input",
+          "role": "oscillator_level_cv"
+        },
+        {
+          "id": "cv_in",
+          "direction": "input",
+          "role": "pitch_or_frequency_cv"
+        },
+        {
+          "id": "fine_cv_in",
+          "direction": "input",
+          "role": "fine_pitch_cv"
+        },
+        {
+          "id": "sync_out",
+          "direction": "output",
+          "role": "sync_or_trigger_output"
+        },
+        {
+          "id": "out",
+          "direction": "output",
+          "role": "square_wave_audio"
+        }
+      ]
+    },
+    {
+      "id": "saw_oscillator",
+      "display_name": "Saw Oscillator",
+      "type": "saw_oscillator",
+      "panel_position": "bottom_left",
+      "binary_evidence": {
+        "possible_module_id": 30,
+        "record": {
+          "offset_hex": "0x40",
+          "bytes_decimal": [30, 1, 52, 44, 50, 0, 0, 0]
+        },
+        "interpretation_confidence": "medium"
+      },
+      "settings": {
+        "range_or_octave": {
+          "display_label_estimate": "32",
+          "visual_estimate_percent_0_to_100": 30,
+          "source": "visual_estimate",
+          "confidence": "low"
+        },
+        "color": {
+          "visual_estimate_percent_0_to_100": 36,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "fine": {
+          "visual_estimate_percent_0_to_100": 50,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "level": {
+          "visual_estimate_percent_0_to_100": 39,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        }
+      },
+      "ports": [
+        {
+          "id": "sync_trig_in",
+          "direction": "input",
+          "role": "oscillator_sync_or_trigger"
+        },
+        {
+          "id": "color_cv_in",
+          "direction": "input",
+          "role": "wave_shape_color_modulation"
+        },
+        {
+          "id": "level_cv_in",
+          "direction": "input",
+          "role": "oscillator_level_cv"
+        },
+        {
+          "id": "cv_in",
+          "direction": "input",
+          "role": "pitch_or_frequency_cv"
+        },
+        {
+          "id": "sync_out",
+          "direction": "output",
+          "role": "sync_or_trigger_output"
+        },
+        {
+          "id": "out",
+          "direction": "output",
+          "role": "saw_wave_audio"
+        }
+      ]
+    },
+    {
+      "id": "lfo",
+      "display_name": "LFO",
+      "type": "low_frequency_oscillator",
+      "panel_position": "top_center_right",
+      "binary_evidence": {
+        "possible_module_id": 1,
+        "record": {
+          "offset_hex": "0x48",
+          "bytes_decimal": [1, 30, 3, 24, 50, 0, 0, 0]
+        },
+        "interpretation_confidence": "medium"
+      },
+      "settings": {
+        "waveform": {
+          "visual_estimate_percent_0_to_100": 42,
+          "source": "visual_estimate",
+          "confidence": "low"
+        },
+        "mod_in_amount": {
+          "visual_estimate_percent_0_to_100": 45,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "rate": {
+          "visual_estimate_percent_0_to_100": 58,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "output_level": {
+          "visual_estimate_percent_0_to_100": 40,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        }
+      },
+      "ports": [
+        {
+          "id": "mod_in",
+          "direction": "input",
+          "role": "lfo_rate_or_shape_modulation"
+        },
+        {
+          "id": "trig",
+          "direction": "input",
+          "role": "lfo_reset_or_trigger"
+        },
+        {
+          "id": "out",
+          "direction": "output",
+          "role": "lfo_signal"
+        },
+        {
+          "id": "cv_out",
+          "direction": "output",
+          "role": "lfo_cv_signal"
+        },
+        {
+          "id": "inverted_out",
+          "direction": "output",
+          "role": "inverted_lfo_cv_signal"
+        }
+      ]
+    },
+    {
+      "id": "amp",
+      "display_name": "AMP",
+      "type": "dual_vca_or_dual_amplifier",
+      "panel_position": "top_right",
+      "binary_evidence": {
+        "possible_module_id": 9,
+        "record": {
+          "offset_hex": "0x50",
+          "bytes_decimal": [9, 0, 100, 50, 100, 0, 0, 0]
+        },
+        "interpretation_confidence": "medium"
+      },
+      "settings": {
+        "amp_1_offset": {
+          "visual_estimate_percent_0_to_100": 42,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "amp_1_level": {
+          "visual_estimate_percent_0_to_100": 67,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "amp_2_offset": {
+          "visual_estimate_percent_0_to_100": 42,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "amp_2_level": {
+          "visual_estimate_percent_0_to_100": 38,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        }
+      },
+      "ports": [
+        {
+          "id": "amp1_offset_cv",
+          "direction": "input",
+          "role": "amp1_offset_or_gain_cv"
+        },
+        {
+          "id": "amp1_in",
+          "direction": "input",
+          "role": "amp1_signal_input"
+        },
+        {
+          "id": "amp1_out",
+          "direction": "output",
+          "role": "amp1_signal_output"
+        },
+        {
+          "id": "amp2_offset_cv",
+          "direction": "input",
+          "role": "amp2_offset_or_gain_cv"
+        },
+        {
+          "id": "amp2_in",
+          "direction": "input",
+          "role": "amp2_signal_input"
+        },
+        {
+          "id": "amp2_out",
+          "direction": "output",
+          "role": "amp2_signal_output"
+        }
+      ]
+    },
+    {
+      "id": "torcido",
+      "display_name": "TORCIDO",
+      "type": "distortion_saturation_effect",
+      "panel_position": "bottom_center",
+      "binary_evidence": {
+        "possible_module_id": 29,
+        "record": {
+          "offset_hex": "0x58",
+          "bytes_decimal": [29, 3, 50, 33, 100, 0, 0, 0]
+        },
+        "interpretation_confidence": "medium"
+      },
+      "settings": {
+        "lo_boost_switch": {
+          "value": "unconfirmed",
+          "source": "visual_estimate",
+          "confidence": "low"
+        },
+        "dist": {
+          "visual_estimate_percent_0_to_100": 44,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "tone": {
+          "visual_estimate_percent_0_to_100": 42,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "level_1": {
+          "visual_estimate_percent_0_to_100": 47,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "level_2": {
+          "visual_estimate_percent_0_to_100": 50,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "tube_warm": {
+          "visual_estimate_percent_0_to_100": 58,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "dry_wet": {
+          "visual_estimate_percent_0_to_100": 45,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "bass_switch": {
+          "value": "unconfirmed",
+          "source": "visual_estimate",
+          "confidence": "low"
+        }
+      },
+      "ports": [
+        {
+          "id": "in_1",
+          "direction": "input",
+          "role": "audio_input_1"
+        },
+        {
+          "id": "in_2",
+          "direction": "input",
+          "role": "audio_input_2_or_stereo_pair"
+        },
+        {
+          "id": "dist_cv",
+          "direction": "input",
+          "role": "distortion_cv"
+        },
+        {
+          "id": "bias_cv",
+          "direction": "input",
+          "role": "bias_cv"
+        },
+        {
+          "id": "tone_cv",
+          "direction": "input",
+          "role": "tone_cv"
+        },
+        {
+          "id": "tube_warm_cv",
+          "direction": "input",
+          "role": "tube_warm_cv"
+        },
+        {
+          "id": "dry_wet_cv",
+          "direction": "input",
+          "role": "dry_wet_cv"
+        },
+        {
+          "id": "out_1",
+          "direction": "output",
+          "role": "distorted_audio_output_1"
+        },
+        {
+          "id": "out_2",
+          "direction": "output",
+          "role": "distorted_audio_output_2"
+        }
+      ]
+    },
+    {
+      "id": "short_delay",
+      "display_name": "Short Delay",
+      "type": "delay_effect",
+      "panel_position": "bottom_right",
+      "binary_evidence": {
+        "possible_module_id": 16,
+        "record": {
+          "offset_hex": "0x60",
+          "bytes_decimal": [16, 0, 0, 100, 0, 0, 0, 0]
+        },
+        "interpretation_confidence": "medium_low"
+      },
+      "settings": {
+        "time": {
+          "visual_estimate_percent_0_to_100": 58,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "feedback": {
+          "visual_estimate_percent_0_to_100": 48,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        },
+        "dry_wet": {
+          "visual_estimate_percent_0_to_100": 50,
+          "source": "visual_estimate",
+          "confidence": "medium_low"
+        }
+      },
+      "ports": [
+        {
+          "id": "time_cv",
+          "direction": "input",
+          "role": "delay_time_cv"
+        },
+        {
+          "id": "feedback_cv",
+          "direction": "input",
+          "role": "feedback_cv"
+        },
+        {
+          "id": "dry_wet_cv",
+          "direction": "input",
+          "role": "dry_wet_cv"
+        },
+        {
+          "id": "in",
+          "direction": "input",
+          "role": "delay_audio_input"
+        },
+        {
+          "id": "out",
+          "direction": "output",
+          "role": "delay_audio_output"
+        }
+      ]
+    },
+    {
+      "id": "hardware_io",
+      "display_name": "Hardware I/O and GRF 1-6",
+      "type": "hardware_io",
+      "panel_position": "bottom_strip",
+      "binary_evidence": {
+        "interpretation_confidence": "low",
+        "notes": "The bottom row exposes audio inputs/outputs plus GRF 1 through GRF 6 hardware inputs. GRF inputs may be connected to external LFOs, audio signals, or other external CV/audio sources."
+      },
+      "ports": [
+        {
+          "id": "audio_input_1",
+          "direction": "input",
+          "role": "hardware_audio_input_1"
+        },
+        {
+          "id": "audio_output_1",
+          "direction": "output",
+          "role": "hardware_audio_output_1"
+        },
+        {
+          "id": "audio_output_2",
+          "direction": "output",
+          "role": "hardware_audio_output_2"
+        },
+        {
+          "id": "grf_1",
+          "direction": "input",
+          "role": "external_bipolar_cv_input_1"
+        },
+        {
+          "id": "grf_2",
+          "direction": "input",
+          "role": "external_bipolar_cv_input_2"
+        },
+        {
+          "id": "grf_3",
+          "direction": "input",
+          "role": "external_bipolar_cv_input_3"
+        },
+        {
+          "id": "grf_4",
+          "direction": "input",
+          "role": "external_bipolar_cv_input_4"
+        },
+        {
+          "id": "grf_5",
+          "direction": "input",
+          "role": "external_bipolar_cv_input_5"
+        },
+        {
+          "id": "grf_6",
+          "direction": "input",
+          "role": "external_bipolar_cv_input_6"
+        }
+      ]
+    }
+  ],
+  "authoritative_connections": [
+    {
+      "id": "conn_01",
+      "from": "torcido.out_1",
+      "to": "ring_mod.in",
+      "signal_kind": "audio",
+      "source": "user_confirmed",
+      "notes": "Output 1 of the central TORCIDO distortion module feeds the Ring Mod input, the jack with the blue ring."
+    },
+    {
+      "id": "conn_02",
+      "from": "sqr_oscillator.out",
+      "to": "ring_mod.mod_in",
+      "signal_kind": "audio",
+      "source": "user_confirmed",
+      "summed_at_destination": true,
+      "notes": "SQR oscillator output is one of two signals summed into the Ring Mod MOD IN input, the jack with the red ring."
+    },
+    {
+      "id": "conn_03",
+      "from": "hardware_io.audio_input_1",
+      "to": "ring_mod.mod_in",
+      "signal_kind": "audio",
+      "source": "user_confirmed",
+      "summed_at_destination": true,
+      "notes": "Audio Input 1 is summed with SQR oscillator output at Ring Mod MOD IN."
+    },
+    {
+      "id": "conn_04",
+      "from": "ring_mod.out",
+      "to": "hardware_io.audio_output_1",
+      "signal_kind": "audio",
+      "source": "user_confirmed",
+      "summed_at_destination": true
+    },
+    {
+      "id": "conn_05",
+      "from": "ring_mod.out",
+      "to": "hardware_io.audio_output_2",
+      "signal_kind": "audio",
+      "source": "user_confirmed",
+      "summed_at_destination": true
+    },
+    {
+      "id": "conn_06",
+      "from": "ring_mod.out",
+      "to": "amp.amp1_in",
+      "signal_kind": "audio",
+      "source": "user_confirmed"
+    },
+    {
+      "id": "conn_07",
+      "from": "ring_mod.out",
+      "to": "lfo.mod_in",
+      "signal_kind": "audio_rate_or_cv_rate_modulation",
+      "source": "user_confirmed",
+      "summed_at_destination": true,
+      "notes": "User correction: the only wired LFO input is rate modulation, not sync/trigger."
+    },
+    {
+      "id": "conn_08",
+      "from": "lfo.cv_out",
+      "to": "amp.amp1_offset_cv",
+      "signal_kind": "cv",
+      "source": "user_confirmed"
+    },
+    {
+      "id": "conn_09",
+      "from": "lfo.cv_out",
+      "to": "torcido.tone_cv",
+      "signal_kind": "cv",
+      "source": "user_confirmed",
+      "summed_at_destination": true
+    },
+    {
+      "id": "conn_10",
+      "from": "lfo.cv_out",
+      "to": "torcido.tube_warm_cv",
+      "signal_kind": "cv",
+      "source": "user_confirmed"
+    },
+    {
+      "id": "conn_11",
+      "from": "lfo.cv_out",
+      "to": "sqr_oscillator.color_cv_in",
+      "signal_kind": "cv",
+      "source": "user_confirmed"
+    },
+    {
+      "id": "conn_12",
+      "from": "lfo.inverted_out",
+      "to": "amp.amp2_offset_cv",
+      "signal_kind": "cv",
+      "source": "user_confirmed"
+    },
+    {
+      "id": "conn_13",
+      "from": "lfo.inverted_out",
+      "to": "short_delay.feedback_cv",
+      "signal_kind": "cv",
+      "source": "user_confirmed"
+    },
+    {
+      "id": "conn_14",
+      "from": "lfo.inverted_out",
+      "to": "sqr_oscillator.fine_cv_in",
+      "signal_kind": "cv",
+      "source": "user_confirmed"
+    },
+    {
+      "id": "conn_15",
+      "from": "lfo.inverted_out",
+      "to": "lfo.mod_in",
+      "signal_kind": "cv",
+      "source": "user_confirmed",
+      "summed_at_destination": true,
+      "notes": "Self-modulates LFO rate via the wired rate modulation input."
+    },
+    {
+      "id": "conn_16",
+      "from": "hardware_io.audio_input_1",
+      "to": "sqr_oscillator.sync_trig_in",
+      "signal_kind": "phase_reset_trigger",
+      "source": "user_confirmed",
+      "notes": "Oscillator sync input resets oscillator phase."
+    },
+    {
+      "id": "conn_17",
+      "from": "sqr_oscillator.sync_out",
+      "to": "saw_oscillator.sync_trig_in",
+      "signal_kind": "phase_reset_trigger",
+      "source": "user_confirmed",
+      "summed_at_destination": true,
+      "notes": "Oscillator sync input resets oscillator phase."
+    },
+    {
+      "id": "conn_18",
+      "from": "short_delay.out",
+      "to": "saw_oscillator.sync_trig_in",
+      "signal_kind": "phase_reset_trigger",
+      "source": "user_confirmed",
+      "summed_at_destination": true,
+      "notes": "Short Delay output is one of the signals driving SAW oscillator phase reset."
+    },
+    {
+      "id": "conn_19",
+      "from": "hardware_io.audio_input_1",
+      "to": "saw_oscillator.sync_trig_in",
+      "signal_kind": "phase_reset_trigger",
+      "source": "user_confirmed",
+      "summed_at_destination": true,
+      "notes": "Oscillator sync input resets oscillator phase."
+    },
+    {
+      "id": "conn_20",
+      "from": "hardware_io.grf_1",
+      "to": "saw_oscillator.cv_in",
+      "signal_kind": "external_bipolar_cv",
+      "source": "user_confirmed",
+      "notes": "GRF1 goes to SAW oscillator pitch CV."
+    },
+    {
+      "id": "conn_21",
+      "from": "hardware_io.grf_2",
+      "to": "sqr_oscillator.cv_in",
+      "signal_kind": "external_bipolar_cv",
+      "source": "user_confirmed",
+      "notes": "GRF2 goes to SQR oscillator pitch CV."
+    },
+    {
+      "id": "conn_22",
+      "from": "hardware_io.grf_2",
+      "to": "short_delay.time_cv",
+      "signal_kind": "external_bipolar_cv",
+      "source": "user_confirmed",
+      "notes": "GRF2 also controls Short Delay time."
+    },
+    {
+      "id": "conn_23",
+      "from": "hardware_io.grf_3",
+      "to": "torcido.tone_cv",
+      "signal_kind": "external_bipolar_cv",
+      "source": "user_confirmed",
+      "summed_at_destination": true,
+      "notes": "GRF3 goes to TORCIDO tone control."
+    },
+    {
+      "id": "conn_24",
+      "from": "hardware_io.grf_4",
+      "to": "torcido.dry_wet_cv",
+      "signal_kind": "external_bipolar_cv",
+      "source": "user_confirmed",
+      "notes": "GRF4 goes to TORCIDO dry/wet control."
+    },
+    {
+      "id": "conn_25",
+      "from": "hardware_io.grf_5",
+      "to": "saw_oscillator.color_cv_in",
+      "signal_kind": "external_bipolar_cv",
+      "source": "user_confirmed",
+      "notes": "GRF5 goes to SAW oscillator color control."
+    },
+    {
+      "id": "conn_26",
+      "from": "hardware_io.grf_6",
+      "to": "ring_mod.on_off_cv",
+      "signal_kind": "gate_or_cv",
+      "source": "user_confirmed",
+      "notes": "GRF6 goes to Ring Mod on/off control."
+    },
+    {
+      "id": "conn_27",
+      "from": "short_delay.out",
+      "to": "torcido.in_1",
+      "signal_kind": "audio",
+      "source": "user_confirmed",
+      "notes": "Short Delay output feeds TORCIDO input 1."
+    },
+    {
+      "id": "conn_28",
+      "from": "saw_oscillator.out",
+      "to": "torcido.in_2",
+      "signal_kind": "audio",
+      "source": "user_confirmed",
+      "notes": "SAW oscillator output feeds TORCIDO input 2."
+    },
+    {
+      "id": "conn_29",
+      "from": "torcido.out_1",
+      "to": "short_delay.in",
+      "signal_kind": "audio",
+      "source": "user_confirmed",
+      "summed_at_destination": true,
+      "notes": "TORCIDO output 1 feeds Short Delay input."
+    },
+    {
+      "id": "conn_30",
+      "from": "torcido.out_2",
+      "to": "short_delay.in",
+      "signal_kind": "audio",
+      "source": "user_confirmed",
+      "summed_at_destination": true,
+      "notes": "TORCIDO output 2 also feeds Short Delay input."
+    },
+    {
+      "id": "conn_31",
+      "from": "amp.amp1_out",
+      "to": "hardware_io.audio_output_2",
+      "signal_kind": "audio",
+      "source": "user_confirmed",
+      "summed_at_destination": true,
+      "notes": "AMP1 output feeds hardware audio output 2."
+    },
+    {
+      "id": "conn_32",
+      "from": "amp.amp2_out",
+      "to": "hardware_io.audio_output_1",
+      "signal_kind": "audio",
+      "source": "user_confirmed",
+      "summed_at_destination": true,
+      "notes": "AMP2 output feeds hardware audio output 1."
+    }
+  ],
+  "dsp_graph_hypothesis": {
+    "audio_path": [
+      "short_delay.out feeds torcido.in_1",
+      "saw_oscillator.out feeds torcido.in_2",
+      "torcido.out_1 and torcido.out_2 are summed at short_delay.in",
+      "torcido.out_1 feeds ring_mod.in",
+      "sqr_oscillator.out and hardware_io.audio_input_1 are summed at ring_mod.mod_in",
+      "ring_mod.out feeds hardware_io.audio_output_1, hardware_io.audio_output_2, amp.amp1_in, and lfo.mod_in",
+      "amp.amp1_out feeds hardware_io.audio_output_2; amp.amp2_out feeds hardware_io.audio_output_1",
+      "short_delay.out is also used as one of the phase-reset sources for saw_oscillator.sync_trig_in"
+    ],
+    "modulation_path": [
+      "lfo.cv_out feeds amp.amp1_offset_cv, torcido.tone_cv, torcido.tube_warm_cv, and sqr_oscillator.color_cv_in",
+      "lfo.inverted_out feeds amp.amp2_offset_cv, short_delay.feedback_cv, sqr_oscillator.fine_cv_in, and lfo.mod_in",
+      "the only wired LFO input is rate modulation via lfo.mod_in",
+      "hardware_io.audio_input_1 feeds sqr_oscillator.sync_trig_in and saw_oscillator.sync_trig_in as oscillator phase-reset sources",
+      "hardware_io.grf_1 through hardware_io.grf_6 provide external bipolar CV inputs to pitch, color, tone, dry/wet, and ring-mod on/off destinations"
+    ],
+    "c_implementation_hint": "Represent modules as DSP nodes with named audio/CV ports. Inputs with multiple incoming audio/CV connections should be implemented as summing junctions. Oscillator sync inputs should reset oscillator phase, likely by edge-detecting their summed/reset source rather than treating them as normal pitch/audio inputs."
+  },
+  "raw_binary_decode": {
+    "module_or_parameter_records": [
+      {
+        "offset_hex": "0x28",
+        "bytes_decimal": [3, 0, 0, 25, 0, 68, 0, 100]
+      },
+      {
+        "offset_hex": "0x30",
+        "bytes_decimal": [100, 53, 100, 0, 0, 0, 0, 0]
+      },
+      {
+        "offset_hex": "0x38",
+        "bytes_decimal": [5, 1, 0, 0, 0, 0, 0, 0]
+      },
+      {
+        "offset_hex": "0x40",
+        "bytes_decimal": [30, 1, 52, 44, 50, 0, 0, 0]
+      },
+      {
+        "offset_hex": "0x48",
+        "bytes_decimal": [1, 30, 3, 24, 50, 0, 0, 0]
+      },
+      {
+        "offset_hex": "0x50",
+        "bytes_decimal": [9, 0, 100, 50, 100, 0, 0, 0]
+      },
+      {
+        "offset_hex": "0x58",
+        "bytes_decimal": [29, 3, 50, 33, 100, 0, 0, 0]
+      },
+      {
+        "offset_hex": "0x60",
+        "bytes_decimal": [16, 0, 0, 100, 0, 0, 0, 0]
+      }
+    ],
+    "connection_matrix_assumption": {
+      "start_offset_hex": "0x80",
+      "description": "All nonzero bytes from offset 0x80 onward. Offset indexes are relative to 0x80. Values are preserved exactly; endpoint semantics are not yet decoded."
+    },
+    "connection_matrix_nonzero_entries": [
+      {"file_offset": 131, "relative_offset": 3, "value": 12},
+      {"file_offset": 134, "relative_offset": 6, "value": 9},
+      {"file_offset": 136, "relative_offset": 8, "value": 1},
+      {"file_offset": 137, "relative_offset": 9, "value": 6},
+      {"file_offset": 138, "relative_offset": 10, "value": 1},
+      {"file_offset": 142, "relative_offset": 14, "value": 16},
+      {"file_offset": 143, "relative_offset": 15, "value": 18},
+      {"file_offset": 146, "relative_offset": 18, "value": 10},
+      {"file_offset": 147, "relative_offset": 19, "value": 6},
+      {"file_offset": 149, "relative_offset": 21, "value": 10},
+      {"file_offset": 162, "relative_offset": 34, "value": 3},
+      {"file_offset": 163, "relative_offset": 35, "value": 3},
+      {"file_offset": 230, "relative_offset": 102, "value": 4},
+      {"file_offset": 260, "relative_offset": 132, "value": 4},
+      {"file_offset": 277, "relative_offset": 149, "value": 5},
+      {"file_offset": 295, "relative_offset": 167, "value": 5},
+      {"file_offset": 339, "relative_offset": 211, "value": 12},
+      {"file_offset": 400, "relative_offset": 272, "value": 4},
+      {"file_offset": 426, "relative_offset": 298, "value": 16},
+      {"file_offset": 456, "relative_offset": 328, "value": 17},
+      {"file_offset": 466, "relative_offset": 338, "value": 8},
+      {"file_offset": 479, "relative_offset": 351, "value": 10},
+      {"file_offset": 486, "relative_offset": 358, "value": 9},
+      {"file_offset": 499, "relative_offset": 371, "value": 18},
+      {"file_offset": 528, "relative_offset": 400, "value": 11},
+      {"file_offset": 540, "relative_offset": 412, "value": 10},
+      {"file_offset": 541, "relative_offset": 413, "value": 12},
+      {"file_offset": 558, "relative_offset": 430, "value": 12},
+      {"file_offset": 562, "relative_offset": 434, "value": 17},
+      {"file_offset": 635, "relative_offset": 507, "value": 8},
+      {"file_offset": 695, "relative_offset": 567, "value": 8},
+      {"file_offset": 715, "relative_offset": 587, "value": 18},
+      {"file_offset": 716, "relative_offset": 588, "value": 1},
+      {"file_offset": 724, "relative_offset": 596, "value": 9},
+      {"file_offset": 732, "relative_offset": 604, "value": 10},
+      {"file_offset": 765, "relative_offset": 637, "value": 18},
+      {"file_offset": 768, "relative_offset": 640, "value": 3},
+      {"file_offset": 775, "relative_offset": 647, "value": 5},
+      {"file_offset": 782, "relative_offset": 654, "value": 12},
+      {"file_offset": 793, "relative_offset": 665, "value": 15},
+      {"file_offset": 834, "relative_offset": 706, "value": 6},
+      {"file_offset": 879, "relative_offset": 751, "value": 8},
+      {"file_offset": 962, "relative_offset": 834, "value": 18},
+      {"file_offset": 989, "relative_offset": 861, "value": 5}
+    ]
+  }
+}

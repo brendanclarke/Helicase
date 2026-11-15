@@ -37,15 +37,22 @@
 #include <float.h>
 
 /*
- * Distortion stand-in. prelude.h supplies the Distortion type; the identity
- * curve below makes the gain ramps observable exactly. Both the new and the
- * reference formulas use it, so B1 still proves the bit-identity of the ramp.
+ * Distortion stand-in. prelude.h supplies the Distortion type; these identity
+ * curves make the gain ramps observable exactly. The float-input helper is
+ * also required by voicePostChain.h; both the new and reference formulas use
+ * the zero-shape identity, so B1 still proves the bit-identity of the ramp.
  */
 static inline int16_t distortion_curveSample16(const Distortion *dist,
                                                int16_t x)
 {
 	(void)dist;
 	return x;
+}
+
+static inline int16_t distortion_curveSampleF(const Distortion *dist, float x)
+{
+	(void)dist;
+	return (int16_t)(int32_t)x;
 }
 
 #include "rm_slope_type.c"

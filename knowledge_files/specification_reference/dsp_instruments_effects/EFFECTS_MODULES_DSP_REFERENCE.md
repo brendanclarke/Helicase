@@ -3,10 +3,12 @@
 Each Effect module's DSP, binding rules, arena use and cost. Part I is the
 system framework every module shares; Part II has one section per Effect type.
 
-- **Current as of:** Session 091 P6 close (2026-11-06). S091 expanded
-  CrumpBit from one engine to five sub-types (dly/cmb/pit/grn/rvb) across
-  six phases (P1–P6), capped at 170 instructions/frame. S074 added
-  CrumpBit (the first type using the arena) and the StereoFilter reference.
+- **Current as of:** Session 094 P2 (2026-11-13). S094 P2 restored the
+  TPT SVF on `grn`/`rvb` (removed S091 P5 F1) and raised the CrumpBit
+  cap to 181 instructions/frame. S091 expanded CrumpBit from one engine
+  to five sub-types (dly/cmb/pit/grn/rvb) across six phases (P1–P6).
+  S074 added CrumpBit (the first type using the arena) and the
+  StereoFilter reference.
 - **Scope split with `MIXER_SYSTEM_DSP_REFERENCE.md`:** that document covers
   the mixer signal path (decimation, fader gains, dry/send, pan/route), the
   FX bus handoff and return, the master bus compressor, the output pipeline,
@@ -203,8 +205,8 @@ channels then feed a mono 8-bit tape-style delay kept in the arena; its
 feedback return is DC-blocked, tilted and soft-kneed, and the Mix control
 crossfades the bit-crushed signal with the raw delay read. Finally a stereo
 output filter shapes the Effect output: a TPT state-variable filter (eight
-voice types) in `dly`/`cmb`/`pit`, and a one-pole (mapped type, no
-resonance) in `grn`/`rvb` (S091 P5 F1). Three stages, one row owner each
+voice types) in all five sub-types (restored to `grn`/`rvb` in S094 P2
+§23; was one-pole S091 P5 F1–S094 P1). Three stages, one row owner each
 (S091 P2 §4).
 
 ```
@@ -223,10 +225,9 @@ per sample, the delay sub-type (the tape loop, mono):
   wp++ (wrap), valid++ (saturating at the loop length)
   out  = h + mix·(g·wet − h)                         first echo unshaped
 per sample, the shared output filter (second pass, both channels; S091 P5 F1):
-  dly/cmb/pit: TPT SVF: v1 = a1·ic1 + a2·v3, v2 = ic2 + a2·ic1 + a3·v3, ic1 = 2·v1 − ic1, ic2 = 2·v2 − ic2
+  all sub-types: TPT SVF: v1 = a1·ic1 + a2·v3, v2 = ic2 + a2·ic1 + a3·v3, ic1 = 2·v1 − ic1, ic2 = 2·v2 − ic2
                out = cx·x + cb·bp + cl·lp            one 3-coefficient mix, ramped per block
-  grn/rvb:     s += k·(x − s), k = crumpBit_onePoleK[frq]   (−3 dB matched to the SVF at res 0)
-               out = cx·x + cl·s                     LP (0, 1), HP (1, −1), flat (1, 0); the type crossfade ramps per block
+               (grn/rvb restored to SVF in S094 P2 §23; was one-pole S091 P5 F1–S094 P1)
 ```
 
 ### 6.1 CrumpBit sub-types (S091 P3; efficiencies S091 P5; parameter cleanup S091 P6)
@@ -234,10 +235,11 @@ per sample, the shared output filter (second pass, both channels; S091 P5 F1):
 Four stages per block. Stage 1 is the shared dry path (ADC, the data-line
 table, DAC, AC coupling) and stage 3 the shared MIX stage; stage 2 is exactly
 one sub-engine, chosen once per block by `sub`; stage 4 is the output filter
-of that sub-type (the TPT SVF in `dly`/`cmb`/`pit`, a one-pole in
-`grn`/`rvb`). Within a sub-type every statement runs every frame (constant
-CPU). S091 P5 caps the whole Effect at 170 instructions per frame in every
-sub-type, worst case, gated by `crumpbit_cpu.py`.
+of that sub-type (TPT SVF in all five sub-types since S094 P2; was
+one-pole in `grn`/`rvb` from S091 P5 F1 to S094 P1). Within a sub-type
+every statement runs every frame (constant CPU). The whole Effect is
+capped at 181 instructions per frame in every sub-type, worst case,
+gated by `crumpbit_cpu.py` (raised from 170 in S094 P2).
 
 **S091 P6 changes across sub-types:**
 - `dpn` renamed to `spn` ("SubPan") in every sub-type. The row's per-sub-type
@@ -253,9 +255,10 @@ sub-type, worst case, gated by `crumpbit_cpu.py`.
   cleared or gated; every row and FX-lane value carries over, rows are
   aligned by role, and only the new engine's DSP state is re-initialised and
   its prefix clamped to the new geometry. Cross-format glitches are wanted.
-  A switch between an SVF sub-type and `grn`/`rvb` hands the output
-  filter's state over (SVF low integrator ↔ one-pole state), so the filter
-  carries on instead of starting from a stale integrator (S091 P5 F1).
+  All sub-types now share the SVF output filter (S094 P2), so a switch
+  hands the integrator states over directly. (Before S094 P2, a switch
+  between an SVF sub-type and `grn`/`rvb` mapped SVF low integrator ↔
+  one-pole state; S091 P5 F1.)
 - **MIX stage (binding, user).** `mix` is not a sub-type control: for every
   sub-type, `out = h + mix·(wet − h)`, where `h` is stage 1 and `wet` is the
   selected engine's output. The row keeps its name and lane 3 in every lane
@@ -305,7 +308,7 @@ sub-type, worst case, gated by `crumpbit_cpu.py`.
   (the window needs no lower clamp). The echo is plain feedback with gain
   0..0.98 over `fbk` (no DC blocker, no soft knee; it always decays). One
   hardware RNG word per block is expanded by an integer hash. Whole-Effect
-  worst case 165.3 per frame (S091 P6; was 166.5).
+  worst case 180.8 per frame (S094 P2, SVF restored; was 165.3 S091 P6).
 - **`rvb` 8-bit four-line FDN (engine C, loop 131).** Four integer taps from
   one packed 32-bit word per frame (one 8-bit lane per line), one-pole
   low-pass damping per line (S091 P5 R1: damping is LP-only; `ton` above
@@ -314,8 +317,8 @@ sub-type, worst case, gated by `crumpbit_cpu.py`.
   so one XOR makes `ldrsb` read signed values. `snc` freezes (`g_k` 0.999,
   input off) and the wet path plus the line feedback open per block only
   once `valid` covers the longest line. The output filter is the shared
-  one-pole (stage 4); `res` shows `---` (no resonance in the
-  one-pole path). Whole-Effect worst case 163.9 per frame.
+  TPT SVF (stage 4; restored from one-pole in S094 P2 §23).
+  Whole-Effect worst case 163.9 per frame.
 
 `rte` is clamped per sub-type by `crumpBit_subtypeRateLimit()` through the
 runtime-aware `effective_max(rt, index, share)`; BUFFER_DEPENDENT rows are
@@ -427,19 +430,22 @@ every lane read goes through
   Rate limit and table lookups (the `dly` Sync search was removed in S091
   P6). The filter is a second pass
   over the block so the stage-2 loop's register pressure stays bounded.
-- **Cost (S091 P6 final, per sub-type worst case per frame):** `dly` 157.6,
-  `cmb` 153.8, `pit` 154.1, `grn` 165.3, `rvb` 163.9. Worst is 165.3,
-  within the 170-cap gate (`crumpbit_cpu.py`). Flash: 712,684 B (headroom
-  40,980 B). Runtime: 100 B.
+- **Cost (S094 P2, per sub-type worst case per frame):** `dly` 157.6,
+  `cmb` 153.8, `pit` 154.1, `grn` 180.8, `rvb` 163.9. Worst is `grn`
+  180.8, within the 181-cap gate (`crumpbit_cpu.py`; raised from 170 in
+  S094 P2 §23 to accommodate the restored SVF on `grn`/`rvb`). About
+  16,280 cycles against the 16,634 Effect budget share. Flash: 712,684 B
+  (headroom 40,980 B). Runtime: 100 B.
   - (S091 P3 baseline for `dly` was 172 per frame; S091 P5 brought it to
-    160.0; P6's delay time table removed the Sync search overhead.)
+    160.0; P6's delay time table removed the Sync search overhead.
+    S094 P2 restored the SVF on `grn`/`rvb`, raising `grn` from 165.3.)
 
 ### 6.2 CrumpBit binding rules
 
 - **Sub-type dispatch (S091):** five sub-types (dly/cmb/pit/grn/rvb) behind
   a per-block dispatch. Four stages: shared dry path, one sub-engine, shared
   MIX stage (`mix`, lane 3 everywhere, never freeable), shared output filter
-  (TPT SVF for dly/cmb/pit; one-pole for grn/rvb — `res` inert, shows `---`).
+  (TPT SVF for all five sub-types since S094 P2; was one-pole for grn/rvb).
   `sub` is Pattern-automatable only; never LFO, Morph, or FX lane.
 - **Lane maps:** per stored `sub` (`effects_laneTable()`). Owners:
   `CRUMPBIT_ROWS_SHARED` / `_SUBTYPE` / `_GRN`.
@@ -449,12 +455,15 @@ every lane read goes through
 - **grn model (S091 P4/P5/P6):** flat-top windows, voice stealing, overwrite
   clamp, freeze with anchor, tap fade on time changes.
 - **`fin` row (S091 P5):** pit fine pitch ±52 cents, row 23.
+- **SVF restored on `grn`/`rvb` (S094 P2 §23):** the one-pole output filter
+  added in S091 P5 F1 was replaced by the original TPT SVF. All five
+  sub-types now share the same SVF output stage.
 - **`CrumpBitRuntime` 100 B:** 56 shared + 44 union; 24 B of the approved
   +32 B over 76 B used; 8 B remain.
-- **170-instruction/frame cap (S091 P5, binding):** every CrumpBit sub-type
-  must stay at or below 170 instructions per frame, worst case. Gated by
-  `crumpbit_cpu.py --cap 170` in the test Makefile. grn margin is 3.5/frame;
-  any per-frame addition must be measured. `crumpBit_dataLines` rebuild
+- **181-instruction/frame cap (S091 P5, raised S094 P2):** every CrumpBit
+  sub-type must stay at or below 181 instructions per frame, worst case.
+  Gated by `crumpbit_cpu.py --cap 181` in the test Makefile. `grn` is the
+  binding sub-type at 180.8/frame (0.2 margin). `crumpBit_dataLines` rebuild
   (~48/frame for one block on bof/biv change) is outside the cap by design.
 - **Host laws:** CB1–CB23, 25 break builds.
 - **24 rows** total.

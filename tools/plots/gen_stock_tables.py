@@ -3,7 +3,7 @@
 
 What:       reads the harmonic recipe tools/plots/stock_wave_harmonics.csv
             (written by tools/plots/plot_stock_waves.py) and writes
-            Core/DSPAudio/wavetableStock.c: one const int16_t [11][1024]
+            tools/plots/archive/wavetableStock.c: one const int16_t [11][1024]
             table per wave, in the layout of sawTable/recTable/triTable
             (wavetable.c), read by the same oscillator loops.
             The band limit of each octave level is measured from sawTable:
@@ -28,8 +28,12 @@ Checks:     (the script exits 1 if one fails)
             C4 --check: regenerate in memory and compare with the committed
                file byte for byte.
 Inputs:     tools/plots/stock_wave_harmonics.csv, Core/DSPAudio/wavetable.c.
-Outputs:    Core/DSPAudio/wavetableStock.c (or --out PATH).
-Accessors:  python3 tools/gen_stock_tables.py [--check] [--out PATH];
+Outputs:    tools/plots/archive/wavetableStock.c (or --out PATH). S093 P3:
+            Re3/Sw3 were removed from the firmware; the file is the archived
+            specification, outside the build. To restore the waves, follow
+            INSTRUMENTS_DSP_REFERENCE.md §6.1.2 (generate into
+            Core/DSPAudio/ with --out).
+Accessors:  python3 tools/plots/gen_stock_tables.py [--check] [--out PATH];
             tools/dsp_test/Makefile stock_tables.
 Affiliates: wavetable.h (the externs), Oscillator.c osc_stockTables[],
             tools/plots/plot_stock_tables.py (the review plot).
@@ -43,11 +47,13 @@ import sys
 
 import numpy as np
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-CSV_PATH = os.path.join(HERE, "plots", "stock_wave_harmonics.csv")
+HERE = os.path.dirname(os.path.abspath(__file__))          # tools/plots
+ROOT = os.path.dirname(os.path.dirname(HERE))
+CSV_PATH = os.path.join(HERE, "stock_wave_harmonics.csv")
 TABLE_PATH = os.path.join(ROOT, "Core", "DSPAudio", "wavetable.c")
-OUT_PATH = os.path.join(ROOT, "Core", "DSPAudio", "wavetableStock.c")
+# S093 P3: Re3/Sw3 are no longer in the firmware; the output is archived
+# outside the build so --check keeps proving the recipe reproduces.
+OUT_PATH = os.path.join(HERE, "archive", "wavetableStock.c")
 
 # (recipe name in the CSV, C table name, display name). Order = wav order
 # from SQ3 on (Oscillator.h). ReA/TrA/SwA (sqa, tra, swa) come later.

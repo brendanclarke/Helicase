@@ -1,0 +1,18 @@
+GREW mixer_calcNextSampleBlock: mixer_decimateBlock mixer.c:177 [mixer_calcNextSampleBlock]: [10, 10] -> [11]
+SHRANK mixer_calcNextSampleBlock: calcNoiseBlock Oscillator.c [calcNextOscSampleFmBlock < HiHat_calcSyncBlockVoice < HiHat_calcSyncBlockVoice < instrumentManager_calcSlotSyncBlock < mixer_calcNextSampleBlock]: [15, 18] -> [16]
+pool mixer_calcNextSampleBlock: base Drum_calcVoiceSyncBlock DrumVoice.c [Drum_calcVoiceSyncBlock < instrumentManager_calcSlotSyncBlock < mixer_calcNextSampleBlock] [10]
+pool mixer_calcNextSampleBlock: base bufferTool_interpolatedGain BufferTools.h [voicePost_drum < Drum_calcVoiceSyncBlock < Drum_calcVoiceSyncBlock < instrumentManager_calcSlotSyncBlock < mixer_calcNextSampleBlock] [25]
+pool mixer_calcNextSampleBlock: base calcFmSineBlock Oscillator.c [calcNextOscSampleFmBlock < Drum_calcVoiceSyncBlock < Drum_calcVoiceSyncBlock < instrumentManager_calcSlotSyncBlock < mixer_calcNextSampleBlock] [29]
+pool mixer_calcNextSampleBlock: base calcNoiseBlock Oscillator.c [calcNextOscSampleFmBlock < Drum_calcVoiceSyncBlock < Drum_calcVoiceSyncBlock < instrumentManager_calcSlotSyncBlock < mixer_calcNextSampleBlock] [11]
+pool mixer_calcNextSampleBlock: base calcSampleOscFmBlock Oscillator.c [calcNextOscSampleFmBlock < HiHat_calcSyncBlockVoice < HiHat_calcSyncBlockVoice < instrumentManager_calcSlotSyncBlock < mixer_calcNextSampleBlock] [36]
+pool mixer_calcNextSampleBlock: base transient_calcClickBlock transientGenerator.c [transient_calcBlock < Drum_calcVoiceSyncBlock < Drum_calcVoiceSyncBlock < instrumentManager_calcSlotSyncBlock < mixer_calcNextSampleBlock] [22]
+pool mixer_calcNextSampleBlock: now  calcNoiseBlock Oscillator.c [calcNextOscSampleBlock < Cymbal_calcSyncBlockVoice < Cymbal_calcSyncBlockVoice < instrumentManager_calcSlotSyncBlock < mixer_calcNextSampleBlock] [15, 15, 18, 18]
+pool mixer_calcNextSampleBlock: now  calcNoiseBlock Oscillator.c [calcNextOscSampleBlock < HiHat_calcSyncBlockVoice < HiHat_calcSyncBlockVoice < instrumentManager_calcSlotSyncBlock < mixer_calcNextSampleBlock] [15, 15, 18, 18]
+pool mixer_calcNextSampleBlock: now  calcSineBlock Oscillator.c [calcNextOscSampleBlock < Cymbal_calcSyncBlockVoice < Cymbal_calcSyncBlockVoice < instrumentManager_calcSlotSyncBlock < mixer_calcNextSampleBlock] [22, 22]
+pool mixer_calcNextSampleBlock: now  calcSineBlock Oscillator.c [calcNextOscSampleBlock < HiHat_calcSyncBlockVoice < HiHat_calcSyncBlockVoice < instrumentManager_calcSlotSyncBlock < mixer_calcNextSampleBlock] [22, 22]
+pool mixer_calcNextSampleBlock: now  calcWavetableOscBlock Oscillator.c [calcNextOscSampleBlock < Cymbal_calcSyncBlockVoice < Cymbal_calcSyncBlockVoice < instrumentManager_calcSlotSyncBlock < mixer_calcNextSampleBlock] [23, 23, 23, 23, 23, 23]
+pool mixer_calcNextSampleBlock: now  calcWavetableOscBlock Oscillator.c [calcNextOscSampleBlock < HiHat_calcSyncBlockVoice < HiHat_calcSyncBlockVoice < instrumentManager_calcSlotSyncBlock < mixer_calcNextSampleBlock] [23, 23, 23, 23, 23, 23]
+pool mixer_calcNextSampleBlock: base [36, 29, 25, 22, 11, 10, 10] -> now [23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 22, 22, 22, 22, 18, 18, 18, 18, 15, 15, 15, 15, 10]: GREW, uncovered [23, 23, 23, 23, 23, 23, 23, 23, 23, 22, 22, 22, 22, 18, 18, 18, 18, 15, 15, 15, 15, 10]
+info mixer_calcNextSampleBlock: 12 -> 14 spans without a cycle (layout fragments, not compared)
+mixer_calcNextSampleBlock: 43 -> 59 cyclic loops
+elf_loopsrc: 2 loop groups grew

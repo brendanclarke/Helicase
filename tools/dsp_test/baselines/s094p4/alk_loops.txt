@@ -1,0 +1,6 @@
+# S094 P4: the Alkaline fused loops, linked (2026-11-11), make clean; make all
+# The three existing wrappers are unchanged; the new mode-4 copy is 227.
+DiodeLadder_renderB2Osc: loop head 0x8063dac: longest 221 (vdiv 3), shortest 221, paths 1
+DiodeLadder_renderB2Osc2: loop head 0x806433c: longest 234 (vdiv 3), shortest 234, paths 1
+DiodeLadder_renderB2OscPwm: loop head 0x80648ec: longest 215 (vdiv 3), shortest 215, paths 1
+DiodeLadder_renderB2OscPwmWt: loop head 0x8064e50: longest 227 (vdiv 3), shortest 227, paths 1

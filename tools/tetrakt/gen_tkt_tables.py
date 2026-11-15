@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Write and check the Tetrakt's constant tables, TetraktTables.c (S096 P1).
+
+What:       computes every table declared in TetraktTables.h and writes
+            Core/DSP/Instruments/Tetrakt/TetraktTables.c:
+              tktToneG[t]      t = 0..126, the effective tone byte (plan
+                               §5.3): g = tan(pi fc / fs) of the tone SVF.
+                               t < 63: LP, fc = 18 kHz x (120 / 18000)^u'
+                               with u' = (63 - t) / 63; t > 63: HP,
+                               fc = 20 Hz x (3000 / 20)^u' with
+                               u' = (t - 63) / 63; t = 63: the LP's 18 kHz
+                               (both weights are 0 there, so g only keeps
+                               the ramp continuous).
+              tktDriveMakeup[d] d = 0..127 (plan §5.4): half make-up. The
+                               drive's output law (gain 2^(5 d / 127), bias
+                               0.25 (d / 127)^2, the clamped cubic, minus
+                               clip(bias), the dry/wet crossfade over the
+                               first 8 steps) is run on a -12 dBFS-peak
+                               sine; m = 10^(-0.5 x gain_dB / 20). d = 0 is
+                               exactly 1.0 (gain 0 dB).
+              tktSrrRate[v]    v = 0..127 (plan §5.5): the drum / mixer srt
+                               law valueShaperI2F(v, -0.7)
+                               (InstrumentManager.c:4349), written as
+                               exactly 1.0 at v = 127.
+              tktFbLpK[s]      s = 0..127 (S1's sto, SD6): the feedback
+                               one-pole's k = 1 - exp(-2 pi fc / fs),
+                               fc = 600 Hz x (16000 / 600)^(s / 127).
+            fs is config.h REAL_FS (44,108.0729 Hz). Floats are written
+            with 9 significant digits (float32 exact).
+Why:        one owner for every constant (the Colloid's rule,
+            gen_col_tables.py); no tan, exp or pow in the control path;
+            the exact entries (tktSrrRate[127], tktDriveMakeup[0]) carry
+            the bypass laws of plan §13 step 1.
+Inputs:     --check: compare instead of write.
+Outputs:    the file; with --check a message, exit 1 on a difference.
+Accessors:  python3 tools/tetrakt/gen_tkt_tables.py [--check];
+            make -C tools/dsp_test tetrakt_tables.
+Affiliates: TetraktTables.h (sizes); TetraktVoice.c (readers);
+            S096_P1_TETRAKT_SAMPLE_PLAYER.md §5.
+"""
+import argparse
+import math
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(HERE))
+OUT = os.path.join(ROOT, "Core", "DSP", "Instruments", "Tetrakt", "TetraktTables.c")
+
+FS = 44108.07291666667      # config.h REAL_FS
+TONE_POINTS = 127           # TetraktTables.h TKT_TONE_POINTS
+POINTS = 128                # TetraktTables.h TKT_TABLE_POINTS
+LP_TOP, LP_BOTTOM = 18000.0, 120.0
+HP_BOTTOM, HP_TOP = 20.0, 3000.0
+DRIVE_OCT, BIAS_MAX, WET_STEPS, CLIP, CUBIC = 5.0, 0.25, 8, 1.5, 4.0 / 27.0
+FB_LO, FB_HI = 600.0, 16000.0
+
+
+def f32(x):
+    """A C float literal with 9 significant digits."""
+    s = f"{x:.9g}"
+    if "." not in s and "e" not in s:
+        s += ".0"
+    return s + "f"
+
+
+def tone_g(t):
+    if t < 63:
+        fc = LP_TOP * (LP_BOTTOM / LP_TOP) ** ((63 - t) / 63.0)
+    elif t > 63:
+        fc = HP_BOTTOM * (HP_TOP / HP_BOTTOM) ** ((t - 63) / 63.0)
+    else:
+        fc = LP_TOP
+    return math.tan(math.pi * fc / FS)
+
+
+def clip(x):
+    x = max(-CLIP, min(CLIP, x))
+    return x - CUBIC * x * x * x
+
+
+def drive_out(x, d):
+    """TetraktVoice.c tkt_layerPost()'s drive stage, restated."""
+    dn = d / 127.0
+    g = 2.0 ** (DRIVE_OCT * dn)
+    b = BIAS_MAX * dn * dn
+    wet = 1.0 if d >= WET_STEPS else d / float(WET_STEPS)
+    y = clip(g * x + b) - clip(b)
+    return x + wet * (y - x)
+
+
+def makeup(d):
+    if d == 0:
+        return 1.0
+    n = 4096
+    amp = 10.0 ** (-12.0 / 20.0)
+    xs = [amp * math.sin(2 * math.pi * k / n) for k in range(n)]
+    ys = [drive_out(x, d) for x in xs]
+    # the DC blocker on the bus removes the bias's moving DC: compare AC power
+    my = sum(ys) / n
+    rx = math.sqrt(sum(x * x for x in xs) / n)
+    ry = math.sqrt(sum((y - my) ** 2 for y in ys) / n)
+    gain_db = 20.0 * math.log10(ry / rx)
+    return 10.0 ** (-0.5 * gain_db / 20.0)
+
+
+def srr_rate(v):
+    if v == 127:
+        return 1.0
+    shape = -0.7
+    k = 2 * shape / (1.0001 - shape)
+    val = v / 127.0
+    return (1 + k) * val / (1 + k * abs(val))
+
+
+def fb_k(s):
+    fc = FB_LO * (FB_HI / FB_LO) ** (s / 127.0)
+    return 1.0 - math.exp(-2.0 * math.pi * fc / FS)
+
+
+def rows(values, per=4):
+    out = []
+    for i in range(0, len(values), per):
+        out.append("    " + ", ".join(values[i:i + per]) + ",")
+    return out
+
+
+def text():
+    L = ["/*",
+         " * TetraktTables.c - generated by tools/tetrakt/gen_tkt_tables.py (S096 P1).",
+         " * Do not edit: change the script and run it again.",
+         " * Contract and meaning of every table: TetraktTables.h.",
+         " */",
+         '#include "TetraktTables.h"',
+         "",
+         "const float tktToneG[TKT_TONE_POINTS] = {"]
+    L += rows([f32(tone_g(t)) for t in range(TONE_POINTS)])
+    L += ["};", "", "const float tktDriveMakeup[TKT_TABLE_POINTS] = {"]
+    L += rows([f32(makeup(d)) for d in range(POINTS)])
+    L += ["};", "", "const float tktSrrRate[TKT_TABLE_POINTS] = {"]
+    L += rows([f32(srr_rate(v)) for v in range(POINTS)])
+    L += ["};", "", "const float tktFbLpK[TKT_TABLE_POINTS] = {"]
+    L += rows([f32(fb_k(s)) for s in range(POINTS)])
+    L += ["};", ""]
+    return "\n".join(L)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--check", action="store_true")
+    a = ap.parse_args()
+    want = text()
+    if a.check:
+        have = open(OUT, newline="").read() if os.path.exists(OUT) else None
+        if have != want:
+            sys.exit(f"gen_tkt_tables: {OUT} differs (rerun without --check)")
+        print("gen_tkt_tables: TetraktTables.c matches")
+        return
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    with open(OUT, "w", newline="\n") as fh:
+        fh.write(want)
+    print("wrote", OUT)
+
+
+if __name__ == "__main__":
+    main()
+

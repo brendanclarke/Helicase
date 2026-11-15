@@ -60,8 +60,8 @@
  *                    S091 P5 A: effective_max(dpn) is 255 in every
  *                    sub-type, and the Position fit `grn` caches after a
  *                    block equals crumpBit_grainPosLimit()'s for the share,
- *                    across shares and a tempo change; the one-pole k
- *                    table (F1) is -3 dB at the SVF's res-0 frequency;
+ *                    across shares and a tempo change (the S091 P5 F1
+ *                    one-pole k table went in S094 P2 AS-13);
  *               CB7  output resonance bound: crumpBit_filterDamping() is in
  *                    [0.0625, 1] for every `res` (Q <= 8), 1 at res 0;
  *               CB8  stability at fbk 127 (gain 1.2; `dly`, the tape
@@ -86,8 +86,8 @@
  *                    mono and short blocks, extreme input: finite, bounded,
  *                    the active engine follows `sub`, each engine's seat
  *                    invariants hold, no byte beyond the share changes;
- *                    S091 P5: the switches cross the SVF and one-pole
- *                    filters (CB19 checks the hand-over itself);
+ *                    S094 P2: every sub-type shares the SVF (CB19 checks
+ *                    that a switch leaves its state untouched);
  *               CB12 `cmb` tuning: the first echo of an impulse arrives at
  *                    crumpBit_combTable[rte] (+-2 samples); `snc` inverts
  *                    the second echo; combNote() is 112 - rte, held at 96;
@@ -117,12 +117,13 @@
  *               CB15 `rvb`: stable and bounded at every extreme of rte,
  *                    fbk, snc, ton and dpn; an RT60 of ~0.49 s (fbk 44)
  *                    decays 9..21 dB over 0.125 s; freeze holds the tail
- *                    within +-6 dB over 1 s; S091 P5 R1: every `ton`
- *                    above 63 plays bit-identically to 63;
+ *                    within +-6 dB over 1 s at mid damping (S095 P4 F1:
+ *                    the pole is flat while frozen); `dmp` (row 24) 2m and
+ *                    2m+1 play bit-identically, and 126 equals 127 (flat);
  *               CB16 `bal` (S091 P4): with balance b, the left channel is
  *                    bit-identical to a run at frq - b and balance 0, the
- *                    right to one at frq + b, for every filter type; S091
- *                    P5: on the SVF (`dly`) and the one-pole (`rvb`) path;
+ *                    right to one at frq + b, for every filter type; on
+ *                    `dly` and on `rvb` (both the SVF since S094 P2);
  *               CB17 (S091 P5 X2) the data-line table equals
  *                    (c & keep) ^ invert for all 256 codes after the first
  *                    block and after every `bof`/`biv` change;
@@ -158,13 +159,22 @@
  *                    at its old D, a silent one takes the new D and rises
  *                    over the next; 2e-6); a reseat silences the tap and
  *                    keeps D inside the new line;
- *               CB19 (S091 P5 F1) the one-pole output filter of `grn`/
- *                    `rvb`: -3 dB at the SVF's res-0 frequency (+-0.3 dB,
- *                    sines through the whole Effect, mix 0); the type
- *                    mapping (LP = LP2 = BP = UBP, HP = notch, peak = off,
- *                    bit for bit; off passes the dry signal exactly); `res`
- *                    has no effect; a switch hands the state over (SVF low
- *                    integrator -> one-pole state -> SVF low integrator).
+ *               CB24 (S095 P1 rework) the type-change feed's head,
+ *                    sk_feedMix(), equals a per-frame-wrap reference
+ *                    over random domains, strides, formats and steps;
+ *                    the feed and the slot lock clear at its end;
+ *               CB25 (S095 P1, §S18) the feed's write-head limit,
+ *                    sk_feedLimit(), keeps exactly the samples no writer
+ *                    reaches before (read + 64 frames), within one sample,
+ *                    against brute force over random heads and writers;
+ *               CB19 (S094 P2 AS-13; was the S091 P5 F1 one-pole law)
+ *                    every sub-type's output filter is the resonant SVF: at
+ *                    mix 0 (the engines' input to stage 4 is the same dry
+ *                    signal), `cmb`, `pit`, `grn` and `rvb` are bit-identical
+ *                    to `dly` for all eight filter types at res 0 and 120,
+ *                    and res 120 differs from res 0 (resonance acts in `grn`
+ *                    and `rvb`); a sub-type switch leaves the filter state
+ *                    (svf_*) untouched, and the output does not jump.
  * Why:        the board cannot report output sample by sample; the
  *             reference proves the code computes exactly the documented
  *             equations (including that the ramp-origin trim is exact and
@@ -174,11 +184,13 @@
  * Inputs:     build/gen/cb_*.c|h, CrumpBitEffect.host.h/.c (extract.py).
  * Outputs:    one line per failure (first 40); "crumpbit failures: N";
  *             exit 1 if N > 0.
- * Accessors:  make -C tools/dsp_test crumpbit (21 break builds follow).
+ * Accessors:  make -C tools/dsp_test crumpbit (20 break builds follow;
+ *             S094 P2 removed break_cb17 with the one-pole).
  * Affiliates: CrumpBitEffect.c/.h; CrumpBitTables.c; CrumpBitParameters.h;
  *             StepScale.c; S091_P2_Implementation.md §5;
  *             S091_P3_Implementation.md (host laws CB4-CB15);
- *             S091_P5_IMPLEMENTATION.md (CB17-CB19).
+ *             S091_P5_IMPLEMENTATION.md (CB17-CB19);
+ *             S094_P2_ALKALINE_SAVINGS.md §23 (CB19 rewritten).
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -206,6 +218,11 @@ static inline uint32_t host_usat(int32_t v, unsigned bits)
 static uint16_t cb_bpm = 120u;
 uint16_t seq_getBpm(void) { return cb_bpm; }
 
+/* S095 P1: the Effect feed slot lock (plan §5.7, D19). */
+static uint8_t cb_feed_lock;
+uint8_t effects_feedSlotLock(void) { return cb_feed_lock; }
+void effects_setFeedSlotLock(uint8_t on) { cb_feed_lock = (on != 0u) ? 1u : 0u; }
+
 /* GetRngValue() (random.h): the hardware word `grn` draws once per block. */
 static uint32_t cb_hw_rng = 0xC0FFEEu;
 int16_t GetRngValue(void)
@@ -223,6 +240,14 @@ int16_t GetRngValue(void)
 #include "cb_tables.h"
 #include "cb_tables.c"
 #include "cb_midipitch.c"   /* midiPitch_detune(): `pit` fine (S091 P5) */
+/*
+ * fxbuf_effectShare() (S095 P1): CrumpBit's export reads its live span from
+ * the share. The laws export with no arena, so the default span applies.
+ */
+void fxbuf_effectShare(fx_share_t *out) { out->base = NULL; out->offset = 0u; out->bytes = 0u; }
+#include "SpaceKit.host.h"
+#include "SpaceKit.host.c"
+#include "SpaceKitDsp.host.c"
 #include "CrumpBitEffect.host.h"
 #include "CrumpBitEffect.host.c"
 
@@ -287,8 +312,9 @@ static uint8_t ref_delayLimit(float max, uint32_t bpm)
 /* The longest delay a share holds (crumpBit_seat()'s rule, length - 2). */
 static float ref_shareMax(uint32_t bytes)
 {
-    const uint32_t len = (bytes > CRUMPBIT_LOOP_MAX_BYTES)
-        ? CRUMPBIT_LOOP_MAX_BYTES : bytes;
+    const uint32_t span = (bytes > SK_PREFIX_BYTES) ? bytes - SK_PREFIX_BYTES : 0u;
+    const uint32_t len = (span > CRUMPBIT_LOOP_MAX_BYTES)
+        ? CRUMPBIT_LOOP_MAX_BYTES : span;
 
     return (len < CRUMPBIT_LOOP_MIN) ? 0.0f : (float)(len - 2u);
 }
@@ -411,8 +437,9 @@ static void ref2_writeParam(RefP2 *rt, uint8_t index, uint8_t value)
 
 static uint32_t ref2_seat(RefP2 *rt, uint32_t bytes)
 {
-    uint32_t len = (bytes > CRUMPBIT_LOOP_MAX_BYTES)
-        ? CRUMPBIT_LOOP_MAX_BYTES : bytes;
+    const uint32_t span = (bytes > SK_PREFIX_BYTES) ? bytes - SK_PREFIX_BYTES : 0u;
+    uint32_t len = (span > CRUMPBIT_LOOP_MAX_BYTES)
+        ? CRUMPBIT_LOOP_MAX_BYTES : span;
 
     if (len != rt->length) {
         if (rt->length != 0u && rt->write_pos < len) {
@@ -603,7 +630,7 @@ static int same_bits(float a, float b)
 
 /* Shares used by CB1 and CB4: whole arena, 1, 2, 6 and 12 units, odd. */
 static const uint32_t cb_shares[] = {
-    CRUMPBIT_LOOP_MAX_BYTES, 122272u, 117856u, 100192u,
+    CRUMPBIT_LOOP_MAX_BYTES + SK_PREFIX_BYTES, 122272u, 117856u, 100192u,
     CRUMPBIT_LOOP_MIN_SHARE_BYTES, 40000u, 64u
 };
 #define CB_SHARE_COUNT (sizeof cb_shares / sizeof cb_shares[0])
@@ -695,9 +722,11 @@ static void law_cb1(void)
             expect(first_max == 127u, msg);
 
         /* The knob limit equals the scan for every share. */
-        for (s = 0u; s <= CRUMPBIT_LOOP_MAX_BYTES + 64u; s += 4096u) {
-            const uint32_t bytes = (s > CRUMPBIT_LOOP_MAX_BYTES)
-                ? CRUMPBIT_LOOP_MAX_BYTES : s;
+        for (s = 0u; s <= CRUMPBIT_LOOP_MAX_BYTES + SK_PREFIX_BYTES + 64u;
+             s += 4096u) {
+            const uint32_t bytes =
+                (s > CRUMPBIT_LOOP_MAX_BYTES + SK_PREFIX_BYTES)
+                    ? CRUMPBIT_LOOP_MAX_BYTES + SK_PREFIX_BYTES : s;
             fx_share_t share = { NULL, 0u, bytes };
 
             cb_bpm = (uint16_t)bpm;
@@ -709,7 +738,8 @@ static void law_cb1(void)
         }
         /* The whole arena: the knob stops at the first t_max row. */
         {
-            fx_share_t full = { NULL, 0u, CRUMPBIT_LOOP_MAX_BYTES };
+            fx_share_t full = { NULL, 0u,
+                                CRUMPBIT_LOOP_MAX_BYTES + SK_PREFIX_BYTES };
 
             snprintf(msg, sizeof msg, "CB1 whole arena bpm %u", bpm);
             expect(crumpBit_subtypeRateLimit(CRUMPBIT_SUBTYPE_DELAY,
@@ -797,7 +827,7 @@ static void law_cb3(void)
 }
 
 /* CB4 + CB5: the whole block against the P2 reference -------------------- */
-#define CB_ARENA CRUMPBIT_LOOP_MAX_BYTES
+#define CB_ARENA (CRUMPBIT_LOOP_MAX_BYTES + SK_PREFIX_BYTES)
 
 static uint8_t arena_new[CB_ARENA];
 static uint8_t arena_ref[CB_ARENA];
@@ -844,7 +874,7 @@ static void law_cb4(void)
     memset(arena_new, 0x55, sizeof arena_new);
     memcpy(arena_ref, arena_new, sizeof arena_ref);
     memset(&rt, 0, sizeof rt);
-    crumpBit_ops.init(&rt, NULL);
+    crumpBit_ops.init(&rt, NULL, NULL);
     ref2_init(&ref);
     expect(rt.ac_c_l == 128 && rt.ac_c_r == 128, "CB5 AC memory seeded 128");
     expect(rt.tone_raw == CRUMPBIT_TONE_FLAT, "CB5 tone flat");
@@ -920,7 +950,8 @@ static void law_cb4(void)
         io.frames = (uint8_t)frames; io.channels = mono ? 1u : 2u;
         io.share = &share;
         crumpBit_ops.process(&rt, &io);
-        ref2_process(&ref, l_ref, mono ? NULL : r_ref, frames, arena_ref,
+        ref2_process(&ref, l_ref, mono ? NULL : r_ref, frames,
+                     arena_ref + SK_PREFIX_BYTES,
                      share.bytes);
 
         for (n = 0u; n < frames; n++) {
@@ -953,7 +984,9 @@ static void law_cb4(void)
                 rt.u.tap.write_pos < rt.u.tap.length &&
                 rt.u.tap.valid <= rt.u.tap.length), msg);
     }
-    expect(memcmp(arena_new, arena_ref, sizeof arena_new) == 0,
+    expect(memcmp(arena_new + SK_PREFIX_BYTES,
+                  arena_ref + SK_PREFIX_BYTES,
+                  sizeof arena_new - SK_PREFIX_BYTES) == 0,
            "CB4 loop bytes identical after 60 s");
 }
 
@@ -965,7 +998,8 @@ static void law_cb6(void)
     char msg[96];
 
     /* S091 P6: the `dly` Rate limit (the delay curve at the test tempo). */
-    for (bytes = 0u; bytes <= CRUMPBIT_LOOP_MAX_BYTES + 64u; bytes += 32u) {
+    for (bytes = 0u; bytes <= CRUMPBIT_LOOP_MAX_BYTES + SK_PREFIX_BYTES + 64u;
+         bytes += 32u) {
         fx_share_t share = { NULL, 0u, bytes };
         const uint8_t want = ref_delayLimit(ref_shareMax(bytes), cb_bpm);
 
@@ -976,7 +1010,8 @@ static void law_cb6(void)
                255u, msg);
     }
     {
-        fx_share_t full = { NULL, 0u, CRUMPBIT_LOOP_MAX_BYTES };
+        fx_share_t full = { NULL, 0u,
+                            CRUMPBIT_LOOP_MAX_BYTES + SK_PREFIX_BYTES };
 
         expect(crumpBit_ops.effective_max(NULL, CRUMPBIT_PARAM_RATE,
                                           &full) == 127u,
@@ -1024,7 +1059,7 @@ static void law_cb8(void)
 
         memset(arena_new, 0, sizeof arena_new);
         memset(&rt, 0, sizeof rt);
-        crumpBit_ops.init(&rt, NULL);
+        crumpBit_ops.init(&rt, NULL, NULL);
         crumpBit_ops.write_param(&rt, CRUMPBIT_PARAM_FEEDBACK, 127u);
         crumpBit_ops.write_param(&rt, CRUMPBIT_PARAM_MIX, 127u);
         crumpBit_ops.write_param(&rt, CRUMPBIT_PARAM_SUB_PAN, 63u);
@@ -1051,7 +1086,7 @@ static void law_cb8(void)
             }
         }
         for (i = 0u; i < rt.u.tap.length; i++)
-            sum += (int8_t)arena_new[i];
+            sum += (int8_t)arena_new[SK_PREFIX_BYTES + i];
         snprintf(msg, sizeof msg, "CB8 pass %u finite", pass);
         expect(finite, msg);
         snprintf(msg, sizeof msg, "CB8 pass %u peak %.3f < 4", pass,
@@ -1088,8 +1123,9 @@ static uint8_t ref_tableScan(const float *table, float max)
  */
 static uint8_t ref_subtypeLimit(uint8_t sub, uint32_t bytes)
 {
-    const uint32_t len = (bytes > CRUMPBIT_LOOP_MAX_BYTES)
-        ? CRUMPBIT_LOOP_MAX_BYTES : bytes;
+    const uint32_t span = (bytes > SK_PREFIX_BYTES) ? bytes - SK_PREFIX_BYTES : 0u;
+    const uint32_t len = (span > CRUMPBIT_LOOP_MAX_BYTES)
+        ? CRUMPBIT_LOOP_MAX_BYTES : span;
     const float max = (len < CRUMPBIT_LOOP_MIN) ? 0.0f : (float)(len - 2u);
     const uint32_t half = len / 2u;
     const float grain_max = (half < 512u) ? 0.0f : (float)(half - 2u);
@@ -1118,10 +1154,11 @@ static void law_cb6_subtypes(void)
     char msg[96];
 
     memset(&rt, 0, sizeof rt);
-    crumpBit_ops.init(&rt, NULL);
+    crumpBit_ops.init(&rt, NULL, NULL);
     for (sub = 0u; sub < CRUMPBIT_SUBTYPE_COUNT; sub++) {
         crumpBit_ops.write_param(&rt, CRUMPBIT_PARAM_SUBTYPE, (uint8_t)sub);
-        for (bytes = 0u; bytes <= CRUMPBIT_LOOP_MAX_BYTES + 64u;
+        for (bytes = 0u;
+             bytes <= CRUMPBIT_LOOP_MAX_BYTES + SK_PREFIX_BYTES + 64u;
              bytes += 32u) {
             fx_share_t share = { NULL, 0u, bytes };
 
@@ -1220,9 +1257,12 @@ static void law_cb6_subtypes(void)
      * P5 A: the manager no longer clamps `dpn` (255 in every sub-type);
      * the engine's own fit, cached by a `grn` block, is the label's.
      */
-    for (bytes = 0u; bytes <= CRUMPBIT_LOOP_MAX_BYTES; bytes += 1024u) {
+    for (bytes = 0u; bytes <= CRUMPBIT_LOOP_MAX_BYTES + SK_PREFIX_BYTES;
+         bytes += 1024u) {
         fx_share_t share = { NULL, 0u, bytes };
-        const uint32_t half = bytes / 2u;
+        const uint32_t span = (bytes > SK_PREFIX_BYTES)
+            ? bytes - SK_PREFIX_BYTES : 0u;
+        const uint32_t half = span / 2u;
         const float gmax = (half < 512u) ? 0.0f : (float)(half - 2u);
         const float tmax = gmax * (float)cb_bpm / CRUMPBIT_SAMPLES_PER_TICK;
         uint32_t fit = 0u;
@@ -1250,12 +1290,13 @@ static void law_cb6_subtypes(void)
         memset(l, 0, sizeof l);
         memset(r, 0, sizeof r);
         memset(&g, 0, sizeof g);
-        crumpBit_ops.init(&g, NULL);
+        crumpBit_ops.init(&g, NULL, NULL);
         crumpBit_ops.write_param(&g, CRUMPBIT_PARAM_SUBTYPE,
                                  CRUMPBIT_SUBTYPE_GRAIN);
         for (t = 0u; t < 3u; t++) {
             cb_bpm = bpms[t];
-            for (bytes = 1024u; bytes <= CRUMPBIT_LOOP_MAX_BYTES;
+            for (bytes = SK_PREFIX_BYTES + 1024u;
+                 bytes <= CRUMPBIT_LOOP_MAX_BYTES + SK_PREFIX_BYTES;
                  bytes += 4096u) {
                 fx_share_t share = { arena_new, 0u, bytes };
                 effect_io_t io = { l, r, 32u, 2u, &share };
@@ -1270,22 +1311,6 @@ static void law_cb6_subtypes(void)
             }
         }
         cb_bpm = 120u;
-    }
-    /*
-     * S091 P5 F1: the one-pole k is -3 dB where the SVF at res 0 is,
-     * tan(w/2) = g sqrt(sqrt 2 - 1), for every index above 0 (0: closed).
-     */
-    expect(crumpBit_onePoleK[0] == 0.0f, "CB6 one-pole k[0] = 0");
-    for (i = 1u; i < 128u; i++) {
-        const double w = 2.0 * atan((double)crumpBit_filterG[i] *
-                                    sqrt(sqrt(2.0) - 1.0));
-        const double k = crumpBit_onePoleK[i];
-        const double a = 1.0 - k;
-        const double g2 = k * k / (1.0 - 2.0 * a * cos(w) + a * a);
-
-        snprintf(msg, sizeof msg, "CB6 one-pole k %u: |H|^2 %.6f", i, g2);
-        expect(fabs(g2 - 0.5) < 1e-5 && k < 1.0 &&
-               crumpBit_onePoleK[i] > crumpBit_onePoleK[i - 1u], msg);
     }
     expect(fabsf(crumpBit_reverbSize[0] - 0.25f) < 1e-7f, "CB6 size 0.25");
     expect(fabsf(crumpBit_reverbSize[127] - 2.5f) < 1e-6f, "CB6 size 2.5");
@@ -1338,10 +1363,15 @@ static void law_cb9(void)
 
     expect((CRUMPBIT_ROWS_SHARED & CRUMPBIT_ROWS_SUBTYPE) == 0u &&
            (CRUMPBIT_ROWS_SHARED & CRUMPBIT_ROWS_GRN) == 0u &&
-           (CRUMPBIT_ROWS_SUBTYPE & CRUMPBIT_ROWS_GRN) == 0u,
+           (CRUMPBIT_ROWS_SUBTYPE & CRUMPBIT_ROWS_GRN) == 0u &&
+           (CRUMPBIT_ROWS_RVB & (CRUMPBIT_ROWS_SHARED |
+                                 CRUMPBIT_ROWS_SUBTYPE |
+                                 CRUMPBIT_ROWS_GRN)) == 0u,
            "CB9 stage masks disjoint");
+    /* S095 P4 F1: `rvb`'s damping row (24) is the fourth owner's. */
     expect((CRUMPBIT_ROWS_SHARED | CRUMPBIT_ROWS_SUBTYPE |
-            CRUMPBIT_ROWS_GRN) == rows, "CB9 every type row has one owner");
+            CRUMPBIT_ROWS_GRN | CRUMPBIT_ROWS_RVB) == rows,
+           "CB9 every type row has one owner");
     expect((CRUMPBIT_ROWS_SUBTYPE &
             CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_TONE)) != 0u,
            "CB9 ton is a sub-type row");
@@ -1379,6 +1409,9 @@ static void law_cb9(void)
             /* Granular rows are lanes of `grn` only. */
             if ((CRUMPBIT_ROWS_GRN & CRUMPBIT_ROW_BIT(row)) != 0u)
                 expect(v == CRUMPBIT_SUBTYPE_GRAIN, msg);
+            /* S095 P4 F1: `rvb`'s rows are lanes of `rvb` only. */
+            if ((CRUMPBIT_ROWS_RVB & CRUMPBIT_ROW_BIT(row)) != 0u)
+                expect(v == CRUMPBIT_SUBTYPE_REVERB, msg);
             /* `aux` is a lane of the sub-types that read it. */
             if (row == CRUMPBIT_PARAM_AUX)
                 expect(v == CRUMPBIT_SUBTYPE_PITCH ||
@@ -1404,6 +1437,9 @@ static void law_cb9(void)
     /* S091 P5 follow-up: `pit` lane 6 is `fin`, where `snp` was. */
     expect(crumpBit_laneMap(CRUMPBIT_SUBTYPE_PITCH)[6] ==
            CRUMPBIT_PARAM_PIT_FINE, "CB9 pit lane 6 = fin");
+    /* S095 P4 F1: `rvb` lane 10 is its damping row, where `ton` was. */
+    expect(crumpBit_laneMap(CRUMPBIT_SUBTYPE_REVERB)[10] ==
+           CRUMPBIT_PARAM_RVB_DAMP, "CB9 rvb lane 10 = dmp");
 }
 
 /* Shared helpers for CB10-CB15 -------------------------------------------- */
@@ -1415,7 +1451,7 @@ static uint8_t arena_p3[CB_ARENA + CB_GUARD];
 static void p3_init(CrumpBitRuntime *rt, uint8_t sub)
 {
     memset(rt, 0, sizeof *rt);
-    crumpBit_ops.init(rt, NULL);
+    crumpBit_ops.init(rt, NULL, NULL);
     crumpBit_ops.write_param(rt, CRUMPBIT_PARAM_SUBTYPE, sub);
     crumpBit_ops.write_param(rt, CRUMPBIT_PARAM_SUB_PAN, 63u);
 }
@@ -1870,7 +1906,7 @@ static void law_cb14(void)
 
     /* (a) pitch slots over the absolute P1..P3, and the detune bound. */
     memset(&rt, 0, sizeof rt);
-    crumpBit_ops.init(&rt, NULL);
+    crumpBit_ops.init(&rt, NULL, NULL);
     rt.aux_raw = 63u;                   /* P1 0 st */
     rt.grain_st2 = 68u;                 /* P2 +5 st (absolute) */
     rt.grain_st3 = 72u;                 /* P3 +9 st (absolute) */
@@ -2393,7 +2429,9 @@ static void law_cb15(void)
                  &share);
         p3_write(&rt, CRUMPBIT_PARAM_SYNC, (uint8_t)((pass >> 2) & 1u),
                  &share);
-        p3_write(&rt, CRUMPBIT_PARAM_TONE, (pass & 8u) ? 127u : 0u, &share);
+        /* S095 P4 F1: `rvb`'s damping is its own row. */
+        p3_write(&rt, CRUMPBIT_PARAM_RVB_DAMP, (pass & 8u) ? 127u : 0u,
+                 &share);
         p3_write(&rt, CRUMPBIT_PARAM_SUB_PAN, (pass & 16u) ? 127u : 0u,
                  &share);
         for (block = 0u; block < 6900u; block++) {
@@ -2435,6 +2473,12 @@ static void law_cb15(void)
     p3_write(&rt, CRUMPBIT_PARAM_MIX, 127u, &share);
     p3_write(&rt, CRUMPBIT_PARAM_RATE, 64u, &share);
     p3_write(&rt, CRUMPBIT_PARAM_FEEDBACK, 100u, &share);
+    /*
+     * S095 P4 F1: the freeze must hold whatever the damping, so the law
+     * runs at mid damping (63, where a damped loop lost 8 dB a second
+     * before the freeze bypass); the pole is flat while frozen.
+     */
+    p3_write(&rt, CRUMPBIT_PARAM_RVB_DAMP, 63u, &share);
     cb15_run(&rt, &share, 1u, out, tail);
     {
         const double a = cb15_rms(out + 2205u, 2205u);
@@ -2447,14 +2491,16 @@ static void law_cb15(void)
     }
 
     /*
-     * (d) S091 P5 R1: the damping is low-pass only, so every `ton` above
-     * 63 plays bit-identically to 63 (flat), whatever the other rows.
+     * (d) S095 P4 F1: the damping reads crumpBit_toneK[dmp >> 1] (`rvb`'s
+     * own row 24), so `dmp` 2m and 2m+1 play bit-identically whatever the
+     * other rows (and 126 / 127 are both the exact pass-through). Pass 0
+     * checks 126 against 127; the others a random pair.
      */
     for (pass = 0u; pass < 8u; pass++) {
         static uint8_t arena_r1[2][16384];
         CrumpBitRuntime rr[2];
         fx_share_t sh[2];
-        const uint8_t ton = (uint8_t)(64u + rnd() % 64u);
+        const uint8_t even = pass ? (uint8_t)((rnd() % 64u) * 2u) : 126u;
         const uint8_t fbk = (uint8_t)(rnd() & 0x7Fu);
         const uint8_t rte = (uint8_t)(rnd() & 0x7Fu);
         uint32_t bad = 0u;
@@ -2470,8 +2516,8 @@ static void law_cb15(void)
             p3_write(&rr[k], CRUMPBIT_PARAM_MIX, 127u, &sh[k]);
             p3_write(&rr[k], CRUMPBIT_PARAM_FEEDBACK, fbk, &sh[k]);
             p3_write(&rr[k], CRUMPBIT_PARAM_RATE, rte, &sh[k]);
-            p3_write(&rr[k], CRUMPBIT_PARAM_TONE,
-                     k ? ton : CRUMPBIT_TONE_FLAT, &sh[k]);
+            p3_write(&rr[k], CRUMPBIT_PARAM_RVB_DAMP,
+                     (uint8_t)(even + k), &sh[k]);
         }
         for (block = 0u; block < 3000u; block++) {
             float l[2][32], r[2][32];
@@ -2490,8 +2536,8 @@ static void law_cb15(void)
                 bad += !same_bits(l[0][n], l[1][n]) +
                        !same_bits(r[0][n], r[1][n]);
         }
-        snprintf(msg, sizeof msg, "CB15 R1 ton %u = flat: %u samples differ",
-                 ton, bad);
+        snprintf(msg, sizeof msg, "CB15 dmp %u = %u: %u samples differ",
+                 even, even + 1u, bad);
         expect(bad == 0u, msg);
     }
     free(out);
@@ -2499,9 +2545,9 @@ static void law_cb15(void)
 
 /*
  * CB16: `bal` (S091 P4) ------------------------------------------------------
- * S091 P5: run on `dly` (the SVF) and on `rvb` (the one-pole; `grn` would
- * also be, but it draws a hardware random word per block, so three runs
- * would not see the same engine output).
+ * S091 P5: run on `dly` and on `rvb` (both the SVF since S094 P2 AS-13;
+ * `grn` would also do, but it draws a hardware random word per block, so
+ * three runs would not see the same engine output).
  */
 static void law_cb16_on(uint8_t sub)
 {
@@ -2677,179 +2723,131 @@ static void law_cb18(void)
     }
 }
 
-/* CB19 (S091 P5 F1): the one-pole output filter --------------------------- */
-
-/* Goertzel power at f of `sub`'s output for a sine at f (mix 0). */
-static double cb19_power(uint8_t sub, uint8_t type, uint8_t frq, uint8_t res,
-                         double f)
-{
-    static uint8_t arena_f[16384];
-    fx_share_t share = { arena_f, 0u, sizeof arena_f };
-    const uint32_t total = 44108u;
-    float *out = calloc(total, sizeof(float));
-    CrumpBitRuntime rt;
-    uint32_t got = 0u;
-    uint32_t t = 0u;
-    double p;
-
-    memset(arena_f, 0, sizeof arena_f);
-    p3_init(&rt, sub);
-    p3_write(&rt, CRUMPBIT_PARAM_MIX, 0u, &share);
-    p3_write(&rt, CRUMPBIT_PARAM_FILTER_TYPE, type, &share);
-    p3_write(&rt, CRUMPBIT_PARAM_FILTER_FREQ, frq, &share);
-    p3_write(&rt, CRUMPBIT_PARAM_FILTER_RESO, res, &share);
-    while (got < total) {
-        float l[32], r[32];
-        uint32_t n;
-
-        for (n = 0u; n < 32u; n++, t++) {
-            l[n] = 0.5f * sinf(2.0f * (float)M_PI * (float)f * (float)t /
-                               44108.0f);
-            r[n] = l[n];
-        }
-        p3_block(&rt, &share, l, r, 32u);
-        memcpy(out + got, l, sizeof l);
-        got += 32u;
-    }
-    p = goertzel(out + total / 2u, total / 2u, f);
-    free(out);
-    return p;
-}
-
+/* CB19 (S094 P2 AS-13): the resonant SVF in every sub-type ------------- */
 static void law_cb19(void)
 {
-    static const uint8_t frqs[3] = { 50u, 70u, 90u };
-    uint32_t i;
+    static const uint8_t subs[5] = { CRUMPBIT_SUBTYPE_DELAY,
+                                     CRUMPBIT_SUBTYPE_COMB,
+                                     CRUMPBIT_SUBTYPE_PITCH,
+                                     CRUMPBIT_SUBTYPE_GRAIN,
+                                     CRUMPBIT_SUBTYPE_REVERB };
     char msg[160];
 
-    /* (a) -3 dB at the SVF's res-0 frequency, both filters, vs `off`. */
-    for (i = 0u; i < 3u; i++) {
-        const double w3 = 2.0 * atan((double)crumpBit_filterG[frqs[i]] *
-                                     sqrt(sqrt(2.0) - 1.0));
-        const double f3 = w3 * 44108.0 / (2.0 * M_PI);
-        const double off = cb19_power(CRUMPBIT_SUBTYPE_REVERB,
-                                      CRUMPBIT_FILTER_OFF, frqs[i], 0u, f3);
-        const double one = cb19_power(CRUMPBIT_SUBTYPE_REVERB,
-                                      CRUMPBIT_FILTER_LP, frqs[i], 0u, f3);
-        const double svf = cb19_power(CRUMPBIT_SUBTYPE_DELAY,
-                                      CRUMPBIT_FILTER_LP, frqs[i], 0u, f3);
-        const double db1 = 10.0 * log10(one / off);
-        const double db2 = 10.0 * log10(svf / off);
+    /*
+     * (a) At mix 0 the input to stage 4 is the dry signal in every sub-type,
+     * so with the same filter rows every sub-type must play `dly`'s output
+     * bit for bit: all eight types, at res 0 and at res 120. (b) res 120
+     * must differ from res 0 on `grn` and `rvb` (their S091 P5 one-pole had
+     * no resonance).
+     */
+    {
+        static uint8_t arena_m[5][4096];
+        uint32_t bad = 0u;
+        uint32_t resDiff = 0u;
+        uint32_t type;
+        uint32_t ri;
 
+        for (type = 0u; type <= CRUMPBIT_FILTER_OFF; type++)
+         for (ri = 0u; ri < 2u; ri++) {
+            CrumpBitRuntime rm[5];
+            fx_share_t sh[5];
+            uint32_t block;
+            uint32_t k;
+
+            for (k = 0u; k < 5u; k++) {
+                sh[k].base = arena_m[k];
+                sh[k].offset = 0u;
+                sh[k].bytes = sizeof arena_m[k];
+                memset(arena_m[k], 0, sizeof arena_m[k]);
+                p3_init(&rm[k], subs[k]);
+                p3_write(&rm[k], CRUMPBIT_PARAM_MIX, 0u, &sh[k]);
+                p3_write(&rm[k], CRUMPBIT_PARAM_FILTER_FREQ, 70u, &sh[k]);
+                p3_write(&rm[k], CRUMPBIT_PARAM_FILTER_TYPE, (uint8_t)type, &sh[k]);
+                p3_write(&rm[k], CRUMPBIT_PARAM_FILTER_RESO, ri ? 120u : 0u, &sh[k]);
+            }
+            for (block = 0u; block < 400u; block++) {
+                float l[5][32], r[5][32];
+                uint32_t n;
+
+                for (n = 0u; n < 32u; n++) {
+                    const float a = rndf(-1.0f, 1.0f);
+                    const float b = rndf(-1.0f, 1.0f);
+
+                    for (k = 0u; k < 5u; k++) {
+                        l[k][n] = a;
+                        r[k][n] = b;
+                    }
+                }
+                for (k = 0u; k < 5u; k++)
+                    p3_block(&rm[k], &sh[k], l[k], r[k], 32u);
+                for (n = 0u; n < 32u; n++)
+                    for (k = 1u; k < 5u; k++)
+                        bad += !same_bits(l[k][n], l[0][n]) +
+                               !same_bits(r[k][n], r[0][n]);
+            }
+        }
+        /* (b) resonance acts on `rvb` and `grn`: res 120 against res 0. */
+        {
+            uint32_t k;
+
+            for (k = 3u; k < 5u; k++) {
+                CrumpBitRuntime ra, rb;
+                static uint8_t arena_a[4096], arena_b[4096];
+                fx_share_t sa = { arena_a, 0u, sizeof arena_a };
+                fx_share_t sb = { arena_b, 0u, sizeof arena_b };
+                uint32_t block;
+
+                memset(arena_a, 0, sizeof arena_a);
+                memset(arena_b, 0, sizeof arena_b);
+                p3_init(&ra, subs[k]);
+                p3_init(&rb, subs[k]);
+                p3_write(&ra, CRUMPBIT_PARAM_MIX, 0u, &sa);
+                p3_write(&rb, CRUMPBIT_PARAM_MIX, 0u, &sb);
+                /* LP: the default type, off, passes the input untouched */
+                p3_write(&ra, CRUMPBIT_PARAM_FILTER_TYPE, CRUMPBIT_FILTER_LP, &sa);
+                p3_write(&rb, CRUMPBIT_PARAM_FILTER_TYPE, CRUMPBIT_FILTER_LP, &sb);
+                p3_write(&ra, CRUMPBIT_PARAM_FILTER_FREQ, 70u, &sa);
+                p3_write(&rb, CRUMPBIT_PARAM_FILTER_FREQ, 70u, &sb);
+                p3_write(&rb, CRUMPBIT_PARAM_FILTER_RESO, 120u, &sb);
+                for (block = 0u; block < 100u; block++) {
+                    float la[32], ra_[32], lb[32], rb_[32];
+                    uint32_t n;
+
+                    for (n = 0u; n < 32u; n++) {
+                        la[n] = lb[n] = rndf(-1.0f, 1.0f);
+                        ra_[n] = rb_[n] = rndf(-1.0f, 1.0f);
+                    }
+                    p3_block(&ra, &sa, la, ra_, 32u);
+                    p3_block(&rb, &sb, lb, rb_, 32u);
+                    for (n = 0u; n < 32u; n++)
+                        resDiff += !same_bits(la[n], lb[n]);
+                }
+                snprintf(msg, sizeof msg,
+                         "CB19 res acts on sub %u: %u samples differ", subs[k],
+                         resDiff);
+                expect(resDiff > 1000u, msg);
+                resDiff = 0u;
+            }
+        }
         snprintf(msg, sizeof msg,
-                 "CB19 frq %u at %.0f Hz: one-pole %.2f dB, SVF %.2f dB",
-                 frqs[i], f3, db1, db2);
-        expect(fabs(db1 + 3.01) < 0.3 && fabs(db2 + 3.01) < 0.3, msg);
+                 "CB19 every sub-type plays dly's SVF at mix 0: %u samples differ",
+                 bad);
+        expect(bad == 0u, msg);
         printf("%s\n", msg);
     }
 
     /*
-     * (b) the type mapping and (c) `res` inert, bit for bit, on `rvb`
-     * (LP = LP2 = BP = UBP; HP = notch; peak = off; res 0 = res 120).
-     */
-    {
-        /* cls: each type's one-pole class, 0 low-pass, 1 high-pass, 2 flat. */
-        static const uint8_t cls[8] = { 0u, 1u, 0u, 0u, 1u, 2u, 0u, 2u };
-        static uint8_t arena_m[9][4096];
-        CrumpBitRuntime rm[9];
-        fx_share_t sh[9];
-        uint32_t bad = 0u;
-        uint32_t block;
-        uint32_t k;
-
-        for (k = 0u; k < 9u; k++) {
-            /* 0..7: `rvb` with type k; 8: `rvb` LP at res 120. */
-            sh[k].base = arena_m[k];
-            sh[k].offset = 0u;
-            sh[k].bytes = sizeof arena_m[k];
-            memset(arena_m[k], 0, sizeof arena_m[k]);
-            p3_init(&rm[k], CRUMPBIT_SUBTYPE_REVERB);
-            p3_write(&rm[k], CRUMPBIT_PARAM_MIX, 64u, &sh[k]);
-            p3_write(&rm[k], CRUMPBIT_PARAM_FILTER_FREQ, 60u, &sh[k]);
-            p3_write(&rm[k], CRUMPBIT_PARAM_FILTER_TYPE,
-                     (k < 8u) ? (uint8_t)k : CRUMPBIT_FILTER_LP, &sh[k]);
-            p3_write(&rm[k], CRUMPBIT_PARAM_FILTER_RESO,
-                     (k == 8u) ? 120u : 0u, &sh[k]);
-        }
-        for (block = 0u; block < 2000u; block++) {
-            float l[9][32], r[9][32];
-            uint32_t n;
-
-            for (n = 0u; n < 32u; n++) {
-                const float a = rndf(-1.0f, 1.0f);
-                const float b = rndf(-1.0f, 1.0f);
-
-                for (k = 0u; k < 9u; k++) {
-                    l[k][n] = a;
-                    r[k][n] = b;
-                }
-            }
-            for (k = 0u; k < 9u; k++)
-                p3_block(&rm[k], &sh[k], l[k], r[k], 32u);
-            for (n = 0u; n < 32u; n++) {
-                for (k = 1u; k < 8u; k++) {
-                    /* the first type of each class: LP 0, HP 1, flat 5. */
-                    const uint32_t first = (cls[k] == 0u) ? 0u
-                                         : ((cls[k] == 1u) ? 1u : 5u);
-
-                    bad += !same_bits(l[k][n], l[first][n]) +
-                           !same_bits(r[k][n], r[first][n]);
-                }
-                bad += !same_bits(l[8][n], l[0][n]) +
-                       !same_bits(r[8][n], r[0][n]);
-            }
-        }
-        snprintf(msg, sizeof msg,
-                 "CB19 type mapping and res inert: %u samples differ", bad);
-        expect(bad == 0u, msg);
-    }
-    {
-        /* `off` on the one-pole path is the dry signal, as `dly` `off`. */
-        static uint8_t arena_o[2][4096];
-        CrumpBitRuntime ro[2];
-        fx_share_t sh[2];
-        uint32_t bad = 0u;
-        uint32_t block;
-        uint32_t k;
-
-        for (k = 0u; k < 2u; k++) {
-            sh[k].base = arena_o[k];
-            sh[k].offset = 0u;
-            sh[k].bytes = sizeof arena_o[k];
-            p3_init(&ro[k], k ? CRUMPBIT_SUBTYPE_REVERB
-                              : CRUMPBIT_SUBTYPE_DELAY);
-            p3_write(&ro[k], CRUMPBIT_PARAM_MIX, 0u, &sh[k]);
-        }
-        for (block = 0u; block < 1000u; block++) {
-            float l[2][32], r[2][32];
-            uint32_t n;
-
-            for (n = 0u; n < 32u; n++) {
-                l[0][n] = l[1][n] = rndf(-1.5f, 1.5f);
-                r[0][n] = r[1][n] = rndf(-1.5f, 1.5f);
-            }
-            for (k = 0u; k < 2u; k++)
-                p3_block(&ro[k], &sh[k], l[k], r[k], 32u);
-            for (n = 0u; n < 32u; n++)
-                bad += !same_bits(l[0][n], l[1][n]) +
-                       !same_bits(r[0][n], r[1][n]);
-        }
-        snprintf(msg, sizeof msg, "CB19 one-pole off = dry: %u differ", bad);
-        expect(bad == 0u, msg);
-    }
-
-    /*
-     * (d) the hand-over on a switch: the state moves exactly, and the
-     * output does not jump. A 100 Hz sine through `LP` (frq 90, -3 dB
-     * near 2.6 kHz), mix 0; the sub-type flips dly <-> rvb (and dly ->
-     * grn) every 37 blocks.
+     * (c) A switch keeps the filter state: crumpBit_enter() leaves svf_*
+     * untouched (one filter for every sub-type), and the output does not
+     * jump. A 100 Hz sine through `LP` (frq 90), mix 0; the sub-type flips
+     * dly -> rvb -> dly -> grn every 37 blocks.
      */
     {
         static uint8_t arena_s[4096];
-        static const uint8_t subs[4] = { CRUMPBIT_SUBTYPE_DELAY,
-                                         CRUMPBIT_SUBTYPE_REVERB,
-                                         CRUMPBIT_SUBTYPE_DELAY,
-                                         CRUMPBIT_SUBTYPE_GRAIN };
+        static const uint8_t flips[4] = { CRUMPBIT_SUBTYPE_DELAY,
+                                          CRUMPBIT_SUBTYPE_REVERB,
+                                          CRUMPBIT_SUBTYPE_DELAY,
+                                          CRUMPBIT_SUBTYPE_GRAIN };
         fx_share_t share = { arena_s, 0u, sizeof arena_s };
         CrumpBitRuntime rt;
         float prev = 0.0f;
@@ -2870,22 +2868,15 @@ static void law_cb19(void)
             uint32_t n;
 
             if (sw) {
-                /* The hand-over itself, checked on the bare enter. */
-                const uint8_t next = subs[(block / 37u) % 4u];
+                const uint8_t next = flips[(block / 37u) % 4u];
                 CrumpBitRuntime probe = rt;
 
                 if (next != probe.active_subtype) {
-                    const uint32_t from1 =
-                        crumpBit_filterIsOnePole(probe.active_subtype);
-                    const float l1 = probe.svf_l1;
-                    const float l2 = probe.svf_l2;
-
                     crumpBit_enter(&probe, next, share.bytes);
-                    if (crumpBit_filterIsOnePole(next) && !from1)
-                        moved_bad += !same_bits(probe.svf_l1, l2);
-                    if (!crumpBit_filterIsOnePole(next) && from1)
-                        moved_bad += !same_bits(probe.svf_l2, l1) ||
-                                     probe.svf_l1 != 0.0f;
+                    moved_bad += !same_bits(probe.svf_l1, rt.svf_l1) +
+                                 !same_bits(probe.svf_l2, rt.svf_l2) +
+                                 !same_bits(probe.svf_r1, rt.svf_r1) +
+                                 !same_bits(probe.svf_r2, rt.svf_r2);
                 }
                 p3_write(&rt, CRUMPBIT_PARAM_SUBTYPE, next, &share);
             }
@@ -2906,8 +2897,8 @@ static void law_cb19(void)
             prev = l[31];
         }
         snprintf(msg, sizeof msg,
-                 "CB19 hand-over: %u states wrong; jump at a switch %.4f "
-                 "(steady %.4f)", moved_bad, (double)worst_switch,
+                 "CB19 a switch keeps the SVF state: %u fields moved; jump at "
+                 "a switch %.4f (steady %.4f)", moved_bad, (double)worst_switch,
                  (double)worst_run);
         expect(moved_bad == 0u && worst_switch < 0.05f, msg);
         printf("%s\n", msg);
@@ -2947,7 +2938,7 @@ static void law_cb20(void)
      * forward and reversed), its Q3.12 step held at 32,767 at +36.
      */
     memset(&rt, 0, sizeof rt);
-    crumpBit_ops.init(&rt, NULL);
+    crumpBit_ops.init(&rt, NULL, NULL);
     rt.grain_spread = 0u;
     rt.pan_raw = 63u;
     bad = 0u;
@@ -3292,6 +3283,222 @@ static void law_cb23(void)
     }
 }
 
+/*
+ * CB24 (S095 P1 rework): the type-change feed's head (sk_feedMix()) against
+ * a per-frame reference. Random wrap domains (64 samples and up), strides
+ * 1/2/4, int8 and int16, steps 0.25..1 and exactly 1, phases, start
+ * positions and short heads: every output equals d[i] x g with the wrap
+ * tested per frame and g the reference ramp (fade_inv 1: only the last
+ * block ramps to 0), l equals r, and pos/phase/left match after each block;
+ * when the head ends, feeding and the slot lock clear. This is the law for
+ * the once-per-block wrap split (the frame loop has no wrap test).
+ */
+static int8_t cb24_arena[SK_PREFIX_BYTES + 8192u] __attribute__((aligned(32)));
+
+static void law_cb24(void)
+{
+    fx_share_t sh;
+    uint32_t trial;
+    uint32_t k;
+    unsigned bad = 0u;
+    char msg[160];
+
+    sh.base = (uint8_t *)cb24_arena;
+    sh.offset = 0u;
+    sh.bytes = sizeof(cb24_arena);
+    for (k = SK_PREFIX_BYTES; k < sizeof(cb24_arena); k++)
+        cb24_arena[k] = (int8_t)((k * 2654435761u) >> 24);
+    for (trial = 0u; trial < 20000u && bad == 0u; trial++) {
+        sk_ctl_t *c = sk_ctl(&sh);
+        const uint32_t st = 1u << (rnd() % 3u);
+        const int s16 = (int)(rnd() & 1u);
+        const uint32_t esz = s16 ? 2u : 1u;
+        const void *dom = cb24_arena + SK_PREFIX_BYTES;
+        uint32_t wrap_el = 64u * st + rnd() % (8192u / esz - 64u * st);
+        uint32_t ri;
+        uint32_t rph;
+        uint32_t rleft;
+        uint32_t blk;
+
+        wrap_el -= wrap_el % st;
+        memset(c, 0, sizeof(*c));
+        c->magic = SK_CTL_MAGIC | EFFECT_TYPE_CRUMPBIT;
+        c->wrap_off = SK_PREFIX_BYTES;
+        c->wrap_elems = wrap_el;
+        c->stride = (uint8_t)st;
+        c->flags = s16 ? SK_FEED_S16 : 0u;
+        c->pos = rnd() % wrap_el;
+        c->step_q16 = ((rnd() & 7u) == 0u) ? 65536u : 16384u + rnd() % 49153u;
+        c->phase = rnd() & 0xFFFFu;
+        c->left = 1u + rnd() % 400u;
+        c->gain = 1.0f;
+        c->fade_inv = 1.0f;
+        c->feeding = 1u;
+        cb_feed_lock = 1u;
+        ri = c->pos;
+        rph = c->phase;
+        rleft = c->left;
+        for (blk = 0u; blk < 64u && c->feeding && bad == 0u; blk++) {
+            float l[32] = {0};
+            float r[32] = {0};
+            float want[32] = {0};
+            uint32_t m;
+            uint32_t run = 32u;
+            uint32_t used;
+            float g0;
+            float g1;
+            float e1;
+
+            if (rleft < 66u) {
+                const uint32_t q = ((rleft << 16) - rph + c->step_q16 - 1u) /
+                                   c->step_q16;
+
+                run = (q < 32u) ? q : 32u;
+            }
+            used = (rph + run * c->step_q16) >> 16;
+            g0 = (rleft >= 1u) ? 1.0f : 0.0f;
+            e1 = (float)rleft - (float)used;
+            g1 = (e1 >= 1.0f) ? 1.0f : ((e1 > 0.0f) ? e1 : 0.0f);
+            for (m = 0u; m < run; m++) {
+                const int32_t v = s16 ? ((const int16_t *)dom)[ri]
+                                      : ((const int8_t *)dom)[ri];
+
+                want[m] = (float)v * (g0 + (g1 - g0) / (float)run * (float)m);
+                rph += c->step_q16;
+                ri += (rph >> 16) * st;
+                rph &= 0xFFFFu;
+                if (ri >= wrap_el)
+                    ri -= wrap_el;
+            }
+            rleft = (used >= rleft || run < 32u) ? 0u : rleft - used;
+            (void)sk_feedMix(&sh, EFFECT_TYPE_CRUMPBIT, l, r, 32u, 1.0f, 1.0f);
+            for (m = 0u; m < 32u && bad == 0u; m++)
+                if (fabsf(l[m] - want[m]) > 1e-3f * (1.0f + fabsf(want[m])) ||
+                    l[m] != r[m]) {
+                    snprintf(msg, sizeof msg,
+                             "CB24 trial %u block %u frame %u: %g want %g",
+                             (unsigned)trial, (unsigned)blk, (unsigned)m,
+                             (double)l[m], (double)want[m]);
+                    expect(0, msg);
+                    bad = 1u;
+                }
+            if (bad == 0u && c->feeding &&
+                (c->pos != ri || c->phase != rph || c->left != rleft)) {
+                snprintf(msg, sizeof msg,
+                         "CB24 trial %u block %u: pos %u/%u phase %u/%u "
+                         "left %u/%u", (unsigned)trial, (unsigned)blk,
+                         (unsigned)c->pos, (unsigned)ri, (unsigned)c->phase,
+                         (unsigned)rph, (unsigned)c->left, (unsigned)rleft);
+                expect(0, msg);
+                bad = 1u;
+            }
+        }
+        if (bad == 0u) {
+            expect(c->feeding == 0u && cb_feed_lock == 0u,
+                   "CB24: the head ended but the feed or the lock stays on");
+            bad = (c->feeding != 0u || cb_feed_lock != 0u);
+        }
+    }
+}
+
+/*
+ * CB25 (S095 P1, §S18): the feed's write-head limit (sk_feedLimit())
+ * against brute force. Random heads (domains, strides, formats, steps,
+ * positions, lengths up to 30,000 samples, wrapping) and one or two
+ * writers (rates 0, 1, 2, 4 bytes per frame, anywhere in a line that may
+ * or may not hold the tail): for every head sample the first write time of
+ * its address is computed directly (a write at `at` and after, then the
+ * lap), and the kept length must be the first sample whose write lands
+ * less than 64 frames after its read, within one sample (float rounding).
+ */
+static void law_cb25(void)
+{
+    fx_share_t sh;
+    uint32_t trial;
+    unsigned bad = 0u;
+    char msg[200];
+
+    sh.base = (uint8_t *)cb24_arena;
+    sh.offset = 0u;
+    sh.bytes = sizeof(cb24_arena);
+    for (trial = 0u; trial < 3000u && bad == 0u; trial++) {
+        sk_ctl_t *c = sk_ctl(&sh);
+        const uint32_t st = 1u << (rnd() % 3u);
+        const uint32_t esz = (rnd() & 1u) ? 2u : 1u;
+        const uint32_t sb = st * esz;
+        const uint32_t usable = sizeof(cb24_arena) - SK_PREFIX_BYTES;
+        uint32_t wrap_b = 64u * sb + rnd() % (usable - 64u * sb);
+        uint32_t nw = 1u + (rnd() & 1u);
+        sk_writer_t w[2];
+        uint32_t want;
+        uint32_t j;
+        uint32_t k;
+        float fps;
+
+        wrap_b -= wrap_b % sb;
+        memset(c, 0, sizeof(*c));
+        c->magic = SK_CTL_MAGIC | EFFECT_TYPE_CRUMPBIT;
+        c->wrap_off = SK_PREFIX_BYTES + (rnd() % (usable - wrap_b + 1u)) /
+                      32u * 32u;
+        c->wrap_elems = wrap_b / esz;
+        c->stride = (uint8_t)st;
+        c->flags = (esz == 2u) ? SK_FEED_S16 : 0u;
+        c->pos = (rnd() % (wrap_b / sb)) * st;
+        c->step_q16 = ((rnd() & 3u) == 0u) ? 65536u : 16384u + rnd() % 49153u;
+        c->left = 1u + rnd() % ((wrap_b / sb < 30000u) ? wrap_b / sb : 30000u);
+        c->fade_inv = 1.0f;
+        c->feeding = 1u;
+        cb_feed_lock = 1u;
+        for (k = 0u; k < nw; k++) {
+            const uint32_t lo = SK_PREFIX_BYTES + rnd() % (usable / 2u);
+            const uint32_t hi = lo + 1u + rnd() % (SK_PREFIX_BYTES + usable - lo);
+            static const uint32_t rates[4] = { 0u, 1u, 2u, 4u };
+
+            w[k].lo = lo;
+            w[k].hi = hi;
+            w[k].at = lo + rnd() % (hi - lo);
+            w[k].rate = rates[rnd() & 3u];
+        }
+        fps = 65536.0f / (float)c->step_q16;
+        want = c->left;
+        for (j = 0u; j < c->left && want == c->left; j++) {
+            const uint32_t el = (c->pos + j * st) % c->wrap_elems;
+            const uint32_t x = c->wrap_off + el * esz;
+            const double tr = (double)j * fps;
+
+            for (k = 0u; k < nw; k++) {
+                double tw;
+
+                if (x < w[k].lo || x >= w[k].hi)
+                    continue;
+                if (w[k].rate == 0u)
+                    tw = 0.0;
+                else if (x >= w[k].at)
+                    tw = (double)(x - w[k].at) / w[k].rate;
+                else
+                    tw = (double)(w[k].hi - w[k].at + x - w[k].lo) /
+                         w[k].rate;
+                if (tw - tr - 64.0 <= 0.0) {
+                    want = j;
+                    break;
+                }
+            }
+        }
+        sk_feedLimit(&sh, EFFECT_TYPE_CRUMPBIT, w, nw);
+        if (c->left + 1u < want || c->left > want + 1u ||
+            (c->left == 0u) != (c->feeding == 0u) ||
+            (c->left == 0u) != (cb_feed_lock == 0u)) {
+            snprintf(msg, sizeof msg,
+                     "CB25 trial %u: kept %u, brute force %u (feeding %u "
+                     "lock %u)", (unsigned)trial, (unsigned)c->left,
+                     (unsigned)want, (unsigned)c->feeding,
+                     (unsigned)cb_feed_lock);
+            expect(0, msg);
+            bad = 1u;
+        }
+    }
+}
+
 int main(void)
 {
     law_cb1();
@@ -3317,6 +3524,8 @@ int main(void)
     law_cb21();
     law_cb22();
     law_cb23();
+    law_cb24();
+    law_cb25();
     printf("crumpbit failures: %d\n", failures);
     return failures ? 1 : 0;
 }

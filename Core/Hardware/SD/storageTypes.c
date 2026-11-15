@@ -412,19 +412,31 @@ uint8_t storage_instrumentFilenameMatchesType(const char *filename,
 const char *storage_instrumentTypeToText(storage_instrument_type_t type)
 {
     /*
-     * Convert runtime instrument type to storage schema text.
+     * Convert runtime instrument type to storage schema text (S093 P4:
+     * registry-driven).
      *
-     * Inputs: registered instrument type. Output: lowercase token used by both
-     * kitset.kcg and instrument metadata. Returning NULL for unknown types lets
-     * filesystem reject an impossible save before it writes a partial file.
+     * What:       the registry row's type_text ("drm", "snr", "cym", "hat",
+     *             "alk", and any later type), the lowercase token of
+     *             kitset.kcg, instrument headers, .hcnames and AutoSave; NULL
+     *             for an unregistered type. The four existing types return
+     *             the same strings as the former switch.
+     * Why:        a hard-coded switch gave NULL for a fifth type, so every
+     *             Alkaline save (Instrument, Kit, Scene, Bank, AutoSave) would
+     *             be refused before writing. storage_instrumentTypeFromText()
+     *             (l. 395) already reads the registry; one source for both
+     *             directions, and no edit here for a further type.
+     * Inputs:     type.  Outputs: the token or NULL; NULL still rejects an
+     *             impossible save before a partial file is written, and still
+     *             ends the .hcnames header walk at the first unregistered
+     *             value (filesystem.c l. 6614, 24616).
+     * Accessors:  storage_instrumentTypeExtension() (l. 430); the instrument
+     *             line formatter (l. 1050); filesystem.c save and HCNAMES
+     *             paths.
+     * Affiliates: instrument_registry[] (InstrumentManager.c).
      */
-    switch (type) {
-    case STORAGE_INSTRUMENT_DRM: return "drm";
-    case STORAGE_INSTRUMENT_SNR: return "snr";
-    case STORAGE_INSTRUMENT_CYM: return "cym";
-    case STORAGE_INSTRUMENT_HAT: return "hat";
-    default: return NULL;
-    }
+    const instrument_registry_entry_t *entry = instrumentManager_registryEntry(type);
+
+    return entry ? entry->type_text : NULL;
 }
 
 const char *storage_instrumentTypeExtension(storage_instrument_type_t type)

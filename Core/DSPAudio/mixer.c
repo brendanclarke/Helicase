@@ -62,6 +62,9 @@
 #include "presetManager.h"
 /* S074 master bus compressor: final stage of mixer_calcNextSampleBlock(). */
 #include "BusCompressor.h"
+#if DEV_MODE_LOGGING
+#include "AutosaveTrace.h"
+#endif
 // TODO DSP_PORT
 // #include "../Hardware/TriggerOut.h"
 //-----------------------------------------------------------------------
@@ -743,6 +746,268 @@ static void mixer_addVoiceInt16ToOutputAndFx(uint8_t dest,
 }
 
 /*
+ * A stereo voice's dry output (S095 P2, draft §5, C-D11).
+ *
+ * What:       for one pre-volume stereo block (dataL, dataR: the Colloid's
+ *             left and right int16 blocks), the same per-sample law as
+ *             mixer_addVoiceInt16ToOutput() for each side:
+ *             - the gain ramp from lastGain to gain over the block;
+ *             - smL = (sample_mx_t)(dataL x currentGain x 256) (S088 P1: the
+ *               float gain and the x256 shift in one expression), and smR;
+ *             - the stereo routes add smL x panL to the left bus and
+ *               smR x panR to the right bus, with the mixer's own per-slot
+ *               constant-power gains (squareRootLut[127 - pan],
+ *               squareRootLut[pan]), exactly as for a mono voice: at the
+ *               centre a stereo voice with L = R adds what a mono voice adds;
+ *               towards an edge it acts as a balance;
+ *             - a single-side route (DAC1_L ...) adds the mono sum
+ *               (L + R) / 2 at unity, as a mono voice adds its block.
+ * Why:        C-D11 (user): the voice's pan is the mixer's per-slot pan,
+ *             applied to the stereo pair. A separate noinline function keeps
+ *             the mono path and its inlined loops unchanged (the mixer gate,
+ *             elf_p4_check: 0 grew).
+ * Inputs:     dest (jack-resolved routing), panL/panR, dataL/dataR, gain,
+ *             lastGain, the four interleaved output buses.
+ * Outputs:    the output buses (saturating adds).
+ * Accessors:  mixer_calcNextSampleBlock(), for a slot whose
+ *             instrumentManager_slotRight() is not NULL and whose send is
+ *             idle.
+ * Affiliates: mixer_addVoiceInt16ToOutput() (the mono twin; with
+ *             dataL == dataR the stereo routes give its result bit for bit:
+ *             host law MX-ST); mixer_addVoiceStereoToOutputAndFx().
+ */
+static __attribute__((noinline)) void mixer_addVoiceStereoToOutput(uint8_t dest,
+		const float panL,
+		const float panR,
+		const int16_t* dataL,
+		const int16_t* dataR,
+		const float gain,
+		const float lastGain,
+		sample_mx_t* outL,
+		sample_mx_t* outR,
+		sample_mx_t* outL2,
+		sample_mx_t* outR2)
+{
+	uint8_t i;
+	const float inv_size = 1.f / (OUTPUT_DMA_SIZE - 1.f);
+	const float gain_delta = gain - lastGain;
+
+/* The mono sum of one sample for a single-side route: (L + R) / 2. */
+#define MIXER_STEREO_MONO(i) ((float)(((int32_t)dataL[i] + (int32_t)dataR[i]) >> 1))
+
+	switch(dest)
+	{
+	case MIXER_ROUTING_DAC1_STEREO:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const sample_mx_t smL = (sample_mx_t)((float)dataL[i] * currentGain * 256.0f);
+			const sample_mx_t smR = (sample_mx_t)((float)dataR[i] * currentGain * 256.0f);
+			*outL2 = bufferTool_satAdd32(*outL2, (sample_mx_t)((float)smL * panL));
+			outL2 += 2;
+			*outR2 = bufferTool_satAdd32(*outR2, (sample_mx_t)((float)smR * panR));
+			outR2 += 2;
+		}
+		break;
+	case MIXER_ROUTING_DAC2_STEREO:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const sample_mx_t smL = (sample_mx_t)((float)dataL[i] * currentGain * 256.0f);
+			const sample_mx_t smR = (sample_mx_t)((float)dataR[i] * currentGain * 256.0f);
+			*outL = bufferTool_satAdd32(*outL, (sample_mx_t)((float)smL * panL));
+			outL += 2;
+			*outR = bufferTool_satAdd32(*outR, (sample_mx_t)((float)smR * panR));
+			outR += 2;
+		}
+		break;
+	case MIXER_ROUTING_DAC1_L:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const sample_mx_t sm = (sample_mx_t)(MIXER_STEREO_MONO(i) * currentGain * 256.0f);
+			*outL2 = bufferTool_satAdd32(*outL2, sm);
+			outL2 += 2;
+		}
+		break;
+	case MIXER_ROUTING_DAC1_R:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const sample_mx_t sm = (sample_mx_t)(MIXER_STEREO_MONO(i) * currentGain * 256.0f);
+			*outR2 = bufferTool_satAdd32(*outR2, sm);
+			outR2 += 2;
+		}
+		break;
+	case MIXER_ROUTING_DAC2_L:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const sample_mx_t sm = (sample_mx_t)(MIXER_STEREO_MONO(i) * currentGain * 256.0f);
+			*outL = bufferTool_satAdd32(*outL, sm);
+			outL += 2;
+		}
+		break;
+	case MIXER_ROUTING_DAC2_R:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const sample_mx_t sm = (sample_mx_t)(MIXER_STEREO_MONO(i) * currentGain * 256.0f);
+			*outR = bufferTool_satAdd32(*outR, sm);
+			outR += 2;
+		}
+		break;
+	}
+#undef MIXER_STEREO_MONO
+}
+
+/*
+ * A stereo voice's dry output and FX send in one pass (S095 P2, draft §5).
+ *
+ * What:       the dry half of every sample exactly as
+ *             mixer_addVoiceStereoToOutput(); the send half as
+ *             mixer_addVoiceInt16ToOutputAndFx()'s, per side:
+ *             - its own ramp from sendLastGain to sendGain;
+ *             - a stereo-input Effect: L x send x panL into bus 0,
+ *               R x send x panR into bus 1;
+ *             - a mono-input Effect: (L + R) / 2 x send, unpanned, into
+ *               bus 0 (as a mono voice's unpanned send).
+ * Why:        the Colloid's stereo picture reaches the stereo-input Space
+ *             Effects (S095 P1) intact; one read of each block. The Effect,
+ *             its stopped-transport idle (effects_returnGain()) and its return
+ *             are untouched: this only fills the FX bus.
+ * Inputs:     as mixer_addVoiceStereoToOutput(), plus sendGain/sendLastGain
+ *             and stereo (the live Effect's stereo-input flag).
+ * Outputs:    the output buses and mixer_fx_bus.mx[0..1].
+ * Accessors:  mixer_calcNextSampleBlock(), for a stereo slot when the send
+ *             is active (fx_active and either send gain > 0: the existing
+ *             condition).
+ * Affiliates: mixer_addVoiceInt16ToOutputAndFx() (the mono twin; with
+ *             dataL == dataR it gives the same dry result, and the same
+ *             stereo-input send: host law MX-ST).
+ */
+static __attribute__((noinline)) void mixer_addVoiceStereoToOutputAndFx(uint8_t dest,
+		const float panL,
+		const float panR,
+		const int16_t* dataL,
+		const int16_t* dataR,
+		const float gain,
+		const float lastGain,
+		const float sendGain,
+		const float sendLastGain,
+		const uint8_t stereo,
+		sample_mx_t* outL,
+		sample_mx_t* outR,
+		sample_mx_t* outL2,
+		sample_mx_t* outR2)
+{
+	uint8_t i;
+	const float inv_size = 1.f / (OUTPUT_DMA_SIZE - 1.f);
+	const float gain_delta = gain - lastGain;
+	const float send_delta = sendGain - sendLastGain;
+
+/* The mono sum of one sample: (L + R) / 2. */
+#define MIXER_STEREO_MONO(i) ((float)(((int32_t)dataL[i] + (int32_t)dataR[i]) >> 1))
+/* The send half of one sample. The stereo test is loop-invariant; GCC
+** -Ofast unswitches it (as in the mono twin). */
+#define MIXER_FX_SEND_STEREO_SAMPLE()                                         \
+	do {                                                                      \
+		const float sendCurrentGain = sendLastGain                            \
+				+ ((float)i * inv_size * send_delta);                         \
+		if (stereo) {                                                         \
+			const float sl = (float)dataL[i] * sendCurrentGain * 256.0f;      \
+			const float sr = (float)dataR[i] * sendCurrentGain * 256.0f;      \
+			mixer_fx_bus.mx[0][i] = bufferTool_satAdd32(                      \
+					mixer_fx_bus.mx[0][i], (sample_mx_t)(sl * panL));         \
+			mixer_fx_bus.mx[1][i] = bufferTool_satAdd32(                      \
+					mixer_fx_bus.mx[1][i], (sample_mx_t)(sr * panR));         \
+		} else {                                                              \
+			const float sm = MIXER_STEREO_MONO(i) * sendCurrentGain * 256.0f; \
+			mixer_fx_bus.mx[0][i] = bufferTool_satAdd32(                      \
+					mixer_fx_bus.mx[0][i], (sample_mx_t)sm);                  \
+		}                                                                     \
+	} while (0)
+
+	switch(dest)
+	{
+	case MIXER_ROUTING_DAC1_STEREO:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const sample_mx_t smL = (sample_mx_t)((float)dataL[i] * currentGain * 256.0f);
+			const sample_mx_t smR = (sample_mx_t)((float)dataR[i] * currentGain * 256.0f);
+			MIXER_FX_SEND_STEREO_SAMPLE();
+			*outL2 = bufferTool_satAdd32(*outL2, (sample_mx_t)((float)smL * panL));
+			outL2 += 2;
+			*outR2 = bufferTool_satAdd32(*outR2, (sample_mx_t)((float)smR * panR));
+			outR2 += 2;
+		}
+		break;
+	case MIXER_ROUTING_DAC2_STEREO:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const sample_mx_t smL = (sample_mx_t)((float)dataL[i] * currentGain * 256.0f);
+			const sample_mx_t smR = (sample_mx_t)((float)dataR[i] * currentGain * 256.0f);
+			MIXER_FX_SEND_STEREO_SAMPLE();
+			*outL = bufferTool_satAdd32(*outL, (sample_mx_t)((float)smL * panL));
+			outL += 2;
+			*outR = bufferTool_satAdd32(*outR, (sample_mx_t)((float)smR * panR));
+			outR += 2;
+		}
+		break;
+	case MIXER_ROUTING_DAC1_L:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const sample_mx_t sm = (sample_mx_t)(MIXER_STEREO_MONO(i) * currentGain * 256.0f);
+			MIXER_FX_SEND_STEREO_SAMPLE();
+			*outL2 = bufferTool_satAdd32(*outL2, sm);
+			outL2 += 2;
+		}
+		break;
+	case MIXER_ROUTING_DAC1_R:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const sample_mx_t sm = (sample_mx_t)(MIXER_STEREO_MONO(i) * currentGain * 256.0f);
+			MIXER_FX_SEND_STEREO_SAMPLE();
+			*outR2 = bufferTool_satAdd32(*outR2, sm);
+			outR2 += 2;
+		}
+		break;
+	case MIXER_ROUTING_DAC2_L:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const sample_mx_t sm = (sample_mx_t)(MIXER_STEREO_MONO(i) * currentGain * 256.0f);
+			MIXER_FX_SEND_STEREO_SAMPLE();
+			*outL = bufferTool_satAdd32(*outL, sm);
+			outL += 2;
+		}
+		break;
+	case MIXER_ROUTING_DAC2_R:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const sample_mx_t sm = (sample_mx_t)(MIXER_STEREO_MONO(i) * currentGain * 256.0f);
+			MIXER_FX_SEND_STEREO_SAMPLE();
+			*outR = bufferTool_satAdd32(*outR, sm);
+			outR += 2;
+		}
+		break;
+	default:
+		/* An unknown routing adds no dry signal, but the send still
+		** accumulates (the mono twin's rule). */
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+			MIXER_FX_SEND_STEREO_SAMPLE();
+		break;
+	}
+#undef MIXER_FX_SEND_STEREO_SAMPLE
+#undef MIXER_STEREO_MONO
+}
+
+/*
  * Convert one normalized Effect return sample to the mixer's signed-24
  * representation.
  *
@@ -886,8 +1151,121 @@ void mixer_calcNextSampleBlockTest(sample_mx_t *output, sample_mx_t *output2)
 //     }
 // }
 //-----------------------------------------------------------------------
+#if DEV_MODE_LOGGING
+/*
+ * Per-slot and per-section render cycle probe (S094 P2 §A/§12; DEV only).
+ *
+ * What:       DWT cycle counts per 32-frame block, attributed to every span
+ *             of mixer_calcNextSampleBlock():
+ *               per slot: block-rate work (filter recalc + calcSlotAsync)
+ *                 and its render (calcSlotSyncBlock only);
+ *               per section (mixer_probe_sec[], MIXER_PROBE_SEC_*): block
+ *                 control up to the LFO dispatch, effects_service(), routing
+ *                 and buffer set-up, the SRR decimators, the output/FX-send
+ *                 adds, the Effect (bus conversion, process, return) and the
+ *                 bus compressor;
+ *               the whole block (average and maximum).
+ *             Every MIXER_PROBE_WINDOW blocks it writes sixteen 'p' trace
+ *             records and restarts: flags 0..5 = slot | runtime type << 3,
+ *             value = block-rate average << 16 | render average (both
+ *             saturated to 16 bits); flags 6 = whole-block average; flags 7
+ *             = whole-block maximum; flags 6 | (section + 1) << 3 = that
+ *             section's average; flags 6 | 8 << 3 = MPU region 0's RASR
+ *             (which SRAM cache configuration ran). The whole block less
+ *             the slots and
+ *             sections is the probe's own overhead.
+ * Why:        the instruction-count model (S093) does not see flash wait
+ *             states, cache misses or VDIV stalls; S094 P2 needs measured
+ *             cycles per slot, and run 1 left a fifth of the block
+ *             unattributed (user: hooks around the mixer and the Effect).
+ * Inputs:     DWT_CYCCNT (enabled by audioCodec_initCycleCounter()).
+ * Outputs:    AutosaveTrace records only; nothing on screen, no product
+ *             state depends on them.
+ * Cost:       94 B RAM; ~30 out-of-line calls per block (noinline so LTO
+ *             keeps them out of the inlined render loops).
+ * Affiliates: AUTOSAVE_TRACE_STAGE_CPU_PROBE, decode_devlogs.py ('p').
+ */
+#define MIXER_PROBE_CYCCNT  (*(volatile uint32_t *)0xE0001004u)
+#define MIXER_PROBE_WINDOW  2048u   /* blocks, about 1.5 s */
+#define MIXER_PROBE_SEC_CTL    0u   /* itp count, modNode, velocity, LFO dispatch */
+#define MIXER_PROBE_SEC_FXSVC  1u   /* effects_service() */
+#define MIXER_PROBE_SEC_SETUP  2u   /* routing, buffer clears, slot-loop overhead */
+#define MIXER_PROBE_SEC_SRR    3u   /* mixer_decimateBlock(), all slots */
+#define MIXER_PROBE_SEC_MIX    4u   /* fader gains + dry/send adds, all slots */
+#define MIXER_PROBE_SEC_FX     5u   /* bus convert, effects_process(), return */
+#define MIXER_PROBE_SEC_COMP   6u   /* busComp_processBlock() */
+#define MIXER_PROBE_SEC_COUNT  7u
+static uint32_t mixer_probe_async[6];
+static uint32_t mixer_probe_sync[6];
+static uint32_t mixer_probe_sec[MIXER_PROBE_SEC_COUNT];
+static uint32_t mixer_probe_total;
+static uint32_t mixer_probe_max;
+static uint32_t mixer_probe_start;
+static uint32_t mixer_probe_last;
+static uint16_t mixer_probe_blocks;
+
+static __attribute__((noinline)) void mixer_probeBegin(void)
+{
+	mixer_probe_start = MIXER_PROBE_CYCCNT;
+	mixer_probe_last = mixer_probe_start;
+}
+
+static __attribute__((noinline)) void mixer_probeAdd(uint32_t *acc)
+{
+	const uint32_t now = MIXER_PROBE_CYCCNT;
+	*acc += now - mixer_probe_last;
+	mixer_probe_last = now;
+}
+
+static uint16_t mixer_probeAvg16(uint32_t sum)
+{
+	sum /= MIXER_PROBE_WINDOW;
+	return (uint16_t)((sum > 0xFFFFu) ? 0xFFFFu : sum);
+}
+
+static __attribute__((noinline)) void mixer_probeEnd(void)
+{
+	const uint32_t block = MIXER_PROBE_CYCCNT - mixer_probe_start;
+
+	mixer_probe_total += block;
+	if (block > mixer_probe_max)
+		mixer_probe_max = block;
+	if (++mixer_probe_blocks < MIXER_PROBE_WINDOW)
+		return;
+	for (uint8_t slot = 0u; slot < 6u; slot++) {
+		autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE,
+				(uint8_t)(slot | ((uint8_t)instrumentManager_runtimeType(slot) << 3)),
+				((uint32_t)mixer_probeAvg16(mixer_probe_async[slot]) << 16)
+				| mixer_probeAvg16(mixer_probe_sync[slot]));
+		mixer_probe_async[slot] = 0u;
+		mixer_probe_sync[slot] = 0u;
+	}
+	autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE, 6u,
+			mixer_probe_total / MIXER_PROBE_WINDOW);
+	autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE, 7u, mixer_probe_max);
+	for (uint8_t sec = 0u; sec < MIXER_PROBE_SEC_COUNT; sec++) {
+		autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE,
+				(uint8_t)(6u | ((sec + 1u) << 3)),
+				mixer_probe_sec[sec] / MIXER_PROBE_WINDOW);
+		mixer_probe_sec[sec] = 0u;
+	}
+	/* Configuration witness: MPU region 0 (all SRAM) RASR; bit 18 (S) set
+	 * means the M7 D-cache treats SRAM as non-cacheable (CACR.SIWT = 0). */
+	*(volatile uint32_t *)0xE000ED98u = 0u;                 /* MPU_RNR */
+	autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE, (uint8_t)(6u | (8u << 3)),
+			*(volatile uint32_t *)0xE000EDA0u);                 /* MPU_RASR */
+	mixer_probe_total = 0u;
+	mixer_probe_max = 0u;
+	mixer_probe_blocks = 0u;
+}
+#define MIXER_PROBE_SEC(sec) mixer_probeAdd(&mixer_probe_sec[MIXER_PROBE_SEC_##sec])
+#define MIXER_PROBE(call) call
+#else
+#define MIXER_PROBE(call) ((void)0)
+#endif
 void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 {
+	MIXER_PROBE(mixer_probeBegin());
 
 	/*
 	 * itp crossfade slot accounting (S088 P0 §3 Layer 3b).
@@ -925,10 +1303,17 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	 * InstrumentManager owns the dynamic instrument-to-runtime selection.
 	 */
 	instrumentManager_dispatchRuntimeLfos();
+	MIXER_PROBE(MIXER_PROBE_SEC(CTL));
 	for(uint8_t slot=0u; slot<6u; slot++)
+	{
 		instrumentManager_recalcSlotFilter(slot);
+		MIXER_PROBE(mixer_probeAdd(&mixer_probe_async[slot]));
+	}
 	for(uint8_t slot=0u; slot<6u; slot++)
+	{
 		instrumentManager_calcSlotAsync(slot);
+		MIXER_PROBE(mixer_probeAdd(&mixer_probe_async[slot]));
+	}
 
 	/*
 	 * Resolve the active Scene Effect before this block is rendered.
@@ -940,6 +1325,7 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	 * EffectsManager owns type handoff and parameter resolution.
 	 */
 	effects_service();
+	MIXER_PROBE(MIXER_PROBE_SEC(FXSVC));
 
 	//calculate trigger io phase
 	// TODO DSP_PORT
@@ -1010,9 +1396,12 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	for(uint8_t slot=0u; slot<6u; slot++)
 	{
 		uint8_t pan;
+		const int16_t *right;   /* S095 P2: a stereo voice's right block, or NULL */
 		float voiceGain;
 		float sendGain;
+		MIXER_PROBE(MIXER_PROBE_SEC(SETUP));
 		instrumentManager_calcSlotSyncBlock(slot, sampleData, OUTPUT_DMA_SIZE);
+		MIXER_PROBE(mixer_probeAdd(&mixer_probe_sync[slot]));
 		/*
 		 * S089 P0: SRR runs only when the slot's instrument chain includes it
 		 * (instrumentManager_slotUsesSrr(); off by default, on for the four
@@ -1020,7 +1409,10 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		 * srt value, so the worst case stays constant.
 		 */
 		if (instrumentManager_slotUsesSrr(slot))
+		{
 			mixer_decimateBlock(slot,sampleData);
+			MIXER_PROBE(MIXER_PROBE_SEC(SRR));
+		}
 		/*
 		 * sampleData is the pre-volume voice block (decimated when the chain
 		 * includes SRR). The fader mode
@@ -1036,6 +1428,12 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		mixer_faderGains(slot, preset_getSlotPlayedScene(slot),
 				&voiceGain, &sendGain);
 		pan = instrumentManager_runtimePan(slot);
+		/*
+		 * S095 P2: a stereo engine (the Colloid) leaves its right block in
+		 * the voice; NULL for every mono type, whose path below is unchanged.
+		 * One pointer test per slot per block.
+		 */
+		right = instrumentManager_slotRight(slot);
 		/*
 		 * One-pass dry + send when the send is active (S073 Step 5).
 		 *
@@ -1053,7 +1451,24 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		 *             mixer_addVoiceInt16ToOutput(); the send-only
 		 *             mixer_addVoiceToFxBus() was removed in this step.
 		 */
-		if (fx_active && (sendGain > 0.0f || mixer_send_last_gain[slot] > 0.0f))
+		if (right) {
+			/*
+			 * S095 P2 (draft §5, C-D11): the stereo dry path, and the stereo
+			 * send under the same condition as the mono path's; the mixer's
+			 * per-slot pan gains apply to the left and right blocks.
+			 */
+			if (fx_active && (sendGain > 0.0f || mixer_send_last_gain[slot] > 0.0f))
+				mixer_addVoiceStereoToOutputAndFx(effectiveRouting[slot],
+						squareRootLut[127-pan], squareRootLut[pan],
+						sampleData, right, voiceGain, mixer_voice_last_gain[slot],
+						sendGain, mixer_send_last_gain[slot], fx_stereo_in,
+						&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
+			else
+				mixer_addVoiceStereoToOutput(effectiveRouting[slot],
+						squareRootLut[127-pan], squareRootLut[pan],
+						sampleData, right, voiceGain, mixer_voice_last_gain[slot],
+						&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
+		} else if (fx_active && (sendGain > 0.0f || mixer_send_last_gain[slot] > 0.0f))
 			mixer_addVoiceInt16ToOutputAndFx(effectiveRouting[slot],
 					squareRootLut[127-pan], squareRootLut[pan],
 					sampleData, voiceGain, mixer_voice_last_gain[slot],
@@ -1066,6 +1481,7 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 					&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
 		mixer_voice_last_gain[slot] = voiceGain;
 		mixer_send_last_gain[slot] = sendGain;
+		MIXER_PROBE(MIXER_PROBE_SEC(MIX));
 	}
 
 	if (fx_active) {
@@ -1110,6 +1526,9 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		 * left side. Mono output keeps its existing constant-power law. Inputs:
 		 * fx_pan 0..127 and fx_level. Outputs: gainL/gainR.
 		 */
+		/* S095 P1: the stopped-transport idle ramps the return (§S18). */
+		const float fx_idle = effects_returnGain();
+
 		if (fx_stereo_out) {
 			gainL = fx_level * ((fx_pan <= 63u) ? 1.0f
 					: (float)(127u - fx_pan) / 64.0f);
@@ -1119,6 +1538,8 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 			gainL = fx_level * squareRootLut[127u - fx_pan];
 			gainR = fx_level * squareRootLut[fx_pan];
 		}
+		gainL *= fx_idle;
+		gainR *= fx_idle;
 		mixer_addFxReturnToOutput(fx_route, mixer_fx_bus.f[0],
 				fx_stereo_out ? mixer_fx_bus.f[1] : 0,
 				gainL, gainR, &output[pos], &output[pos+1],
@@ -1143,6 +1564,7 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		mixer_fx_return_last_gain[0] = 0.0f;
 		mixer_fx_return_last_gain[1] = 0.0f;
 	}
+	MIXER_PROBE(MIXER_PROBE_SEC(FX));
 
 	/*
 	 * Master bus compressor (S074), after all voices and the FX return.
@@ -1155,5 +1577,6 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	 * Affiliate: BusCompressor.h and voiceControl_triggerNow().
 	 */
 	busComp_processBlock(&output2[pos], &output[pos], fx_scene);
-
+	MIXER_PROBE(MIXER_PROBE_SEC(COMP));
+	MIXER_PROBE(mixer_probeEnd());
 }

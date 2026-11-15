@@ -4,11 +4,51 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 091 P6 (2026-11-06),
-  `dev-ph7-voice_expansion`. DEV link: `text=712,264`, `data=420`,
-  `bss=413,284`; flash payload 712,684 B of 753,664 B
-  (**headroom 40,980 B**). ITCM 15,240 / 16,384 B; FXBUF 126,656 B at
-  `0x20001140` (margin 3,776 B). The entries below run newest first.
+- **Current as of:** Session 094 (2026-11-12),
+  `dev-ph7-alkaline`. DEV link: `text=695,560`, `data=420`,
+  `bss=413,280`; flash payload 695,980 B of 753,664 B
+  (**headroom 44,556 B**). ITCM 13,984 / 16,384 B; SRAM1 free 87,404 B
+  (DEV link); FXBUF 126,656 B at `0x20001140` (margin 3,776 B).
+  The entries below run newest first.
+  *(S093 P8 flash/bss figures preserved; exact S094 build figures TBD.)*
+- **S093 P8 changes (2026-11-10):** Alkaline (TB-303) instrument,
+  catalogue v3, 8-bit removal, wavetable reassessment.
+  - **Added (S093 P4, approved):** `AlkalineVoice` (**548 B** after P6)
+    inside the existing 1,264 B `InstrumentRuntimeSlot` union; no union
+    growth. `DiodeLadder` 232 B, `DiodeLadderNet` 288 B (r6),
+    `AlkalineSquareTable` 22,528 B flash. `AlkalineParameters` 28
+    descriptors.
+  - **Added (S093 P5):** `menu_instrumentLoadIndex` **+2 B** (R1).
+  - **Removed (S093 P3):** `Re3`/`Sw3` stock table waves
+    (`wavetableStock.c`), ≈ 45 KB flash. `OSC_SAMPLE_START` 8 → 6.
+  - **Removed (S093 P8):** 8-bit branches from ten ITCM wavetable reader
+    functions: ITCM 14,552 → **12,128 B** (−2,424 B). Each reader now has
+    one loop instead of two.
+  - **No new RAM.** `.bss` 413,280 B and `.data` 420 B unchanged from S091
+    P6 after alignment. The name cache is borrowed during the modal install
+    (D8).
+  - Build P8: `text=695,560`, `data=420`, `bss=413,280`; ITCM 12,128 B;
+    flash headroom 44,556 B.
+- **S094 changes (2026-11-12):** Voice DSP adjustments, SRAM D-cache fix,
+  cycle budget, memory allocation speed-ups, PWM position law fix.
+  - **ITCM:** 12,128 → **13,984 B** (+1,856 net: S2 crash removal −≈540,
+    S3 PWM 15 loops in `.itcm.s094p1` +≈2,400).
+  - **SRAM1 added (P3, approved):** `filesystem_copy_clear_scratch_t`
+    **+1,932 B** (`.bss`, copy/clear dedicated scratch, replacing the
+    9 KB name-cache loan). AsyncFATFS cache 8→16 sectors: **+4,224 B**.
+    Total: **+6,156 B**. SRAM1 free after: **87,404 B** (DEV link).
+  - **MPU (P2, AS-6):** region 0 S bit cleared (non-shareable, D-cache
+    effective). The S=1 bit set in S013 had disabled the D-cache for all
+    SRAM. Fix: −14.8 % on same Scene.
+  - **MPU (P3, D):** region 2 added over SRAM2 for write-back stack
+    (`TEX 001 C1 B1 S0`, SRD `0x01` for IWDG capsule).
+  - **DiodeLadder +12 B** (`otaIn`, `toneC`, `toneZ`): inside the
+    1,264 B slot reserve (no union growth).
+  - **Crash removed (P1 S2):** `crashSample` −32,769 B flash, crash loops
+    −≈540 B ITCM. Card sample `02_crash.wav` on SD.
+  - **No `.bss` or `.data` growth** from DSP changes. The copy/clear
+    scratch and AFATFS cache are the only SRAM1 additions.
+  - **Stall record** part 1 changed to 32-bit layout.
 - **S091 P5 changes (2026-11-05):** CrumpBit sub-type efficiencies
   (`S091_P5_IMPLEMENTATION.md`).
   - **Added (approved Q4):** `crumpBit_dataLines` (**256 B**) and
@@ -536,22 +576,28 @@ only works while sector 6 holds no code.
 
 ## 4. Sample flash (sectors 7–11)
 
-### 4.1 Layout (catalogue v2, S087)
+### 4.1 Layout (catalogue v3, S087/S093 P8)
 
 | Region | Range | Size |
 |---|---|---:|
 | Sample/wavetable audio | `0x080C0000–0x081FDFFF` | up to 1,302,528 B |
 | Catalogue v2 | `0x081FE000–0x081FFFFF` | 8,192 B |
 
-**Catalogue v2 structure (8 KB at `SAMPLE_CATALOGUE_START_ADDRESS`):**
-- Header (32 B): magic `0x4C584332` ("LXC2", programmed last),
-  version, `sample_entry_bytes` (28), `wavetable_entry_bytes` (20),
+**Catalogue v3 structure (8 KB at `SAMPLE_CATALOGUE_START_ADDRESS`):**
+- Header (32 B): magic `0x3343584C` ("LXC3", programmed last; S093 P8),
+  version 3, `sample_entry_bytes` (28), `wavetable_entry_bytes` (20),
   `sample_count`, `wavetable_count`, `data_end`, flags, reserved
 - Sample entries (128 × 28 B): `start_address`, `frame_count`,
   `loop_start`, `loop_end`, `gain_code`, `bits`, `flags` (bit 0 = loop
   present), `name[8]`
 - Wavetable entries (128 × 20 B): `start_address`, `frame_len`,
   `frame_count`, `bits`, `flags`, `name[8]`, padding
+
+**S093 P8 changes from v2:** magic `LXC2` → `LXC3`, version 2 → 3.
+Wavetable entries: `frame_len` is always 1,024 and `bits` always 16 (each
+frame is a 1,024 × int16 row resampled at install time from any source
+length 16..2,048 points). 8-bit WAV files are no longer installed. A v2
+card reads as STALE and must be reinstalled via `Load:[Samples]`.
 
 Items from `0x080C0000` (sector 7) upward. The v1 layout
 (`SampleInfo[120]` at `0x081FF6A0`, display names at `0x081FFC40`) is
@@ -574,22 +620,32 @@ samples`. The S086 stock-wave flash block is not needed.
 - `memtest.c` uses the same floor (`ERASE_SECTOR_FLOOR`).
 - D-cache is invalidated over the erased or programmed range.
 
-### 4.3 Installing (S087 catalogue v2)
+### 4.3 Installing (S087 catalogue v2, S093 P8 catalogue v3)
 
 - Load:[Samples] runs `menu_loadSamplesModal()`: suspends audio, erases
   sectors 7–11, walks `/samples` (files first, subfolders, natural order,
   depth limit 3) then `/wavetables` (each subfolder = one wavetable, `.wav`
   files inside = frames), and commits the catalogue.
-- Only mono 16-bit 44.1 kHz PCM WAV files are accepted.
+- Only mono 16-bit 44.1 kHz PCM WAV files are accepted. 8-bit WAV files
+  are skipped (S093 P8 D10). 24-bit wavetable frames are converted to
+  16-bit and installed. Stereo sources are mixed to mono.
+- **S093 P8:** each wavetable frame is resampled to 1,024 × int16 at
+  install time by a band-limited periodic resampler (H=32 filter
+  half-width). The install buffer borrows `fs_list_cache_name` (9,000 B;
+  D8); no new RAM. Source frames: 16..2,048 points, any accepted bit depth.
+  The installer counts source points to compute the frame count (S4 fix:
+  `ak_hvox` 104 frames previously stored as 56).
 - `sampleInstall_begin()`: erases sectors 7–11; nothing programmed.
 - `sampleInstall_commit()`: programs header words 1–7 first, magic word 0
-  last. An interrupted install reads as EMPTY.
+  last (`LXC3`). An interrupted install reads as EMPTY.
 - `sampleInstall_abortItem()`: discards buffered bytes, never rewinds the
   cursor onto programmed flash. Lost space is accepted.
 - `install_fault`: set by failed erase or write; stops further writes.
 - Display names: numeric prefix stripped (`01_kick.wav` → `kick`); names
   over 8 chars show first 4 + last 4 characters.
-- Wavetable limits: any frame length, at most 128 frames.
+- Wavetable limits: any source frame length (16..2,048 points), stored as
+  1,024 × int16; at most 128 frames per wavetable; 2,048 B per frame in
+  flash.
 - Gain code: `2^(code/24)`, peak within 0.25 dB of full scale.
 - A pre-S073 install is rejected (0 samples): its entry 0 is at
   `0x08080004`, below the floor.
@@ -683,10 +739,10 @@ samples`. The S086 stock-wave flash block is not needed.
 Code placed with `INITCM` (`config.h`) is copied from flash to ITCM at boot
 and runs with zero wait states.
 
-| Function | Bytes |
-|---|---:|
-Sizes at the S087 close (12,640 B total; the v1 user-sample loops are
-removed, replaced by the `.itcm.s087` readers):
+Sizes at the S093 P8 close (**12,128 B** total; S093 P8 removed the 8-bit
+branches from the ten `.itcm.s087` wavetable readers, −2,424 B from S091's
+15,240; S089 P2/P3 added the fold and FM ramp copies; the v1 user-sample
+loops were removed in S087):
 
 | Function | Bytes |
 |---|---:|
@@ -708,6 +764,12 @@ removed, replaced by the `.itcm.s087` readers):
 Removed in S087 P1: `calcUserSampleOscBlock` (396 B),
 `calcUserSampleOscFmBlock` (444 B), v1 user-sample ring copy (448 B),
 `osc_syncWaveform()`. Net ITCM: 8,512 → 12,640 B.
+
+S093 P8: the 8-bit branch removed from each of the ten `.itcm.s087`
+wavetable reader functions (each now has one 16-bit loop instead of two).
+All readers use the fixed 1,024-point table read (`ph >> 22`, mask
+`0x3FF`). Net ITCM: 15,240 → **12,128 B** (−2,424 B from S089 P3's
+15,240; −4,512 B from S087 P1's 12,640 + S089's additions).
 
 - Only oscillator code is placed here. Filter and distortion ITCM placement
   (`ENABLE_EFFECT_INITCM_CODE`) is off: it measured worse in Session 023,

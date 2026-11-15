@@ -183,7 +183,7 @@ void Cymbal_triggerVoice(CymbalVoice *voice, const uint8_t source_slot,
 	 * Inputs: CymbalVoice pointer, logical source slot, velocity, and note.
 	 * Output: LFO/velocity modulation uses source_slot while the supplied
 	 * instance receives oscillator/envelope/transient changes. This lets
-	 * InstrumentManager host cymbals in any Advanced-eligible voice slot.
+	 * InstrumentManager host cymbals in any voice slot.
 	 */
 	if(!voice)
 		return;

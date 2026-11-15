@@ -1,11 +1,13 @@
 # MIDI Specification and Code Reference
 
-> **Current as of Session 084 close (2026-10-26), branch
-> `dev-ph7-voice_expansion`.** The S083 MIDI implementation is
+> **Current as of Session 093 close (2026-11-10), branch
+> `dev-ph7-alkaline`.** The S083 MIDI implementation is
 > hardware-checked; the S084 changes (overlay rolls and flams on the master
 > tick, 15 overlay types, external clock interpolation) are built and
-> host-checked, hardware pending. Where this document and the code
-> disagree, the code wins; fix this document in the same change.
+> host-checked, hardware pending. S093 P4/P6 added the Alkaline (TB-303)
+> instrument: velocity 101–127 accents, gate 7/12 step, 28 NRPN rows
+> (§4.3, §5.1). Where this document and the code disagree, the code wins;
+> fix this document in the same change.
 
 The LXR-02 MIDI interface:
 - global MIDI settings and the note-to-track map;
@@ -277,6 +279,11 @@ at +64.
 - A muted track does not sound (the note is still consumed).
 - Each note-on resets the voice's held automation and ends its R12 override
   (S081 step reset rule).
+- **Alkaline (S093 P4):** the velocity is the accent selector: 101–127 is
+  an accent, 0–100 is not (the default step velocity 100 does not accent).
+  The note starts a 303 gate of 7/12 of the step; a note after a slide-flagged
+  note whose gate is still open is legato and holds the gate through the next
+  step. The pitch glides on a legato note.
 
 **Overlay action:**
 - When the BAR overlay is `<` or `>` (one state, set by the PERF BAR
@@ -296,7 +303,9 @@ at +64.
 - MIDI-held rolls are not VOICE holds: they neither hold nor join the
   looper.
 
-**Note-off:** stops an overlay roll. A single trigger ignores it.
+**Note-off:** stops an overlay roll. A single trigger ignores it. An
+Alkaline note's gate ends by its own step length, so a note-off does not end
+it (B-6).
 
 **Recording:**
 - Each trigger is reported to LiveRecord (source MIDI), with the overlay
@@ -381,8 +390,12 @@ is `pv<`/`pv>` (§2.3).
 - **Instrument-agnostic.** A voice ID addresses whatever descriptor sits at
   that index in the slot's current instrument type, and an Effect ID the
   current Effect type's parameter. The same NRPN means different parameters
-  on different types, with no special casing. A chart per instrument type
-  and per Effect type is the user's reference (not yet published).
+  on different types, with no special casing. The voice chart is
+  `MIDI_NRPN_TABLE.md`; an Effect chart is not yet published.
+- **Alkaline (S093 P4/P6)** has 28 rows (0–27); 28–63 are unused and ignored
+  in that block. `alk_wave` is a selector (0 `Saw`, 1 `Sqr`), `alk_tuning` is
+  0–127 with 63 centre (±700 cents), `alk_slide` is 0/1; S093 P6 appended
+  `alk_attack` (26) and `osc1_position` (27).
 - **Unused IDs** are ignored and the message is forwarded.
 - **Channels:**
   - Every ID works on G.
@@ -407,9 +420,9 @@ unchanged (identity, as in step automation).
   enumerated lists, target tokens), the same rule step automation applies.
 - Drum `osc2_mod_type` (`mod`): 0 `fm`, 1 `mix`, 2 `snc`, 3–127 `rng`
   (S085 P1; before S085, 1–127 gave `mix`).
-- `oscN_wave` (`wav`): 0–7 the built-in waves (`Sin Tri Saw Rec Noi Cym Re3
-  Sw3`), 8 on the installed user samples (since S086; before, samples
-  started at 6); values above the last sample clamp to it.
+- `oscN_wave` (`wav`): 0–5 the built-in waves (`Sin Tri Saw Rec Noi Cym`),
+  6 on the installed user samples (S093 P3 removed `Re3`/`Sw3`, which were
+  6–7 from S086); values above the last sample clamp to it.
 - `osc1_position` (`pos`, S086): 0–127, identity. It was appended as the
   last descriptor of each instrument (local index 39; Snare 38), so its NRPN
   number is slot × 64 + that index; every earlier NRPN number and MIDI Learn
@@ -423,6 +436,22 @@ unchanged (identity, as in step automation).
   `WFd`. Appended after `osc1_run`, same append-only numbering rule. A
   selector: one value per step when automated, never morphed, not an LFO or
   velocity target.
+- `alk_wave` (S093 P4): 0 `Saw`, 1 `Sqr`; other stored values play `Saw`.
+  A selector: one value per step when automated, never morphed.
+- `alk_tuning` (S093 P4): 0–127, 63 = centre (±700 cents); `alk_slide`:
+  0 off, 1 on (latched at its own note's trigger; it decides whether the
+  next note glides). The five 303 knobs and `alk_drive` (S093 P6: 16^drive,
+  x1..x16) are identity 0–127.
+- `alk_attack` (S093 P6, appended): 0–127, the VEG attack as the 303's CPU
+  trigger-pulse width. 0 = a 0.70 ms trigger, the former attack bit for bit;
+  127 = 0.55 ms. The exponential discharge stays. Appended after
+  `lfo_target_param_2`, so every earlier NRPN number and MIDI Learn row is
+  unchanged.
+- `osc1_position` (S093 P6 on Alkaline, appended at 27): 0 free-running (the
+  303's VCO); 1–127 sets the start phase to pos/128 of a cycle at every
+  non-legato note. A move bends the phase within one block, as on the other
+  instruments. Legato notes keep the running phase. Appended after
+  `alk_attack`; every earlier number is unchanged.
 - The only translation is the Morph amounts (§5.2).
 - WIDE8 Effect rows expand through the Effect type's 7-bit expansion, as
   automation does.

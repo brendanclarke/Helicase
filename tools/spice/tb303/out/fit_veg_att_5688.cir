@@ -1,0 +1,40 @@
+* TB-303 VEG: vg=12.0 t_trig=0.00056875 gate 0.005-0.5
+
+.model QN NPN(IS=1e-14 BF=300 VAF=100 CJE=8p CJC=4p TF=0.4n RB=50)
+.model QP PNP(IS=1e-14 BF=200 VAF=80 CJE=8p CJC=5p TF=0.6n RB=50)
+.model DS D(IS=2.5n N=1.8 RS=0.5 CJO=2p)
+
+VCC vcc 0 12
+* --- trigger -> D36 -> R134 22k -> Q32 base (C41 0.1u)
+VTRIG trig 0 PWL(0 0 10m 0 0.0100010 5.333 0.0105688 5.333 0.0105697 0)
+D36 trig n36 DS
+R134 n36 b32 22k
+C41 b32 0 0.1u
+Q32 c32 b32 e32 QN
+R130 e32 0 100
+R132 c32 n42 100
+* --- C42 1u, recharged through R123 1.5M from +12 V (assumed rail)
+C42 n42 0 1u IC=11.9
+R123 vcc n42 1.5Meg
+* --- gate -> D34 -> R137 1k -> D35 -> R133 2.2k -> R131 220k -> Q31 emitter
+VGATE gate 0 PWL(0 0 0.0050000 0 0.0050010 12.0 0.5000000 12.0 0.5000010 0)
+D34 gate n34 DS
+R137 n34 n137 1k
+D35 n137 n35 DS
+R133 n35 n133 2.2k
+R131 n133 e31 220k
+Q31 abc n42 e31 QP
+* --- IC15 pin 1 (amplifier bias input): a current-mirror input, i.e. a
+*     diode-connected transistor to V- (pin 5, ground). It can only sink
+*     current; VABC (0 V) measures it.
+VABC abc abc2 0
+QABC abc2 abc2 0 QN
+
+.options method=gear reltol=1e-4
+.tran 5.000e-06 0.0400 0 5.000e-06 uic
+.control
+run
+wrdata fit_veg_att_5688.txt i(VABC) v(n42) v(b32) v(e31)
+quit
+.endc
+.end

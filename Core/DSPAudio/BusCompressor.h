@@ -69,4 +69,19 @@ void busComp_processBlock(sample_mx_t *st1, sample_mx_t *st2,
  */
 void busComp_sidechainTrigger(uint8_t track, uint8_t velocity);
 
+/*
+ * Raw meter of the bus compressor (S095 P4 C5).
+ *
+ * What: the detector's smoothed power (mean of L^2 + R^2 over 2, full scale
+ * 1.0) and the reduction the cell applies, min(fast, memory), in dB (<= 0).
+ * Why: the compressor page shows them so `cam` can be set by eye; the cost
+ * is a foreground read of two floats (no log here: the caller converts at
+ * its own refresh).
+ * Inputs: two out pointers. Output: 1 while the compressor runs (cmp on, or
+ * fading), 0 when it is off (outputs untouched).
+ * Context: foreground; the render runs in the same main loop, so no race.
+ * Caller: menu.c (the `cgr` widget).
+ */
+uint8_t busComp_meterRaw(float *power, float *gr_db);
+
 #endif /* BUS_COMPRESSOR_H_ */

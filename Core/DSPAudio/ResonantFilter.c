@@ -63,7 +63,8 @@ void SVF_init(ResonantFilter* filter)
 		filter->f = 0.20f;
 		filter->q = 0.9f;
 
-		filter->drive = 0.5f;
+		/* S095 P4 C2: the drv 0 value of SVF_setDrive() (was 0.5). */
+		filter->drive = 1.0f;
 
 		SVF_directSetFilterValue(filter,0.25f);
 
@@ -141,13 +142,31 @@ INITCM_EFFECT void SVF_recalcFreqSlew(ResonantFilter* filter)
 #endif
 }
 //------------------------------------------------------------------------------------
+/*
+ * Filter input drive from the `drv` row (Drum, Snare, Cymbal, HiHat;
+ * IM_SPECIAL_FILTER_DRIVE).
+ *
+ * What: the gain in front of the ZDF filter's Pade saturator, 1.0 at drv 0
+ * up to 6.4 at drv 127 (1 + 5.4 x^2, x = drv/127). S095 P4 F4: the hard-
+ * clipping types lower it per block by svf_driveFloorOffset[] (HP, BP, UBP,
+ * Nch and Pek floor 0.4, as before P4); LP and LP2 keep 1.0.
+ * Why (S095 P4 C2): the floor was 0.4, so every filtered voice reached the
+ * bus 8 dB below the same voice with the filter `off` (which passes the
+ * input unchanged), and a clean kit sat well under the bus compressor's
+ * threshold. 1.0 keeps a full-scale oscillator at the saturator's knee
+ * (gentle compression of its peaks only) and leaves the top (6.4, +16 dB)
+ * where it was. The naive LP2 path reads the same drive.
+ * Inputs: drive row 0..127. Output: filter->drive. Per row change; no
+ * per-sample cost.
+ * Callers: InstrumentManager.c IM_SPECIAL_FILTER_DRIVE.
+ */
 void SVF_setDrive(ResonantFilter* filter,uint8_t drive)
 {
 #if USE_SHAPER_NONLINEARITY
 	filter->drive = drive;
 	setDistortionShape(&filter->shaper, filter->drive);
 #else
-	filter->drive =  0.4f + (drive/127.f)*(drive/127.f)*6;
+	filter->drive = 1.0f + (drive/127.f)*(drive/127.f)*5.4f;
 #endif
 
 }
@@ -205,7 +224,7 @@ INITCM_EFFECT float softClipTwo(float in)
  *             without a data-dependent path.
  * Inputs:     a, the squared saturator argument.
  * Outputs:    one normalised numerator or denominator.
- * Accessors:  SVF_calcBlockZDF() and SVF_calcBlockZDFFloat().
+ * Accessors:  SVF_calcBlockZDF().
  * Affiliates: tanhXdX()/softClipTwo() remain for the naive path and the
  *             tools/dsp_test filter comparison checks the S1 equivalence.
  */
@@ -230,11 +249,55 @@ static inline float svf_padeDen(const float a)
  * Inputs:     ResonantFilter.h configuration switches.
  * Outputs:    a compile-time error for unsupported configurations.
  * Accessors:  the preprocessor.
- * Affiliates: SVF_calcBlockZDFFloat() retains its own shaper guard.
+ * Affiliates: SVF_calcBlockZDF(). (The float twin's guard went with the
+ *             twin in S095 P4 T3.)
  */
 #if !ENABLE_NONLINEAR_INTEGRATORS || USE_SHAPER_NONLINEARITY
 #error "Batched ZDF solver (S073 Step 1) requires nonlinear integrators and no shaper"
 #endif
+//------------------------------------------------------------------------------------
+/*
+ * Per-type drive floor offset (S095 P4 F4, user: hard clipping is very bad).
+ *
+ * What:       added once per block to filter->drive (1.0 + 5.4 x^2 from
+ *             SVF_setDrive()) in the ZDF branch, so each type's drive floor
+ *             at drv 0 is 1.0 + offset: LP 1.0; HP, BP, UBP, Nch and Pek
+ *             0.4 (the pre-P4 floor). The top moves by the same offset
+ *             (5.8 at drv 127, was 6.4), so at every drv the hard-clipping
+ *             types get at most the pre-P4 drive (0.4 + 5.4 x^2 <=
+ *             0.4 + 6 x^2).
+ * Why:        C2 raised every type's floor from 0.4 to 1.0 to bring clean
+ *             voices up to the bus compressor. LP leaves through
+ *             fastTanh() (soft, never at the int16 rail), but HP, BP, UBP,
+ *             Nch and Pek leave through x FILTER_GAIN and __SSAT, a hard
+ *             clip. Measured on the host (full-scale saw, kick and noise
+ *             into the real SVF_calcBlockZDF(), drv 0, res 0..127, cutoffs
+ *             0.02..0.4): at 1.0, HP clipped 2.1 % of samples (16 % at the
+ *             worst setting), BP 0.34 %, UBP 0.03 %, Nch 0.02 %, Pek 7.6 %
+ *             (pre-P4 at 0.4: HP 0.014 %, Pek 1.2 %, the rest 0). A floor of
+ *             0.8 kept UBP and Nch clean at drv 0 but clipped them more than
+ *             before mid-knob (Nch at drv 48: 10.3 % against 0.65 %), so
+ *             every hard-clipping type keeps 0.4 and clips no more than
+ *             before at any drv (measured drv 0..112). LP and the naive
+ *             LP2 (its own path, clamped states) never hard-clip and keep
+ *             1.0.
+ * Index:      the filter type id (FILTER_LP 1 .. FILTER_NAIVE_2_POLE 7; 0
+ *             and 8 `off` unused).
+ * Cost:       one load and one add per block; the loop is unchanged.
+ * Affiliates: SVF_setDrive(), SVF_calcBlockZDF(), S095_P4_IMPLEMENTATION.md
+ *             §16.
+ */
+static const float svf_driveFloorOffset[9] = {
+    0.0f,   /* unused */
+    0.0f,   /* LP   floor 1.0 */
+    -0.6f,  /* HP   floor 0.4 */
+    -0.6f,  /* BP   floor 0.4 */
+    -0.6f,  /* UBP  floor 0.4 */
+    -0.6f,  /* Nch  floor 0.4 */
+    -0.6f,  /* Pek  floor 0.4 */
+    0.0f,   /* LP2  (its own path reads filter->drive) */
+    0.0f,   /* off */
+};
 //------------------------------------------------------------------------------------
 INITCM_EFFECT_NOINLINE void SVF_calcBlockZDF(ResonantFilter* filter, const uint8_t type, int16_t* buf, const uint8_t size)
 {
@@ -282,11 +345,14 @@ INITCM_EFFECT_NOINLINE void SVF_calcBlockZDF(ResonantFilter* filter, const uint8
 		 * Inputs:     input block, filter coefficients, drive and s1/s2/zi state.
 		 * Outputs:    buf plus s1/s2/zi, written back once after the loop.
 		 * Accessors:  DrumVoice.c, Snare.c, CymbalVoice.c and HiHat.c.
-		 * Affiliates: the float twin below, svf_padeNum()/svf_padeDen(),
-		 *             StereoFilterEffect.c coefficient linking, and the golden
-		 *             filter harness.
+		 * Affiliates: svf_padeNum()/svf_padeDen() and the golden filter
+		 *             harness. (The float twin and its Effect client were
+		 *             removed in S095 P4 T3.)
+		 * S095 P4 F4: the type's floor offset (svf_driveFloorOffset[]) is
+		 *             added here, once per block.
 		 */
-		const float drive = filter->drive;
+		const float drive = filter->drive +
+		                    svf_driveFloorOffset[(type < 9u) ? type : 0u];
 		float s1 = filter->s1;
 		float s2 = filter->s2;
 		float zi = filter->zi;
@@ -379,135 +445,4 @@ INITCM_EFFECT_NOINLINE void SVF_calcBlockZDF(ResonantFilter* filter, const uint8
 		filter->s2 = s2;
 		filter->zi = zi;
 	}
-}
-//------------------------------------------------------------------------------------
-/*
- * Float-I/O counterpart of SVF_calcBlockZDF (Session 072 step 4).
- *
- * The state equations intentionally mirror the int16 path above. Inputs are
- * already normalized, outputs remain float, and the int16 __SSAT conversion is
- * replaced with normalized scaling. The Effect bus owns final saturation after
- * processing; voice callers continue using SVF_calcBlockZDF unchanged.
- */
-#if USE_SHAPER_NONLINEARITY
-#error "SVF_calcBlockZDFFloat mirrors only the non-shaper configuration"
-#endif
-INITCM_EFFECT_NOINLINE void SVF_calcBlockZDFFloat(ResonantFilter* filter,
-                                                  const uint8_t type,
-                                                  float* buf,
-                                                  const uint8_t size)
-{
-    const float out_gain = (float)FILTER_GAIN / 32767.0f;
-    const float f = filter->g;
-    const float R = filter->f >= 0.4499f ? 1.0f : filter->q;
-    const float ff = f * f;
-    uint8_t i;
-
-    /* Unlike the legacy int path, an invalid/off type is true pass-through. */
-    if (type != FILTER_NAIVE_2_POLE &&
-        (type < FILTER_LP || type > FILTER_PEAK))
-        return;
-
-    if (type == FILTER_NAIVE_2_POLE) {
-        const float f_lp2 = filter->f * 2.21f;
-
-        for (i = 0u; i < size; i++) {
-            const float x = softClipTwo(buf[i] * filter->drive);
-            const float q = (1.0f - filter->q) * 1.4f +
-                            (1.0f - filter->q) / (1.0f - f_lp2);
-
-            filter->a += f_lp2 * ((x - filter->a) +
-                                  q * (filter->a - filter->b));
-            if (filter->a > 1.0f)
-                filter->a = 1.0f;
-            else if (filter->a < -1.0f)
-                filter->a = -1.0f;
-            filter->b += f_lp2 * (filter->a - filter->b);
-            if (filter->b > 1.0f)
-                filter->b = 1.0f;
-            else if (filter->b < -1.0f)
-                filter->b = -1.0f;
-            buf[i] = filter->b * out_gain;
-        }
-        return;
-    }
-
-    /*
-     * Batched ZDF solver, float I/O twin (S073 Step 1).
-     *
-     * What:       mirrors the int16 two-division solver for normalized float
-     *             samples and retains the existing out_gain output scaling.
-     * Why:        StereoFilter runs two instances per block; it must receive
-     *             the same constant-cost division reduction (class S1).
-     * Inputs:     float block, coefficients, drive and filter state.
-     * Outputs:    float block and s1/s2/zi written back once after the loop.
-     * Accessors:  StereoFilterEffect.c left/right filter instances.
-     * Affiliates: SVF_calcBlockZDF(), svf_padeNum()/svf_padeDen(), and the
-     *             golden float filter comparison.
-     */
-    {
-        const float drive = filter->drive;
-        float s1 = filter->s1;
-        float s2 = filter->s2;
-        float zi = filter->zi;
-
-        for (i = 0u; i < size; i++) {
-            const float u    = buf[i] * drive;
-            const float ax   = 0.25f * u * u;
-            const float a1   = 0.25f * s1 * s1;
-            const float Nx   = svf_padeNum(ax);
-            const float Dx   = svf_padeDen(ax);
-            const float N1   = svf_padeNum(a1);
-            const float D1   = svf_padeDen(a1);
-            const float invA = 1.0f / (Dx * D1);
-            const float x    = u * Nx * D1 * invA;
-            const float t1   = N1 * Dx * invA;
-            const float ih   = 0.5f * (x + zi);
-            zi = x;
-            const float v0   = 0.5f * (ih - 2.0f * R * s1 - s2);
-            const float a0   = v0 * v0;
-            const float N0   = svf_padeNum(a0);
-            const float D0   = svf_padeDen(a0);
-            const float E    = D0 + f * 2.0f * R * N0;
-            const float P    = ff * N0 * t1;
-            const float F    = P + E;
-            const float Q    = P * x + s2 * E + f * D0 * t1 * s1;
-            const float invB = 1.0f / (D0 * E * F);
-            const float t0   = N0 * E * F * invB;
-            const float g0   = D0 * D0 * F * invB;
-            const float y1   = Q * D0 * E * invB;
-            const float s1t1 = s1 * t1;
-            const float xx   = t0 * (x - y1);
-            const float y0   = (s1t1 + f * xx) * g0;
-
-            s1 = s1t1 + 2.0f * f * (xx - t0 * 2.0f * R * y0);
-            s2 += 2.0f * f * t1 * y0;
-
-            switch (type) {
-            case FILTER_LP:
-                buf[i] = fastTanh(y1);
-                break;
-            case FILTER_HP:
-                buf[i] = (x - 2.0f * R * y0 - y1) * out_gain;
-                break;
-            case FILTER_BP:
-                buf[i] = y0 * out_gain;
-                break;
-            case FILTER_UNITY_BP:
-                buf[i] = 2.0f * R * y0 * out_gain;
-                break;
-            case FILTER_NOTCH:
-                buf[i] = (x - 2.0f * R * y0) * out_gain;
-                break;
-            case FILTER_PEAK:
-                buf[i] = (y1 - (x - 2.0f * R * y0 - y1)) * out_gain;
-                break;
-            default:
-                break;
-            }
-        }
-        filter->s1 = s1;
-        filter->s2 = s2;
-        filter->zi = zi;
-    }
 }

@@ -37,9 +37,9 @@
 #define CC_NAME_RETRY_TICKS   1000u
 #define CC_REMAP_NONE         0xFFu
 
-_Static_assert(CC_SCRATCH_REMAP_OFFSET + FS_HCNAMES_ROW_COUNT <=
-                   FS_NAME_SCRATCH_BYTES,
-               "HCNAMES remap must fit the borrowed name buffer");
+/* S094 P3: ccSvc_buf is the dedicated remap itself (161 B, offset 0). */
+_Static_assert(CC_SCRATCH_REMAP_OFFSET == 0u,
+               "HCNAMES remap starts at the dedicated remap's first row");
 
 /* FIFO of pending pastes/clears: 4 x 6 B plus head and count (26 B). */
 static cc_job_t ccSvc_queue[CC_QUEUE_SIZE];
@@ -90,7 +90,8 @@ static uint8_t ccSvc_flags;
 static uint8_t ccSvc_claimScene = CC_NO_SCENE;
 /* Refused name-write requests so far (2 B). */
 static uint16_t ccSvc_nameRetry;
-/* Borrowed 9 kB name buffer, NULL while not borrowed (4 B). */
+/* The dedicated HCNAMES remap (S094 P3: filesystem_copyClearRemapBegin()),
+ * NULL outside an interaction's name recording (4 B). */
 static uint8_t *ccSvc_buf;
 
 /*
@@ -187,33 +188,25 @@ static void ccSvc_release(void)
 }
 
 /*
- * Borrow the name buffer once; the remap starts empty. Name-buffer waiting is
- * counted only for paths that intentionally use the loan (F1-I).
+ * Take the dedicated HCNAMES remap once per interaction (S094 P3, A).
+ *
+ * What:       filesystem_copyClearRemapBegin() clears the remap to
+ *             CC_REMAP_NONE and returns it; it always succeeds, so a job's
+ *             name phase never waits here.
+ * Why:        the remap used to live in the borrowed 9 kB browser name cache,
+ *             so this waited for an idle facade and, since S082 P3 D53, for
+ *             no Load/Save command (the Bank load's final index restore
+ *             reused the same array). The dedicated scratch shares nothing,
+ *             so both waits are gone. The HCNAMES write itself still needs
+ *             the facade (ccSvc teardown, filesystem_requestCopyResidentNames()).
+ * Outputs:    1 (ready); ccSvc_buf points at the remap.
+ * Affiliates: ccSvc_namesReady(), filesystem_copyClearRemapEnd().
  */
 static uint8_t ccSvc_ensureScratch(void)
 {
     if (ccSvc_buf)
         return 1u;
-    /*
-     * Hold the name loan while a Load/Save command runs (S082 P3 D53).
-     *
-     * What: no borrow while menu_isLoadSaveCommandActive(), which covers a
-     * background Bank load from OK (or the MIDI UI take-over) to its final
-     * index restore. Why: the facade is busy for the whole load, and right
-     * after it the frozen screen's final Bank index restore reuses the same
-     * 9 kB array; a borrow in between would corrupt one or the other. A job
-     * in its name phase waits; its content is already committed.
-     * Inputs: menu_isLoadSaveCommandActive(). Outputs: 0 (not ready).
-     * Affiliates: ccSvc_namesReady(),
-     * menu_requestLoadCommandFinalIndexRestore().
-     */
-    if (menu_isLoadSaveCommandActive())
-        return 0u;
-    ccSvc_buf = filesystem_borrowNameCacheScratch();
-    if (!ccSvc_buf)
-        return 0u;
-    memset(&ccSvc_buf[CC_SCRATCH_REMAP_OFFSET], CC_REMAP_NONE,
-           FS_HCNAMES_ROW_COUNT);
+    ccSvc_buf = filesystem_copyClearRemapBegin();
 #if DEV_MODE_LOGGING
     ccTrace(AUTOSAVE_TRACE_CC_EVT_SCRATCH,
             (uint32_t)ccSvc_traceState.scratch_wait << 8u);
@@ -586,7 +579,7 @@ static void ccSvc_restoreEarlyTriggers(const cc_job_t *job, uint8_t slot)
 }
 
 /*
- * Source block and trigger for one paste step. Snapshot reads the borrowed
+ * Source block and trigger for one paste step. Snapshot reads the snapshot
  * table; live reads the source step now and retargets it for the destination
  * during the engine phase. Press-time trigger masks override both source
  * representations.
@@ -1291,7 +1284,7 @@ void ccSvc_nameContentChanged(uint16_t row)
     ccSvc_flags |= CC_SVC_NAMES_DIRTY;
 }
 
-/* Borrow lazily for the final name phase; content changes never borrow. */
+/* Take the remap lazily for the final name phase (always ready, S094 P3). */
 uint8_t ccSvc_namesReady(void)
 {
     return ccSvc_ensureScratch();
@@ -1769,7 +1762,7 @@ void ccSvc_tick(void)
         ccTrace_anomaly(AUTOSAVE_TRACE_CC_ANOM_TEARDOWN_CLAIM_HELD,
                         ccSvc_claimScene, 7u, 0u, ccSvc_claimScene);
     if (ccSvc_buf) {
-        filesystem_returnNameCacheScratch();
+        filesystem_copyClearRemapEnd();
         ccSvc_buf = 0;
         ccTrace(AUTOSAVE_TRACE_CC_EVT_SCRATCH, 1u);
     }

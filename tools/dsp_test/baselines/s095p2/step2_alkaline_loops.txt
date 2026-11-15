@@ -1,0 +1,4 @@
+DiodeLadder_renderB2Osc equal (longest 221 )
+DiodeLadder_renderB2Osc2 equal (longest 234 )
+DiodeLadder_renderB2OscPwm equal (longest 215 )
+DiodeLadder_renderB2OscPwmWt equal (longest 227 )

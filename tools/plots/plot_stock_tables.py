@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Review plot of the generated stock-wave octave tables (S086 P2).
 
-What:       reads the tables the device plays (Core/DSPAudio/wavetableStock.c,
+What:       reads the archived stock tables (tools/plots/archive/wavetableStock.c,
             written by tools/gen_stock_tables.py) and the existing
             sawTable/recTable (wavetable.c), and plots for each new wave:
               left   one cycle at levels 0, 4, 8 and 10, with its stock
@@ -11,7 +11,8 @@ What:       reads the tables the device plays (Core/DSPAudio/wavetableStock.c,
                      Nyquist harmonic count H as a tick.
 Why:        086_SESSION_HANDOFF_LOG.md §3.3: the review picture of
             what the firmware will play, level by level.
-Inputs:     Core/DSPAudio/wavetableStock.c, Core/DSPAudio/wavetable.c.
+Inputs:     tools/plots/archive/wavetableStock.c (S093 P3: no longer in the
+            firmware), Core/DSPAudio/wavetable.c.
 Outputs:    tools/plots/stock_tables_levels.png.
 Accessors:  python3 tools/plots/plot_stock_tables.py (numpy, matplotlib).
 Affiliates: tools/gen_stock_tables.py (WAVES, LEVEL_H, the table parser).
@@ -25,7 +26,7 @@ import numpy as np
 import lxr_plotlib as L
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(HERE))
+sys.path.insert(0, HERE)
 import gen_stock_tables as G  # noqa: E402
 
 COUNTERPART = {"sq3": "recTable", "sw3": "sawTable", "sqa": "recTable",

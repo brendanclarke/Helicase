@@ -214,9 +214,10 @@ typedef enum {
     FS_NAME_CACHE_BANK,
     FS_NAME_CACHE_PATTERN,
     /*
-     * S075: the array is lent to copy/clear as working storage
-     * (filesystem_borrowNameCacheScratch()); no browser accessor treats this
-     * domain as loaded, so Load/Save reloads its index on the next entry.
+     * S075: the array is lent as working storage; no browser accessor treats
+     * this domain as loaded, so Load/Save reloads its index on the next
+     * entry. Since S094 P3 only the modal sample/wavetable install takes the
+     * loan (copy/clear has its own scratch, fs_cc_scratch).
      */
     FS_NAME_CACHE_COPYCLEAR,
     /* Legacy tag retained for compatibility checks; HCNAMES storage is now dedicated. */
@@ -1063,8 +1064,11 @@ typedef union {
  * Affiliates: filesystem_prepareLibraryNameCache(), filesystem_residentNames,
  * and the separate filesystem_stage_workspace_t above.
  */
+/* S093 P8: 4-byte aligned, because the sample install lends it out as an
+ * int16 wavetable frame buffer (filesystem_installUserContentBlocking()) */
 static char fs_list_cache_name[FS_LIBRARY_NAME_CACHE_MAX]
-                              [STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+                              [STORAGE_KIT_DISPLAY_NAME_LEN + 1u]
+    __attribute__((aligned(4)));
 /*
  * Persistent HCNAMES provenance register: one two-byte source per logical
  * Bank/Scene/Kit/Instrument/Pattern/Effect row. This is the user-approved
@@ -1875,8 +1879,47 @@ static uint8_t filesystem_patternHeaderValid(const uint8_t *header,
  * Menu and Preset access them only through filesystem accessors.
  */
 static fs_name_cache_kind_t fs_list_cache_kind = FS_NAME_CACHE_NONE;
-/* S075: nonzero while copy/clear holds fs_list_cache_name (1 B SRAM). */
+/* S075: nonzero while fs_list_cache_name is lent (1 B SRAM). Since S094 P3
+ * only the modal sample/wavetable install takes the loan. */
 static uint8_t fs_name_cache_borrowed;
+/*
+ * Dedicated copy/clear name-remap scratch (S094 P3, Proposal A).
+ *
+ * What:       the HCNAMES row remap copy/clear records during an interaction
+ *             (remap[row] = original row whose name and source the row takes,
+ *             0xFF = unchanged), plus the snapshot of the original names and
+ *             sources that filesystem_cacheCopyClearRemap() takes before it
+ *             applies the remap. 1,932 B SRAM1 .bss (user sign-off, S094 P3);
+ *             uint16_t first, so there is no padding.
+ * Why:        copy/clear used to borrow the whole 9,000 B fs_list_cache_name
+ *             for these 2,027 B. The loan made every paste's name phase wait
+ *             for an idle facade and no Load/Save command, refused every other
+ *             facade operation while held, and cleared the browser index on
+ *             return. Here nothing is shared, so none of that applies.
+ * Validity:   fs_cc_scratch_active (1 B) is set by
+ *             filesystem_copyClearRemapBegin() and cleared by
+ *             filesystem_copyClearRemapEnd(); the remap is meaningful only
+ *             while it is set. names/sources are operation-local to
+ *             filesystem_cacheCopyClearRemap().
+ * Accessors:  filesystem_copyClearRemapBegin()/End(),
+ *             filesystem_cacheCopyClearRemap(),
+ *             filesystem_requestCopyResidentNames().
+ * Affiliates: copyClearService.c (ccSvc_ensureScratch(), teardown).
+ */
+typedef struct {
+    uint16_t sources[FS_RESIDENT_NAMES_ROW_COUNT];
+    char names[FS_RESIDENT_NAMES_ROW_COUNT][STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+    uint8_t remap[FS_RESIDENT_NAMES_ROW_COUNT];
+} fs_copy_clear_scratch_t;
+static fs_copy_clear_scratch_t fs_cc_scratch;
+static uint8_t fs_cc_scratch_active;
+_Static_assert(sizeof(fs_copy_clear_scratch_t) == 1932u,
+               "copy/clear scratch is the approved 1,932 B");
+_Static_assert(sizeof(((fs_copy_clear_scratch_t *)0)->names) ==
+                   sizeof(hcnames_name_mirror) &&
+               sizeof(((fs_copy_clear_scratch_t *)0)->sources) ==
+                   sizeof(fs_resident_source),
+               "copy/clear snapshot must match the mirror and register");
 #if DEV_MODE_LOGGING
 /*
  * S075 trace debug (DEV only, 2 B): suspension edge state and one refusal
@@ -1959,10 +2002,11 @@ static void filesystem_clearNameCacheStorage(void)
      * are cleared without modifying the separate typed stage. Affiliates:
      * HCNAMES, `.hcindex`, menu browse state machines, and typed load stages.
      *
-     * S075: while the array is lent to copy/clear it is not a browser cache;
-     * a disposal request (Menu lifecycle, a refused request's cleanup) must
-     * not wipe the working storage, so it is ignored. The lender's return
-     * path clears the array after it has released the loan.
+     * S075: while the array is lent (since S094 P3, to the sample/wavetable
+     * install only) it is not a browser cache; a disposal request (Menu
+     * lifecycle, a refused request's cleanup) must not wipe the working
+     * storage, so it is ignored. The lender's return path clears the array
+     * after it has released the loan.
      */
     if (fs_name_cache_borrowed)
         return;
@@ -1975,36 +2019,44 @@ static void filesystem_clearNameCacheStorage(void)
 _Static_assert(FS_HCNAMES_ROW_COUNT == FS_RESIDENT_NAMES_ROW_COUNT,
                "public HCNAMES row count must match the register");
 _Static_assert(sizeof(fs_list_cache_name) == FS_NAME_SCRATCH_BYTES,
-               "copy/clear scratch size must match the name cache");
+               "the lent scratch size must match the name cache");
+/* S093 P8: the install's wavetable frame buffer fits the name cache */
+_Static_assert(sizeof(fs_list_cache_name) >= WAVETABLE_FRAME_MAX * sizeof(int16_t),
+               "a wavetable source frame must fit the name cache");
 
 /*
- * Lend the 9,000 B name cache to copy/clear as working storage (S075).
+ * Return the lent 9,000 B name cache (S075; install only since S094 P3).
  *
- * Contract in filesystem.h. Borrow refuses while the facade is not idle (an
- * index read or HCNAMES transaction may be using the array) or while already
- * lent; otherwise the array is cleared, tagged FS_NAME_CACHE_COPYCLEAR and
- * handed out. Return clears it again (domain NONE) so no stale scratch bytes
- * can ever be read as names.
+ * Contract in filesystem.h. Clears the array and its domain (NONE) so no
+ * stale scratch bytes can ever be read as names. The loan itself is taken
+ * inline by filesystem_installUserContentBlocking().
  */
-uint8_t *filesystem_borrowNameCacheScratch(void)
-{
-    if (status != FS_STATUS_IDLE || fs_name_cache_borrowed)
-        return 0;
-    filesystem_clearNameCacheStorage();
-    fs_list_cache_kind = FS_NAME_CACHE_COPYCLEAR;
-    fs_name_cache_borrowed = 1u;
-#if DEV_MODE_LOGGING
-    fs_cc_refusal_reported = 0u;
-#endif
-    return (uint8_t *)fs_list_cache_name;
-}
-
 void filesystem_returnNameCacheScratch(void)
 {
     if (!fs_name_cache_borrowed)
         return;
     fs_name_cache_borrowed = 0u;
     filesystem_clearNameCacheStorage();
+}
+
+/*
+ * Start and end one copy/clear interaction's remap (S094 P3, Proposal A).
+ *
+ * Contract in filesystem.h. Begin clears the remap to "unchanged" (0xFF),
+ * marks it valid and returns it; it always succeeds, whatever the facade or
+ * Load/Save is doing. End marks it invalid. Affiliates: fs_cc_scratch.
+ */
+uint8_t *filesystem_copyClearRemapBegin(void)
+{
+    memset(fs_cc_scratch.remap, 0xFF, sizeof(fs_cc_scratch.remap));
+    fs_cc_scratch_active = 1u;
+    return fs_cc_scratch.remap;
+}
+
+void filesystem_copyClearRemapEnd(void)
+{
+    fs_cc_scratch_active = 0u;
+    memset(fs_cc_scratch.remap, 0xFF, sizeof(fs_cc_scratch.remap));
 }
 
 /*
@@ -2031,7 +2083,7 @@ static void filesystem_clearInstrumentCacheStorage(void)
  */
 static void filesystem_prepareLibraryNameCache(fs_name_cache_kind_t kind)
 {
-    /* S075: never retag the array while copy/clear holds it. */
+    /* S075: never retag the array while it is lent (install, S094 P3). */
     if (fs_name_cache_borrowed)
         return;
     filesystem_clearNameCacheStorage();
@@ -4678,12 +4730,17 @@ static void filesystem_createBootIndex_tick(void)
                 filesystem_finish(FS_STATUS_ERROR);
                 return;
             }
-            op_create_dir_retry = 1u;
+            /* S095 P3 F1: arm the retry and the wait only once the mkdir has
+             * started; a refused request stays ready with op_file NULL and
+             * retries next tick (case 6 explains the stuck-wait defect). */
             op_file_ready = false;
             if (!afatfs_mkdir_lfn(STORAGE_ROOT_INSTRUMENT,
                                   AFATFS_MATCH_CASE_INSENSITIVE,
-                                  NULL, on_file_opened))
+                                  NULL, on_file_opened)) {
+                op_file_ready = true;   /* not started: retry next tick */
                 return;
+            }
+            op_create_dir_retry = 1u;
             return;
         }
         op_kit_root_dir = op_file;
@@ -4768,12 +4825,40 @@ static void filesystem_createBootIndex_tick(void)
                 filesystem_finish(FS_STATUS_ERROR);
                 return;
             }
-            op_create_dir_retry = 1u;
+            /*
+             * S095 P3 F1: the type folder is missing (the S095 P2 freeze).
+             *
+             * What:       re-read the registry entry for this tick, then start
+             *             one mkdir; the retry flag and the wait are armed only
+             *             once afatfs has accepted the request.
+             * Why:        this function runs once per tick, so a local set in
+             *             case 5 is gone when case 6 runs: `entry` was read
+             *             uninitialised here and the junk pointer faulted (the
+             *             display stopped mid-word, the audio buzzed). Every
+             *             other type's folder existed on the card, so only a
+             *             new type ever reached this branch. Second: clearing
+             *             op_file_ready before a mkdir that does not start (the
+             *             FAT layer busy) left this phase waiting for a callback
+             *             that never comes; on refusal it now stays ready with
+             *             op_file NULL and retries on the next tick.
+             * Inputs:     op_instrument_scan_registry_index (set in case 4).
+             * Outputs:    on_file_opened() reports the new folder (phase 6
+             *             continues) or NULL (the retry flag ends in ERROR).
+             */
+            entry = instrumentManager_registryEntryAt(
+                op_instrument_scan_registry_index);
+            if (!entry || !entry->storage_directory) {
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
             op_file_ready = false;
             if (!afatfs_mkdir_lfn(entry->storage_directory,
                                   AFATFS_MATCH_CASE_INSENSITIVE,
-                                  NULL, on_file_opened))
+                                  NULL, on_file_opened)) {
+                op_file_ready = true;   /* not started: retry next tick */
                 return;
+            }
+            op_create_dir_retry = 1u;
             return;
         }
         op_kit_root_dir = op_file;
@@ -6576,17 +6661,30 @@ static uint8_t filesystem_parseResidentSourceToken(const char *token,
 /*
  * Validate the .hcnames instrument-type header against the firmware registry.
  *
- * What: the first line of .hcnames must be a #types header listing the
- * instrument file extensions in enum order. Why: if the firmware's
- * instrument_type_t enum has changed since the file was written (a type
- * added, removed, or reordered), every Instrument row's type field is
- * potentially wrong; regenerating the file from SceneData is the only
- * safe recovery. Inputs: the first line of the physical file and the
- * instrument registry (via storage_instrumentTypeToText). Outputs:
- * success (proceed to data rows) or failure (invalidate and regenerate).
+ * What: the first line of .hcnames must be a #types header listing
+ * instrument type tokens in enum order. The header is accepted when its
+ * tokens equal the registry's first N tokens, N >= 1: the full current list,
+ * or a leading part of it (a file written before later types were
+ * appended). A reordered, renamed or removed token, an unknown token, or more
+ * tokens than the registry has is rejected.
+ * Why: Instrument rows store their type as a text token, so a type appended
+ * to the registry (S093: alk after drm snr cym hat) changes the meaning of no
+ * existing row. Rejecting the shorter header sent every boot after a type
+ * addition into filesystem_regenerateHcnamesFromWinner_tick(), which flags
+ * every row R (unproven), and the AutoSave reader then discards the record's
+ * payload for every Scene (Case 2 library reload or Case 3 empty): the S093
+ * P4 field report "all of my autosave was invalidated on boot". Registry rows
+ * are designated by type and new types go before UNKNOWN
+ * (InstrumentManager.c static assert, check_special_tags.py
+ * registry_check()), so a leading part of the list keeps its positions. The
+ * next register write emits the full header.
+ * Inputs: the first line of the physical file and the instrument registry
+ * (via storage_instrumentTypeToText). Outputs: success (proceed to data
+ * rows; each row's own type token is still validated) or failure
+ * (invalidate and regenerate).
  * Affiliates: storage_instrumentTypeToText(), the bootstrap writer
  * (emits the header), filesystem_cacheResidentRecord() (reads data
- * rows after the header).
+ * rows after the header); the seven .hcnames readers that call this.
  */
 static uint8_t filesystem_validateHcnamesHeader(const char *line)
 {
@@ -6606,10 +6704,11 @@ static uint8_t filesystem_validateHcnamesHeader(const char *line)
     /*
      * Walk the instrument_type_t enum in order, comparing every registered
      * token against the corresponding tab field.  The enum walk ends when
-     * storage_instrumentTypeToText() returns NULL, so a header that lists
-     * fewer types than the current enum mismatches on the first missing
-     * token, while a header listing more tokens fails the trailing check
-     * below instead of being silently truncated.
+     * storage_instrumentTypeToText() returns NULL; a header that ends
+     * earlier (fewer types: written before later types were appended) stops
+     * the walk at its line end and is accepted below, while a header listing
+     * more tokens fails the trailing check instead of being silently
+     * truncated.
      */
     for (;;) {
         const char *token = storage_instrumentTypeToText(
@@ -6632,14 +6731,15 @@ static uint8_t filesystem_validateHcnamesHeader(const char *line)
     if (type_index == 0u)
         return 0u;
     /*
-     * Reject trailing tokens beyond the registry as well as a short header:
-     * both mean the vocabulary count differs, which is exactly the mismatch
-     * the header exists to detect.
+     * Reject trailing tokens beyond the registry: a token the firmware does
+     * not know means the file came from a vocabulary this build cannot read.
+     * A header that ended before the registry did (type_index tokens, all
+     * matching) is a leading part of the current list and is accepted
+     * (S093 P4: appended types must not invalidate the register).
      */
     if (*p != '\n' && *p != '\r' && *p != '\0')
         return 0u;
-    return (storage_instrumentTypeToText(
-        (storage_instrument_type_t)type_index) == NULL) ? 1u : 0u;
+    return 1u;
 }
 
 static uint8_t filesystem_cacheResidentRecord(uint16_t row, const char *line)
@@ -7106,38 +7206,28 @@ static void filesystem_cacheCurrentResidentPatternName(void)
  * Overlay copy/clear identity changes onto the freshly read register (S075).
  *
  * What: applies the session's row remap (destination row <- source row) from
- * the borrowed name buffer to the HCNAMES mirror and source register, using
- * a copy of the original rows so chained or swapped pastes resolve to the
- * pre-operation names. Copied rows take the source's name and source token;
+ * the dedicated copy/clear scratch (fs_cc_scratch, S094 P3) to the HCNAMES
+ * mirror and source register, using a copy of the original rows so chained
+ * or swapped pastes resolve to the pre-operation names. Copied rows take the source's name and source token;
  * their refreshed flag is cleared so the boot reader never reloads a library
  * object over pasted content (spec §9.10). Instrument type tokens are
  * formatted from the resident slot and follow automatically. Rows changed only
  * by clears already had their refreshed flag cleared in RAM and are written
  * as they are (names kept on clear, user).
- * Inputs: remap[161] at offset 0 of the borrowed buffer (0xFF = unchanged).
- * Scratch: original names at offset 256 (1,449 B) and original sources at
- * offset 1,705 (322 B) of the same buffer. Output: mirror and register rows;
- * the shared writer then rewrites `.hcnamtmp` and swaps it in. Caller:
+ * Inputs: fs_cc_scratch.remap[161] (0xFF = unchanged), valid while
+ * fs_cc_scratch_active. Scratch: fs_cc_scratch.names (1,449 B) and .sources
+ * (322 B) take the original rows. Output: mirror and register rows; the
+ * shared writer then rewrites `.hcnamtmp` and swaps it in. Caller:
  * filesystem_residentNames_tick() phases 3 and 7.
  */
-#define FS_COPY_REMAP_OFFSET        0u
-#define FS_COPY_NAMES_OFFSET        256u
-#define FS_COPY_SOURCES_OFFSET      (FS_COPY_NAMES_OFFSET + \
-                                     sizeof(hcnames_name_mirror))
-_Static_assert(FS_COPY_SOURCES_OFFSET + sizeof(fs_resident_source) <=
-                   FS_NAME_SCRATCH_BYTES,
-               "copy/clear HCNAMES scratch must fit the name buffer");
 static void filesystem_cacheCopyClearRemap(void)
 {
-    uint8_t *scratch = (uint8_t *)fs_list_cache_name;
-    const uint8_t *remap = &scratch[FS_COPY_REMAP_OFFSET];
-    char (*names)[STORAGE_KIT_DISPLAY_NAME_LEN + 1u] =
-        (char (*)[STORAGE_KIT_DISPLAY_NAME_LEN + 1u])
-            (void *)&scratch[FS_COPY_NAMES_OFFSET];
-    uint16_t *sources = (uint16_t *)(void *)&scratch[FS_COPY_SOURCES_OFFSET];
+    const uint8_t *remap = fs_cc_scratch.remap;
+    char (*names)[STORAGE_KIT_DISPLAY_NAME_LEN + 1u] = fs_cc_scratch.names;
+    uint16_t *sources = fs_cc_scratch.sources;
     uint16_t row;
 
-    if (!fs_name_cache_borrowed)
+    if (!fs_cc_scratch_active)
         return;
     memcpy(names, hcnames_name_mirror, sizeof(hcnames_name_mirror));
     memcpy(sources, fs_resident_source, sizeof(fs_resident_source));
@@ -7272,15 +7362,25 @@ static void filesystem_recordStallSnapshot(uint8_t site)
     autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
                          (uint8_t)(site | (0u << AUTOSAVE_TRACE_PHASE_STALL_PART_SHIFT)),
                          value);
-    /* Part 1: cache slots (8 total); an index of -1 encodes as 0. */
-    value = (uint32_t)(fs.cache_locked & 0x0Fu) |
-            ((uint32_t)(fs.cache_retained & 0x0Fu) << 4u) |
-            ((uint32_t)(fs.cache_dirty & 0x0Fu) << 8u) |
-            ((uint32_t)(fs.cache_reading & 0x0Fu) << 12u) |
-            ((uint32_t)(fs.cache_writing & 0x0Fu) << 16u) |
-            ((uint32_t)(fs.cache_empty & 0x0Fu) << 20u) |
-            ((uint32_t)((uint8_t)(fs.cwd_retain + 1) & 0x0Fu) << 24u) |
-            ((uint32_t)((uint8_t)(fs.cwd_lock + 1) & 0x0Fu) << 28u);
+    /*
+     * Part 1: cache slots (S094 P3: 16 total, 5-bit fields, good to 31).
+     *
+     * Layout: locked 0-4, retained 5-9, dirty 10-14, empty 15-19, reading
+     * bit 20, writing bit 21, cwd retain + 1 22-26, cwd lock + 1 27-31 (an
+     * index of -1 encodes as 0). Reading and writing are one bit each because
+     * the SD shim accepts one transfer at a time (sdcard_readBlock() and
+     * sdcard_writeBlock() refuse unless IDLE). The former 4-bit layout
+     * wrapped at 16 (cache_empty is 16 at boot). Decoder:
+     * decode_devlogs.py decode_hcnames_stall() part 1.
+     */
+    value = (uint32_t)(fs.cache_locked & 0x1Fu) |
+            ((uint32_t)(fs.cache_retained & 0x1Fu) << 5u) |
+            ((uint32_t)(fs.cache_dirty & 0x1Fu) << 10u) |
+            ((uint32_t)(fs.cache_empty & 0x1Fu) << 15u) |
+            ((uint32_t)(fs.cache_reading ? 1u : 0u) << 20u) |
+            ((uint32_t)(fs.cache_writing ? 1u : 0u) << 21u) |
+            ((uint32_t)((uint8_t)(fs.cwd_retain + 1) & 0x1Fu) << 22u) |
+            ((uint32_t)((uint8_t)(fs.cwd_lock + 1) & 0x1Fu) << 27u);
     autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
                          (uint8_t)(site | (1u << AUTOSAVE_TRACE_PHASE_STALL_PART_SHIFT)),
                          value);
@@ -23508,6 +23608,11 @@ static void filesystem_scanInstruments_tick(void)
         /* Registry order owns the set of Instrument folders to scan. */
         if (!op_instrument_scan_one_type)
             op_instrument_scan_registry_index = 0u;
+        /* S095 P3 F1: phase 12 finishes with op_close_status. A missing type
+         * folder (phase 7) reaches it without passing phase 9, the only other
+         * writer here, so start from DONE: a missing folder is an empty list,
+         * not the previous operation's result. */
+        op_close_status = FS_STATUS_DONE;
         op_phase = 1;
         return;
 
@@ -25379,7 +25484,10 @@ static uint8_t filesystem_installFrames(afatfsFilePtr_t file,
         if (kind == SAMPLE_INSTALL_KIND_SAMPLE) {
             if (!sampleInstall_writeFrames(sample_io_buf, n))
                 return 0u;
-        } else if (!sampleInstall_writeFrame(sample_io_buf, (uint16_t)n)) {
+        } else if (!sampleInstall_writeFrame(sample_io_buf, (uint16_t)n,
+                                             (int16_t *)(void *)fs_list_cache_name)) {
+            /* S093 P8 (D8): the frame is assembled in the name cache, which
+             * filesystem_installUserContentBlocking() holds for the install */
             return 0u;
         }
         frames -= n;
@@ -25440,10 +25548,12 @@ fail:
 /*
  * Install one wavetable folder (S087 stage C).
  *
- * What:       pass 1 counts the folder's .wav files and fixes the frame length,
- *             depth (8 only when every frame is 8-bit) and source format;
- *             pass 2 streams the frames in natural order. A folder with no
- *             frames, mixed lengths or mixed formats installs nothing.
+ * What:       pass 1 counts the folder's .wav files and fixes the frame length
+ *             and source format (S093 P8: 16- or 24-bit; an 8-bit file fails
+ *             filesystem_parseWav() and is not counted, so an 8-bit folder
+ *             installs nothing and a mixed one fails pass 2); pass 2 streams
+ *             the frames in natural order. A folder with no frames, mixed
+ *             lengths or mixed formats installs nothing.
  * Why:        S087 P0 §5.2, A16, A24: one folder = one table, one frame length
  *             per table, first frame = the modulator list entry.
  * Inputs:     open folder handle (cwd = that folder), folder display name.
@@ -25459,7 +25569,6 @@ static uint8_t filesystem_installWavetableHere(afatfsFilePtr_t dir,
     fs_install_wav_t wav;
     uint16_t frame_len = 0u;
     uint8_t count = 0u;
-    uint8_t bits = 8u;
     uint8_t found = 0u;
     uint8_t ok = 1u;
     uint8_t pick_ok;
@@ -25488,7 +25597,6 @@ static uint8_t filesystem_installWavetableHere(afatfsFilePtr_t dir,
             if (count == 0u) {
                 first = wav;
                 frame_len = (uint16_t)frames;
-                bits = (uint8_t)(wav.fmt.bits == 8u ? 8u : 16u);
                 count = 1u;
             } else if ((uint16_t)frames == frame_len &&
                        wav.fmt.bits == first.fmt.bits &&
@@ -25520,7 +25628,7 @@ static uint8_t filesystem_installWavetableHere(afatfsFilePtr_t dir,
         return 0u;
 
     storage_displayNameFromLfn(name, display_name, 0u);
-    if (!sampleInstall_beginWavetable(name, frame_len, count, bits, &first.fmt))
+    if (!sampleInstall_beginWavetable(name, frame_len, count, &first.fmt))
         return 0u;
     fs_install_last[depth][0] = '\0';
     {
@@ -25661,7 +25769,7 @@ static void filesystem_installWavetableFolder(afatfsFilePtr_t dir,
 }
 
 /*
- * Install samples/ and wavetables/ into catalogue v2 (S087 stage C).
+ * Install samples/ and wavetables/ into catalogue v3 (S087 stage C; S093 P8).
  *
  * What:       one blocking pass, audio suspended by the caller:
  *             sampleInstall_begin(); walk samples/ (depth <= 3; in each
@@ -25673,7 +25781,7 @@ static void filesystem_installWavetableFolder(afatfsFilePtr_t dir,
  *             folders; one unreadable file skips its item only; /loops is
  *             retired (every sample can loop, A6).
  * Inputs:     the card; the 512 B sample_io_buf.
- * Outputs:    catalogue v2; counts for the result screen; 1 on success.
+ * Outputs:    catalogue v3; counts for the result screen; 1 on success.
  * Accessors:  menu_loadSamplesModal().
  * Affiliates: SampleInstall.h, storage_naturalCompare(),
  *             filesystem_parseWav(), filesystem_blockOpenDirLfn(),
@@ -25690,6 +25798,32 @@ uint8_t filesystem_installUserContentBlocking(void)
         return 0u;
     if (!filesystem_blockFsOk())
         return 0u;
+
+    /*
+     * S093 P8 (user, D8): hold the 9,000 B name cache for the install.
+     *
+     * What:       the array is lent exactly as to copy/clear (cleared, tagged
+     *             FS_NAME_CACHE_COPYCLEAR, disposal ignored); the wavetable
+     *             walker assembles each source frame in it (up to 2,048 int16 =
+     *             4,096 B, sampleInstall_writeFrame()); it is returned and
+     *             cleared at the end, so Load/Save reloads its index on the
+     *             next entry.
+     * Why:        D1': the raw frame is not stored, so the resampler reads it
+     *             from RAM; no new RAM (D8). This pass only needs the facade
+     *             not BUSY (checked above), so it takes the loan here. Since
+     *             S094 P3 it is the only borrower (copy/clear has its own
+     *             scratch); a loan already held is refused, as a busy facade.
+     * Affiliates: filesystem_returnNameCacheScratch().
+     */
+    if (fs_name_cache_borrowed)
+        return 0u;
+    filesystem_clearNameCacheStorage();
+    fs_list_cache_kind = FS_NAME_CACHE_COPYCLEAR;
+    fs_name_cache_borrowed = 1u;
+#if DEV_MODE_LOGGING
+    /* One refusal witness per loan (was reset by the removed borrow call). */
+    fs_cc_refusal_reported = 0u;
+#endif
     status = FS_STATUS_BUSY;
     current_op = FS_INTERNAL_OP_NONE;
 
@@ -25709,6 +25843,8 @@ uint8_t filesystem_installUserContentBlocking(void)
     }
     if (!sampleInstall_commit())
         ok = 0u;
+    /* S093 P8: return the name cache (cleared, domain NONE) */
+    filesystem_returnNameCacheScratch();
 
     current_op = FS_INTERNAL_OP_NONE;
     status = FS_STATUS_IDLE;
@@ -29262,12 +29398,12 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
 
     if (status == FS_STATUS_BUSY) return false;
     /*
-     * S075: while copy/clear holds the 9 kB name buffer, no operation that
-     * could read or write browser names may start; only the copy/clear name
-     * write itself is admitted. Callers see the same refusal as a busy
-     * facade and retry; the loan lasts only until queued copy/clear work and
-     * its name write have finished. Affiliate:
-     * filesystem_borrowNameCacheScratch().
+     * S075: while the 9 kB name buffer is lent, no operation that could read
+     * or write browser names may start. Since S094 P3 only the modal
+     * sample/wavetable install takes the loan, and it holds the facade BUSY
+     * throughout, so this is a backstop; copy/clear uses its own scratch
+     * (fs_cc_scratch) and never blocks other operations. The copy/clear name
+     * write stays admitted. Affiliate: filesystem_installUserContentBlocking().
      */
     if (fs_name_cache_borrowed && op != FS_INTERNAL_OP_UPDATE_HCNAMES_COPY) {
 #if DEV_MODE_LOGGING
@@ -34631,7 +34767,8 @@ uint16_t filesystem_identityRow(fs_identity_row_class_t cls, uint8_t scene,
 
 bool filesystem_requestCopyResidentNames(fs_completion_cb_t cb)
 {
-    if (status == FS_STATUS_BUSY || !fs_name_cache_borrowed)
+    /* S094 P3: valid while copy/clear's dedicated remap is active. */
+    if (status == FS_STATUS_BUSY || !fs_cc_scratch_active)
         return false;
     if (!filesystem_start(FS_INTERNAL_OP_UPDATE_HCNAMES_COPY,
                           FS_FILE_SETTINGS, 0u, cb))

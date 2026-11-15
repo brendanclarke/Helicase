@@ -1,0 +1,40 @@
+* IC15 input and output networks
+
+.model QN NPN(IS=1e-14 BF=300 VAF=100 CJE=8p CJC=4p TF=0.4n RB=50)
+.model QP PNP(IS=1e-14 BF=200 VAF=80 CJE=8p CJC=5p TF=0.6n RB=50)
+.model DS D(IS=2.5n N=1.8 RS=0.5 CJO=2p)
+
+VREF vref 0 5.333
+* inputs: A via R121 220k + C21 0.01u, B via R122 100k + C22 0.01u, into pin 3
+VA sa 0 DC 0 AC 1
+VB sb 0 DC 0 AC 0
+R121 sa n121 220k
+C21 n121 p3 0.01u
+R122 sb n122 100k
+C22 n122 p3 0.01u
+R124 p3 nb 2.2k
+R125 p2 nb 2.2k
+R126 vref nb 2.2k
+C37 nb 0 10u
+* output: OTA current into R127 47k + R129 22k || R128 220k to the C40 node
+IOTA 0 p6 DC 0 AC 1e-6
+R127 p6 n127 47k
+R129 n127 n40 22k
+R128 p6 n40 220k
+R162 vref n40 2.2k
+C40 n40 0 10u
+* buffer (pins 7 -> 8), C38 1u into VR8 volume 50k (A) at full
+EBUF p8 0 p6 0 1
+C38 p8 nv 1u
+RVOL nv 0 50k
+.ac dec 60 2 22k
+.control
+run
+wrdata vca_ac.txt vdb(p3) vdb(nv) v(p3)
+alter VA ac=0
+alter VB ac=1
+run
+wrdata vca_acb.txt vdb(p3) v(p3)
+quit
+.endc
+.end

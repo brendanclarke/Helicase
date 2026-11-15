@@ -1,0 +1,3 @@
+sizeof(TktLayer) = 196 B
+sizeof(TetraktVoice) = 1048 B (slot reserve 1264 B)
+TktWork = 448 B (static assert, TetraktVoice.c)

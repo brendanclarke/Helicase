@@ -1,0 +1,62 @@
+net 3932
+Space new            +2684
+CrumpBit             +484
+other                +428
+Manager/FxBuffer     +336
+--- top growth
+   +748 sk_feedMix [Space new]
+   +660 sk_feedLimit [Space new]
+   +596 sk_feedBegin [Space new]
+   +284 sk_drainStep [Space new]
+   +264 crumpBit_exportHandoff [CrumpBit]
+   +236 crumpBit_seatActive [CrumpBit]
+   +176 effects_switchRuntime [Manager/FxBuffer]
+   +168 sk_exportBegin [Space new]
+   +144 crumpBit_feedLimit [CrumpBit]
+   +124 effects_drainProcess [Manager/FxBuffer]
+    +96 mixer_calcNextSampleBlock [other]
+    +84 sk_feedCut [Space new]
+    +84 crumpBit_init [CrumpBit]
+    +60 crumpBit_effectiveMax [CrumpBit]
+    +56 sk_exportSeg [Space new]
+    +56 modNode_resetTargets [other]
+    +48 sk_drainBegin [Space new]
+    +44 menu_pollPresetStatus [other]
+    +44 crumpBit_runGrain [CrumpBit]
+    +40 sk_feedEnd [Space new]
+    +40 Drum_triggerVoice [other]
+    +40 Cymbal_triggerVoice [other]
+    +32 liveRec_triggerIn [other]
+    +28 osc_wtbFmBlendRampBlock [other]
+    +28 effects_service [Manager/FxBuffer]
+    +24 menu_cellMidiTarget [other]
+    +20 HiHat_triggerVoice [other]
+    +18 menu_commitTargetEdit [other]
+    +16 crumpBit_grainPosLimit [CrumpBit]
+    +16 audio_check_and_render [other]
+    +16 Snare_triggerVoice [other]
+    +16 CSWTCH.18 [other]
+    +12 osc_wtbFmBlendBlock [other]
+    +12 crumpBit_subtypeRateLimit [CrumpBit]
+     +8 midiLearn_typeMatches [other]
+     +8 menu_cellClearTarget [other]
+     +8 main [other]
+     +8 fxbuf_handoffBeginExit [Manager/FxBuffer]
+     +8 effects_activateScene [Manager/FxBuffer]
+     +4 pat_rawPublish [other]
+--- top shrink
+     +0 Alkaline_triggerVoice
+     +0 Alkaline_isQuiet
+     +0 Alkaline_initVoice
+     +0 Alkaline_calcVoiceSyncBlock
+     +0 Alkaline_calcVoiceAsync
+     -4 midiIn_dispatch
+     -4 menu_getMidiStaticName
+     -4 SVF_calcBlockZDF
+     -8 effects_exportHandoff
+    -12 oscSection_renderOldCarrier
+    -16 menu_stepAutomationExecuteItem0
+    -16 CSWTCH.17
+    -32 Drum_calcVoiceSyncBlock
+   -180 crumpBit_bufferChanged
+   -200 crumpBit_process

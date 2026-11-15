@@ -1154,13 +1154,21 @@ bool filesystem_requestUpdateResidentSceneNames(
  * Pattern/Effect identity (slot is used only for FS_ROW_INSTRUMENT), or
  * FS_HCNAMES_ROW_COUNT when invalid.
  * filesystem_requestCopyResidentNames(): one asynchronous HCNAMES rewrite
- * that reads `/.hcnames`, applies the copy/clear remap held at offset 0 of
- * the borrowed name buffer (remap[row] = original row whose name and source
- * the row takes, 0xFF = unchanged; copied rows lose their refreshed flag),
- * writes `.hcnamtmp` and swaps it in, then calls cb. Refused (false) while
- * the facade is busy or when the buffer is not borrowed. On failure the
+ * that reads `/.hcnames`, applies the copy/clear remap from
+ * filesystem_copyClearRemapBegin() (remap[row] = original row whose name and
+ * source the row takes, 0xFF = unchanged; copied rows lose their refreshed
+ * flag), writes `.hcnamtmp` and swaps it in, then calls cb. Refused (false)
+ * while the facade is busy or when no remap is active. On failure the
  * previous `.hcnames` stays intact. Client: copyClearService.c. Affiliates:
- * filesystem_borrowNameCacheScratch(), the shared HCNAMES update transaction.
+ * filesystem_copyClearRemapBegin()/End(), the shared HCNAMES update
+ * transaction.
+ *
+ * filesystem_copyClearRemapBegin() / filesystem_copyClearRemapEnd() (S094 P3,
+ * Proposal A): copy/clear's dedicated remap (161 B, inside the 1,932 B
+ * fs_cc_scratch in filesystem.c). Begin clears it to 0xFF, marks it valid
+ * and returns it; it always succeeds and never waits on the facade or a
+ * Load/Save command. End marks it invalid. One interaction holds it from
+ * its first name record to its teardown. Client: copyClearService.c.
  */
 #define FS_HCNAMES_ROW_COUNT 161u
 typedef enum {
@@ -1173,6 +1181,8 @@ typedef enum {
 uint16_t filesystem_identityRow(fs_identity_row_class_t cls, uint8_t scene,
                                 uint8_t slot);
 bool filesystem_requestCopyResidentNames(fs_completion_cb_t cb);
+uint8_t *filesystem_copyClearRemapBegin(void);
+void filesystem_copyClearRemapEnd(void);
 /* Borrow the requested Scene row while HCNAMES owns the shared cache.
  * Index 16 (Scene 17, while it exists) returns the S082 P1 D29 captured name. */
 const char *filesystem_residentSceneName(uint8_t scene_index);
@@ -1280,24 +1290,18 @@ uint8_t filesystem_instrumentNameCacheLoaded(instrument_type_t type);
 void filesystem_clearNameCache(void);
 
 /*
- * Lend the 9,000 B name cache to copy/clear as working storage (S075).
+ * The 9,000 B name cache as lent working storage (S075; S093 P8).
  *
- * What: hands out the whole browser name array while a copy/clear operation
- * runs, tagged so every browser accessor reports "not loaded" and Load/Save
- * reloads its index on the next entry. Why: during an operation AutoSave, the
- * deferred HCNAMES flush and the Load/Save pages cannot run (suspension,
- * routing), so the cache is idle; copy/clear needs it for source snapshots
- * and the identity-row remap (user, 2026-10-01: the 9 kB name buffer is
- * multi-use scratch during an operation). Inputs: none. Output: a pointer to
- * FS_NAME_SCRATCH_BYTES bytes, or NULL while the facade is busy or the buffer
- * is already lent. Return clears the bytes and the domain. While lent, name
- * cache disposal requests are ignored and every filesystem operation except
- * the copy/clear name write is refused like a busy facade. Clients:
- * copyClearService.c only. Affiliates: filesystem_requestCopyResidentNames()
- * reads the remap at offset 0 and uses offsets 256.. during its own request.
+ * What: the modal sample/wavetable installer (S093 P8) takes the whole
+ * browser name array for one wavetable frame, tagged so every browser
+ * accessor reports "not loaded" and Load/Save reloads its index on the next
+ * entry. Return clears the bytes and the domain. While lent, name-cache
+ * disposal requests are ignored and filesystem_start() refuses other
+ * operations like a busy facade. Since S094 P3 copy/clear no longer borrows
+ * it (filesystem_copyClearRemapBegin()); the loan is taken inline by
+ * filesystem_installUserContentBlocking(), which is its only client.
  */
 #define FS_NAME_SCRATCH_BYTES 9000u
-uint8_t *filesystem_borrowNameCacheScratch(void);
 void filesystem_returnNameCacheScratch(void);
 /* Compatibility spelling retained for existing Instrument menu callers. */
 void filesystem_clearInstrumentCache(void);
@@ -1393,7 +1397,7 @@ const kit_t *filesystem_loadedKit(void);
  */
 const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void);
 /*
- * Install samples/ and wavetables/ into catalogue v2 (S087 stage C).
+ * Install samples/ and wavetables/ into catalogue v3 (S087 stage C; S093 P8).
  *
  * What:       one blocking pass, audio suspended by the caller: erase the
  *             sample sectors, walk samples/ (depth <= 3: files in natural
@@ -1402,12 +1406,16 @@ const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void);
  *             (frames in natural order), and commit the header last.
  * Why:        S087 P0 §5.2: natural order, folders, wavetables as folders; one
  *             unreadable file skips its item only; /loops is retired (every
- *             sample can loop, A6).
- * Inputs:     the card.  Outputs: catalogue v2; 1 on success.
+ *             sample can loop, A6); wavetable frames are stored as 1,024-point
+ *             16-bit rows and 8-bit sources are refused (S093 P8).
+ * Inputs:     the card.  Outputs: catalogue v3; 1 on success.
  * Accessors:  menu_loadSamplesModal().
  * Affiliates: SampleInstall.h, storage_naturalCompare(),
  *             filesystem_parseWav(), filesystem_blockOpenDirLfn().
- * RAM:        per-depth last/best names and counters (R-C3).
+ * RAM:        per-depth last/best names and counters (R-C3); the existing
+ *             9,000 B fs_list_cache_name is temporarily borrowed for one
+ *             wavetable source frame (up to 4,096 B), then cleared and returned
+ *             for Load/Save to reload (S093 P8, user-approved D8).
  */
 uint8_t filesystem_installUserContentBlocking(void);
 

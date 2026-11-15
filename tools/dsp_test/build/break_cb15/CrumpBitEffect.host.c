@@ -15,13 +15,15 @@
  *   1 shared   ADC -> data lines -> DAC -> AC = dry h      (inline helper)
  *   2 sub-type one of dly | cmb | pit | grn | rvb -> wet   (per-block switch)
  *   3 shared   MIX: out = h + mix (wet - h)                 (inline helper)
- *   4 shared   output filter, a second pass: the resonant TPT SVF in
- *              dly | cmb | pit, a one-pole in grn | rvb (S091 P5 F1)
+ *   4 shared   output filter, a second pass: the resonant TPT SVF in every
+ *              sub-type (S094 P2 AS-13: grn | rvb back on the SVF; their
+ *              S091 P5 F1 one-pole is gone)
  * Within a sub-type every statement runs on every frame whatever its
  * settings (constant CPU); the sub-type is chosen once per block.
- * S091 P5 caps every sub-type at 170 instructions per frame for the whole
- * Effect, worst case (S091_P5_SUBTYPE_EFFICIENCIES.md); crumpbit_cpu_check
- * gates it on the linked image.
+ * S091 P5 capped every sub-type at 170 instructions per frame for the whole
+ * Effect; since S094 P2 the budget is the Effect's cycle share (16,634 per
+ * block, S094_P2_ALKALINE_SAVINGS.md §21), and crumpbit_cpu_check gates the
+ * instruction count on the linked image at the measured S094 P2 cap.
  */
 
 
@@ -32,6 +34,26 @@
 
 #include <math.h>
 #include <string.h>           /* memset(): crumpBit_enter() */
+
+
+/*
+ * The feed gains of CrumpBit's tails (S095 P1, D24: effect_feed_gain_uq15,
+ * uQ1.15): one 8-bit code / 128 is CrumpBit's wet scale, so a tape or line
+ * tail is 1.0; the `rvb` wet is about half the sum of a side's two lanes
+ * (mid 1/4 + side 1/4 at the default width), so 0.5.
+ */
+#define CRUMPBIT_FEED_GAIN_TAPE       1.0f
+#define CRUMPBIT_FEED_GAIN_RVB        0.5f
+
+/*
+ * rt->feed_bits (S095 P1): CRUMPBIT_FEED_RUN while a type-change feed plays
+ * (crumpBit_init() sets it, crumpBit_process() clears it when sk_feedMix()
+ * ends); CRUMPBIT_FEED_LIMIT when the engine's write heads are new (init,
+ * a sub-type entry) and the feed must be cut where they would overwrite it
+ * (crumpBit_feedLimit(), once, after the block's seat).
+ */
+#define CRUMPBIT_FEED_RUN             0x01u
+#define CRUMPBIT_FEED_LIMIT           0x02u
 
 /*
  * Private DSP constants (S074_CRUMPBIT_EFFECT.md §3).
@@ -411,7 +433,8 @@ float crumpBit_delaySamples(uint8_t rate, uint16_t bpm)
 float crumpBit_shareMaxSamples(const fx_share_t *share)
 {
     /* len: the loop length this share seats (crumpBit_seat()'s rule). */
-    uint32_t len = share ? share->bytes : 0u;
+    /* S095 P1 (SD1): the usable share above the arena prefix. */
+    uint32_t len = share ? sk_usableBytes(share) : 0u;
 
     if (len > CRUMPBIT_LOOP_MAX_BYTES)
         len = CRUMPBIT_LOOP_MAX_BYTES;
@@ -473,8 +496,8 @@ static CRUMPBIT_NOINLINE uint8_t crumpBit_tableLimit(const float *table,
  * Callers: crumpBit_subtypeRateLimit() (the manager's effective_max, the
  * page clamp and label). Affiliates: crumpBit_delayRow(), host law CB1.
  */
-static CRUMPBIT_NOINLINE uint8_t crumpBit_delayLimit(float max_samples,
-                                                     uint16_t bpm)
+CRUMPBIT_NOINLINE uint8_t crumpBit_delayLimit(float max_samples,
+                                             uint16_t bpm)
 {
     crumpbit_delay_curve_t c;
     /* m: the search bound; count: the rows (from 0 up) known below m. */
@@ -498,9 +521,9 @@ static CRUMPBIT_NOINLINE uint8_t crumpBit_delayLimit(float max_samples,
 float crumpBit_grainMaxSamples(const fx_share_t *share)
 {
     /* half: one `grn` line, half the seated share (plan §3.3.2). */
-    const uint32_t half = (share ? ((share->bytes > CRUMPBIT_LOOP_MAX_BYTES)
-                                        ? CRUMPBIT_LOOP_MAX_BYTES
-                                        : share->bytes) : 0u) / 2u;
+    const uint32_t usable = share ? sk_usableBytes(share) : 0u;
+    const uint32_t half = ((usable > CRUMPBIT_LOOP_MAX_BYTES)
+                               ? CRUMPBIT_LOOP_MAX_BYTES : usable) / 2u;
 
     return (half < CRUMPBIT_GRAIN_LINE_MIN)
         ? 0.0f : (float)(half - CRUMPBIT_LOOP_GUARD);
@@ -642,8 +665,12 @@ static uint32_t crumpBit_seat(CrumpBitRuntime *rt, uint32_t len)
     const uint8_t tape = (uint8_t)(rt->active_subtype != CRUMPBIT_SUBTYPE_PITCH);
 
     if (len != t->length) {
-        if (t->length != 0u && t->write_pos < len) {
-            /* Tail kept: only the samples written since the last wrap count. */
+        /*
+         * Tail kept: only the samples written since the last wrap count.
+         * S095 P1: a fresh seat (length 0, valid 0) keeps the start index
+         * init chose (the feed's tail end); nothing unwritten is heard.
+         */
+        if (t->write_pos < len) {
             if (t->valid > t->write_pos)
                 t->valid = t->write_pos;
         } else {
@@ -729,17 +756,41 @@ static inline const uint8_t *crumpBit_dataLinesFor(const CrumpBitRuntime *rt)
  *
  * What: the manager has already zeroed the union. This marks the loop
  * unseated and unprimed, so the first block seats the loop, mutes every
- * unwritten sample through `valid`, and starts the delay at its target. The
- * handoff is not adopted in v1: re-entering CrumpBit never plays a previous
- * owner's tail. Nothing is cleared in bulk. Inputs: runtime and handoff.
- * Output: runtime ready for write_param(). Caller: effects_switchRuntime().
- * Affiliates: crumpBit_seat(), FXBUF_STATE_EFFECT_WRITTEN.
+ * unwritten sample through `valid`, and starts the delay at its target.
+ * S095 P1: the previous owner's tail plays through the Space kit's feed
+ * (sk_feedBegin(), sk_feedMix()). Nothing is cleared in bulk.
+ * Inputs: runtime, handoff, the live share. Output: runtime ready for
+ * write_param(). Caller: effects_switchRuntime().
+ * Affiliates: crumpBit_seat(), crumpBit_feedLimit(), SpaceKit.h.
  */
-static void crumpBit_init(void *rt_void, const fxbuf_handoff_t *handoff)
+static __attribute__((cold)) void crumpBit_init(void *rt_void,
+                                                const fxbuf_handoff_t *handoff,
+                                                const fx_share_t *share)
 {
     CrumpBitRuntime *rt = (CrumpBitRuntime *)rt_void;
+    /* end: the old tail's end (share offset), 0 without a feed. */
+    uint32_t end;
 
-    (void)handoff;
+    /*
+     * S095 P1 (plan §5.3; §S18): enter through the kit. sk_feedBegin() reads
+     * the outgoing type's first segment in place and sets the slot lock
+     * while it plays. The loop starts writing where the tail ends, so its
+     * writes move away from it; the first block's seat then limits the
+     * feed against the engine's write heads (CRUMPBIT_FEED_LIMIT). The
+     * loop's bytes are not cleared: `valid` mutes every unwritten byte, as
+     * before (SD6).
+     */
+    sk_feedBegin(share, handoff, EFFECT_TYPE_CRUMPBIT);
+    end = sk_feedEnd(share, EFFECT_TYPE_CRUMPBIT);
+    /*
+     * The incoming dry ramp (plan §5.3 step 5) through CrumpBit's own mix
+     * stage: its law is out = h + mix (wet - h), so dry = 1 - mix. The first
+     * block ramps from the row whose dry equals the outgoing dry (one block,
+     * CrumpBit's existing mix ramp, instead of the Space types' 10 ms).
+     */
+    if (handoff && (handoff->state_flags & FXBUF_STATE_EFFECT_WRITTEN) != 0u)
+        rt->mix_prev = (uint8_t)(127u - (((uint32_t)handoff->effect_dry_uq15 *
+                                          127u + 0x4000u) >> 15));
     /*
      * The manager zeroed the union: every sub-type state is unseated
      * (length 0) and the active engine is `dly` (0). The forced resolution
@@ -747,8 +798,9 @@ static void crumpBit_init(void *rt_void, const fxbuf_handoff_t *handoff)
      * first block like any switch (crumpBit_enter()).
      */
     rt->u.tap.length = 0u;
-    rt->u.tap.write_pos = 0u;
+    rt->u.tap.write_pos = (end > SK_PREFIX_BYTES) ? end - SK_PREFIX_BYTES : 0u;
     rt->u.tap.valid = 0u;
+    rt->feed_bits = end ? (CRUMPBIT_FEED_RUN | CRUMPBIT_FEED_LIMIT) : 0u;
     rt->primed = 0u;
     /*
      * AC-coupling memory (S091 R4): the previous code of each channel. The
@@ -781,6 +833,8 @@ static void crumpBit_init(void *rt_void, const fxbuf_handoff_t *handoff)
     rt->filter_bal = 63u;
     /* S091 P5 follow-up: `pit` fine at its centre (the voice `fin` 63). */
     rt->pit_fine = 63u;
+    /* S095 P4 F1: `rvb` damping flat (its row's default). */
+    rt->rvb_damp = CRUMPBIT_RVB_DAMP_FLAT;
     /*
      * S091 P5 X2: no table is trusted across an entry; the first block
      * builds it for the rows the forced resolution wrote.
@@ -825,56 +879,102 @@ static void crumpBit_bytePosition(const CrumpBitRuntime *rt, uint32_t *pos,
 }
 
 /*
- * Describe the loop in the handoff when CrumpBit is exited or refreshed.
+ * Describe CrumpBit's valid audio when it is exited or refreshed (S095 P1,
+ * D24).
  *
- * What: records 1 channel, 8 bits, 44,108 Hz, the write position and integer
- * read position in pointer slot 12 (FXBUF_HANDOFF_EFFECT_POINTER_BASE), and
- * FXBUF_STATE_EFFECT_WRITTEN when any sample was written. Positions are
- * share-relative, which is arena-relative because the share starts at the
- * arena bottom. Inputs: runtime and the fresh handoff record. Output: the
- * Effect fields of the record. Callers: EffectsManager's handoff helper.
- * Affiliates: fxbuf_handoff_t.
+ * What: the wrap domain is the loop above the prefix (or, `grn`, its
+ * delay half); bits 8,
+ * 44,108 Hz, speed 1.0 (CrumpBit's tape glide moves the read head, never the
+ * write speed), dry = 1 - mix, gain CRUMPBIT_FEED_GAIN_*. Segments, each start
+ * clamped to `valid`:
+ * - `dly`, `cmb`: the pending repeat [wp - delay, wp), BOTH, stride 1;
+ * - `pit`: the window [wp - W, wp), BOTH, stride 1;
+ * - `grn`: its delay line's pending tap [wp - tap_d, wp) in the delay half;
+ * - `rvb`: the four FDN lines, lane k = [wp - d_k, wp) words (x 4 bytes),
+ *   stride 4, lanes 0 and 2 to L, 1 and 3 to R.
+ * No arena byte is written (SD3: a same-type Scene switch exports a live
+ * runtime). Inputs: runtime, the fresh record. Output: the record.
+ * Callers: effects_exportHandoff(). Affiliates: sk_exportBegin(),
+ * sk_exportSeg(), FxBuffer.h read rule.
  */
-static void crumpBit_exportHandoff(const void *rt_void, fxbuf_handoff_t *out)
+static __attribute__((cold)) void crumpBit_exportHandoff(const void *rt_void,
+                                                        fxbuf_handoff_t *out)
 {
     const CrumpBitRuntime *rt = (const CrumpBitRuntime *)rt_void;
-    float rp;
+    /*
+     * The active engine's line in one form: base (share-relative bytes),
+     * len/wp/valid (in the engine's unit: bytes, or words for `rvb`), d[k]
+     * (each segment's samples behind the write index), n segments.
+     */
+    uint32_t base;
+    uint32_t len;
+    uint32_t wp;
+    uint32_t valid;
+    uint32_t d[4];
+    uint32_t unit = 1u;
+    uint32_t n = 1u;
+    float gain = CRUMPBIT_FEED_GAIN_TAPE;
+    uint32_t k;
 
     if (!rt || !out)
         return;
-    out->effect_channels = 1u;
-    out->effect_bits = 8u;
-    out->effect_rate_hz = (uint16_t)CRUMPBIT_SAMPLE_RATE_HZ;
-    /*
-     * S091 P3: only the tape sub-types describe a read head; the others
-     * report their write position as the read position. Nobody adopts the
-     * Effect pointers today (CrumpBit itself never does).
-     */
-    if (rt->active_subtype == CRUMPBIT_SUBTYPE_DELAY ||
-        rt->active_subtype == CRUMPBIT_SUBTYPE_COMB) {
-        const CrumpBitTapState *t = &rt->u.tap;
+    /* The loop starts above the arena prefix (SD1). */
+    base = SK_PREFIX_BYTES;
+    switch (rt->active_subtype) {
+    case CRUMPBIT_SUBTYPE_REVERB: {
+        const float size = crumpBit_reverbSize[(rt->rate > 127u) ? 127u
+                                                                 : rt->rate];
 
-        if (t->length == 0u)
-            return;
-        rp = (float)t->write_pos - t->delay;
-        rp += (rp < 0.0f) ? (float)t->length : 0.0f;
-        out->write_offset[FXBUF_HANDOFF_EFFECT_POINTER_BASE] = t->write_pos;
-        out->read_offset[FXBUF_HANDOFF_EFFECT_POINTER_BASE] =
-            (uint32_t)rp % t->length;
-        if (t->valid != 0u)
-            out->state_flags |= FXBUF_STATE_EFFECT_WRITTEN;
-        return;
+        len = rt->u.rvb.length;
+        wp = rt->u.rvb.write_pos;
+        valid = rt->u.rvb.valid;
+        d[0] = (uint32_t)((float)CRUMPBIT_RVB_BASE0 * size);
+        d[1] = (uint32_t)((float)CRUMPBIT_RVB_BASE1 * size);
+        d[2] = (uint32_t)((float)CRUMPBIT_RVB_BASE2 * size);
+        d[3] = (uint32_t)((float)CRUMPBIT_RVB_BASE3 * size);
+        unit = 4u;
+        n = 4u;
+        gain = CRUMPBIT_FEED_GAIN_RVB;
+        break;
     }
-    {
-        /* pos/valid: the active engine's write byte and written bytes. */
-        uint32_t pos;
-        uint32_t written;
+    case CRUMPBIT_SUBTYPE_GRAIN:
+        /* The delay half: the line after the record line. */
+        len = rt->u.grn.length;
+        base += len;
+        wp = rt->u.grn.write_pos;
+        valid = rt->u.grn.valid;
+        d[0] = rt->u.grn.tap_d;
+        break;
+    case CRUMPBIT_SUBTYPE_PITCH:
+        len = rt->u.pit.length;
+        wp = rt->u.pit.write_pos;
+        valid = rt->u.pit.valid;
+        d[0] = (uint32_t)rt->u.pit.window;
+        break;
+    default:
+        len = rt->u.tap.length;
+        wp = rt->u.tap.write_pos;
+        valid = rt->u.tap.valid;
+        /* Whole samples behind the head, the read's lower neighbour. */
+        d[0] = (uint32_t)(rt->u.tap.delay + 0.999f);
+        break;
+    }
+    if (len == 0u || valid == 0u || d[0] == 0u)
+        return;
+    sk_exportBegin(out, base, len * unit, 8u, (uint8_t)unit,
+                   (uint16_t)CRUMPBIT_SAMPLE_RATE_HZ, 1.0f,
+                   (float)(127u - ((rt->mix_raw > 127u) ? 127u : rt->mix_raw)) /
+                       127.0f, gain);
+    for (k = 0u; k < n; k++) {
+        /* At most the valid history, and len - 1 (a whole ring reads empty). */
+        uint32_t dk = (d[k] > valid) ? valid : d[k];
 
-        crumpBit_bytePosition(rt, &pos, &written);
-        out->write_offset[FXBUF_HANDOFF_EFFECT_POINTER_BASE] = pos;
-        out->read_offset[FXBUF_HANDOFF_EFFECT_POINTER_BASE] = pos;
-        if (written != 0u)
-            out->state_flags |= FXBUF_STATE_EFFECT_WRITTEN;
+        dk = (dk >= len) ? len - 1u : dk;
+        sk_exportSeg(out, (uint8_t)k, base + ((wp + len - dk) % len) * unit,
+                     base + wp * unit,
+                     (n == 1u) ? FXBUF_SEG_SIDE_BOTH
+                               : ((k & 1u) ? FXBUF_SEG_SIDE_R
+                                           : FXBUF_SEG_SIDE_L));
     }
 }
 
@@ -889,7 +989,8 @@ static void crumpBit_exportHandoff(const void *rt_void, fxbuf_handoff_t *out)
  * 15..21 (`aux` and the granular rows) are stored whatever the active
  * sub-type, so a switch keeps every value (plan §2.4). S091 P4: row 20 is
  * the grain Length (was the level jitter), row 22 the shared filter
- * balance. Inputs: runtime, row index, value
+ * balance. S095 P4 F1: row 24 is `rvb`'s damping, stored whatever the
+ * active sub-type, as the other sub-type rows. Inputs: runtime, row index, value
  * (already clamped to the descriptor maximum). Output: runtime fields.
  * Caller: effects_service(). Affiliates: crumpBit_descriptors.
  */
@@ -925,6 +1026,8 @@ static void crumpBit_writeParam(void *rt_void, uint8_t index, uint8_t value)
     case CRUMPBIT_PARAM_GRAIN_WIDTH:    rt->grain_width = value;       break;
     /* S091 P5 follow-up: `pit`'s fine pitch (row 23). */
     case CRUMPBIT_PARAM_PIT_FINE:       rt->pit_fine = value;          break;
+    /* S095 P4 F1: `rvb`'s own damping row (row 24). */
+    case CRUMPBIT_PARAM_RVB_DAMP:       rt->rvb_damp = value;          break;
     default:                                                           break;
     }
 }
@@ -1057,47 +1160,6 @@ static inline void crumpBit_filterMix(uint8_t type, float r,
     *cx = row[0];
     *cb = row[1] + row[2] * (2.0f * r);
     *cl = row[3];
-}
-
-/*
- * The one-pole output filter of `grn` and `rvb` (S091 P5 F1).
- *
- * What: in these two sub-types stage 4 is a one-pole per channel,
- * s += k (x - s), out = cx x + cl s, instead of the resonant TPT SVF:
- * - k from crumpBit_onePoleK[] at the channel's cutoff index (`frq` with the
- *   `bal` spread, as the SVF), matched so the one-pole's -3 dB point is the
- *   SVF's at `res` 0 (plan Q6; generated);
- * - every `typ` value keeps a meaning, because the row is shared and its
- *   stored value survives sub-type switches (plan Q5): LP, LP2, BP, UBP ->
- *   low-pass (cx 0, cl 1); HP, notch -> high-pass x - s (1, -1); peak, off
- *   -> flat (1, 0). The page shows the mapped type (LP/HP/off);
- * - `res` has no effect (the page shows `---`); the type crossfade still
- *   ramps over one block, as the SVF's.
- * Why: the SVF loop is 31 instructions per frame, the one-pole 16; `grn` and
- *   `rvb`, the two dearest engines, could not otherwise reach the 170 cap
- *   (S091_P5_SUBTYPE_EFFICIENCIES.md §2).
- * Index: CRUMPBIT_FILTER_* (MENU_FILTER order). Columns: cx, cl.
- * Accessors: crumpBit_process() (stage 4), crumpBit_filterIsOnePole() (also
- * crumpBit_enter()'s state hand-over). Affiliates: crumpBit_onePoleK,
- * crumpBit_uiFormatValue3() (`typ`/`res` labels), host law CB19.
- */
-static const float crumpBit_onePoleMixTable[CRUMPBIT_FILTER_OFF + 1u][2] = {
-    /*            cx     cl  */
-    /* LP   */ {  0.0f,  1.0f },
-    /* HP   */ {  1.0f, -1.0f },
-    /* BP   */ {  0.0f,  1.0f },
-    /* UBP  */ {  0.0f,  1.0f },
-    /* Nch  */ {  1.0f, -1.0f },
-    /* Pek  */ {  1.0f,  0.0f },
-    /* LP2  */ {  0.0f,  1.0f },
-    /* off  */ {  1.0f,  0.0f },
-};
-
-/* Nonzero when a sub-type's output filter is the one-pole (`grn`, `rvb`). */
-static inline uint32_t crumpBit_filterIsOnePole(uint8_t subtype)
-{
-    return (subtype == CRUMPBIT_SUBTYPE_GRAIN ||
-            subtype == CRUMPBIT_SUBTYPE_REVERB) ? 1u : 0u;
 }
 
 /*
@@ -2593,9 +2655,10 @@ static inline float crumpBit_exp2Neg(float x)
  * lanes = four lines); the line delays d_k = base_k x size (`rte`), integer,
  * clamped to the buffer; the line gains g_k = 2^(lg x d_k) with lg from
  * crumpBit_reverbDecay (`fbk`, RT60 0.1-10 s), or near 1 while frozen (`snc`,
- * input muted); the per-line damping (`ton`; S091 P5 R1: low-pass only,
- * k = crumpBit_toneK[min(ton, 63)], so 63 and above are an exact
- * pass-through and the high-pass half of the row plays flat in `rvb`); the
+ * input muted); the per-line damping (`dmp`, row 24, S095 P4 F1: low-pass
+ * only, k = crumpBit_toneK[dmp >> 1], 0 the darkest, 126 and 127 (the
+ * default) an exact pass-through, and exactly flat while frozen so a freeze
+ * holds; S091 P5 R1 had read the shared `ton` row's 0..63); the
  * width (`dpn`); the per-block gate that keeps feedback and wet off until
  * `valid` covers the longest line (no stale bytes recirculate after an
  * Effect type change).
@@ -2638,12 +2701,16 @@ static CRUMPBIT_NOINLINE void crumpBit_runReverb(CrumpBitRuntime *rt,
     float side_k;
     float mix = b->mix;
     /*
-     * tone_k (R1): the damping pole, the `ton` table's low-pass half only;
-     * crumpBit_toneK[63] is exactly 1, so s_k += 1 (y_k - s_k) gives
-     * s_k = y_k bit for bit (flat).
+     * tone_k (S095 P4 F1, user: a low-pass-only tone control is 0..127, 127
+     * flat and the default; freezes should hold): the damping pole reads
+     * `rvb`'s own row (`dmp`, row 24) through the `ton` table's low-pass
+     * half, entry dmp >> 1 (0..63); crumpBit_toneK[63] is exactly 1, so 126
+     * and 127 give s_k = y_k bit for bit (flat). While frozen (`snc`) the
+     * pole is exactly flat whatever `dmp` is: a damped loop loses its highs
+     * every pass, which made a freeze at mid damping fade by 8 dB a second.
+     * Per block (a select and a shift); no per-sample change.
      */
-    const float tone_k = crumpBit_toneK[(rt->tone_raw > CRUMPBIT_TONE_FLAT)
-                                        ? CRUMPBIT_TONE_FLAT : rt->tone_raw];
+    const float tone_k = rt->sync ? 1.0f : crumpBit_toneK[rt->rvb_damp >> 1];
     float s0 = rv->damp[0];
     float s1 = rv->damp[1];
     float s2 = rv->damp[2];
@@ -2849,17 +2916,12 @@ static uint32_t crumpBit_seatActive(CrumpBitRuntime *rt, uint32_t bytes)
  * reinterpreted union bits become a NaN or a huge value); the tape glide is
  * re-primed. The rows are untouched: the new engine reads every stored row
  * value with its own meaning (plan §2.4, A1).
- * S091 P5 F1: a switch between an SVF sub-type and a one-pole one (`grn`,
- * `rvb`) hands the output filter's state over, so the filter carries on
- * from where it was instead of starting from a stale integrator: the
- * one-pole starts from the SVF's low integrator (svf_*2 -> svf_*1), the SVF
- * from the one-pole state as its low integrator with the band integrator
- * cleared (svf_*1 -> svf_*2, svf_*1 = 0); for a held input both are the
- * filter's steady state. No crossfade of the switch itself (S091 P3 S7: the
- * switch glitch is wanted); this only avoids an extra filter click.
+ * The output filter (stage 4) is the same SVF in every sub-type (S094 P2
+ * AS-13), so its state (svf_*) carries straight across a switch: no
+ * hand-over, no click from the filter. (S091 P5 F1's one-pole in `grn` and
+ * `rvb` needed one; it is gone.)
  * Inputs: runtime, the new sub-type, the seated bytes. Output: the union
- * holds the new engine's state; active_subtype = new; the stage 4 state in
- * the new filter's form.
+ * holds the new engine's state; active_subtype = new.
  * Cost: straight-line apart from one modulo, once in the switching block.
  * Caller: crumpBit_process().
  */
@@ -2869,19 +2931,7 @@ static void crumpBit_enter(CrumpBitRuntime *rt, uint8_t next, uint32_t bytes)
     uint32_t written;
     uint32_t len;
 
-    crumpBit_bytePosition(rt, &pos, &written);
-    /* F1: the output filter's state into the new sub-type's form. */
-    if (crumpBit_filterIsOnePole(next) &&
-        !crumpBit_filterIsOnePole(rt->active_subtype)) {
-        (void)0;
-        rt->svf_r1 = rt->svf_r2;
-    } else if (!crumpBit_filterIsOnePole(next) &&
-               crumpBit_filterIsOnePole(rt->active_subtype)) {
-        rt->svf_l2 = rt->svf_l1;
-        rt->svf_r2 = rt->svf_r1;
-        rt->svf_l1 = 0.0f;
-        rt->svf_r1 = 0.0f;
-    }
+    crumpBit_bytePosition(rt, &pos, &written); rt->svf_l1 = 0.0f;
     /* The whole union is rebuilt: zeroed floats and counters first. */
     memset(&rt->u, 0, sizeof(rt->u));
     rt->active_subtype = next;
@@ -2924,6 +2974,67 @@ static void crumpBit_enter(CrumpBitRuntime *rt, uint8_t next, uint32_t bytes)
         }
         break;
     }
+    /* S095 P1: new write heads; a running feed is limited against them. */
+    if (rt->feed_bits & CRUMPBIT_FEED_RUN)
+        rt->feed_bits |= CRUMPBIT_FEED_LIMIT;
+}
+
+/*
+ * Limit a running type-change feed against the active engine's write heads
+ * (S095 P1, §S18; SpaceKit.h sk_feedLimit()).
+ *
+ * What: describes where this engine writes next, share-relative, in its
+ * loop above the prefix: `dly`/`cmb`/`pit` one byte per frame from
+ * write_pos; `grn` the record and delay half-lines, one byte each per frame
+ * from write_pos (freeze redirects the record write into the delay half,
+ * which the second head already covers); `rvb` one 4-byte word per frame.
+ * The kit cuts the tail before the first sample one of them would
+ * overwrite before it is read.
+ * When: in the first seated block after init or a sub-type entry, before
+ * the engine writes (CRUMPBIT_FEED_LIMIT). Out of line and cold: once per
+ * change, never in a steady block.
+ * Inputs: runtime (seated), share. Output: the control block's head.
+ * Caller: crumpBit_process().
+ */
+static CRUMPBIT_NOINLINE __attribute__((cold)) void crumpBit_feedLimit(
+    CrumpBitRuntime *rt, const fx_share_t *share)
+{
+    const uint32_t base = SK_PREFIX_BYTES;
+    sk_writer_t w[2];
+    uint32_t n = 1u;
+    uint32_t len;
+
+    rt->feed_bits &= (uint8_t)~CRUMPBIT_FEED_LIMIT;
+    switch (rt->active_subtype) {
+    case CRUMPBIT_SUBTYPE_GRAIN:
+        len = rt->u.grn.length;
+        w[0].at = base + rt->u.grn.write_pos;
+        w[0].lo = base;
+        w[0].hi = base + len;
+        w[0].rate = 1u;
+        w[1].at = w[0].at + len;
+        w[1].lo = base + len;
+        w[1].hi = base + 2u * len;
+        w[1].rate = 1u;
+        n = 2u;
+        break;
+    case CRUMPBIT_SUBTYPE_REVERB:
+        len = rt->u.rvb.length;
+        w[0].at = base + 4u * rt->u.rvb.write_pos;
+        w[0].lo = base;
+        w[0].hi = base + 4u * len;
+        w[0].rate = 4u;
+        break;
+    default:
+        len = rt->u.tap.length;
+        w[0].at = base + rt->u.tap.write_pos;
+        w[0].lo = base;
+        w[0].hi = base + len;
+        w[0].rate = 1u;
+        break;
+    }
+    if (len != 0u)
+        sk_feedLimit(share, EFFECT_TYPE_CRUMPBIT, w, n);
 }
 
 /*
@@ -2958,17 +3069,15 @@ static inline void crumpBit_filterCoeffs(float g, float r, float *a1,
  *    (origin from mix_prev);
  * 4. one sub-engine loop (stages 1, 2 and 3 per frame);
  * 5. stage 4, a second pass: the output filter's coefficients and its
- *    one-block type crossfade, then its loop. S091 P5 F1: `dly`/`cmb`/`pit`
- *    run the resonant TPT SVF (S091 P2, unchanged), `grn`/`rvb` the
- *    one-pole. Each branch computes its own coefficients and runs its own
- *    loop, so a block pays for one filter only, and the coefficients (now
- *    worked out after the engine, which never reads them) are not live
- *    across the engine call.
+ *    one-block type crossfade, then its loop: the resonant TPT SVF (S091
+ *    P2) in every sub-type (S094 P2 AS-13: `grn`/`rvb` back from the S091
+ *    P5 F1 one-pole, so `res` and all eight types act there again). The
+ *    coefficients are worked out after the engine, which never reads them,
+ *    so they are not live across the engine call.
  * Inputs: runtime and normalized stereo io. Output: io->l/io->r in place,
  * arena bytes, runtime. Caller: effects_process().
  * Affiliates: crumpBit_run*(), crumpBit_enter(), crumpBit_seatActive(),
- * crumpBit_dataLinesFor(), crumpBit_filterMix(), crumpBit_filterG,
- * crumpBit_onePoleMixTable, crumpBit_onePoleK.
+ * crumpBit_dataLinesFor(), crumpBit_filterMix(), crumpBit_filterG.
  */
 static void crumpBit_process(void *rt_void, effect_io_t *io)
 {
@@ -2981,7 +3090,8 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
     if (!rt || !io || !io->l || !io->share || !io->share->base ||
         io->frames == 0u)
         return;
-    bytes = io->share->bytes;
+    /* S095 P1 (SD1): the loop lives above the arena prefix. */
+    bytes = sk_usableBytes(io->share);
     bytes = (bytes > CRUMPBIT_LOOP_MAX_BYTES) ? CRUMPBIT_LOOP_MAX_BYTES : bytes;
     /* 1. A changed sub-type is entered on this block (reinterpretation). */
     if (rt->subtype != rt->active_subtype)
@@ -2990,12 +3100,15 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
     blk.len = crumpBit_seatActive(rt, bytes);
     if (blk.len == 0u)
         return;
+    /* S095 P1: new write heads during a feed limit it, before they write. */
+    if (rt->feed_bits & CRUMPBIT_FEED_LIMIT)
+        crumpBit_feedLimit(rt, io->share);
 
     /* 3. Shared per-block work. */
     blk.frames = io->frames;
     blk.left = io->l;
     blk.right = io->r ? io->r : io->l;
-    blk.base = (int8_t *)io->share->base;
+    blk.base = (int8_t *)io->share->base + SK_PREFIX_BYTES;
     /* Data lines (X2): the table for this block's `bof`/`biv`. */
     blk.lines = crumpBit_dataLinesFor(rt);
     /* Ramp step per frame: the block's ramps land on their targets. */
@@ -3013,16 +3126,27 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
     case CRUMPBIT_SUBTYPE_REVERB: crumpBit_runReverb(rt, &blk); break;
     default:                      crumpBit_runDelay(rt, &blk);  break;
     }
+    /*
+     * S095 P1 (plan §5.4; §S18): a running type-change feed plays the old
+     * tail into this block's wet at the mix ramp, ahead of the output SVF,
+     * which filters it like CrumpBit's own wet. It is not written into the
+     * loop (heard, not repeated): one pass, only in feed blocks. CrumpBit's
+     * bus is stereo (EFFECT_IO_STEREO_OUT), so right is its own channel.
+     */
+    if ((rt->feed_bits & CRUMPBIT_FEED_RUN) &&
+        !sk_feedMix(io->share, EFFECT_TYPE_CRUMPBIT, blk.left, blk.right,
+                    blk.frames, blk.mix, mix_to))
+        rt->feed_bits = 0u;
     rt->mix_prev = rt->mix_raw;
 
     /*
      * 5. Stage 4 (shared): the output filter, a second pass over the block.
      * S091 P4 `bal` (row 22, 63 = 0): the right channel's cutoff index is
      * frq + (bal - 63), the left's frq - (bal - 63), each clamped to 0..127
-     * (S091_P4_GRN_TWEAKS.md A6.2), for both filter forms. In each loop both
-     * inputs are read before either output is stored, so a mono block
-     * (right aliases left) filters the same input on both states and keeps
-     * the left result, as the engines do.
+     * (S091_P4_GRN_TWEAKS.md A6.2). Both inputs are read before either
+     * output is stored, so a mono block (right aliases left) filters the
+     * same input on both states and keeps the left result, as the engines
+     * do.
      */
     {
         /* tilt: the balance in cutoff steps, -63..64. */
@@ -3034,52 +3158,13 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
         const int32_t fl = (f - tilt < 0) ? 0 : ((f - tilt > 127) ? 127 : f - tilt);
         const int32_t fr = (f + tilt < 0) ? 0 : ((f + tilt > 127) ? 127 : f + tilt);
 
-        if (crumpBit_filterIsOnePole(rt->active_subtype)) {
+        {
             /*
-             * F1, `grn`/`rvb`: k per channel from the generated table (no
-             * divide); the type's (cx, cl) ramp from the previous block's
-             * type to this one's over the block. Types above `off` read as
-             * `off`, as crumpBit_filterMix() does.
-             */
-            const float kl = crumpBit_onePoleK[fl];
-            const float kr = crumpBit_onePoleK[fr];
-            const float *from = crumpBit_onePoleMixTable[
-                (rt->filter_type_prev > CRUMPBIT_FILTER_OFF)
-                    ? CRUMPBIT_FILTER_OFF : rt->filter_type_prev];
-            const float *to = crumpBit_onePoleMixTable[
-                (rt->filter_type > CRUMPBIT_FILTER_OFF)
-                    ? CRUMPBIT_FILTER_OFF : rt->filter_type];
-            /* cx, cl: input and low-pass weights, ramped per frame. */
-            float cx = from[0];
-            float cl = from[1];
-            const float cx_inc = (to[0] - cx) * blk.per_frame;
-            const float cl_inc = (to[1] - cl) * blk.per_frame;
-            /* s_l, s_r: the one-pole states (the svf_*1 fields). */
-            float s_l = rt->svf_l1;
-            float s_r = rt->svf_r1;
-
-            for (n = 0u; n < blk.frames; n++) {
-                const float xl = blk.left[n];
-                const float xr = blk.right[n];
-
-                /* Output-mix ramp: lands on this block's type at the end. */
-                cx += cx_inc;
-                cl += cl_inc;
-                /* One-pole low-pass: s moves k of the way towards x. */
-                s_l += kl * (xl - s_l);
-                s_r += kr * (xr - s_r);
-                /* LP s, HP x - s, flat x: one weighted sum for all. */
-                blk.right[n] = cx * xr + cl * s_r;
-                blk.left[n] = cx * xl + cl * s_l;
-            }
-            rt->svf_l1 = s_l;
-            rt->svf_r1 = s_r;
-        } else {
-            /*
-             * `dly`/`cmb`/`pit`: the Simper TPT SVF (S091 P2): g from the
-             * voice-law table, k = 2R, a1 = 1/(1 + g(g + k)), a2 = g a1,
-             * a3 = g a2 per channel (at bal 63 both sets are the S091 P2
-             * set bit for bit); the output mix crossfades over the block.
+             * Every sub-type (S094 P2 AS-13): the Simper TPT SVF (S091 P2):
+             * g from the voice-law table, k = 2R, a1 = 1/(1 + g(g + k)),
+             * a2 = g a1, a3 = g a2 per channel (at bal 63 both sets are the
+             * S091 P2 set bit for bit); the output mix crossfades over the
+             * block.
              */
             const float r = crumpBit_filterDamping(rt->filter_reso);
             /* a1..a3 per channel (S091 P4 `bal`: each side its cutoff). */
@@ -3174,10 +3259,13 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
  * Inputs: runtime and new share. Output: runtime seat fields.
  * Caller: effects_onShareChanged().
  */
-static void crumpBit_bufferChanged(void *rt_void, const fx_share_t *share)
+static __attribute__((cold)) void crumpBit_bufferChanged(void *rt_void,
+                                                        const fx_share_t *share)
 {
-    const uint32_t bytes = share ? share->bytes : 0u;
+    /* S095 P1: a share cut that reaches the feed's tail ends it (D14). */
+    const uint32_t bytes = share ? sk_usableBytes(share) : 0u;
 
+    (void)sk_feedCut(share, EFFECT_TYPE_CRUMPBIT);
     (void)crumpBit_seatActive((CrumpBitRuntime *)rt_void,
                               (bytes > CRUMPBIT_LOOP_MAX_BYTES)
                                   ? CRUMPBIT_LOOP_MAX_BYTES : bytes);
@@ -3225,7 +3313,9 @@ static uint8_t crumpBit_effectiveMax(const void *rt_void, uint8_t index,
  *                                              S091 P5 follow-up; dly: none,
  *                                              S091 P6)
  *       9    spn   spn   spn   dpn   dpn     (grn: Position; rvb: width)
- *      10    ton   ton   ton   lng   ton     (grn: Length, row 20)
+ *      10    ton   ton   ton   lng   dmp     (grn: Length, row 20; rvb:
+ *                                              its damping, row 24, S095
+ *                                              P4 F1)
  *      14    -     -     aux   aux   -       (pit: interval; grn: P1)
  *      15    -     -     -     spr   -
  *   S091 P4 (plan Q11, accepted): the `grn` pool carries its performance
@@ -3273,10 +3363,11 @@ static const uint8_t crumpBit_laneMaps[CRUMPBIT_SUBTYPE_COUNT]
         CRUMPBIT_PARAM_FILTER_TYPE, CRUMPBIT_PARAM_FILTER_FREQ,
         CRUMPBIT_PARAM_FILTER_RESO, CRUMPBIT_PARAM_AUX,
         CRUMPBIT_PARAM_GRAIN_SPREAD },
+    /* S095 P4 F1: lane 10 drives `rvb`'s own damping row (`dmp`). */
     [CRUMPBIT_SUBTYPE_REVERB] = { CRUMPBIT_LANES_SHARED_HEAD,
         CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SYNC,
         CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN, CRUMPBIT_PARAM_SUB_PAN,
-        CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FILTER_TYPE,
+        CRUMPBIT_PARAM_RVB_DAMP, CRUMPBIT_PARAM_FILTER_TYPE,
         CRUMPBIT_PARAM_FILTER_FREQ, CRUMPBIT_PARAM_FILTER_RESO,
         EFFECT_LANE_NONE, EFFECT_LANE_NONE },
 };

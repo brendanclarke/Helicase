@@ -4,6 +4,15 @@ This file is the working memory for Codex/Claude Code/LLM Agent sessions on this
 Read it fully at the start of every session before touching any code.
 Do not append session history or resolved-issue narrative to this file; those belong in `knowledge_files/log_archive/`.
 
+## Document edits (user, S093, binding)
+
+- **A turn that touches `MEMORY.md` and/or `knowledge_files/` must not
+  touch any file outside those two.** A turn that touches a file outside
+  `MEMORY.md` and `knowledge_files/` must not touch either of them.
+- Plans and schedules must not contain a step that edits `MEMORY.md` or
+  `knowledge_files/`. They may list the statements a change makes out of date,
+  for the user to act on.
+
 ---
 
 ## Quick Start
@@ -126,7 +135,9 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
 
 - **Copy/clear:** exclusive holder for raw block API; top 132 B = swap block;
   publish before free; `copyClear_backgroundSuspended()` blocks
-  AutoSave/trace/settings/repair. Name cache lent for 161 B HCNAMES remap.
+  AutoSave/trace/settings/repair. Dedicated `filesystem_copy_clear_scratch_t`
+  (+1,932 B SRAM1, S094 P3) replaces the former 9 KB name-cache loan; the
+  D53 wait is removed. Name cache still lent for 161 B HCNAMES remap.
 - **No backward compatibility, ever (user, standing):** no migration, aliasing,
   or converters.
 - **Wording (user, S081):** stored data are *files*, not "cards."
@@ -199,8 +210,58 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   must be paid for by an equal or larger measured saving, gated with
   `elf_loopdump.py`, `elf_hotloops.py`, and the inlined-set diff. The unused
   margin under WFd budgets is not headroom. `CPU_USE_DSP_AUDIT.md` item 64.
-- **CrumpBit 170-cap (S091 P5, binding):**
-  `EFFECTS_MODULES_DSP_REFERENCE.md` §6.2.
+- **Cycle-based budget (S094 P2 §21):** 97 % average cap = 152,004 of
+  156,705 cycles per block. Basic 19,620 × 4 + Advanced 21,803 × 2 +
+  Effect 16,634 + shared mixer 12,784 + outside-mixer 4,701 + 500 slack.
+  Replaces the S089 instruction-based gates. Measured with the DWT_CYCCNT
+  cycle probe (DEV_MODE_LOGGING only, trace stage `p`, 94 B).
+- **QADD (S094 P2 §22):** `bufferTool_satAdd32()` replaced with
+  `__QADD()` intrinsic in the mixer dry-add and send paths. Bit-exact.
+  Stereo dry add: 41-42→26 instructions/sample; with send: 56-57→33-34.
+- **Cost comparisons include per-block work (S093, binding):** a voice's
+  cost per sample = audio loops + (control-rate work + render entry/exit) /
+  32, measured the same way on both sides (static longest path with
+  `elf_blockpath.py`/`elf_looppath.py`, loops × iterations, `bl` callees
+  added). Count VDIV separately on both sides (≈ 14 cycles each; an
+  instruction total alone misprices forms with different division counts).
+  Never compare audio loops alone. Frozen S093 P3 (linked, after the Re3/Sw3
+  removal): Drum dearest ≈ 222.5 loops + 922 per block / 32 + SRR 10 ≈ 261
+  per sample, 3 VDIV (`093_SESSION_HANDOFF_LOG.md` §4, `CPU_USE_DSP_AUDIT.md`
+  item 71); the per-block count tool is `tools/alkaline/control_cost.py`.
+  `ALKALINE_MODULE_REFERENCE.md` §5.
+- **Alkaline (S093 P4/P6/S094, binding):** the voice is `AlkalineVoice`
+  (560 B after S094; +12 B for `otaIn`, `toneC`, `toneZ`) in the fifth
+  tagged slot; Basic. Its oscillator is a **table wave**: `sawTable`,
+  `alkSqrTable[octave]` for `alk_wave` 1, or `alkTriTable` for `alk_wave` 2
+  (S094 P4; `ALK_WAVE_COUNT` 3), set with `osc_setTableFreq()` — **never**
+  `osc_setFreq()`. The oscillator read is fused into the B2R loop
+  (`DiodeLadder_renderB2Osc`, bit-identical, AL-X; `ALK_FUSED_OSC 1`).
+  `ALK_TYP_PWM 2u` (S094 P1 S5): fused mode 3, `DiodeLadder_renderB2OscPwm()`,
+  read form 2, 204 instructions; `ALK_TYP_COUNT` 3. `ALK_NET_STATES` is
+  **6** on one balanced basis common to every Res point (r6) at 64 samples;
+  any model change regenerates the tables (`tools/alkaline/gen_alk_tables.py`)
+  and re-checks P3 §9.3. A switchable sample/wavetable Alkaline oscillator
+  is a **class decision** (P3 §9.5), not a parameter. The type registry is
+  the storage schema: designated rows in enum order, 3-character tokens, one
+  `TABLES` entry per type; the add-a-type checklist is
+  `INSTRUMENTS_DSP_REFERENCE.md` §9.2. **Post-FX (S094 P1 S4):** VCA
+  overdrive (`otaIn` = `gain[vcaDrive] * DL_INV_2VT`, gain ×1..×32) and
+  one-pole low-pass tone (`toneC`; Tone 127 / Overdrive 0 = bit-identical).
+  Drive gain/makeup from tables (`AlkalinePostTables.c/.h`). Rows 29
+  `instrument_drive` and 30 `alk_tone` appended (30 total). Mix page:
+  vol pan ton drv. Post-filter overdrive: `OVD_OCT` 5.0, `OVD_MAKEUP_OCT`
+  −2.5. Accepted worst case ≈263.7 per sample (no slot).
+- **Alkaline knob vs feedback (S093 P6, binding):** the C side takes the Res
+  **knob** (0..1); the model and SPICE take the effective feedback
+  `k_eff = ALK_RES_KMAX x knob` (`ALK_RES_KMAX` 1.5, a wiper transformer
+  above k = 1). Every harness that hands a SPICE `res` to the C bench divides
+  by `ALK_RES_KMAX`; a SPICE `dec` knob handed to the stretched decay model
+  goes through `alk_model.decay_knob_303()`. `pos` 0 on Saw/Sqr is
+  free-running, 1..127 is the note-start phase. Stored `dec` / `res` / `drv`
+  bytes keep their keys and change meaning, with no migration.
+- **CrumpBit 181-cap (S091 P5/S094 P2, binding):** resonant TPT SVF
+  restored on `grn`/`rvb` in S094 P2 §23 (was one-pole since S091 P5 F1);
+  cap raised 170→181. `EFFECTS_MODULES_DSP_REFERENCE.md` §6.2.
 - **Mixer byte size is NOT a cost measure (S089 P0 F3).** LTO re-spends freed
   inline budget. Gate mixer-path changes on `elf_hotloops.py` + inlined-set
   symbol diff, not on the mixer function's byte size.
@@ -212,10 +273,12 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
 - **Drum FM ramp twins (S089 P3):** `osc_renderTypedFmRamp()` dispatches
   ramped FM copies for `slp`/`smp`/`wtb` in Drum `fm` only. Stock carriers
   keep the S088 pass. Originals are untouched (Cymbal/HiHat still use them).
-  ITCM 15,240 / 16,384 B after P3.
+  ITCM **13,984** / 16,384 B after S094 (was 12,128 at S093 P8; crash
+  removal −≈540 B, PWM 15 loops in `.itcm.s094p1` +≈2,400 B).
 - **ITCM subsection order (S089):** linker script pins `.itcm.s089` then
-  `.itcm.s089p3`. New ITCM code goes in a new `.itcm.sNNN` subsection after
-  the last one. Never edit an existing ITCM function's section attribute.
+  `.itcm.s089p3` then `.itcm.s094p1`. New ITCM code goes in a new
+  `.itcm.sNNN` subsection after the last one. Never edit an existing ITCM
+  function's section attribute.
 - **Oscillator run modes (S088, `osc1_run`):** `rst` must stay bit-identical.
   `fre` never resets the carrier phase; `itp` resets it and crossfades the
   old carrier (`OscCarrierSnapshot`, 28 B) for 132 samples, rendered plain
@@ -225,6 +288,41 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   wavetable blending. `ampRampArm` arms one block of post-chain/FM ramps;
   never pass unequal ramp endpoints when it is clear. Filter coefficient
   changes in `fre`/`itp` use `SVF_recalcFreqSlew()` (0.28 per block).
+- **Interpolation slot claims in async only (S093 P8 item 79, binding):**
+  a call that writes `modulationNode` state from an engine's sync render
+  moves the mixer's register allocation. Engine-side interpolation-slot
+  claims (e.g. Alkaline `modNode_interpClaim()`) belong in the async, never
+  in the sync render.
+- **Sample flash catalogue v3 (S093 P8, binding):** magic `LXC3`,
+  version 3. Every wavetable frame is stored as a 1,024 × int16 row
+  resampled at install time (H=32). `frame_len` is 1,024, `bits` is 16.
+  8-bit WAV files are not installed (D10). A v2 card reads STALE and must
+  be reinstalled via `Load:[Samples]`. `STORAGE_SRAM_MANIFEST.md` §4.
+- **`OSC_SAMPLE_START` is 5 (S094 P1 S2; was 6 at S093 P3):** crash
+  wave (`crashSample[32769]`) removed from firmware; card sample
+  `SD_CARD/samples/02_crash.wav` replaces it. `OSC_STOCK_LAST` → `NOISE`.
+  Savings: Drum/Snare −3, Cymbal/HiHat −6 per sample; ITCM −≈540 B;
+  flash −32,769 B. Files saved at S093 that selected entry v ≥ 7 now
+  play entry v − 1. No migration.
+- **PWM oscillator type (S094 P1 S3):** `OSC_TYPE_PWM` 4u on Drum, Snare,
+  Cymbal, HiHat. Hybrid: phase warp (W) for Sin/Tri, two-read (D) for
+  Saw/Rec. Integer Q15/Q14 interpolation. `OSC_BIND_PWM` 3,
+  `OSC_TYPE_MODLIST` 5 (never stored). Position law (S094 P4): pos 0 = 50 %
+  (unmodified wave), pos 127 = narrowest. 128 widths from position-indexed
+  tables.
+- **LFO sync and rate table (S094 P1 S1):** `IM_SPECIAL_LFO_SYNC`
+  (writer 23, count 24). `lfoRateHz[128]`: frq 0 = stopped, 1 = 100 s,
+  semitone grid 63..127. `LFO_MAX_F` removed. Five `lfo_sync` rows become
+  `ROW_MENU_SPECIAL`.
+- **Cymbal/HiHat now Basic (S094 P2 §22):** `INSTRUMENT_FLAG_BASIC` set.
+  No current type is Advanced; the Advanced machinery is preserved.
+- **SRAM D-cache fix (S094 P2 §13):** MPU region 0 had S=1 (shareable)
+  since S013, which on Cortex-M7 with CACR.SIWT=0 disabled D-cache for
+  all SRAM. Fix: clear S bit. Result: −14.8 % on same Scene.
+- **Memory allocation speed-ups (S094 P3):** AsyncFATFS cache 8→16
+  sectors (+4,224 B SRAM1); discardable hint for regular-file data reads;
+  write-back stack region (MPU region 2 over SRAM2, `TEX 001 C1 B1 S0`,
+  SRD `0x01`). SRAM1 free after S094: **87,404 B** (DEV link).
 
 ---
 
@@ -285,6 +383,15 @@ Not a port of preceding LXR-01 or LXR-02 firmware.
 ## General Process Reminders
 
 - Always verify the local working repository directory before writing code.
+- **Nothing needed goes in `build/` (user, S093):** `make clean` removes
+  `build/`. Records, baselines, reference images and anything a later step
+  or document points at live in the tree (measurement records and loop
+  baselines: `tools/dsp_test/baselines/<session>/`). `build/` holds only
+  outputs a command regenerates (images, objects, scratch).
+- **No unverified items in a handed-over plan (user, S093):** anything that
+  can be checked in the tree (a name, a line, a file format, a tool option, a
+  include chain) is checked before the plan or schedule is handed over; "to
+  confirm" lists are only for what needs the device or the user's ear.
 - **Header dependency tracking is active (S070).** The Makefile uses
   `-MMD -MP` plus `-include $(OBJS:.o=.d)`, so editing a header triggers
   recompilation. `make clean` is no longer required after header edits.
@@ -308,8 +415,10 @@ Full pin table, IRQ assignments and priorities, and encoder rules:
 - Application origin: **0x08008000** — VTOR must be set at startup
 - Stack top (SP): **0x20080000**
 - DTCM 128 KB (not DMA-accessible) + SRAM1 368 KB + SRAM2 16 KB
-- I-Cache / D-Cache enabled (16 KB each); MPU WT for SRAM, Normal
-  non-cacheable for DMA (`.dma_nocache` region).
+- I-Cache / D-Cache enabled (16 KB each); MPU WT non-shareable for SRAM
+  (S=0 since S094 P2; was S=1 since S013, which disabled D-cache), Normal
+  non-cacheable for DMA (`.dma_nocache` region). MPU region 2: SRAM2
+  write-back stack (S094 P3).
 - `audioOutBuffer` lives in DTCM (`INDTCMZ`).
 
 ### Flash Sector Layout
@@ -389,12 +498,12 @@ One operation at a time; request functions return immediately. Full spec:
 
 Samples and wavetables are installed from `Load:[Samples]`: walks `/samples`
 (natural order, depth 3) and `/wavetables` (each subfolder = one wavetable),
-erases sectors 7–11, installs, commits catalogue v2.
+erases sectors 7–11, installs, commits catalogue v3.
 
 - **Accepted formats:** mono 16-bit 44.1 kHz PCM WAV.
-- **Catalogue v2 (S087):** 8 KB at `0x081FE000`. 32 B header (magic "LXC2"
-  programmed last), 128 × 28 B sample entries, 128 × 20 B wavetable entries.
-  Details: `STORAGE_SRAM_MANIFEST.md` §4, `087_SESSION_HANDOFF_LOG.md` §5.
+- **Catalogue v3 (S093 P8):** 8 KB at `0x081FE000`. Magic `LXC3`,
+  version 3. 1,024 × int16 wavetable frames resampled at install (H=32).
+  A v2 card reads STALE. Details: `STORAGE_SRAM_MANIFEST.md` §4.
 - Sort: natural order (`storage_naturalCompare()`). Display names: first 4 +
   last 4 for names over 8 chars; numeric prefix stripped.
 - Audio payload from `0x080C0000` (sector 7) upward; catalogue at top of

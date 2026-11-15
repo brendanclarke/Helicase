@@ -1,0 +1,48 @@
+* TB-303 VCO core + Q8 shaper, f = 65.406 Hz, load = sq
+.param vaf=100.0 bfp=600.0 ron=100.0 idss=0.001 swvt=2.9000000000000004 swvh=2.8500000000000005
+
+* Q26 (2SC1583 dual NPN): generic small-signal NPN; VAF swept separately.
+.model QN NPN(IS=1e-14 BF=300 VAF={vaf} CJE=8p CJC=4p TF=0.4n RB=50)
+* Q8 (2SA733 P grade, hFE 200-400): generic high-gain PNP.
+.model QP PNP(IS=1e-14 BF={bfp} VAF=80 CJE=8p CJC=5p TF=0.6n RB=50)
+* Q28 (2SK30A-O, IDSS 0.6-1.4 mA): generic N-JFET, IDSS = BETA*VTO^2 (swept).
+.model JN NJF(VTO=-1.0 BETA={idss} LAMBDA=0.005 CGS=8p CGD=3p)
+* Reset: behavioural switch (Q24/Q25/Q27/D25 comparator, not modelled):
+* closes when C33 falls to V_BOT, opens 50 mV below the reset level.
+.model SWR SW(VT={swvt} VH={swvh} RON={ron} ROFF=1e12)
+
+VCC vcc 0 12
+* --- Q26: reference side forced to I_ramp (IC11a's job), output side into C33
+IREF vcc nref 3.603871e-06
+Q26A nref nref 0 QN
+Q26B c33 nref 0 QN
+C33 c33 0 0.01u IC=11.3
+* --- reset to vreset when C33 reaches V_BOT, release near the top
+VRST vrst 0 11.3
+BCTL ctl 0 V = 11.3 - V(c33)
+SRST vrst c33 ctl 0 SWR
+* --- Q28 2SK30 source follower into R105 (VG senses the gate current)
+VG c33 g28 0
+J28 vcc g28 src JN
+R105 src 0 10k
+* --- Q8 square shaper ([SN] p5)
+R35 src nb 100k
+C10 src n10 0.01u
+R34 n10 nb 10k
+Q8 col nb q8e QP
+R45 vcc q8e 22k
+C11 q8e 0 1u
+R36 col 0 10k
+
+R62 col n62 220k
+C17 n62 vq12 1u
+R70 vq12 0 2.2k
+
+.options method=gear reltol=1e-4 abstol=1e-12 vntol=1e-6
+.tran 2.000e-06 0.4587 0 2.000e-06 uic
+.control
+run
+wrdata sens_C2_bf600.txt v(c33) v(src) v(col) v(q8e) v(nb) i(vg) v(vq12)
+quit
+.endc
+.end

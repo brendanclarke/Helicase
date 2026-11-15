@@ -259,7 +259,11 @@ const ParamDescriptor cymbal_param_descriptors[] = {
     ROW_MENU("lfo_wave", "LFO", "Waveform", "wav", MENU_LFO_WAVES, MOD_NONE, lfo.waveform, TYPE_UINT8),
     ROW_MENU("lfo_retrigger_voice", "LFO", "Retriggr", "rtg", MENU_RETRIGGER, MOD_NONE, lfo.retrigger, TYPE_UINT8),
     ROW("lfo_polarity", "LFO", "Polarity", "pol", DTYPE_LFO_POLARITY, MOD_NONE, lfo.polarity, TYPE_UINT8),
-    ROW_MENU("lfo_sync", "LFO", "ClockSnc", "snc", MENU_SYNC_RATES, MOD_NONE, lfo.sync, TYPE_UINT8),
+    /* lfo_sync (S094 P1 S1): the special writer recomputes the LFO's phase
+     * step with the mode (IM_SPECIAL_LFO_SYNC -> lfo_setSync()); a plain
+     * byte store left the rate at the previous mode's until frq or the tempo
+     * moved */
+    ROW_MENU_SPECIAL("lfo_sync", "LFO", "ClockSnc", "snc", MENU_SYNC_RATES, MOD_NONE, lfo.sync, TYPE_UINT8, IM_SPECIAL_LFO_SYNC),
     /*
      * S076 P2: scaled phase offset. IM_SPECIAL_LFO_OFFSET maps the 0..127
      * display value onto the full 32-bit phase accumulator range.
@@ -276,14 +280,15 @@ const ParamDescriptor cymbal_param_descriptors[] = {
     ROW("transient_vol", "Transnt", "Volume", "vol", DTYPE_0B127, MOD_0_127, transGen.volume, TYPE_FLT),
     ROW_SPECIAL("transient_freq", "Transnt", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, transGen.pitch, TYPE_FLT, IM_SPECIAL_TRANSIENT_FREQ),
     /*
-     * osc1_position: pos, the oscillator's continuous position (S086 P3/P4).
+     * osc1_position: pos, the oscillator position / PWM width (S094 P1 S3).
      *
-     * What:       0..127, stored in osc.position. For Sin, Tri, Saw, Rec, Re3
-     *             and Sw3 it is a phase offset of pos/128 of a cycle; for Cym
-     *             pos/128 of the whole crash sample (S086 P4). A hit starts at
-     *             today's start phase + pos; while the voice plays, a change
-     *             glides over one block through a temporary phaseInc bend.
-     *             Noise and v1 user samples ignore it (user samples: S2).
+     * What:       0..127, stored in osc.position. Under wav, Sin/Tri/Saw/Rec
+     *             use it as a phase offset (pos/128 of a cycle); Re3/Sw3 were
+     *             removed in S093 and Cym in S094 P1 S2. Under pwm it is the
+     *             pulse width (1..127; zero acts as 1), snaps on a hit and
+     *             slews by at most two steps per block. smp/slp/wtb retain
+     *             their typed position rules; Noise and modulator user waves
+     *             ignore osc1_position.
      * Why:        S086 P3: the fourth cell of the first oscillator screen. The
      *             row is appended last, so every existing descriptor index,
      *             automation ID, LFO/velocity token, NRPN ID and MIDI Learn row
@@ -292,16 +297,17 @@ const ParamDescriptor cymbal_param_descriptors[] = {
      *             velocity node (the 0..127 range of a TYPE_UINT8 row).
      * Outputs:    osc.position (TYPE_UINT8, plain store; no special writer).
      * Accessors:  osc_positionTrigger(), osc_positionBendApply() and
-     *             osc_positionBendRestore() (Oscillator.h).
+     *             osc_positionBendRestore(), osc_typedPositionApply()
+     *             (Oscillator.h).
      * Affiliates: CymbalVoice.c: Cymbal_triggerVoice() and
      *             Cymbal_calcSyncBlockVoice(); FILESYSTEM_SPEC.md (the key);
      *             086_SESSION_HANDOFF_LOG.md §4.
      */
     ROW("osc1_position", "Oscilltr", "Position", "pos", DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
     /*
-     * osc1_type: typ, the oscillator type (S087 stage B).
+     * osc1_type: typ, the oscillator type (S087 stage B; S094 P1 S3 pwm).
      *
-     * What:       0 wav, 1 smp, 2 slp, 3 wtb (OSC_TYPE_*), stored in
+     * What:       0 wav, 1 smp, 2 slp, 3 wtb, 4 pwm (OSC_TYPE_*), stored in
      *             osc.oscType through IM_SPECIAL_OSC_TYPE (osc_setType()).
      * Why:        S087 P0 §4: osc1 selects stock waves, samples, loops or
      *             wavetables. A selector (never morphed, Normal image only,

@@ -65,10 +65,15 @@
 #include "MidiLearn.h"
 #include "modulationNode.h"
 #include "Oscillator.h"
+#include "AlkalineVoice.h"     /* S094 P4: ALK_WAVE_COUNT (the name assert) */
+#include "ColloidVoice.h"      /* S095 P2: COL_WAVE_COUNT, the COL_* counts (the name asserts) */
+#include "TetraktVoice.h"      /* S096 P1: TKT_LAYER_MASK_COUNT (the name assert) */
 #include "transientGenerator.h"   /* S087 P3: transient list with user one-shots */
 #include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* (name asserts) */
 #include <string.h>
 #include <stdint.h>
+#include <math.h>              /* S095 P4 C5: log2f/lrintf/fmaxf (the readout) */
+#include "BusCompressor.h"     /* S095 P4 C5: busComp_meterRaw() */
 
 #define MENU_COMPACT_SCREEN_CELLS 4u
 #define MENU_STATIC_SUBPAGE_CELLS 8u
@@ -1050,7 +1055,7 @@ static void menu_setStorageMessage(const char *message, const char *detail)
 
 static void menu_loadSamplesModal(void)
 {
-    /* S087 C: one install for samples/ and wavetables/ (catalogue v2);
+    /* S087 C / S093 P8: one install for samples/ and wavetables/ (catalogue v3);
     ** /loops is retired and audio is reinitialized once after the flash work. */
     uint16_t t0;
     uint8_t ok;
@@ -1384,6 +1389,7 @@ static const Name valueNames[NUM_NAMES] = {
     {SHORT_BUS_COMP_AMOUNT,CAT_SCENE,LONG_BUS_COMP_AMOUNT},
     {SHORT_BUS_COMP_TIME,CAT_SCENE,LONG_BUS_COMP_TIME},
     {SHORT_BUS_COMP_SIDECHAIN,CAT_SCENE,LONG_BUS_COMP_SIDECHAIN},
+    {SHORT_BUS_COMP_GR,CAT_SCENE,LONG_BUS_COMP_GR},
     /* S078 per-track run mode: run / Track / RunMode (S078 P4 relabel). */
     {SHORT_PLAY_MODE,CAT_TRACK,LONG_PLAY_MODE},
     /* S079 step specials: cdn/tim/rol/rtm/rfl on the STEP page. */
@@ -2087,6 +2093,11 @@ static uint8_t menu_patStoreUseWidgetVisible(void);
 static void menu_formatPatStoreUsePercent3(char *buf);
 static void menu_formatPatStoreUsePercent4(char *buf);
 static void menu_displayPatStoreUseEdit(void);
+/* S095 P4 C5: the bus-compressor readout (same repaint paths as StoreUse). */
+static uint8_t menu_busCompGrWidgetVisible(void);
+static void menu_busCompGrSample(void);
+static void menu_formatBusCompGr3(char *buf);
+static void menu_displayBusCompGrEdit(void);
 static void menu_formatPresetNumber3(char *dst, uint16_t zero_based_slot);
 static void menu_sendEditedParameter(uint16_t paramNr, uint8_t value);
 static void setNoteName(uint8_t num, char *buf);
@@ -2139,6 +2150,14 @@ typedef struct {
     uint8_t scene_setting;
     uint8_t slot;
     uint8_t descriptor_index;
+    /*
+     * Bit cell (S096 P1 SD1): b + 1 when this instrument cell shows and edits
+     * bit b of its row (the Tetrakt's lon), else 0. Zero by default, so every
+     * memset-built cell is an ordinary cell. descriptor_index stays the row:
+     * automation, search, held lookup, MIDI Learn, pot clear and live record
+     * treat the four bit cells as the one row (plan R5).
+     */
+    uint8_t bit_plus1;
     const ParamDescriptor *descriptor;
     /* Effect page cell identity; meaningful only for MENU_CELL_EFFECT. */
     menuEffects_cell_t fx;
@@ -3330,6 +3349,13 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value,
 {
     uint8_t dtype = (uint8_t)(menu_cellDtype(cell) & 0x0fu);
 
+    /*
+     * S096 P1 SD2: a bit cell's held or working value is the row's mask; the
+     * cell shows its own bit (its dtype is the plain on/off).
+     */
+    if (cell && cell->kind == MENU_CELL_INSTRUMENT && cell->bit_plus1)
+        value = (uint8_t)((value >> (cell->bit_plus1 - 1u)) & 1u);
+
     /* Per-track play mode shows its 0..5 name (S078 §4.1). */
     if (cell && cell->kind == MENU_CELL_STATIC &&
         cell->static_param == PAR_TRACK_PLAY_MODE) {
@@ -3975,6 +4001,64 @@ static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
         return;
     }
 
+    /*
+     * S096 P1 SD2 (plan §4.3, R5): a bit cell on held steps writes the whole
+     * mask.
+     *
+     * What:       the mask seed is the working cache, else the held lock,
+     *             else the row's Normal value; a turn right sets this cell's
+     *             bit, left clears it; every held step stores the mask (the
+     *             step's layer set). Every visible bit cell of the same row
+     *             takes the mask as its working value, so the four redraw
+     *             together and are underlined at once. Only the turned cell
+     *             is held back from the underline for the edit flash.
+     * Why:        a step lock is a snapshot of all four layers (T-Q8): the
+     *             page shows that the moment one cell is toggled.
+     */
+    if (cell.kind == MENU_CELL_INSTRUMENT && cell.bit_plus1) {
+        const kit_instrument_slot_t *slotData =
+            scene_instrumentSlotConst(scene_getActiveIndex(), cell.slot);
+        const uint8_t bit = (uint8_t)(1u << (cell.bit_plus1 - 1u));
+        uint8_t mask;
+        uint8_t p;
+
+        if (va_underlineSuppressed & (uint8_t)(0x10u << knobNr))
+            mask = va_workingValue[knobNr];
+        else if (va_resolveHeldValue(target, &stored7))
+            mask = va_storedToParam(stored7);
+        else if (slotData && cell.descriptor_index < INSTRUMENT_PARAM_COUNT)
+            mask = slotData->parameter_images.instrument_parameters[cell.descriptor_index];
+        else
+            mask = 0u;
+        if (delta > 0)
+            mask |= bit;
+        else if (delta < 0)
+            mask &= (uint8_t)~bit;
+        mask &= 0x0Fu;
+        for (i = 0u; i < va_heldCount; i++) {
+            if (patSvc_writeStepAutomation(
+                    menu_shownPattern, menu_activeVoice,
+                    buttonHandler_visibleStep(va_heldOrder[i]), target, mask))
+                wrote = 1u;
+        }
+        if (wrote) {
+            va_searchSetBit(cell.descriptor_index);
+            for (p = 0u; p < 4u; p++) {
+                menu_cell_t other = menu_resolveCell(activePage, p);
+
+                if (other.kind == MENU_CELL_INSTRUMENT && other.bit_plus1 &&
+                    other.descriptor_index == cell.descriptor_index) {
+                    va_workingValue[p] = mask;
+                    va_underlineSuppressed |= (uint8_t)(0x10u << p);
+                }
+            }
+            va_underlineSuppressed |= (uint8_t)(1u << knobNr);
+            va_lastEditTick = time_sysTick;
+            menu_knobs_dirty = 1u;
+        }
+        return;
+    }
+
     /* Seed: working cache if validity bit set, else the stored parameter value,
      * else the read-only displayed endpoint for first creation. */
     if (va_underlineSuppressed & (uint8_t)(0x10u << knobNr))
@@ -4610,6 +4694,9 @@ static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position)
                                                        subPage,
                                                        position,
                                                        &cell.descriptor_index);
+        /* S096 P1 SD1: which bit of the row a bit cell shows (0: none). */
+        cell.bit_plus1 = instrumentManager_menuCellBitPlus1(slot->type, subPage,
+                                                            position);
         if (!cell.descriptor &&
             cell.descriptor_index == INSTRUMENT_MENU_SKIP) {
             cell.kind = MENU_CELL_STATIC;
@@ -5097,6 +5184,9 @@ static uint8_t menu_cellDtype(const menu_cell_t *cell)
             return DTYPE_0B255;
         return DTYPE_0B127;
     }
+    /* S096 P1 SD2: a bit cell is a plain on/off (tag 0: on / off, 0..1). */
+    if (cell->kind == MENU_CELL_INSTRUMENT && cell->bit_plus1)
+        return DTYPE_ON_OFF;
     if (cell->kind == MENU_CELL_INSTRUMENT ||
         cell->kind == MENU_CELL_KIT_SETTING)
         return cell->descriptor ? cell->descriptor->dtype : DTYPE_0B127;
@@ -5135,6 +5225,14 @@ static uint16_t menu_cellDisplayValue(const menu_cell_t *cell)
             scene_instrumentSlotConst(scene_getActiveIndex(), cell->slot);
         if (!slot || cell->descriptor_index >= INSTRUMENT_PARAM_COUNT)
             return 0u;
+        /*
+         * S096 P1 SD2: a bit cell shows its bit of the row's Normal value (the
+         * switch is a selector: S078's non-morphable rule, Normal in either
+         * view).
+         */
+        if (cell->bit_plus1)
+            return (uint16_t)((slot->parameter_images.instrument_parameters[cell->descriptor_index]
+                               >> (cell->bit_plus1 - 1u)) & 1u);
         return voiceModeShowMorph
             ? slot->parameter_images.morph_instrument_parameters[cell->descriptor_index]
             : slot->parameter_images.instrument_parameters[cell->descriptor_index];
@@ -5210,6 +5308,26 @@ static uint8_t menu_cellCommitValueEx(const menu_cell_t *cell, uint16_t value,
      * (panel), menu_commitTargetEdit() (MIDI).
      */
     const uint8_t morphView = (uint8_t)(panel && voiceModeShowMorph);
+    /*
+     * S096 P1 SD2: a bit cell commits the whole row. The 0/1 value becomes the
+     * row's Normal value with that bit set or cleared, and the commit
+     * continues as an ordinary cell of the row (R12, AutoSave, the edit-mask
+     * fan-out and MIDI echo see one row edit).
+     */
+    if (cell->kind == MENU_CELL_INSTRUMENT && cell->bit_plus1) {
+        const kit_instrument_slot_t *slot =
+            scene_instrumentSlotConst(scene_getActiveIndex(), cell->slot);
+        menu_cell_t row = *cell;
+        uint8_t mask;
+
+        if (!slot || cell->descriptor_index >= INSTRUMENT_PARAM_COUNT)
+            return 0u;
+        mask = slot->parameter_images.instrument_parameters[cell->descriptor_index];
+        mask = (uint8_t)(value ? (mask | (1u << (cell->bit_plus1 - 1u)))
+                               : (mask & ~(1u << (cell->bit_plus1 - 1u))));
+        row.bit_plus1 = 0u;
+        return menu_cellCommitValueEx(&row, (uint16_t)(mask & 0x0Fu), panel);
+    }
     /* Effect page cells are owned by menuEffects.c (Session 072 step 7). */
     if (cell->kind == MENU_CELL_EFFECT) {
         if (panel)
@@ -6459,6 +6577,18 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         menuEffects_formatValue3(&cell->fx, valueAsText))
         return;
 
+    /*
+     * S095 P2: a cell with no effect in its slot's current mode shows "---"
+     * (instrumentManager_cellInactive(): a Colloid's pos/psp under typ wav,
+     * spr/mot in fmd ser). The value is still edited and stored; it takes
+     * effect when the mode changes.
+     */
+    if (cell && cell->kind == MENU_CELL_INSTRUMENT &&
+        instrumentManager_cellInactive(cell->slot, cell->descriptor)) {
+        memcpy(valueAsText, menuText_dash, 3);
+        return;
+    }
+
     /* Per-track play mode shows its 0..5 name (S078 §4.1). */
     if (cell && cell->kind == MENU_CELL_STATIC &&
         cell->static_param == PAR_TRACK_PLAY_MODE) {
@@ -6534,9 +6664,14 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
     switch (dtype) {
     case DTYPE_TARGET_SELECTION_VELO:
     case DTYPE_TARGET_SELECTION_LFO:
-        if (cell->kind == MENU_CELL_INSTRUMENT)
+        if (cell->kind == MENU_CELL_INSTRUMENT) {
             menu_formatInstrumentTargetShort(raw, valueAsText);
-        else
+            /* S096 P1 SD3: a Tetrakt velocity group names all four layers:
+             * tn* for tnA (plan §4.2). LFO targets keep their layer letter. */
+            if (dtype == DTYPE_TARGET_SELECTION_VELO &&
+                instrumentManager_targetIsVelocityGroup(raw))
+                valueAsText[2] = '*';
+        } else
             menu_displayModTargetShort(value, valueAsText);
         break;
     case DTYPE_AUTOM_TARGET:
@@ -6562,7 +6697,8 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         /*
          * S088 P0 §2.1 D12: tagged on/off sub-type display.
          * What: high nibble != 0 shows the tag table's name
-         *       (menu_onoffTagNames(): run modes or voice chains), otherwise
+         *       (menu_onoffTagNames(): run modes, voice chains or the
+         *       Alkaline type), otherwise
          *       on/off as before. Same rule as va_formatValue3().
          */
         if ((uint8_t)(menu_cellDtype(cell) >> 4) != 0u) {
@@ -9672,19 +9808,34 @@ static void menu_instrumentLoadCopyTypeLabel(char *dest)
     /*
      * Build the fixed eight-character Load label used by the LCD.
      *
-     * Normal rows show the instrument type label as before. The morph row
-     * appends "Mrp" to the captured base type, producing labels such as
-     * "DrumMrp ". Padding and truncation live here so repaint cannot resize or
-     * corrupt the LCD field.
+     * What:       normal rows show the instrument type label, padded to 8.
+     *             The morph row shows at most 5 characters of the label
+     *             followed by "Mrp": "DrumMrp ", "HiHatMrp", "CymbaMrp",
+     *             "AlkalMrp".
+     * Why:        S093 P4: with a fifth type (and more to come) the label
+     *             length is not bounded by the four originals. Before, "Mrp"
+     *             was appended only where it fitted: Cymbal showed "CymbalMr"
+     *             and an 8-character label such as "Alkaline" would show no
+     *             Mrp at all, identical to its normal row. Padding and
+     *             truncation live here so repaint cannot resize or corrupt the
+     *             LCD field.
+     * Inputs:     menu_instrumentLoadType, menu_instrumentLoadMorphMode.
+     * Outputs:    dest[0..7].
+     * Affiliates: instrumentManager_typeDisplayLabel(); FILESYSTEM_SPEC.md
+     *             l. 268 (`<Type>Mrp`).
      */
     menu_copyPaddedField(label, base_label, 8u);
     if (menu_instrumentLoadMorphMode) {
         uint8_t len = 0u;
+        /* the label's own length (padding is spaces) */
         while (len < 8u && label[len] != ' ')
             len++;
-        if (len < 8u) label[len++] = 'M';
-        if (len < 8u) label[len++] = 'r';
-        if (len < 8u) label[len++] = 'p';
+        /* keep room for the three-character suffix */
+        if (len > 5u)
+            len = 5u;
+        label[len++] = 'M';
+        label[len++] = 'r';
+        label[len++] = 'p';
         while (len < 8u)
             label[len++] = ' ';
         label[8] = '\0';
@@ -12039,6 +12190,103 @@ static void menu_formatPatStoreUsePercent4(char *buf)
     buf[3] = '%';
 }
 
+/*
+ * Bus-compressor readout hold (S095 P4 C5; 8 B .bss, approved 2026-11-13).
+ *
+ * What: the loudest detector power and the deepest reduction seen since the
+ * readout last painted, -1 / +1 meaning "nothing seen". Why: the cell
+ * repaints at the CPU widget's cadence (500 ms); a drum bus's reduction
+ * changes every hit, so an instant read would show noise. The hold is fed
+ * every foreground pass while the readout is visible
+ * (menu_busCompGrSample()) and cleared when it paints.
+ * Affiliates: busComp_meterRaw(), menu_formatBusCompGr3(),
+ * menu_displayBusCompGrEdit().
+ */
+static float menu_busCompPowerHold = -1.0f;
+static float menu_busCompGrHold = 1.0f;
+
+/* Take one meter reading into the hold (foreground, every pass while shown). */
+static void menu_busCompGrSample(void)
+{
+    float power;
+    float gr;
+
+    if (!busComp_meterRaw(&power, &gr))
+        return;
+    menu_busCompPowerHold = fmaxf(menu_busCompPowerHold, power);
+    menu_busCompGrHold = fminf(menu_busCompGrHold, gr);
+}
+
+/*
+ * The held reduction in whole dB, or 0 with `off` when the compressor is
+ * off. Clears the hold. Output: nonzero when a value exists.
+ * S095 P4 F2: a paint with no sample since the last one (the first paint on
+ * arriving at the cell, a second repaint in the same pass) reads the meter
+ * once directly instead of showing `off`; `off` means busComp_meterRaw()
+ * returned 0, i.e. `cmp` is off.
+ */
+static uint8_t menu_busCompGrTake(int8_t *level_db, int8_t *gr_db)
+{
+    uint8_t have = (uint8_t)(menu_busCompGrHold <= 0.0f);
+    float l;
+
+    if (!have) {
+        menu_busCompGrSample();
+        have = (uint8_t)(menu_busCompGrHold <= 0.0f);
+    }
+    if (have) {
+        l = 3.0103f * log2f(menu_busCompPowerHold + 1.0e-12f);
+        *level_db = (int8_t)((l < -99.0f) ? -99 : (int32_t)lrintf(l));
+        *gr_db = (int8_t)((menu_busCompGrHold < -99.0f) ? -99
+                          : (int32_t)lrintf(menu_busCompGrHold));
+    }
+    menu_busCompPowerHold = -1.0f;
+    menu_busCompGrHold = 1.0f;
+    return have;
+}
+
+/*
+ * Compact cell: the held reduction in signed dB, written as the +-63 rows
+ * write signed values (numtostrps(): "  0", "- 6", "-12"), or "off".
+ */
+static void menu_formatBusCompGr3(char *buf)
+{
+    int8_t level;
+    int8_t gr;
+
+    if (!menu_busCompGrTake(&level, &gr)) {
+        memcpy(buf, "off", 3u);
+        return;
+    }
+    numtostrps(buf, gr);
+}
+
+/*
+ * Click-in view: "Comp in / GR" over "in-18dB gr -6dB" (input level from the
+ * 5 ms detector, held reduction), or "off" when cmp is off.
+ */
+static void menu_displayBusCompGrEdit(void)
+{
+    static const char title[] = "Comp in / GR";
+    int8_t level;
+    int8_t gr;
+    uint8_t i;
+
+    memset(&editDisplayBuffer[0][0], ' ', 16u);
+    memset(&editDisplayBuffer[1][0], ' ', 16u);
+    for (i = 0u; i < sizeof(title) - 1u && i < 16u; i++)
+        editDisplayBuffer[0][i] = title[i];
+    if (!menu_busCompGrTake(&level, &gr)) {
+        memcpy(&editDisplayBuffer[1][13], "off", 3u);
+        return;
+    }
+    memcpy(&editDisplayBuffer[1][0], "in", 2u);
+    numtostrps(&editDisplayBuffer[1][2], level);
+    memcpy(&editDisplayBuffer[1][5], "dB gr", 5u);
+    numtostrps(&editDisplayBuffer[1][11], gr);
+    memcpy(&editDisplayBuffer[1][14], "dB", 2u);
+}
+
 static void setNoteName(uint8_t num, char *buf)
 {
     uint8_t n = num % 12;
@@ -12110,6 +12358,7 @@ static void menu_formatUserShortName(char prefix, uint8_t index, char *buf)
  * What:       the 8-character name and the 3-character code of the entry a
  *             wave value selects:
  *             - osc1 under wav: the stock name, no code;
+ *             - osc1 under pwm: Sin/Tri/Saw/Rec, without a compact code;
  *             - osc1 under smp/slp/wtb: the item's catalogue name and
  *               sNN/lNN/wNN; both blank when the type has no item at that
  *               value;
@@ -12148,6 +12397,73 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
 
     memset(nameDst, ' ', SAMPLE_DISPLAY_NAME_LEN);
     memset(codeDst, ' ', 3u);
+    /*
+     * S093 P8: an Alkaline slot's osc1 under wav lists Saw, Sqr, Tri.
+     *
+     * What:       value 0 -> "Saw", 1 -> "Sqr", 2 -> "Tri" (S094 P4)
+     *             (alkWaveNames), copied to the name and compact-code fields;
+     *             any other value names nothing (blank), as a Drum value past
+     *             its list.
+     * Why:        the stock list (waveformNames: Sin, Tri, ...) is not the
+     *             Alkaline's; the voice plays Saw for 0, Sqr for 1 and Tri
+     *             for 2 (alk_renderWav()). Under wtb the Alkaline cell takes the
+     *             shared branch below (wNN, the table name).
+     * Accessors:  menu_formatWaveValue3() (compact cells, overlays, the voice
+     *             automation display), the single-parameter painter.
+     */
+    /* S094 P4: the Alkaline lists Saw Sqr Tri under both wav and pwm */
+    if (isOsc1 && (type == OSC_TYPE_WAV || type == OSC_TYPE_PWM) &&
+        instrumentManager_runtimeType(cell->slot) == INSTRUMENT_TYPE_ALK) {
+        if (value < (uint8_t)alkWaveNames[0][0]) {
+            memcpy(nameDst, alkWaveNames[value + 1u], 3u);
+            memcpy(codeDst, alkWaveNames[value + 1u], 3u);
+        }
+        return;
+    }
+    /*
+     * S096 P1: a Tetrakt sample row (tkt_sample_a..d) names the installed
+     * sample at its value: the catalogue's 8-character name and its sNN code;
+     * a value past the installed count names nothing (blank, "---" in the
+     * compact cell). The count is the row's clamp (InstrumentManager.c
+     * instrumentManager_waveDomainMax()).
+     */
+    if (isInstrument && strncmp(cell->descriptor->file_key, "tkt_sample_", 11u) == 0) {
+        if (value < samples) {
+            sampleMemory_getDisplayName(value, name);
+            memcpy(nameDst, name, SAMPLE_DISPLAY_NAME_LEN);
+            menu_formatUserShortName('s', value, codeDst);
+        }
+        return;
+    }
+    /*
+     * S095 P2 (C-D20): a Colloid slot's osc1 under wav lists Saw, Rec, Tri,
+     * Sin (colWaveNames). S095 P3 F2: under pwm it takes the shared pwm
+     * branch below (Sin, Tri, Saw, Rec: the platform's list and order); under
+     * wtb the shared catalogue branch (wNN, the table name).
+     */
+    if (isOsc1 && type == OSC_TYPE_WAV &&
+        instrumentManager_runtimeType(cell->slot) == INSTRUMENT_TYPE_COL) {
+        if (value < COL_WAVE_COUNT) {
+            memcpy(nameDst, colWaveNames[value + 1u], 3u);
+            memcpy(codeDst, colWaveNames[value + 1u], 3u);
+        }
+        return;
+    }
+    /*
+     * S094 P1 S3: osc1 under pwm names Sin, Tri, Saw, Rec.
+     *
+     * What:       value 0..OSC_PWM_WAVE_COUNT - 1 maps to a stock name; an
+     *             out-of-range value remains blank. PWM has no compact code.
+     * Why:        under pwm the wav byte selects one of four stock waves with
+     *             a pulse-width form. The catalogue branch below would read
+     *             the same value as a sample or wavetable index.
+     * Accessors:  menu_formatWaveValue3() and the single-parameter painter.
+     */
+    if (isOsc1 && type == OSC_TYPE_PWM) {
+        if (value < OSC_PWM_WAVE_COUNT)
+            memcpy(nameDst, waveformNames[value + 1u], 3u);
+        return;
+    }
     if (isOsc1 && type != OSC_TYPE_WAV) {
         /* osc1 under smp/slp/wtb: the value is the item index. */
         if (type == OSC_TYPE_WTB) {
@@ -12319,25 +12635,35 @@ static void menu_formatTransientName(uint8_t value, char *nameDst)
 }
 
 /*
- * Name table of a tagged DTYPE_ON_OFF cell (S088 D12; S089 P2).
+ * Name table of a tagged DTYPE_ON_OFF cell (S088 D12; S089 P2; S093 P4).
  *
  * What:       returns the 3-character name table for a dtype high-nibble tag:
- *             ONOFF_TAG_VOICE_CHAIN -> voiceChainNames (T+D, WFd); every other
- *             non-zero tag -> oscRunNames (rst, fre, itp), exactly as before.
+ *             ONOFF_TAG_VOICE_CHAIN -> voiceChainNames (T+D, WFd);
+ *             ONOFF_TAG_ALK_TYPE -> alkTypeNames (wav, wtb; S093 P8); every
+ *             other non-zero tag -> oscRunNames (rst, fre, itp), exactly as
+ *             before.
  *             Entry [0][0] is the count; names start at [1].
- * Why:        the six tagged on/off sites in this file used oscRunNames
- *             directly ("tag != 0 means run mode"); the second tag needs its
- *             own table, and one helper keeps display, clamp, automation max
- *             and the step-edit line in agreement.
+ * Why:        one helper keeps display, clamp, automation max and the
+ *             step-edit line in agreement for every tag. Its six callers in
+ *             this file: l. 3387, 6570, 6864, 13869, 13915, 15099.
  * Inputs:     tag (dtype >> 4, non-zero).  Outputs: the table.
  * Accessors:  menu_formatCellValue3(), va_formatValue3(), menu_clampCellValue(),
  *             menu_automationValueMax(), menu_formatAutomationValue3(), the
  *             single-parameter step-edit display.
- * Affiliates: ONOFF_TAG_* / oscRunNames / voiceChainNames (MenuText.h).
+ * Affiliates: ONOFF_TAG_* / oscRunNames / voiceChainNames / alkTypeNames
+ *             (MenuText.h).
  */
 static const char (*menu_onoffTagNames(uint8_t tag))[4]
 {
-    return (tag == ONOFF_TAG_VOICE_CHAIN) ? voiceChainNames : oscRunNames;
+    switch (tag) {
+    case ONOFF_TAG_VOICE_CHAIN: return voiceChainNames;
+    case ONOFF_TAG_ALK_TYPE:    return alkTypeNames;
+    /* S095 P2: the Colloid's selectors (MenuText.h ONOFF_TAG_COL_*) */
+    case ONOFF_TAG_COL_ROUTE:      return colRouteNames;      /* S095 P3 F9 */
+    case ONOFF_TAG_COL_FILT_TYPE:  return colFiltTypeNames;
+    case ONOFF_TAG_TKT_LAYERS:     return tktLayerNames;      /* S096 P1 */
+    default:                    return oscRunNames;
+    }
 }
 
 static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *buf)
@@ -12482,6 +12808,26 @@ _Static_assert((sizeof(transientNames) / sizeof(transientNames[0])) - 1u ==
 _Static_assert((sizeof(voiceChainNames) / sizeof(voiceChainNames[0])) - 1u ==
                    VOICE_CHAIN_COUNT,
                "voiceChainNames must list every VOICE_CHAIN_* value");
+/* S093 P4 / S094 P4: the Alkaline waveform names list every stored value:
+ * Saw, Sqr, Tri (ALK_WAVE_*, AlkalineVoice.h). */
+_Static_assert((sizeof(alkWaveNames) / sizeof(alkWaveNames[0])) - 1u ==
+                   ALK_WAVE_COUNT,
+               "alkWaveNames must list Saw, Sqr and Tri");
+/* S093 P8 / S094 P1: the Alkaline typ list is wav, wtb, pwm (ALK_TYP_COUNT,
+ * AlkalineVoice.h) */
+_Static_assert((sizeof(alkTypeNames) / sizeof(alkTypeNames[0])) - 1u == 3u,
+               "alkTypeNames must list wav, wtb and pwm");
+/* S095 P2: the Colloid name tables list every value of their voice-side
+ * enumerations (ColloidVoice.h, ColloidTables.h). */
+_Static_assert((sizeof(colWaveNames) / sizeof(colWaveNames[0])) - 1u == COL_WAVE_COUNT,
+               "colWaveNames must list Saw, Rec, Tri and Sin");
+_Static_assert((sizeof(colRouteNames) / sizeof(colRouteNames[0])) - 1u == COL_RTE_COUNT,
+               "colRouteNames must list str and every filter type (S095 P3)");
+_Static_assert((sizeof(colFiltTypeNames) / sizeof(colFiltTypeNames[0])) - 1u == COL_FT_COUNT,
+               "colFiltTypeNames must list every filter type");
+/* S096 P1: the layer-switch names list every 4-bit mask (TetraktVoice.h). */
+_Static_assert((sizeof(tktLayerNames) / sizeof(tktLayerNames[0])) - 1u == TKT_LAYER_MASK_COUNT,
+               "tktLayerNames must list the 16 layer sets");
 _Static_assert((sizeof(foldTypeNames) / sizeof(foldTypeNames[0])) - 1u ==
                    VOICE_FOLD_COUNT &&
                (sizeof(foldTypeLongNames) / sizeof(foldTypeLongNames[0])) - 1u ==
@@ -13857,7 +14203,8 @@ static uint8_t menu_automationValueMax(const ParamDescriptor *descriptor)
          *
          * What:       with a non-zero dtype high nibble the automation max is
          *             count-1 from the tag's name table
-         *             (menu_onoffTagNames(): run modes or voice chains); a
+         *             (menu_onoffTagNames(): run modes, voice chains or the
+         *             Alkaline type); a
          *             plain on/off stays 1.
          * Why:        step automation needs the max for its bar and for the
          *             encoder increment clamp (rst/fre/itp are three values).
@@ -14988,6 +15335,11 @@ static void menu_repaintGeneric(void)
             menu_displayPatStoreUseEdit();
             return;
         }
+        if (cell.kind == MENU_CELL_STATIC &&
+            cell.static_param == PAR_BUS_COMP_GR) {
+            menu_displayBusCompGrEdit();
+            return;
+        }
 
         curParmVal = menu_cellDisplayValue(&cell);
         dtype = (uint8_t)(menu_cellDtype(&cell) & 0x0f);
@@ -15079,9 +15431,21 @@ static void menu_repaintGeneric(void)
             } else switch (dtype) {
             case DTYPE_TARGET_SELECTION_VELO:
             case DTYPE_TARGET_SELECTION_LFO:
-                if (cell.kind == MENU_CELL_INSTRUMENT)
+                if (cell.kind == MENU_CELL_INSTRUMENT) {
                     menu_displayInstrumentTargetFull(curParmVal);
-                else if (curParmVal == INSTRUMENT_PARAM_INVALID)
+                    /*
+                     * S096 P1 SD3: a Tetrakt velocity group: '*' after the long
+                     * name (columns 8-15), as the compact cell's tn*.
+                     */
+                    if (dtype == DTYPE_TARGET_SELECTION_VELO &&
+                        instrumentManager_targetIsVelocityGroup(curParmVal)) {
+                        uint8_t c = 15u;
+
+                        while (c > 8u && editDisplayBuffer[1][c] == ' ')
+                            c--;
+                        editDisplayBuffer[1][(c < 15u) ? c + 1u : 15u] = '*';
+                    }
+                } else if (curParmVal == INSTRUMENT_PARAM_INVALID)
                     memcpy(&editDisplayBuffer[1][0], menuText_off, 3);
                 else
                     menu_displayModTargetFull(value);
@@ -15257,6 +15621,12 @@ static void menu_repaintGeneric(void)
                        cell.kind == MENU_CELL_KIT_SETTING) {
                 menu_copyPaddedField(&editDisplayBuffer[0][4u * i],
                                      cell.descriptor->short_name, 3u);
+                /* S096 P1 SD2: a bit cell is named on + its layer: onA .. onD. */
+                if (cell.kind == MENU_CELL_INSTRUMENT && cell.bit_plus1) {
+                    editDisplayBuffer[0][4u * i]      = 'o';
+                    editDisplayBuffer[0][4u * i + 1u] = 'n';
+                    editDisplayBuffer[0][4u * i + 2u] = (char)('A' + cell.bit_plus1 - 1u);
+                }
             } else if (cell.kind == MENU_CELL_STATIC) {
                 memcpy(&editDisplayBuffer[0][4u * i],
                        shortNames[valueNames[cell.text_id].shortName], 3);
@@ -15293,6 +15663,9 @@ static void menu_repaintGeneric(void)
             } else if (cell.kind == MENU_CELL_STATIC &&
                        cell.static_param == PAR_PAT_STORE_USE) {
                 menu_formatPatStoreUsePercent3(valueAsText);
+            } else if (cell.kind == MENU_CELL_STATIC &&
+                       cell.static_param == PAR_BUS_COMP_GR) {
+                menu_formatBusCompGr3(valueAsText);
             } else {
                 menu_formatCellValue3(&cell, valueAsText);
             }
@@ -15407,7 +15780,8 @@ static void menu_encoderChangeParameter(int8_t inc)
         return;
     if (cell.kind == MENU_CELL_STATIC &&
         (cell.static_param == PAR_RUNTIME_CPU_USE ||
-         cell.static_param == PAR_PAT_STORE_USE))
+         cell.static_param == PAR_PAT_STORE_USE ||
+         cell.static_param == PAR_BUS_COMP_GR))
         return;
 
     /* Held SEQ steps write lane locks, never retained menu values (D2). */
@@ -17541,7 +17915,8 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
     }
     if (cell.kind == MENU_CELL_STATIC &&
         (cell.static_param == PAR_RUNTIME_CPU_USE ||
-         cell.static_param == PAR_PAT_STORE_USE)) return;
+         cell.static_param == PAR_PAT_STORE_USE ||
+         cell.static_param == PAR_BUS_COMP_GR)) return;
 
     value = menu_cellDisplayValue(&cell);
     if (menu_cellIsLfoTargetVoice(&cell)) {
@@ -17688,6 +18063,29 @@ static uint8_t menu_patStoreUseWidgetVisible(void)
                          cell.static_param == PAR_PAT_STORE_USE);
     }
     return (uint8_t)(activePage == 1u && activeParameter >= 7u);
+}
+
+/*
+ * Report whether the compressor readout is visible (S095 P4 C5).
+ *
+ * What: the Scene settings sub-page's second screen (column 4) or the
+ * readout's own click-in view. Output: nonzero when sampling and repainting
+ * are useful. Affiliates: menu_serviceRuntimeWidgets(), PAR_BUS_COMP_GR.
+ */
+static uint8_t menu_busCompGrWidgetVisible(void)
+{
+    uint8_t activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+    uint8_t activeParameter = menuIndex & MASK_PARAMETER;
+
+    if (menu_activePage != MENU_MIDI_PAGE)
+        return 0u;
+    if (editModeActive) {
+        menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
+        return (uint8_t)(cell.kind == MENU_CELL_STATIC &&
+                         cell.static_param == PAR_BUS_COMP_GR);
+    }
+    return (uint8_t)(activePage == MENU_GLOBAL_SCENE_SUBPAGE &&
+                     activeParameter >= 4u);
 }
 
 void menu_serviceRuntimeWidgets(void)
@@ -17847,6 +18245,13 @@ void menu_serviceRuntimeWidgets(void)
 
     menu_sceneLiveRefreshService();
 
+    /*
+     * S095 P4 C5: feed the compressor readout's hold every pass while it is
+     * shown (two float compares; nothing when hidden, the page test first).
+     */
+    if (menu_activePage == MENU_MIDI_PAGE && menu_busCompGrWidgetVisible())
+        menu_busCompGrSample();
+
     if ((uint16_t)(now - menu_cpuUseLastRefresh) < MENU_CPU_USE_REFRESH_MS)
         return;
     menu_cpuUseLastRefresh = now;
@@ -17873,7 +18278,8 @@ void menu_serviceRuntimeWidgets(void)
     /* A CPU cadence also provides a cheap repaint opportunity for the
      * retained Pattern value; no Pattern bitmap rescan occurs here. */
     if (!screensaver_isActive() &&
-        (menu_cpuUseWidgetVisible() || menu_patStoreUseWidgetVisible()))
+        (menu_cpuUseWidgetVisible() || menu_patStoreUseWidgetVisible() ||
+         menu_busCompGrWidgetVisible()))
         menu_repaint();
 }
 
@@ -20392,7 +20798,8 @@ uint8_t menu_getViewedPattern(void) { return menu_shownPattern; }
  * BC18 diagnostic check: the Scene-owned compressor page stays last.
  *
  * What: verifies the named page holds cmp first (top1), cam/ctm/csc after it,
- * an empty second half (top5), and that no populated settings page follows
+ * the `cgr` readout in top5 (S095 P4 C5) and nothing after it, and that no
+ * populated settings page follows
  * it (S074 rule; S080 P2 moves the page to sub-page 3 with the four Scene
  * cells together). Why: menu cues and SELECT traversal rely on the
  * append-only placement rule. Output: silent success; on failure, a 1.5 s
@@ -20405,7 +20812,8 @@ static void menu_devCheckGlobalSceneSubPage(void)
         &menuPages[MENU_MIDI_PAGE][MENU_GLOBAL_SCENE_SUBPAGE];
     uint8_t bad = (uint8_t)(scene_page->top1 != TEXT_BUS_COMP_MODE ||
                             scene_page->top4 != TEXT_BUS_COMP_SIDECHAIN ||
-                            scene_page->top5 != TEXT_EMPTY);
+                            scene_page->top5 != TEXT_BUS_COMP_GR ||
+                            scene_page->top6 != TEXT_EMPTY);
     uint8_t sub_page;
     uint16_t t0;
 

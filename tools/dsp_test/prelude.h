@@ -46,7 +46,7 @@ static inline sample_mx_t sampleMix_fromInt16(int16_t x)
     return ((sample_mx_t)x) << SAMPLE_MIX_SHIFT_16_TO_24;
 }
 
-typedef struct DistStruct { float shape; float inv_shape; } Distortion;
+typedef struct DistStruct { float shape; float out_gain; } Distortion;
 #define ENABLE_NONLINEAR_INTEGRATORS 1
 #define FILTER_GAIN 0x70ff
 #define USE_SHAPER_NONLINEARITY 0

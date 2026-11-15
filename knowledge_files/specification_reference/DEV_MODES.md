@@ -600,6 +600,14 @@ on LED appearance. See `PATTERN_DYNAMIC_STACK.md` §5 for the call-site
 contract; `K` is an AutoSaveTrace code, unrelated to `PatternTrace.h`'s own
 stage-letter set below despite the shared single-letter convention.
 
+### Cycle probe (S094 P2 §10)
+
+`DEV_MODE_LOGGING`-only feature. Uses `DWT_CYCCNT` (Data Watchpoint and Trace
+cycle counter) around each slot's async+sync render call. Measures per-slot
+block-rate and render timing. Seven mixer sections are individually timed.
+Trace stage character: `p`. RAM cost: 94 B (logging builds only; zero in
+release). The probe feeds the cycle-based budget system adopted in S094 P2 §21.
+
 ## Stall detection (`DEV_STALL_DETECTION`)
 
 Eleven sites currently exist (S082 added the Bank child preview). Each follows the same shape: poll for

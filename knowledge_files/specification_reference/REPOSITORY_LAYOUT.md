@@ -13,8 +13,7 @@
 │   ├── build_lxrv2_img.py          ← stamps the boot image check and packages the .bin → LXRV2_lxr02.img
 │   ├── link_budget.py              ← flash/ITCM/DTCM/arena report after every build
 │   ├── decode_devlogs.py           ← decodes /bootlog.bin and /asavetrc.bin
-│   ├── gen_stock_tables.py         ← generates Core/DSPAudio/wavetableStock.c (Re3/Sw3) from plots/stock_wave_harmonics.csv; --check (S086)
-│   ├── plots/                      ← stock-wave recipe and analysis plots (plot_stock_waves.py, plot_stock_tables.py; numpy/matplotlib) (S086)
+│   ├── plots/                      ← stock-wave recipe and analysis plots (plot_stock_waves.py, plot_stock_tables.py; numpy/matplotlib) (S086); gen_stock_tables.py writes the archived Re3/Sw3 tables to plots/archive/wavetableStock.c, outside the build (removed from the firmware in S093 P3); --check
 │   └── dsp_test/                   ← host test bench (DSP_TEST.md): modules/ (one test per module), spike/ (effects retry kit)
 ├── build/                           ← generated, not in VCS
 ├── knowledge_files/
@@ -149,8 +148,7 @@
     ├── DSPAudio/
     │   ├── random.c/h               ← F765 RNG port (PLL48CLK, bare register)
     │   ├── Oscillator.c/h           ← oscillator loops, dispatchers, S085 sync/ring family, S086 pos helpers (OscInfo padding)
-    │   ├── wavetable.c/h            ← sine, Tri/Saw/Rec [11][1024] tables (externs incl. the stock waves)
-    │   ├── wavetableStock.c         ← GENERATED Re3/Sw3 tables (tools/gen_stock_tables.py) (S086)
+    │   ├── wavetable.c/h            ← sine, Tri/Saw/Rec [11][1024] tables
     │   ├── Samples.c/h              ← crashSample[32769] (32,768 points + guard)
     │   └── [all DSP voice files]    ← ported; mixer_calcNextSampleBlock wired to AudioCodecManager
     └── compat/

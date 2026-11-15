@@ -1,0 +1,3 @@
+dly: delayRun 179x1 + per block 440/32 + idle 2.0 = 194.7 (cap 202.9); with the feed 214.7 (cap 222.9)
+rvb: hbDown 18x0.5 + hbDown 9x1 + reverbProcess 25x0.5 + plateRun 219x0.5 + shimmerRun 77x0.0625 + rvbOut 41x0.5 + per block 716.25/32 + idle 2.0 = 189.7 (cap 191.8); with the feed 209.6 (cap 211.8)
+ech: monoPeak 9x1 + echoTapeRun 93x1 + echoProcess 14x0.25 + plateRun 149x0.25 + echoOut 94x0.25 + per block 797.25/32 + idle 2.0 = 193.1 (cap 199.2); with the feed 213.1 (cap 219.2)

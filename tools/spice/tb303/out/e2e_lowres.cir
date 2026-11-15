@@ -1,0 +1,191 @@
+* TB-303 end-to-end run lowres: {'wave': 'saw', 'cut': 0.35, 'res': 0.2, 'env': 0.6, 'dec': 0.45, 'acc': 0.8}
+
+.model QN NPN(IS=1e-14 BF=300 VAF=100 CJE=8p CJC=4p TF=0.4n RB=50)
+.model QN21 NPN(IS=1e-14 BF=300 VAF=100 CJE=8p CJC=4p TF=0.4n RB=50)
+.model QNC NPN(IS=1e-14 BF=240 VAF=100 CJE=8p CJC=4p TF=0.4n RB=50)
+.model QP PNP(IS=1e-14 BF=300 VAF=60 CJE=8p CJC=5p TF=0.6n RB=50)
+.model QP8 PNP(IS=1e-14 BF=300 VAF=80 CJE=8p CJC=5p TF=0.6n RB=50)
+.model QPV PNP(IS=1e-14 BF=200 VAF=80 CJE=8p CJC=5p TF=0.6n RB=50)
+.model DS D(IS=2.52n N=1.752 RS=0.5 CJO=2p)
+.model JN NJF(VTO=-1.0 BETA=1.0e-3 LAMBDA=0.005 CGS=8p CGD=3p)
+.model JY NJF(VTO=-1.5 BETA=0.889e-3 LAMBDA=0.005)
+.model S4066 SW(VT=2.5 VH=0.1 RON=250 ROFF=1e10)
+.model SWR SW(VT=2.9 VH=2.85 RON=100 ROFF=1e12)
+
+VCC vcc 0 12
+VREF vref 0 5.333
+* ===== sequencer outputs (behavioural)
+VDAC dac 0 PWL(0.0000000 2 0.9999990 2 1.0000000 2 1.1249990 2 1.1250000 2 1.2499990 2 1.2500000 2.25 1.3749990 2.25 1.3750000 2.5833 1.4999990 2.5833 1.5000000 3 1.6249990 3 1.6250000 2.8333 1.8749990 2.8333 1.8750000 2)
+VGATE gate 0 PWL(0.0000000 0 1.0000000 0 1.0000010 12 1.0729167 12 1.0729177 0 1.1250000 0 1.1250010 12 1.1979167 12 1.1979177 0 1.2500000 0 1.2500010 12 1.4479167 12 1.4479177 0 1.5000000 0 1.5000010 12 1.6979167 12 1.6979177 0 1.8750000 0 1.8750010 12 1.9479167 12 1.9479177 0)
+VTRIG trig 0 PWL(0.0000000 0 1.0000000 0 1.0000010 5.333 1.0007000 5.333 1.0007010 0 1.1250000 0 1.1250010 5.333 1.1257000 5.333 1.1257010 0 1.2500000 0 1.2500010 5.333 1.2507000 5.333 1.2507010 0 1.5000000 0 1.5000010 5.333 1.5007000 5.333 1.5007010 0 1.8750000 0 1.8750010 5.333 1.8757000 5.333 1.8757010 0)
+VSTR c_str 0 PWL(0.0000000 0 1.0000000 0 1.0000010 11.85 1.0013000 11.85 1.0013010 0 1.1250000 0 1.1250010 11.85 1.1263000 11.85 1.1263010 0 1.2500000 0 1.2500010 11.85 1.2513000 11.85 1.2513010 0 1.5000000 0 1.5000010 11.85 1.5013000 11.85 1.5013010 0 1.8750000 0 1.8750010 11.85 1.8763000 11.85 1.8763010 0)
+VACC acc 0 PWL(0.0000000 0 1.1250000 0 1.1250010 5 1.2499990 5 1.2500000 0 1.5000000 0 1.5000010 5 1.7499990 5 1.7500000 0 1.8750000 0 1.8750010 5 1.9999990 5 2.0000000 0)
+VSLIDE slide 0 PWL(0.0000000 0 1.3749000 0 1.3749010 5 1.4998990 5 1.4999000 0 1.6249000 0 1.6249010 5 1.7498990 5 1.7499000 0)
+BSLN slide_n 0 V = 5 - V(slide)
+* ===== pitch CV and slide (P0 A9): DAC (R-2R, ~100k) -> IC11b follower; C35 0.22u
+*       on the follower output (slide off) or on the DAC node (slide on)
+RDAC dac ndac 100k
+ECV cvout 0 ndac 0 1
+SSL1 ndac nc35 slide 0 S4066
+SSL2 cvout nc35 slide_n 0 S4066
+C35 nc35 0 0.22u
+* ===== VCO (P1): ramp current at 1 V/oct from the CV (behavioural expo), C33,
+*       reset to 11.3 V at 5.5 V, Q28 follower, Q8 shaper
+BRAMP v_c33 0 I = 3.737860e-06 * pow(2, V(cvout) - 2.0)
+C33 v_c33 0 0.01u
+VRST v_vrst 0 11.3
+BCTL v_ctl 0 V = 11.3 - V(v_c33)
+SRST v_vrst v_c33 v_ctl 0 SWR
+VG v_c33 v_g28 0
+J28 vcc v_g28 v_src JN
+R105 v_src 0 10k
+R35 v_src v_nb8 100k
+C10 v_src v_n10 0.01u
+R34 v_n10 v_nb8 10k
+Q8 v_col v_nb8 v_q8e QP8
+R45 vcc v_q8e 22k
+C11 v_q8e 0 1u
+R36 v_col 0 10k
+* ===== VCF (P2, R110 = 22k); S1 -> R62
+R62 v_src f_n62 220k
+C17 f_n62 f_inL 1u
+R70 f_inL f_nb 2.2k
+R98 f_inR f_nb 2.2k
+R68 vref f_nb 2.2k
+C16 f_nb 0 10u
+Q12L f_aL f_inL f_tail QN
+Q12R f_aR f_inR f_tail QN
+R95 vcc f_vtop 100
+C28 f_vtop 0 47u
+R115 f_vtop f_b22 10k
+C30 f_b22 0 10u
+Q22L f_vtop f_b22 f_dL QN
+Q22R f_vtop f_b22 f_dR QN
+Q16 f_dL f_dL f_cL QN
+Q23 f_dR f_dR f_cR QN
+Q14 f_cL f_cL f_bL QN
+Q17 f_cR f_cR f_bR QN
+Q13 f_bL f_bL f_aL QN
+Q15 f_bR f_bR f_aR QN
+C26 f_dL f_dR 0.033u
+C24 f_cL f_cR 0.033u
+C19 f_bL f_bR 0.033u
+C18 f_aL f_aR 0.018u
+C27 f_dR f_b21L 0.1u
+C25 f_dL f_b21R 0.1u
+R113 f_b21L f_nb21 100k
+R114 f_b21R f_nb21 100k
+R116 vref f_nb21 10k
+C29 f_nb21 0 1u
+Q21L f_c21L f_b21L f_t21 QN21
+Q21R f_c21R f_b21R f_t21 QN21
+R111 f_vtop f_c21L 2.2k
+R110 f_vtop f_c21R 22k
+Q20 f_t21 f_b20 f_e20 QN
+R112 f_nb21 f_b20 10k
+R109 f_b20 0 10k
+R108 f_e20 0 2.2k
+Q19 f_vtop f_c21R f_out19 QN
+R96 f_out19 0 10k
+C14 f_out19 tp6 1u
+RVR4AA 0 f_wip 10000.000
+RVR4AB f_wip tp6 40000.000
+C15 f_wip f_n15 1u
+R67 f_n15 f_b18 2.2k
+R99 f_b18 f_nb18 100k
+R66 vref f_nb18 100k
+C22F f_nb18 0 1u
+Q18 vcc f_b18 f_q18e QN
+R94 f_q18e 0 10k
+C23 f_q18e f_n23 1u
+R97 f_n23 f_inR 10k
+* ===== control network (P4)
+D37 c_str c_n37 DS
+R152 c_n37 c_c62 100
+C62 c_c62 0 1u
+R138 c_c62 c_nx 68k
+RVR6 c_nx c_ny 165480.150
+SDEC c_nx c_ny acc 0 S4066
+DC28 c_ny c_nj DS
+DC27 c_nj c_nk DS
+DC26 c_nk 0 DS
+R117 vref c_nj 22k
+Q41 vcc c_c62 c_e41 QNC
+Q40 vcc c_e41 c_n53 QNC
+J39 c_n53 0 0 JY
+RVR3A c_cutn c_w3 5463.386
+RVR3B c_w3 vcc 44536.614
+R47 c_cutn c_n561 10k
+R61 c_v5p1 c_n561 10k
+RVR5A c_v5p1 c_w5 14260.105
+RVR5B c_w5 c_n53 35739.895
+RTM3 c_w3 c_ntm 152740.0
+R73 c_ntm c_nb11 100k
+Q10 c_n561 c_n134 c_nb11 QP
+Q11 c_nc11 c_nb11 c_n561 QNC
+Q9 0 c_nb9 c_n561 QP
+R65 vref c_nb9 10k
+R64 c_nb9 0 10k
+R71 c_n134 c_n561 2.2k
+R63 c_w5 c_n134 220k
+SACC c_n53 c_v7p3 acc 0 S4066
+RVR7A 0 c_w7 40000.000
+RVR7B c_w7 c_v7p3 10000.000
+D24 c_w7 c_n24 DS
+R46 c_n24 c_v4p1 47k
+RVR4BA c_v4p1 c_w4 10000.000
+RVR4BB c_w4 c_c13 40000.000
+C13 c_c13 0 1u
+R72 c_w4 c_n134 100k
+VTL c_nc11 c_nc11b 0
+R69 c_nc11b f_tail 2.2k
+* ===== VCA (P3)
+D36 trig a_n36 DS
+R134 a_n36 a_b32 22k
+C41 a_b32 0 0.1u
+Q32 a_c32 a_b32 a_e32 QN
+R130 a_e32 0 100
+R132 a_c32 a_n42 100
+C42 a_n42 0 1u
+R123 vcc a_n42 1.5Meg
+D34 gate a_n34 DS
+R137 a_n34 a_n137 1k
+D35 a_n137 a_n35 DS
+R133 a_n35 a_n133 2.2k
+R131 a_n133 a_e31 220k
+Q31 a_abc a_n42 a_e31 QPV
+VABC a_abc a_abc2 0
+QABC a_abc2 a_abc2 0 QN
+R119 c_w7 a_nc36 47k
+C36 a_nc36 0 0.033u
+R120 a_nc36 a_n120 22k
+D27 a_n120 a_abc DS
+C21 tp6 a_n121 0.01u
+R121 a_n121 a_p3 220k
+C22 f_wip a_n122 0.01u
+R122 a_n122 a_p3 100k
+R124 a_p3 a_nb 2.2k
+R125 a_p2 a_nb 2.2k
+R126 vref a_nb 2.2k
+C37 a_nb 0 10u
+BOTA 0 a_p6 I = i(VABC) * tanh((V(a_p3) - V(a_p2)) / 0.0517)
+R127 a_p6 a_n127 47k
+R129 a_n127 a_n40 22k
+R128 a_p6 a_n40 220k
+R162 vref a_n40 2.2k
+C40 a_n40 0 10u
+EB8 a_p8 0 a_p6 0 1
+C38 a_p8 out 1u
+RVOL out 0 50k
+.options method=gear reltol=2e-4 abstol=1e-11 vntol=2e-6 itl4=40
+* operating point with the VCO capacitor held at its reset level (a
+* relaxation oscillator has no DC state of its own); everything else settles
+.ic v(v_c33)=11.3
+.tran 1.133787e-05 2.2500 0 4u
+.control
+run
+linearize v(cvout) v(v_src) v(c_n53) v(c_c13) i(VTL) i(VABC) v(tp6) v(out) v(gate) v(acc) v(slide) v(trig)
+wrdata e2e_lowres.txt v(cvout) v(v_src) v(c_n53) v(c_c13) i(VTL) i(VABC) v(tp6) v(out) v(gate) v(acc) v(slide) v(trig)
+quit
+.endc
+.end

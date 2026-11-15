@@ -1,0 +1,75 @@
+* TB-303 control network cut=0.5 env=0.5 dec=0.5 acc=0.0 res=0.0
+
+.model QN NPN(IS=1e-14 BF=240 VAF=100 CJE=8p CJC=4p TF=0.4n RB=50)
+.model QP PNP(IS=1e-14 BF=300 VAF=60 CJE=8p CJC=5p TF=0.6n RB=50)
+.model DS D(IS=2.52n N=1.752 RS=0.5 CJO=2p)
+* Q39 2SK30(Y), IDSS 1.2-3 mA: 2 mA used
+.model JY NJF(VTO=-1.5 BETA=0.889e-3 LAMBDA=0.005)
+* IC12 (4066) switch, R_on 250 ohm
+.model S4066 SW(VT=2.5 VH=0.1 RON=250 ROFF=1e10)
+
+.model QN11 NPN(IS=1.0000e-14 BF=240 VAF=100 CJE=8p CJC=4p TF=0.4n RB=50)
+VCC vcc 0 12
+VREF vref 0 5.333
+* --- MEG: strike (1.3 ms, 11.85 V, behavioural) -> D37 -> R152 100 -> C62 1u
+VSTR str 0 PWL(0 0 0.010000 0 0.010001 11.85 0.011300 11.85 0.011301 0)
+D37 str n37 DS
+R152 n37 c62 100
+C62 c62 0 1u
+* --- discharge: R138 68k -> X; VR6 1M(A) rheostat X -> Y; IC12 (3-4) shorts X-Y on accent
+R138 c62 nx 68k
+RVR6 nx ny 200000.000
+VACC acc 0 PWL(0 0)
+SDEC nx ny acc 0 S4066
+* --- diode stack: Y -> D28 -> J -> D27 -> D26 -> ground; R117 22k from the reference to J
+D28 ny nj DS
+D27 nj nk DS
+D26 nk 0 DS
+R117 vref nj 22k
+* --- Darlington Q41/Q40 -> N53 (MEG out), Q39 2SK30(Y) current-source load
+Q41 vcc c62 e41 QN
+Q40 vcc e41 n53 QN
+J39 n53 0 0 JY
+* --- knobs: VR3 (Cutoff, A) from +12 V to R47 -> n561; VR5 (Env Mod, A) from
+*     R61 -> n561 to the MEG (N53). R47 and R61 both return to Q9's node n561 ([XB]).
+RVR3A cutn w3 10000.000
+RVR3B w3 vcc 40000.000
+R47 cutn n561 10k
+R61 v5p1 n561 10k
+RVR5A v5p1 w5 10000.000
+RVR5B w5 n53 40000.000
+* --- Cutoff wiper -> TM3 -> R73 -> Q10 emitter / Q11 base
+RTM3 w3 ntm 152739.486
+R73 ntm nb11 100k
+* --- expo: Q10 PNP (base = summing node n134), Q11 NPN, Q9 PNP holds n561
+Q10 n561 n134 nb11 QP
+Q11 nc11 nb11 n561 QN11
+Q9 0 nb9 n561 QP
+R65 vref nb9 10k
+R64 nb9 0 10k
+R71 n134 n561 2.2k
+* --- Env Mod: VR5 wiper -> R63 220k -> n134
+R63 w5 n134 220k
+* --- accent: IC12 (1-2) N53 -> VR7 top; VR7 (B) wiper -> D24 -> R46 47k -> VR4b pin 1;
+*     VR4b (B, the Resonance second gang) pin 3 = C13 1u; wiper -> R72 100k -> n134
+SACC n53 v7p3 acc 0 S4066
+RVR7A 0 w7 1.000
+RVR7B w7 v7p3 50000.000
+D24 w7 n24 DS
+R46 n24 v4p1 47k
+RVR4BA v4p1 w4 1.000
+RVR4BB w4 c13 50000.000
+C13 c13 0 1u
+R72 w4 n134 100k
+* --- Q11 collector: R69 2.2k to the Q12 emitters (about 4.7 V)
+R69 nc11 tailv 2.2k
+VTAIL tailv 0 4.7
+VSENSE nc11x nc11 0
+.options method=gear reltol=1e-4
+.tran 2.000e-04 4.0000 0 2.000e-04
+.control
+run
+wrdata ctl_meg_d50_n.txt i(VTAIL) v(c62) v(n53) v(n134) v(c13) v(w4)
+quit
+.endc
+.end

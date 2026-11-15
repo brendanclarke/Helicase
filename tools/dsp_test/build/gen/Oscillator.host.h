@@ -51,51 +51,75 @@
 #define SAW					0x02
 #define REC					0x03
 #define NOISE				0x04
-#define CRASH				0x05
 /*
- * Stock table waves (S086 P2): [11][1024] octave tables like Tri/Saw/Rec,
- * in wavetableStock.c, read by the same table loops. SQ3 = Re3 (303
- * square), SW3 = Sw3 (303 saw). OSC_STOCK_FIRST..OSC_STOCK_LAST index
- * osc_stockTables[] (Oscillator.c); ReA/TrA/SwA follow later.
+ * The built-in (stock) waves are SINE..NOISE (S093 P3; S094 P1 S2).
+ *
+ * What:       OSC_STOCK_LAST is the last built-in wave: the wav-row clamp and
+ *             the menu range. User entries (modulator list) start at
+ *             OSC_SAMPLE_START.
+ * Why:        the S086 stock table waves Re3/Sw3 (0x06/0x07) were removed in
+ *             S093 (S093_P0_ALKALINE_C_FUNCTIONS_CODE.md §10): their 45,056 B
+ *             went to Alkaline. Their recipes and generator stay in
+ *             tools/plots/ (INSTRUMENTS_DSP_REFERENCE.md §6.1.2 lists the
+ *             restore steps). S094 P1 S2 removes CRASH (0x05): its plain loop
+ *             set every modulator's plain-read ceiling, and its points are
+ *             kept as SD_CARD/samples/02_crash.wav instead.
  */
-#define SQ3					0x06
-#define SW3					0x07
-#define OSC_STOCK_FIRST		SQ3
-#define OSC_STOCK_LAST		SW3
-#define OSC_SAMPLE_START 	0x08
+#define OSC_STOCK_LAST		NOISE
+#define OSC_SAMPLE_START 	0x05
 
 /*
- * Oscillator type: the typ row (S087 stage B).
+ * Oscillator type: the typ row (S087 stage B; S094 P1 S3 pwm).
  *
- * What:       OSC_TYPE_WAV 0 (stock waves, today's oscillator), OSC_TYPE_SMP 1
- *             (one-shot sample), OSC_TYPE_SLP 2 (looped sample), OSC_TYPE_WTB 3
- *             (wavetable), OSC_TYPE_COUNT 4. OSC_TYPE_MODLIST 4 is not a typ
+ * What:       OSC_TYPE_WAV 0 (stock waves), OSC_TYPE_SMP 1 (one-shot sample),
+ *             OSC_TYPE_SLP 2 (looped sample), OSC_TYPE_WTB 3 (wavetable),
+ *             OSC_TYPE_PWM 4 (S094 P1: pulse-width forms of Sin/Tri/Saw/Rec,
+ *             pos = width), OSC_TYPE_COUNT 5. OSC_TYPE_MODLIST 5 is not a typ
  *             value: it marks a modulator (Drum osc2, Cymbal/HiHat osc2/osc3),
- *             whose wav list is the stock waves followed by the user entries
- *             s01.., l01.., w01.. (S087 P0 §12.4). OSC_TYPE_SELECTABLE is the
- *             number of typ values the menu and the writer accept in this
- *             build: 1 after stage B, 3 after stage D, 4 after stage E.
- * Why:        S087 P0 §4, A21/A22: osc1 selects its type with typ; the
- *             modulators have no typ row and select user content through
- *             their wav list. One byte in OscInfo carries both meanings so
- *             osc_setFreq() and the renderers can tell them apart.
- * Inputs:     the osc1_type descriptor (osc1) and the engine init functions
+ *             whose wav list is stock waves followed by s01.., l01.., w01..
+ *             (S087 P0 §12.4). It moved from 4 to 5 in S094 P1; it is set at
+ *             engine init and never stored. OSC_TYPE_SELECTABLE is the number
+ *             of typ values accepted by the menu and writer.
+ * Why:        osc1 selects its type with typ; modulators have no typ row and
+ *             select user content through their wav list. One byte in OscInfo
+ *             carries both meanings so osc_setFreq() and renderers can tell
+ *             them apart. PWM appends a value without changing stored types.
+ * Inputs:     the osc1_type descriptor (osc1) and engine init functions
  *             (modulators).
  * Outputs:    OscInfo.oscType.
  * Accessors:  osc_setType(), osc_isTyped(), osc_setFreq(), the engines'
  *             typed branches, menu.c (count), InstrumentManager.c (writer).
- * Affiliates: MENU_OSC_TYPE and oscTypeNames (MenuText.h); the osc1_type rows
- *             in the four *Parameters.c files.
+ * Affiliates: MENU_OSC_TYPE and oscTypeNames (MenuText.h); osc1_type rows in
+ *             the four *Parameters.c files.
  */
 #define OSC_TYPE_WAV         0u
 #define OSC_TYPE_SMP         1u
 #define OSC_TYPE_SLP         2u
 #define OSC_TYPE_WTB         3u
-#define OSC_TYPE_COUNT       4u
-#define OSC_TYPE_MODLIST     4u
-#define OSC_TYPE_SELECTABLE  4u   /* S087 E: wav smp slp wtb */
+#define OSC_TYPE_PWM         4u
+#define OSC_TYPE_COUNT       5u
+#define OSC_TYPE_MODLIST     5u
+#define OSC_TYPE_SELECTABLE  5u   /* S094 P1: wav smp slp wtb pwm */
 _Static_assert(OSC_TYPE_SELECTABLE >= 1u && OSC_TYPE_SELECTABLE <= OSC_TYPE_COUNT,
                "OSC_TYPE_SELECTABLE out of range");
+_Static_assert(OSC_TYPE_MODLIST >= OSC_TYPE_COUNT,
+               "OSC_TYPE_MODLIST must not be a typ value (osc_isTyped())");
+
+/*
+ * PWM constants (S094 P1 S3).
+ *
+ * What:       OSC_PWM_WAVE_COUNT 4: under pwm the wav list is Sin, Tri, Saw,
+ *             Rec (0..3; a stored value past 3 clamps to Rec, the S087 r8
+ *             rule). OSC_PWM_SLEW_STEPS 2: the most the applied width moves
+ *             toward pos per block (P-D7; S094 P4: the full 127 steps take
+ *             about 46 ms, 64 blocks, since pos 0 is a width of its own).
+ * Why:        width changes arrive at block rate; slew avoids waveform steps,
+ *             and a trigger snaps to the requested value.
+ * Accessors:  osc_userCount(), osc_typedPositionApply(), menu.c
+ *             menu_formatWaveCell(), AlkalineVoice.c (the Alkaline slew).
+ */
+#define OSC_PWM_WAVE_COUNT   4u
+#define OSC_PWM_SLEW_STEPS   2
 
 /*
  * Oscillator run modes (S088 P0 §1).
@@ -182,7 +206,9 @@ _Static_assert(sizeof(OscCarrierSnapshot) <= 32u,
  * Sample reader constants (S087 stage D).
  *
  * What:       OSC_SAMPLE_PHASE_SHIFT 12 (Q19.12 phase: point index << 12 +
- *             fraction); OSC_BIND_NONE/SMP/SLP/WTB8/WTB16; OSC_POS_SAMPLE_SPEED_CAP
+ *             fraction); OSC_BIND_NONE/SMP/SLP/PWM/WTB16 (S093 P8: WTB8 is
+ *             gone with 8-bit tables; S094 P1 uses 3 for the PWM no-catalogue
+ *             bind); OSC_POS_SAMPLE_SPEED_CAP
  *             4 (D5: a pos glide moves the playhead at most 4x the playback
  *             speed, at least one step per block); OSC_FM_SAMPLE_SHIFT 9 (the
  *             FM read offset: the same fraction of a 1,024-point nominal period
@@ -197,7 +223,7 @@ _Static_assert(sizeof(OscCarrierSnapshot) <= 32u,
 #define OSC_BIND_NONE             0u
 #define OSC_BIND_SMP              1u
 #define OSC_BIND_SLP              2u
-#define OSC_BIND_WTB8             3u
+#define OSC_BIND_PWM              3u
 #define OSC_BIND_WTB16            4u
 #define OSC_POS_SAMPLE_SPEED_CAP  4
 #define OSC_FM_SAMPLE_SHIFT       9u
@@ -221,7 +247,9 @@ typedef struct OscStruct
 	 *
 	 * What:       position is the 0..127 osc1_position value. For the phase
 	 *             waves (osc_positionIsPhase()) it is position/128 of a cycle;
-	 *             for CRASH the cycle is the complete sample. positionApplied
+	 *             under typ pwm it is the width index (S094 P4: 0 = the
+	 *             unmodified wave, 127 = the narrowest; oscPwmTables.h).
+	 *             positionApplied
 	 *             is the part of position already contained in phase.
 	 * Why:        a descriptor value can change once per audio block. Keeping
 	 *             the applied value lets the engine spread each change through
@@ -293,7 +321,23 @@ typedef struct OscStruct
 	 * Affiliates: modNode_resetTargets(); OSC_WAVE_INTERP_MAX_ACTIVE.
 	 */
 	uint8_t		interpStamp;
-	float		waveInterpFrac;			/* S087 P1: unused (wav interpolation retired, A7); kept for the OscInfo layout */
+	/*
+	 * The Alkaline wavetable's frame position (S093 P8 revision 3).
+	 *
+	 * What:       under the Alkaline's typ wtb only: the frame position being
+	 *             played, 0..frames - 1, fractional (2.25 = a quarter of the
+	 *             way from frame 2 to frame 3). It glides toward pos at most
+	 *             one frame per block.
+	 * Why:        S087 P1 retired the field (wav interpolation, A7) and kept
+	 *             it for the OscInfo layout; the Alkaline reuses it so its
+	 *             blend adds no RAM. Drum, Snare, Cymbal and HiHat do not
+	 *             read or write it (their wavetables keep the position in
+	 *             positionApplied / positionBendStep).
+	 * Inputs:     AlkalineVoice.c alk_wtbBind(), alk_wtbTrigger() (jump to
+	 *             pos), alk_renderWtb() (the glide).
+	 * Outputs:    read by alk_renderWtb().
+	 */
+	float		waveInterpFrac;
 	uint32_t	waveInterpGeneration;	/* S087 P1: unused; kept for the OscInfo layout */
 	float		freqCacheValue;
 	uint8_t		freqCacheWaveform;
@@ -371,26 +415,39 @@ void calcNoiseBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float 
 //-----------------------------------------------------------
 int16_t calcNoise(OscInfo* osc);
 //-----------------------------------------------------------
-int16_t calcSampleOscFm(OscInfo* osc, OscInfo* modOsc);
-//-----------------------------------------------------------
-//used to play back the crash cymbal sample
-void calcSampleOscFmBlock(OscInfo* osc,int16_t* modBuffer, int16_t* buf, uint8_t size ,const float gain);
-//-----------------------------------------------------------
 void calcNextOscSampleBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain);
 //-----------------------------------------------------------
 // calculate an oscillator
 int16_t calcNextOscSample(OscInfo* osc);
  //-----------------------------------------------------------
 void osc_setFreq(OscInfo* osc);
+/*
+ * Table-wave frequency, the direct form (S093 P3, Alkaline T1-7).
+ *
+ * What:       phaseInc and tableOffset for a [11][1024] table wave from
+ *             freq x pitchMod x modNodeValue, exactly as osc_setFreq() sets
+ *             them for Tri/Saw/Rec for every positive frequency, without its
+ *             waveform dispatch, type clamps and frequency cache; the octave
+ *             level from the float's exponent and mantissa (the edges are
+ *             exact doublings), not ten compares. A NaN frequency gives level
+ *             10 here, 0 there (never reached: the caller's pitch is finite).
+ * Why:        S093_P2 §3A.2 T1-7: an Alkaline glide changes the frequency
+ *             every block, so osc_setFreq()'s cache misses every block (its
+ *             worst path is 128-139 instructions); the caller plays one fixed
+ *             table wave.
+ * Inputs:     osc->freq, pitchMod, modNodeValue (an LFO or velocity target on
+ *             the coarse row keeps working).
+ * Outputs:    osc->phaseInc, osc->tableOffset.
+ * Accessors:  AlkalineVoice.c (Alkaline_calcVoiceAsync) only; a voice that
+ *             calls it must never need osc_setFreq()'s bind or clamp rules
+ *             (no user-sample types, waveform fixed to a table wave).
+ */
+void osc_setTableFreq(OscInfo* osc);
 //-----------------------------------------------------------
 void calcNextOscSampleFmBlock(OscInfo* osc, int16_t* modBuffer, int16_t* buf, uint8_t size ,const float gain);
  //-----------------------------------------------------------
 // calculate an fm oscillator
 int16_t calcNextOscSampleFm(OscInfo* osc, OscInfo* modOsc);
-//-----------------------------------------------------------
-void calcSampleOscBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain);
-//-----------------------------------------------------------
-int16_t calcSampleOsc(OscInfo* osc);
 //-----------------------------------------------------------
 /** set the played midi note.*/
 void osc_setBaseNote(OscInfo* osc, uint8_t baseNote);
@@ -439,13 +496,13 @@ void osc_recalcFreq(OscInfo* osc);
  * What:       master->phaseInc, in "2^32 per nominal period" units.
  *             - Sine, table (incl. the stock table waves) and noise phases
  *               already are.
- *             - Crash and user samples (a <<17 point index; 1,024 points per
- *               nominal period) are scaled << 5. They are first clamped to
- *               0x07FFFFFF so the shift cannot overflow; a master at or above
+ *             - User samples (a modulator's s / l entry: Q19.12, 1,024 points
+ *               per nominal period) are scaled << 10 after a clamp to
+ *               0x003FFFFF, so the shift cannot overflow; a master at or above
  *               fs then resets the slave on every sample.
  * Why:        plan A1/A4: in P1 every master is a clock at its frequency.
- *             Crash and user samples act as noise (one reset per nominal
- *             period), not as their audio.
+ *             User samples act as noise (one reset per nominal period), not
+ *             as their audio. The crash << 5 rule went with CRASH (S094 P1 S2).
  * Inputs:     master (read only). Its phaseInc is current:
  *             Drum_calcVoiceAsync() runs osc_setFreq() on both Drum
  *             oscillators every block, in every mode.
@@ -486,8 +543,8 @@ uint32_t osc_buildSyncList(uint32_t clock, const uint32_t clockInc,
  *                 target = over[i] x ratio, ratio = osc->phaseInc / clockInc;
  *                 phase += depth x (signed)(target - phase).
  *             The reset therefore lands on sample i + 1 (plan K4).
- *             - Synced: Sin, Tri, Saw, Rec, Crash, the stock table waves
- *               (S086 P2).
+ *             - Synced: Sin, Tri, Saw, Rec, the stock table waves (S086 P2;
+ *               S094 P1 S2: Crash removed).
  *             - Rendered plain (no sync): Noi, user samples (plan A3/A4).
  *             - Waveform interpolation: both partners use the same list.
  * Why:        plan Q10: the Drum amount is the sync depth (0 free-running,
@@ -593,9 +650,8 @@ static inline int32_t osc_ringDepthQ15(const float amount)
 /*
  * Whether a waveform is read from a [11][1024] octave table (S086 P2).
  *
- * What:       1 for TRI, SAW, REC and the stock table waves
- *             (OSC_STOCK_FIRST..OSC_STOCK_LAST); 0 for SINE, NOISE, CRASH
- *             and user samples.
+ * What:       1 for TRI, SAW, REC; 0 for SINE, NOISE and user samples (the
+ *             S086 stock table waves were removed in S093, CRASH in S094).
  * Why:        the engines' trigger start phase (0xff << 20 x the transient
  *             offset) applies to every table wave alike.
  * Inputs:     waveform.  Outputs: 0 or 1.
@@ -604,8 +660,7 @@ static inline int32_t osc_ringDepthQ15(const float amount)
  */
 static inline uint8_t osc_isTableWave(const uint8_t waveform)
 {
-	return (uint8_t)((waveform >= TRI && waveform <= REC) ||
-	                 (waveform >= OSC_STOCK_FIRST && waveform <= OSC_STOCK_LAST));
+	return (uint8_t)(waveform >= TRI && waveform <= REC);
 }
 
 /*
@@ -642,10 +697,10 @@ _Static_assert(OSC_POS_BEND_CAP >= 1 && OSC_POS_BEND_CAP <= 64,
 /*
  * Return whether position is a phase offset for this waveform (S086 P3/P4).
  *
- * What:       SINE, CRASH and all table waves use the full 32-bit phase range;
- *             NOISE and v1 user samples retain their existing no-position
- *             behaviour until the later sample stage.
- * Why:        one phase unit is position/128 of the wave or complete sample.
+ * What:       SINE and all table waves use the full 32-bit phase range; NOISE
+ *             and v1 user samples retain their existing no-position behaviour
+ *             (S094 P1 S2: CRASH removed).
+ * Why:        one phase unit is position/128 of the wave.
  * Inputs:     waveform ID.
  * Outputs:    1 for phase waves, otherwise 0.
  * Accessors:  osc_positionTrigger(), osc_positionBendApply().
@@ -659,8 +714,7 @@ uint32_t osc_typedTriggerPhase(OscInfo* osc);
 
 static inline uint8_t osc_positionIsPhase(const uint8_t waveform)
 {
-	return (uint8_t)(waveform == SINE || waveform == CRASH ||
-	                 osc_isTableWave(waveform));
+	return (uint8_t)(waveform == SINE || osc_isTableWave(waveform));
 }
 
 /*
@@ -716,11 +770,12 @@ static inline uint32_t osc_positionTrigger(OscInfo* osc)
  *             immediately before their osc1 render.
  * Affiliates: osc_positionBendRestore() (must follow the render);
  *             osc_setFreq() (its cache would keep a bend left in phaseInc);
- *             osc_typedPositionApply() (typed osc1, S087); 086 log §4.3.
+ *             osc_typedPositionApply() (typed osc1, including PWM S094 P1);
+ *             086 log §4.3.
  */
 static inline void osc_positionBendApply(OscInfo* osc, const uint8_t bend)
 {
-	/* S087 D: smp/slp/wtb take the out-of-line rules (D3-D5, D8). */
+	/* S087 D / S094 P1: smp/slp/wtb/pwm use their out-of-line rules. */
 	if (osc_isTyped(osc)) {
 		osc_typedPositionApply(osc, bend);
 		return;
@@ -744,8 +799,9 @@ static inline void osc_positionBendApply(OscInfo* osc, const uint8_t bend)
 /*
  * End the continuous position bend after the block's render (S086 P3/P4).
  *
- * What:       subtracts positionBendStep x OSC_POS_BEND_PER_STEP from
- *             phaseInc, restoring it exactly, and clears positionBendStep.
+ * What:       the stock path subtracts positionBendStep x
+ *             OSC_POS_BEND_PER_STEP from phaseInc; typed paths restore their
+ *             own bend (samples) or clear it (WTB/PWM), then return.
  * Why:        phaseInc is cached by osc_setFreq(); a bend left in it would
  *             become a lasting pitch error. Reading the step from the
  *             oscillator keeps the caller free of live state (assessment F1).
@@ -757,7 +813,7 @@ static inline void osc_positionBendApply(OscInfo* osc, const uint8_t bend)
  */
 static inline void osc_positionBendRestore(OscInfo* osc)
 {
-	/* S087 D: smp/slp/wtb restore their own step (D8). */
+	/* S087 D / S094 P1: typed oscillators restore or clear their own step. */
 	if (osc_isTyped(osc)) {
 		osc_typedPositionRestore(osc);
 		return;
@@ -768,13 +824,14 @@ static inline void osc_positionBendRestore(OscInfo* osc)
 }
 
 /*
- * Whether osc1 plays a user type (S087 stage B).
+ * Whether osc1 plays a typed oscillator (S087 stage B; S094 P1 pwm).
  *
- * What:       1 for OSC_TYPE_SMP, OSC_TYPE_SLP and OSC_TYPE_WTB; 0 for wav and
- *             for modulators (OSC_TYPE_MODLIST).
+ * What:       1 for OSC_TYPE_SMP, SLP, WTB and PWM; 0 for wav and for
+ *             modulators (OSC_TYPE_MODLIST, 5).
  * Why:        the engines branch on it once per block to call the typed
  *             renderers instead of the existing dispatchers (S087 P0 A2), and
- *             the pos helpers use it to choose the rule (D3).
+ *             the pos helpers use it to choose the rule (D3). PWM rides the
+ *             typed path, so the engine render code is unchanged.
  * Inputs:     osc.  Outputs: 0 or 1.
  * Accessors:  the four engine renders and triggers; osc_positionBendApply()/
  *             Restore(); osc_setFreq().
@@ -783,7 +840,7 @@ static inline void osc_positionBendRestore(OscInfo* osc)
 static inline uint8_t osc_isTyped(const OscInfo* osc)
 {
 	return (uint8_t)(osc->oscType >= OSC_TYPE_SMP &&
-	                 osc->oscType <= OSC_TYPE_WTB);
+	                 osc->oscType <= OSC_TYPE_PWM);
 }
 
 /*
@@ -794,7 +851,8 @@ static inline uint8_t osc_isTyped(const OscInfo* osc)
  *             - stores it;
  *             - clamps osc->waveform to an entry that exists for the new type
  *               (wav: OSC_STOCK_LAST; smp/slp: sample count - 1; wtb: table
- *               count - 1; none installed: 0) - the value is otherwise used
+ *               count - 1; pwm: OSC_PWM_WAVE_COUNT - 1, Rec; none installed:
+ *               0) - the value is otherwise used
  *               as it is: nothing is remembered or restored (S087 P0 r8);
  *             - re-anchors pos: positionApplied = position (D7);
  *             - re-anchors the phase for the new phase units: into smp/slp

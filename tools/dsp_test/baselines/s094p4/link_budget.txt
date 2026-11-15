@@ -1,0 +1,13 @@
+# S094 P4, clean build (2026-11-11): make clean; make all; make img
+# Pre-change clean baseline (/tmp/p4base, the touched files at HEAD):
+#   Flash : 686,116 / 753,664 B used, headroom 67,548 B
+#   ITCM  : 13,984 / 16,384 B
+#   DTCM  : statics 4,396 B
+#   FXBUF : 126,656 B at 0x20001140 (min 122,880, margin 3,776)
+# After S094 P4:
+Flash : 691,100 / 753,664 B used, headroom 62,564 B
+ITCM  : 13,984 / 16,384 B
+DTCM  : statics 4,396 B
+FXBUF : 126,656 B at 0x20001140 (min 122,880, margin 3,776)
+# Net flash +4,984 B (the plan's estimate: about +5.2 KB); RAM and ITCM
+# unchanged.

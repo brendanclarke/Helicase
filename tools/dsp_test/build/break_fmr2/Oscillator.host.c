@@ -50,6 +50,7 @@
 
 
 
+
 #include <math.h>
 // TODO DSP_PORT
 // #include "sequencer.h"
@@ -113,11 +114,6 @@ static inline uint32_t freq2PhaseIncr1024(const float f)
 	return (((1024*f)/REAL_FS))*4194304 ; //(<<22)
 }
 //-----------------------------------------------------------
-static inline uint32_t freq2PhaseIncr32767(const float f)
-{
-	return (((1024*f)/REAL_FS))*131072 ; //(<<17)
-}
-//-----------------------------------------------------------
 INITCM void calcSineBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain)
 {
 	uint8_t i;
@@ -127,11 +123,11 @@ INITCM void calcSineBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const 
 		int16_t oscOut;
 
 		const uint32_t index =  oscPhase;
-		uint32_t  itg	= index>>20;
+		uint32_t  itg	= index>>22;
 
 		#if INTERPOLATE_OSC
 			oscOut = sine_table[itg++];
-			const float frac = (index & 0xfffff) * 0.00000095367431640625f;
+			const float frac = (index & 0x3fffff) * 0.0000002384185791015625f;
 			oscOut += frac*(sine_table[itg] - oscOut);
 		#else
 			oscOut = sine_table[itg];
@@ -149,11 +145,11 @@ int16_t calcSine(OscInfo* osc)
 	int16_t oscOut;
 
 	const uint32_t index =  oscPhase;
-	uint32_t  itg	= index>>20;
+	uint32_t  itg	= index>>22;
 
 #if INTERPOLATE_OSC
 	oscOut = sine_table[itg++];
-	float frac	= (index & 0xfffff) * 0.00000095367431640625f;
+	float frac	= (index & 0x3fffff) * 0.0000002384185791015625f;
 	oscOut += frac*(sine_table[itg] - oscOut);
 #else
 	oscOut = sine_table[itg];
@@ -174,11 +170,11 @@ INITCM void calcFmSineBlock(OscInfo* osc, int16_t* modBuffer, int16_t* buf, uint
 		int16_t oscOut ;
 
 		const uint32_t index =  oscPhase + (((uint32_t)(modBuffer[i]*osc->fmMod))<<17);
-		uint32_t  itg	= index>>20;
+		uint32_t  itg	= index>>22;
 
 	#if INTERPOLATE_FM_OSC
 		oscOut = sine_table[itg++];
-		const float frac	= (index & 0xfffff) * 0.00000095367431640625f;
+		const float frac	= (index & 0x3fffff) * 0.0000002384185791015625f;
 		oscOut += frac*(sine_table[itg] - oscOut);
 	#else
 		oscOut = sine_table[itg];
@@ -195,11 +191,11 @@ int16_t calcFmSine(OscInfo* osc, OscInfo* modOsc)
 	int16_t oscOut ;
 
 	const uint32_t index =  oscPhase + (((uint32_t)(modOsc->output*osc->fmMod))<<17);
-	uint32_t  itg	= index>>20;
+	uint32_t  itg	= index>>22;
 
 #if INTERPOLATE_FM_OSC
 	oscOut = sine_table[itg++];
-	const float frac	= (index & 0xfffff) * 0.00000095367431640625f;
+	const float frac	= (index & 0x3fffff) * 0.0000002384185791015625f;
 	oscOut += frac*(sine_table[itg] - oscOut);
 #else
 	oscOut = sine_table[itg];
@@ -261,27 +257,6 @@ int16_t calcFm(OscInfo* osc, OscInfo* modOsc, const int16_t table[][1024])
 	return oscOut;
 }
 //-----------------------------------------------------------
-/*
- * Stock table waves by waveform (S086 P2).
- *
- * What:       the [11][1024] octave table of waveform OSC_STOCK_FIRST + i.
- * Why:        each dispatcher has one case group for the stock waves and
- *             passes osc_stockTables[waveform - OSC_STOCK_FIRST] to the
- *             Tri/Saw/Rec loop. A variable pointer adds one call site per
- *             dispatcher instead of one constant-argument site per wave
- *             (085 log §13; DSP ref §10: constant sites make LTO re-specialise).
- * Accessors:  calcNextOscSampleFmBlock(), calcNextOscSampleBlock(),
- *             osc_renderPlainWave(), osc_renderSyncWave(),
- *             calcNextOscSampleRingBlock().
- * Affiliates: wavetableStock.c (generated), Oscillator.h SQ3/SW3.
- */
-static const int16_t (* const osc_stockTables[])[1024] = {
-	sq3Table,	/* SQ3 */
-	sw3Table,	/* SW3 */
-};
-_Static_assert(sizeof(osc_stockTables) / sizeof(osc_stockTables[0]) ==
-               OSC_STOCK_LAST - OSC_STOCK_FIRST + 1,
-               "osc_stockTables must list OSC_STOCK_FIRST..OSC_STOCK_LAST");
 //-----------------------------------------------------------
 INITCM void calcNextOscSampleFmBlock(OscInfo* osc, int16_t* modBuffer, int16_t* buf, uint8_t size ,const float gain)
 {
@@ -303,17 +278,9 @@ INITCM void calcNextOscSampleFmBlock(OscInfo* osc, int16_t* modBuffer, int16_t* 
 			calcFmBlock(osc,recTable,modBuffer,buf,size,gain);
 			break;
 
-		case SQ3: case SW3:
-			calcFmBlock(osc,osc_stockTables[osc->waveform - OSC_STOCK_FIRST],modBuffer,buf,size,gain);
-			break;
-
 		case NOISE:
 			//TODO FM noise - needed since its tuned digi noise!
 			calcNoiseBlock(osc,buf,size,gain);
-			break;
-
-		case CRASH:
-			calcSampleOscFmBlock(osc,modBuffer,buf,size,gain);
 			break;
 
 		default: {
@@ -349,10 +316,6 @@ int16_t calcNextOscSampleFm(OscInfo* osc,OscInfo* modOsc)
 
 	case NOISE:
 		return calcNoise(osc);
-		break;
-
-	case CRASH:
-		return calcSampleOscFm(osc,modOsc);
 		break;
 
 	default:
@@ -437,16 +400,8 @@ INITCM void calcNextOscSampleBlock(OscInfo* osc, int16_t* buf, const uint8_t siz
 			calcWavetableOscBlock(osc,recTable,buf,size, gain);
 			break;
 
-		case SQ3: case SW3:
-			calcWavetableOscBlock(osc,osc_stockTables[osc->waveform - OSC_STOCK_FIRST],buf,size, gain);
-			break;
-
 		case NOISE:
 			calcNoiseBlock(osc,buf,size, gain);
-			break;
-
-		case CRASH:
-			calcSampleOscBlock(osc,buf,size, gain);
 			break;
 
 		default:
@@ -478,10 +433,6 @@ int16_t calcNextOscSample(OscInfo* osc)
 
 	case NOISE:
 		return calcNoise(osc);
-		break;
-
-	case CRASH:
-		return calcSampleOsc(osc);
 		break;
 
 	default:
@@ -540,106 +491,6 @@ int16_t calcWavetableOsc(OscInfo* osc,  const int16_t table[][1024])
 
 };
 
-//------------------------------------------------------------------
-INITCM void calcSampleOscFmBlock(OscInfo* osc,int16_t* modBuffer, int16_t* buf, uint8_t size ,const float gain)
-{
-	uint8_t i;
-	for(i=0;i<size;i++)
-	{
-		const uint32_t oscPhase 	= osc->phase;
-		int16_t oscOut ;
-
-		const uint32_t index =  oscPhase + (((uint32_t)(modBuffer[i]*osc->fmMod))<<14);
-		uint32_t  itg	= index>>17;
-
-	#if INTERPOLATE_FM_OSC
-		oscOut = crashSample[itg++];
-		const float frac	= (index & 0x0001FFFF) * 0.00000762939453125f; // 1 / 2^17
-		oscOut += frac*(crashSample[itg] - oscOut);
-	#else
-		oscOut = crashSample[itg];
-	#endif
-
-		oscOut = (oscOut - 127)*256;
-
-		osc->phase = oscPhase + osc->phaseInc;
-		osc->output = oscOut;
-		buf[i] = oscOut * gain;
-	}
-}
-//------------------------------------------------------------------
-int16_t calcSampleOscFm(OscInfo* osc, OscInfo* modOsc)
-{
-
-	const uint32_t oscPhase 	= osc->phase;
-	int16_t oscOut ;
-
-	const uint32_t index =  oscPhase + (((uint32_t)(modOsc->output*osc->fmMod))<<14);
-	uint32_t  itg	= index>>17;
-
-#if INTERPOLATE_FM_OSC
-	oscOut = crashSample[itg++];
-	const float frac	= (index & 0x0001FFFF) * 0.00000762939453125f; // 1 / 2^17
-	oscOut += frac*(crashSample[itg] - oscOut);
-#else
-	oscOut = crashSample[itg];
-#endif
-
-	oscOut = (oscOut - 127)*256;
-
-	osc->phase = oscPhase + osc->phaseInc;
-	osc->output = oscOut;
-	return oscOut;
-};
-//---------------------------------------------------------------
-INITCM void calcSampleOscBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain)
-{
-	uint8_t i;
-	for(i=0;i<size;i++)
-	{
-		const uint32_t oscPhase = osc->phase;
-		int16_t oscOut ;
-		uint32_t  itg	= oscPhase>>17;
-
-
-	#if INTERPOLATE_OSC
-		//todo use ldm instead of ldr to laod multiple values from memory
-		oscOut = crashSample[itg++];
-		const float frac = (oscPhase & 0x0001FFFF) * 0.00000762939453125f; // 1 / 2^17
-		oscOut += frac*(crashSample[itg] - oscOut);
-	#else
-		oscOut = crashSample[itg];
-	#endif
-		oscOut = (oscOut - 127)*256;
-
-		osc->phase = oscPhase + osc->phaseInc;
-		buf[i] = oscOut * gain;
-	}
-}
-//---------------------------------------------------------------
-int16_t calcSampleOsc(OscInfo* osc)
-{
-	const uint32_t oscPhase = osc->phase;
-	int16_t oscOut ;
-
-	uint32_t  itg	= oscPhase>>17;
-
-#if INTERPOLATE_OSC
-	//todo use ldm instead of ldr to laod multiple values from memory
-	oscOut = crashSample[itg++];
-	const float frac = (oscPhase & 0x0001FFFF) * 0.00000762939453125f; // 1 / 2^17
-	oscOut += frac*(crashSample[itg] - oscOut);
-#else
-	oscOut = crashSample[itg];
-#endif
-	oscOut = (oscOut - 127)*256;
-
-	osc->phase = oscPhase + osc->phaseInc;
-	osc->output = oscOut;
-	return oscOut;
-
-};
- //-----------------------------------------------------------
 /* =========================================================================
 ** S085 P1: Drum osc2 mod modes snc (hard sync) and rng (ring)
 ** =========================================================================
@@ -710,7 +561,8 @@ int16_t calcSampleOsc(OscInfo* osc)
  *             increment (a clamped ratio only lowers it). |diff x depthQ30|
  *             < 2^61.
  * Accessors:  calcSineSyncBlock(), calcWavetableOscSyncBlock(),
- *             calcSampleOscSyncBlock(); tools/dsp_test osc_mod (S2, S3).
+ *             calcSineSyncBlock(), calcWavetableOscSyncBlock();
+ *             tools/dsp_test oscillator (S2, S3).
  */
 static inline __attribute__((always_inline)) uint32_t osc_syncPull(
 	const uint32_t phase, const uint32_t over, const uint32_t ratioQ16,
@@ -811,14 +663,8 @@ static OSC_S085_SECTION void osc_renderPlainWave(OscInfo* osc, int16_t* buf,
 	case REC:
 		calcWavetableOscBlock(osc, recTable, buf, size, 1.f);
 		break;
-	case SQ3: case SW3:
-		calcWavetableOscBlock(osc, osc_stockTables[osc->waveform - OSC_STOCK_FIRST], buf, size, 1.f);
-		break;
 	case NOISE:
 		calcNoiseBlock(osc, buf, size, 1.f);
-		break;
-	case CRASH:
-		calcSampleOscBlock(osc, buf, size, 1.f);
 		break;
 	default: {
 		/* S087 D: unreachable (see D-7). */
@@ -831,11 +677,9 @@ static OSC_S085_SECTION void osc_renderPlainWave(OscInfo* osc, int16_t* buf,
 
 /*
  * Sync clock increment for the FM-page oscillator (S085 P1).
- * Contract: Oscillator.h. Crash and user samples run in <<17 point units
- * (osc_calcSampleFreqValue: f/fs x 2^27), which is 1/32 of the 2^32-per-
- * period clock, hence << 5 after the clamp. The stock table waves sit
- * between CRASH and OSC_SAMPLE_START and are 2^32-per-period clocks like
- * Tri/Saw/Rec (S086 P2), so the test excludes them.
+ * Contract: Oscillator.h. User samples run in Q19.12 point units
+ * (f x 2^22 / fs), which is 1/1,024 of the 2^32-per-period clock, hence << 10
+ * after the clamp. S094 P1 S2: the crash << 5 branch went with CRASH.
  */
 uint32_t osc_syncClockInc(const OscInfo* master)
 {
@@ -848,11 +692,6 @@ uint32_t osc_syncClockInc(const OscInfo* master)
 		if (inc > 0x003FFFFFu)
 			inc = 0x003FFFFFu;
 		inc <<= 10;
-	} else if (master->waveform == CRASH) {
-		/* The crash sample keeps its v1 <<17 phase units. */
-		if (inc > 0x07FFFFFFu)
-			inc = 0x07FFFFFFu;
-		inc <<= 5;
 	}
 	return inc;
 }
@@ -879,8 +718,8 @@ OSC_S085_LOOP uint32_t osc_buildSyncList(uint32_t clock, const uint32_t clockInc
 /*
  * Sine slave under sync (S085 P1).
  *
- * What:       calcSineBlock()'s read and interpolation (4,096-point table,
- *             <<20 phase); the store is oscOut (gain 1, D3); the phase
+ * What:       calcSineBlock()'s read and interpolation (1,024-point table,
+ *             <<22 phase; S095 P2); the store is oscOut (gain 1, D3); the phase
  *             update goes through osc_syncPull().
  * Inputs:     osc, over[size], ratioQ16, depthQ30, buf[size], size.
  * Outputs:    buf; osc->phase.
@@ -900,10 +739,10 @@ static OSC_S085_LOOP void calcSineSyncBlock(OscInfo* osc, const uint32_t* over,
 		int16_t oscOut;
 
 		const uint32_t index =  oscPhase;
-		uint32_t  itg	= index>>20;
+		uint32_t  itg	= index>>22;
 
 		oscOut = sine_table[itg++];
-		const float frac = (index & 0xfffff) * 0.00000095367431640625f;
+		const float frac = (index & 0x3fffff) * 0.0000002384185791015625f;
 		oscOut += frac*(sine_table[itg] - oscOut);
 
 		osc->phase = osc_syncPull(oscPhase + osc->phaseInc, over[i],
@@ -952,47 +791,10 @@ static OSC_S085_LOOP void calcWavetableOscSyncBlock(OscInfo* osc,
 }
 
 /*
- * Crash slave under sync (S085 P1).
- *
- * What:       calcSampleOscBlock()'s read (32,768-point 8-bit crashSample,
- *             <<17 phase, (x - 127) x 256); the store is oscOut (gain 1,
- *             D3); the phase update goes through osc_syncPull(). A hard
- *             reset restarts the cymbal read near its start.
- * Note:       it reads crashSample[itg + 1] at itg = 32767, exactly as the
- *             plain loop does (unchanged behaviour, kept for identity).
- * Inputs:     osc, over[size], ratioQ16, depthQ30, buf[size], size.
- * Outputs:    buf; osc->phase.
- * Accessors:  osc_renderSyncWave().
- * Affiliates: calcSampleOscBlock(); plan A2/Q12 (crash slave syncs).
- */
-static OSC_S085_LOOP void calcSampleOscSyncBlock(OscInfo* osc, const uint32_t* over,
-                                                 const uint32_t ratioQ16,
-                                                 const int32_t depthQ30,
-                                                 int16_t* buf, const uint8_t size)
-{
-	uint8_t i;
-	for(i=0;i<size;i++)
-	{
-		const uint32_t oscPhase = osc->phase;
-		int16_t oscOut ;
-		uint32_t  itg	= oscPhase>>17;
-
-		oscOut = crashSample[itg++];
-		const float frac = (oscPhase & 0x0001FFFF) * 0.00000762939453125f; // 1 / 2^17
-		oscOut += frac*(crashSample[itg] - oscOut);
-		oscOut = (oscOut - 127)*256;
-
-		osc->phase = osc_syncPull(oscPhase + osc->phaseInc, over[i],
-		                          ratioQ16, depthQ30);
-		buf[i] = oscOut;
-	}
-}
-
-/*
  * One waveform's sync render (S085 P1; S087 P1).
  *
- * What:       dispatches Sin/Tri/Saw/Rec/Crash and the stock table waves to
- *             their sync copies. NOISE renders unsynced through
+ * What:       dispatches Sin/Tri/Saw/Rec and the stock table waves to their
+ *             sync copies (S094 P1 S2: Crash removed). NOISE renders unsynced through
  *             osc_renderPlainWave() (the leaf loops at gain 1, plan A3/A4).
  * Why:        the slave partition is a switch, not a predicate: S087 P1
  *             retires the waveform-interpolation partner path (A7), so no
@@ -1020,13 +822,6 @@ static OSC_S085_SECTION void osc_renderSyncWave(OscInfo* osc, const uint32_t* ov
 		break;
 	case REC:
 		calcWavetableOscSyncBlock(osc, recTable, over, ratioQ16, depthQ30, buf, size);
-		break;
-	case SQ3: case SW3:
-		calcWavetableOscSyncBlock(osc, osc_stockTables[osc->waveform - OSC_STOCK_FIRST],
-		                          over, ratioQ16, depthQ30, buf, size);
-		break;
-	case CRASH:
-		calcSampleOscSyncBlock(osc, over, ratioQ16, depthQ30, buf, size);
 		break;
 	default:	/* NOISE: unsynced */
 		osc_renderPlainWave(osc, buf, size);
@@ -1073,10 +868,10 @@ static OSC_S085_LOOP void calcSineRingBlock(OscInfo* osc, const int16_t* modBuf,
 		int16_t oscOut;
 
 		const uint32_t index =  oscPhase;
-		uint32_t  itg	= index>>20;
+		uint32_t  itg	= index>>22;
 
 		oscOut = sine_table[itg++];
-		const float frac = (index & 0xfffff) * 0.00000095367431640625f;
+		const float frac = (index & 0x3fffff) * 0.0000002384185791015625f;
 		oscOut += frac*(sine_table[itg] - oscOut);
 
 		osc->phase = oscPhase + osc->phaseInc;
@@ -1159,41 +954,6 @@ static OSC_S085_LOOP void calcNoiseRingBlock(OscInfo* osc, const int16_t* modBuf
 }
 
 /*
- * Crash carrier with the ring law (S085 P1).
- *
- * What:       calcSampleOscBlock() with the store replaced by
- *             osc_ringSample(oscOut, modBuf[i], d_i).
- * Inputs:     osc, modBuf[size], buf[size], size, depthQ15,
- *             depthStepQ15.
- * Outputs:    buf; osc->phase.
- * Accessors:  calcNextOscSampleRingBlock().
- * Affiliates: calcSampleOscBlock().
- */
-static OSC_S085_LOOP void calcSampleOscRingBlock(OscInfo* osc, const int16_t* modBuf,
-                                                 int16_t* buf, const uint8_t size,
-                                                 const int32_t depthQ15,
-                                                 const int32_t depthStepQ15)
-{
-	int32_t ringDepth = depthQ15;
-	uint8_t i;
-	for(i=0;i<size;i++)
-	{
-		const uint32_t oscPhase = osc->phase;
-		int16_t oscOut ;
-		uint32_t  itg	= oscPhase>>17;
-
-		oscOut = crashSample[itg++];
-		const float frac = (oscPhase & 0x0001FFFF) * 0.00000762939453125f; // 1 / 2^17
-		oscOut += frac*(crashSample[itg] - oscOut);
-		oscOut = (oscOut - 127)*256;
-
-		osc->phase = oscPhase + osc->phaseInc;
-		ringDepth += depthStepQ15;
-		buf[i] = osc_ringSample(oscOut, modBuf[i], ringDepth);
-	}
-}
-
-/*
  * Render one carrier block with the ring law (S085 P1).
  * Contract: Oscillator.h. It mirrors calcNextOscSampleBlock()'s waveform
  * switch (S087 P1: no interpolation entry, no user samples). Every ring copy
@@ -1219,15 +979,8 @@ OSC_S085_DISPATCH void calcNextOscSampleRingBlock(OscInfo* osc, const int16_t* m
 	case REC:
 		calcWavetableOscRingBlock(osc, recTable, modBuf, buf, size, depthQ15, depthStepQ15);
 		break;
-	case SQ3: case SW3:
-		calcWavetableOscRingBlock(osc, osc_stockTables[osc->waveform - OSC_STOCK_FIRST],
-		                          modBuf, buf, size, depthQ15, depthStepQ15);
-		break;
 	case NOISE:
 		calcNoiseRingBlock(osc, modBuf, buf, size, depthQ15, depthStepQ15);
-		break;
-	case CRASH:
-		calcSampleOscRingBlock(osc, modBuf, buf, size, depthQ15, depthStepQ15);
 		break;
 	default: {
 		/* S087 D: unreachable (see D-7). */
@@ -1257,9 +1010,26 @@ static void osc_calcWavetableFreqValue(OscInfo* osc, const float currentFreq)
 	osc->tableOffset = overtoneIndex>10?10:overtoneIndex;
 }
 //-----------------------------------------------------------
-static void osc_calcSampleFreqValue(OscInfo* osc, const float currentFreq)
+/*
+ * Table-wave frequency without the dispatcher (S093 P3, Alkaline T1-7).
+ * Contract: Oscillator.h. Reuses osc_calcWavetableFreqValue(); not ITCM (a
+ * per-block call); osc_setFreq() and every loop are unchanged.
+ */
+void osc_setTableFreq(OscInfo* osc)
 {
-	osc->phaseInc = freq2PhaseIncr32767(currentFreq);
+	/* The octave edges (osc_octaveEdgeHz[]) are 16.3516 Hz x 2^k exactly in
+	 * float32 (one mantissa, 0x02D013; exponents 4..13), so the number of
+	 * edges <= f is the exponent of f minus 4, plus 1 when f's mantissa
+	 * reaches the edges', clamped to 0..10: freqToTableIndex()'s result for
+	 * every positive f (including +inf), without its ten compares. */
+	const float f = osc->freq * osc->pitchMod * osc->modNodeValue;
+	union { float f; int32_t i; } v = { f };
+	int32_t k = ((v.i >> 23) & 0xFF) - (127 + 4)
+	          + (int32_t)((v.i & 0x007FFFFF) >= 0x0002D013);
+
+	k = (k < 0) ? 0 : ((k > 10) ? 10 : k);
+	osc->phaseInc = freq2PhaseIncr1024(f);
+	osc->tableOffset = (uint8_t)((v.i > 0) ? k : 0);
 }
 //-----------------------------------------------------------
  INITCM void osc_setFreq(OscInfo* osc)
@@ -1343,17 +1113,8 @@ static void osc_calcSampleFreqValue(OscInfo* osc, const float currentFreq)
 			osc_calcWavetableFreqValue(osc, currentFreq);
 			break;
 
-		case SQ3: case SW3:
-			osc_calcWavetableFreqValue(osc, currentFreq);
-			break;
-
 		case NOISE:
 			osc_calcNoiseFreqValue(osc, currentFreq);
-			break;
-
-
-		case CRASH:
-			osc_calcSampleFreqValue(osc, currentFreq);
 			break;
 
 		/*
@@ -1428,14 +1189,15 @@ void osc_recalcFreq(OscInfo* osc)
  */
 
 /*
- * Change osc1's type (S087 stage B; see the header).
+ * Change osc1's type (S087 stage B; extended for PWM in S094 P1 S3).
  *
  * What:       clamp, then store and re-anchor; an unchanged type is a no-op.
  * Why:        see the header (single writer for menu, Kit apply, restore and
  *             step automation).
  * Inputs:     osc, type.  Outputs: oscType, waveform, positionApplied, phase.
  * Accessors:  instrumentManager_writeSpecialRuntime().
- * Affiliates: osc_isTyped(); S087 P0 §12.5; OSC_TYPE_SELECTABLE.
+ * Affiliates: osc_isTyped(); osc_userCount(); S087 P0 §12.5;
+ *             OSC_TYPE_SELECTABLE.
  */
 void osc_setType(OscInfo* osc, uint8_t type)
 {
@@ -1506,7 +1268,9 @@ void osc_setType(OscInfo* osc, uint8_t type)
 /*
  * Number of user entries for a type (S087 stage D; see the header).
  *
- * What:       wav -> 8; smp/slp -> sample count; wtb -> wavetable count.
+ * What:       wav -> OSC_SAMPLE_START stock entries (5 after S094 P1 S2);
+ *             smp/slp -> sample count; wtb -> wavetable count; pwm (S094 P1
+ *             S3) -> OSC_PWM_WAVE_COUNT (Sin, Tri, Saw, Rec).
  * Why:        the type writer, bind and menu ranges share one count.
  * Inputs:     type.  Outputs: count (0 for an unknown type).
  * Accessors:  osc_setType(), osc_userBind(), InstrumentManager.
@@ -1522,6 +1286,9 @@ uint8_t osc_userCount(uint8_t type)
 		return sampleMemory_getNumSamples();
 	case OSC_TYPE_WTB:
 		return sampleMemory_getNumWavetables();
+	case OSC_TYPE_PWM:
+		/* S094 P1 S3: Sin, Tri, Saw and Rec have pulse-width forms; Noi does not. */
+		return OSC_PWM_WAVE_COUNT;
 	default:
 		return 0u;
 	}
@@ -1550,19 +1317,23 @@ uint8_t osc_userListCount(void)
  * D/E; see the header).
  *
  * What:       resolves (kind, index) from oscType (osc1: smp/slp/wtb, the index
- *             clamped to the last item) or from the modulator's flat list
- *             (stock, s, l, w). A wavetable's kind is resolved to WTB8 or WTB16
- *             from its entry BEFORE the comparison with the stored bind. When
+ *             clamped to the last item), PWM without a catalogue item, or
+ *             from the modulator's flat list
+ *             (stock, s, l, w). A wavetable binds as WTB16 only when its entry
+ *             exists (S093 P8: every table is 16-bit), checked BEFORE the
+ *             comparison with the stored bind. When
  *             kind, index or the catalogue generation differ, re-reads the item
  *             (base address, frames or frame length) and re-anchors (D7):
  *             positionApplied = position; a smp phase past the new end is
  *             clamped to the end; a slp phase past the loop end is folded into
  *             the loop once. Every block: phaseInc = the cycle law (2^32 per
- *             cycle, freq2PhaseIncr()) for a wavetable bind or a wtb osc1, else
+ *             cycle, freq2PhaseIncr()) for a wavetable bind, wtb osc1 or PWM,
+ *             else
  *             the sample law f x 2^22 / REAL_FS (Q19.12).
  * Why:        one bind for osc1 and the modulators (S087 P0 §6.3, D7, A23, A24).
- *             impl. §11 F9: an 8-bit table compared its stored WTB8 with a
- *             provisional WTB16 and rebound every block (no frame glide).
+ *             impl. §11 F9: before S093 P8, an 8-bit table's stored WTB8
+ *             differed from the provisional WTB16, so it rebound every block
+ *             (no frame glide); P8 removes the depth choice with 8-bit tables.
  *             impl. §11 F7: a modulator w entry (oscType MODLIST) got the
  *             sample law, 1,024 x too slow; its sync clock was wrong likewise.
  * Inputs:     osc, the catalogue.  Outputs: bind fields, phaseInc,
@@ -1578,6 +1349,31 @@ void osc_userBind(OscInfo* osc)
 	uint8_t kind = OSC_BIND_NONE;
 	uint8_t index = 0u;
 	uint8_t count;
+
+	/*
+	 * PWM bind (S094 P1 S3).
+	 *
+	 * What:       marks the no-catalogue bind OSC_BIND_PWM, then sets phaseInc
+	 *             and tableOffset by the stock table law every block. Sine and
+	 *             the wavetable rows share the 2^32-per-cycle phase law.
+	 * Why:        PWM plays built-in tables, so catalogue binding and its
+	 *             positionApplied re-anchor do not apply; re-anchoring each
+	 *             block would defeat the width slew.
+	 * Inputs:     osc (PWM type), currentFreq.
+	 * Outputs:    bind fields (initialized once), phaseInc, tableOffset.
+	 * Affiliates: osc_pwmPlan(); osc_setType() (type changes re-anchor width).
+	 */
+	if (osc->oscType == OSC_TYPE_PWM) {
+		if (osc->sampleCacheLooped != OSC_BIND_PWM) {
+			osc->sampleCacheLooped = OSC_BIND_PWM;
+			osc->sampleCacheIndex = 0u;
+			osc->sampleCacheSize = 0u;
+			osc->sampleCacheData = 0;
+			osc->sampleCacheGeneration = 0u;
+		}
+		osc_calcWavetableFreqValue(osc, currentFreq);
+		return;
+	}
 
 	if (osc->oscType == OSC_TYPE_SMP || osc->oscType == OSC_TYPE_SLP) {
 		count = osc_userCount(osc->oscType);
@@ -1615,7 +1411,8 @@ void osc_userBind(OscInfo* osc)
 		}
 	}
 
-	/* F9: the stored kind of a wavetable is its entry's depth. */
+	/* F9: a wavetable binds only with an entry (S093 P8: 16-bit only, so
+	 * the entry no longer chooses a depth). */
 	if (kind == OSC_BIND_WTB16) {
 		const wavetable_catalogue_entry_t *w =
 			sampleMemory_wavetableEntry(index);
@@ -1623,8 +1420,6 @@ void osc_userBind(OscInfo* osc)
 		if (!w) {
 			kind = OSC_BIND_NONE;
 			index = 0u;
-		} else if (w->bits == 8u) {
-			kind = OSC_BIND_WTB8;
 		}
 	}
 
@@ -1635,8 +1430,7 @@ void osc_userBind(OscInfo* osc)
 		                                        kind == OSC_BIND_SLP)
 			? sampleMemory_sampleEntry(index)
 			: (const sample_catalogue_entry_t *)0;
-		const wavetable_catalogue_entry_t *wentry = (kind == OSC_BIND_WTB8 ||
-		                                             kind == OSC_BIND_WTB16)
+		const wavetable_catalogue_entry_t *wentry = (kind == OSC_BIND_WTB16)
 			? sampleMemory_wavetableEntry(index)
 			: (const wavetable_catalogue_entry_t *)0;
 
@@ -1666,7 +1460,7 @@ void osc_userBind(OscInfo* osc)
 		}
 	}
 	/* F7: the increment law follows what is bound, not the oscillator role. */
-	osc->phaseInc = (kind == OSC_BIND_WTB8 || kind == OSC_BIND_WTB16 ||
+	osc->phaseInc = (kind == OSC_BIND_WTB16 ||
 	                 osc->oscType == OSC_TYPE_WTB)
 		? freq2PhaseIncr(currentFreq)
 		: (uint32_t)((currentFreq * 4194304.0f) / REAL_FS);
@@ -1731,6 +1525,16 @@ uint32_t osc_typedTriggerPhase(OscInfo* osc)
 	osc_userBind(osc);
 	if (osc->oscType == OSC_TYPE_WTB)
 		return 0u;   /* stage E: pos is a frame position, not a phase */
+	/*
+	 * PWM start (S094 P1 S3).
+	 *
+	 * What:       starts at phase 0; positionApplied was snapped to pos above.
+	 * Why:        pos is the pulse width, not a phase offset. Every hit begins
+	 *             at the same edge; the Drum transient offset applies only to
+	 *             the ordinary wav path.
+	 */
+	if (osc->oscType == OSC_TYPE_PWM)
+		return 0u;
 	if (osc->sampleCacheSize == 0u)
 		return 0u;
 	start = (((pos * osc->sampleCacheSize) >> 7u) << OSC_SAMPLE_PHASE_SHIFT);
@@ -1754,6 +1558,8 @@ uint32_t osc_typedTriggerPhase(OscInfo* osc)
  * What:       wtb: d = position - positionApplied, linear, capped so the
  *             block moves at most one frame (|d| <= 127 / (count - 1)); the
  *             frame position moves, phaseInc never bends.
+ *             pwm: a linear width slew of at most OSC_PWM_SLEW_STEPS per
+ *             block, with no phase bend (S094 P1 S3).
  *             smp/slp: d = position - positionApplied (linear, D3), 0 once a
  *             one-shot has ended (D4, no revival), capped to the D5 speed limit
  *             (|d| x frames <= OSC_POS_SAMPLE_SPEED_CAP x phaseInc, at least 1).
@@ -1762,7 +1568,8 @@ uint32_t osc_typedTriggerPhase(OscInfo* osc)
  *             phase stays >= 0: phase + size x (phaseInc + d x frames) >= 0.
  *             positionApplied += d; when `bend`, phaseInc += d x frames and
  *             positionBendStep = d, else positionBendStep = 0 (Drum snc).
- * Why:        S087 P0 D1/D3/D4/D5; impl. §11 F16: the old limit (points / 32)
+ * Why:        S087 P0 D1/D3/D4/D5; S094 P1 P-D7 for PWM; impl. §11 F16: the
+ *             old limit (points / 32)
  *             ignored the sample length. Inside a loop a backward glide is a
  *             forward step modulo the loop (osc_slpBlockInc()), so no limit
  *             applies there.
@@ -1777,6 +1584,33 @@ void osc_typedPositionApply(OscInfo* osc, uint8_t bend)
 	const uint32_t frames = osc->sampleCacheSize;
 	int32_t d;
 	int32_t maxStep;
+
+	/*
+	 * PWM width slew (S094 P1 S3, P-D7).
+	 *
+	 * What:       moves positionApplied toward pos by at most two steps per
+	 *             block; width is linear, not circular. Clears the bend step
+	 *             and leaves phaseInc unchanged. S094 P4: pos 0..127 is a
+	 *             monotonic width index (0 = the unmodified wave, 127 = the
+	 *             narrowest; osc_pwmPlan()).
+	 * Why:        pos can be changed once per block by a knob, LFO, Morph,
+	 *             automation or velocity. Limiting the step avoids a hard
+	 *             waveform edge; the trigger snaps to the target separately.
+	 * Inputs:     osc->position, osc->positionApplied.
+	 * Outputs:    osc->positionApplied, osc->positionBendStep = 0.
+	 * Affiliates: osc_pwmPlan(); osc_typedTriggerPhase().
+	 */
+	if (osc->oscType == OSC_TYPE_PWM) {
+		d = (int32_t)(osc->position & 127u) - (int32_t)osc->positionApplied;
+		if (d > OSC_PWM_SLEW_STEPS)
+			d = OSC_PWM_SLEW_STEPS;
+		else if (d < -OSC_PWM_SLEW_STEPS)
+			d = -OSC_PWM_SLEW_STEPS;
+		osc->positionApplied = (uint8_t)((int32_t)osc->positionApplied + d);
+		osc->positionBendStep = 0;
+		(void)bend;
+		return;
+	}
 
 	if (osc->oscType == OSC_TYPE_WTB) {
 		const wavetable_catalogue_entry_t *wt =
@@ -1844,16 +1678,18 @@ void osc_typedPositionApply(OscInfo* osc, uint8_t bend)
 /*
  * End a typed pos blend (S087 stage D; see the header).
  *
- * What:       subtracts step x frames from phaseInc; clears the step.
- * Why:        D8: bindFrames cannot change inside a block, so the restore is
- *             exact without a live local.
+ * What:       for smp/slp subtracts step x frames from phaseInc; for wtb and
+ *             PWM clears positionBendStep without changing phaseInc.
+ * Why:        D8: bindFrames cannot change inside a block, so the sample
+ *             restore is exact without a live local. WTB/PWM never bend it.
  * Inputs:     osc.  Outputs: phaseInc, positionBendStep.
  * Accessors:  osc_positionBendRestore() (typed branch).
  * Affiliates: osc_typedPositionApply().
  */
 void osc_typedPositionRestore(OscInfo* osc)
 {
-	if (osc->oscType == OSC_TYPE_WTB) {
+	/* WTB and PWM (S094 P1) never bend phaseInc: nothing to restore. */
+	if (osc->oscType == OSC_TYPE_WTB || osc->oscType == OSC_TYPE_PWM) {
 		osc->positionBendStep = 0;
 		return;
 	}
@@ -2407,6 +2243,24 @@ static OSC_S087_LOOP void osc_wtbSyncBlendBlock(OscInfo* osc,
                                                 int32_t depthQ30,
                                                 int16_t* buf, uint8_t size);
 
+/*
+ * S094 P1 S3: PWM role renderers (defined in the PWM block at the end of this
+ * file). Each builds one block plan in flash and calls the form's ITCM loop;
+ * the typed dispatchers below add one call per block.
+ */
+static void osc_pwmRenderPlain(OscInfo* osc, int16_t* buf, uint8_t size,
+                               float gain);
+static void osc_pwmRenderFm(OscInfo* osc, const int16_t* mod, int16_t* buf,
+                            uint8_t size, float gain);
+static void osc_pwmRenderFmRamp(OscInfo* osc, const int16_t* mod, int16_t* buf,
+                                uint8_t size, float gain, float d0, float dStep);
+static void osc_pwmRenderRing(OscInfo* osc, const int16_t* modBuf, int16_t* buf,
+                              uint8_t size, int32_t depthQ15,
+                              int32_t depthStepQ15);
+static void osc_pwmRenderSync(OscInfo* osc, const uint32_t* over,
+                              uint32_t ratioQ16, int32_t depthQ30,
+                              int16_t* buf, uint8_t size);
+
 /* S087 D/E: typed render entries (see the header). */
 void OSC_S087_SECTION osc_renderTyped(OscInfo* osc, int16_t* buf, uint8_t size,
                                       float gain)
@@ -2418,9 +2272,12 @@ void OSC_S087_SECTION osc_renderTyped(OscInfo* osc, int16_t* buf, uint8_t size,
 	case OSC_BIND_SLP:
 		osc_slpPlainBlock(osc, buf, size, gain);
 		break;
-	case OSC_BIND_WTB8:
 	case OSC_BIND_WTB16:
 		osc_wtbBlendBlock(osc, buf, size, gain);
+		break;
+	case OSC_BIND_PWM:
+		/* S094 P1 S3: PWM has no catalogue item and never claims a slot. */
+		osc_pwmRenderPlain(osc, buf, size, gain);
 		break;
 	default:
 		osc_zeroBlock(buf, size);
@@ -2441,9 +2298,12 @@ void OSC_S087_SECTION osc_renderTypedFm(OscInfo* osc, const int16_t* mod,
 	case OSC_BIND_SLP:
 		osc_slpFmBlock(osc, mod, buf, size, gain);
 		break;
-	case OSC_BIND_WTB8:
 	case OSC_BIND_WTB16:
 		osc_wtbFmBlendBlock(osc, mod, buf, size, gain);
+		break;
+	case OSC_BIND_PWM:
+		/* S094 P1 S3: PWM has no catalogue item and never claims a slot. */
+		osc_pwmRenderFm(osc, mod, buf, size, gain);
 		break;
 	default:
 		osc_zeroBlock(buf, size);
@@ -2464,9 +2324,12 @@ void OSC_S087_SECTION osc_renderTypedSync(OscInfo* osc, const uint32_t* over,
 	case OSC_BIND_SLP:
 		osc_slpSyncBlock(osc, over, ratioQ16, depthQ30, buf, size);
 		break;
-	case OSC_BIND_WTB8:
 	case OSC_BIND_WTB16:
 		osc_wtbSyncBlendBlock(osc, over, ratioQ16, depthQ30, buf, size);
+		break;
+	case OSC_BIND_PWM:
+		/* S094 P1 S3: PWM has no catalogue item and never claims a slot. */
+		osc_pwmRenderSync(osc, over, ratioQ16, depthQ30, buf, size);
 		break;
 	default:
 		osc_zeroBlock(buf, size);
@@ -2486,9 +2349,12 @@ void OSC_S087_SECTION osc_renderTypedRing(OscInfo* osc, const int16_t* modBuf,
 	case OSC_BIND_SLP:
 		osc_slpRingBlock(osc, modBuf, buf, size, depthQ15, depthStepQ15);
 		break;
-	case OSC_BIND_WTB8:
 	case OSC_BIND_WTB16:
 		osc_wtbRingBlendBlock(osc, modBuf, buf, size, depthQ15, depthStepQ15);
+		break;
+	case OSC_BIND_PWM:
+		/* S094 P1 S3: PWM has no catalogue item and never claims a slot. */
+		osc_pwmRenderRing(osc, modBuf, buf, size, depthQ15, depthStepQ15);
 		break;
 	default:
 		osc_zeroBlock(buf, size);
@@ -2509,8 +2375,7 @@ void OSC_S087_SECTION osc_renderTypedRing(OscInfo* osc, const int16_t* modBuf,
 void OSC_S087_SECTION osc_renderUserList(OscInfo* osc, int16_t* buf,
                                          uint8_t size, float gain)
 {
-	if (osc->sampleCacheLooped == OSC_BIND_WTB8 ||
-	    osc->sampleCacheLooped == OSC_BIND_WTB16) {
+	if (osc->sampleCacheLooped == OSC_BIND_WTB16) {
 		/* S087 E/A24: a modulator w entry plays frame 0 and never claims. */
 		osc->positionApplied = 0u;
 		osc_wtbPlainBlock(osc, buf, size, gain);
@@ -2538,7 +2403,8 @@ static int16_t osc_itpScratch[OUTPUT_DMA_SIZE];
  * (S088 P0 §3 Layer 3c; see the header for the contract).
  *
  * What:       builds a temporary OscInfo view from the snapshot, renders it
- *             PLAIN into osc_itpScratch (typed smp/slp/wtb plain copies, or
+ *             PLAIN into osc_itpScratch (typed smp/slp/wtb copies, the PWM
+ *             plain role at the frozen width (S094 P1), or
  *             calcNextOscSampleBlock() for the stock/one-shot waveforms), then
  *             crossfades the live buf toward it:
  *                 t = (elapsed x OUTPUT_DMA_SIZE + i) / (BLOCKS x 32)
@@ -2602,9 +2468,12 @@ void oscSection_renderOldCarrier(OscCarrierSnapshot *snap, int16_t *buf,
 		case OSC_BIND_SLP:
 			osc_slpPlainBlock(&view, osc_itpScratch, size, 1.0f);
 			break;
-		case OSC_BIND_WTB8:
 		case OSC_BIND_WTB16:
 			osc_wtbPlainBlock(&view, osc_itpScratch, size, 1.0f);
+			break;
+		case OSC_BIND_PWM:
+			/* Render the snapshot's saved width; it never takes a table slot. */
+			osc_pwmRenderPlain(&view, osc_itpScratch, size, 1.0f);
 			break;
 		default:
 			osc_zeroBlock(osc_itpScratch, size);
@@ -2707,34 +2576,43 @@ OSC_S087_LOOP uint32_t osc_buildLoopSyncList(OscInfo* master, uint32_t pos,
 }
 
 /*
- * Wavetable frame helpers (S087 stage E).
+ * Wavetable frame helpers (S087 stage E; S093 P8: one stored format).
  *
  * What:       one frame's base pointer and one interpolated point at a cycle
- *             phase (2^32 per frame, any length, A16).
- * Why:        the one-frame and blend copies share the exact read; 8-bit data
- *             is scaled by 256 so both depths land in int16 units.
- * Inputs:     data, bits, frame_len, phase.
+ *             phase (2^32 per frame).
+ * Why:        the one-frame and blend copies share the exact read. S093 P8
+ *             (user, D1'/D9): every stored frame is one 1,024-point 16-bit row
+ *             (WAVETABLE_ROW_POINTS; sampleMemory_wavetableRangeValid() refuses
+ *             any other entry), so the read is the stock table read: the point
+ *             is the phase's top 10 bits, its successor wraps by the mask, the
+ *             fraction is the low 22 bits. For a 1,024-point frame this is the
+ *             former any-length read ((ph x len) >> 32, its low word / 2^32)
+ *             bit for bit: the low word is (ph & 0x3FFFFF) << 10, exact in a
+ *             float. Without the multiply, the compare and the 8-bit branch
+ *             (which split every reader into an 8- and a 16-bit loop), each
+ *             reader has one loop, 1-3 instructions shorter than its former
+ *             16-bit loop in nine readers and 1 longer in the sync blend (S093
+ *             P8 schedule §0).
+ * Inputs:     data (a frame's first point), phase.
  * Outputs:    the interpolated value.
  * Accessors:  the wtb loops below.
- * Affiliates: SampleMemory.h wavetable entry.
+ * Affiliates: SampleMemory.h WAVETABLE_ROW_POINTS; the stock table loops
+ *             (calcWavetableOscBlock(), the same read).
  */
+_Static_assert(WAVETABLE_ROW_POINTS == 1024u,
+               "osc_wtbRead() takes the point from the phase's top 10 bits");
 static inline __attribute__((always_inline)) float osc_wtbRead(
-	const uint8_t *data, uint8_t bits, uint32_t len, uint32_t ph)
+	const uint8_t *data, uint32_t ph)
 {
-	const uint64_t m = (uint64_t)ph * len;
-	const uint32_t idx = (uint32_t)(m >> 32);
-	const uint32_t n = (idx + 1u == len) ? 0u : idx + 1u;
-	const float fr = (float)(uint32_t)m * (1.0f / 4294967296.0f);
-	int32_t a;
-	int32_t b;
+	/* the point at or before ph: the top 10 bits of the 2^32 cycle */
+	const uint32_t idx = ph >> 22;
+	/* its successor, point 1,023 wrapping to point 0 */
+	const uint32_t n = (idx + 1u) & (WAVETABLE_ROW_POINTS - 1u);
+	/* the fraction between them: the low 22 bits / 2^22, 0..1 */
+	const float fr = (float)(ph & 0x003FFFFFu) * (1.0f / 4194304.0f);
+	const int32_t a = ((const int16_t *)data)[idx];
+	const int32_t b = ((const int16_t *)data)[n];
 
-	if (bits == 8u) {
-		a = ((const int8_t *)data)[idx] << 8;
-		b = ((const int8_t *)data)[n] << 8;
-	} else {
-		a = ((const int16_t *)data)[idx];
-		b = ((const int16_t *)data)[n];
-	}
 	return (float)a + fr * (float)(b - a);
 }
 
@@ -2742,7 +2620,8 @@ static const uint8_t *osc_wtbFrame(const OscInfo* osc,
                                    const wavetable_catalogue_entry_t *wt,
                                    uint32_t frame)
 {
-	const uint32_t bytes = (uint32_t)wt->frame_len * (wt->bits / 8u);
+	/* S093 P8: 2 bytes per point (16-bit only) */
+	const uint32_t bytes = (uint32_t)wt->frame_len * 2u;
 
 	return (const uint8_t *)osc->sampleCacheData + frame * bytes;
 }
@@ -2893,7 +2772,7 @@ static OSC_S087_LOOP void osc_wtbPlainBlock(OscInfo* osc, int16_t* buf,
 		const uint8_t *base = osc_wtbFrame(osc, wt, frame);
 
 		for (i = 0u; i < size; i++) {
-			buf[i] = (int16_t)(osc_wtbRead(base, wt->bits, wt->frame_len, ph) *
+			buf[i] = (int16_t)(osc_wtbRead(base, ph) *
 			                   gain);
 			ph += inc;
 		}
@@ -2938,9 +2817,6 @@ static OSC_S087_LOOP void osc_wtbBlendBlock(OscInfo* osc, int16_t* buf,
 		return;
 	}
 	{
-		const uint8_t bits = wt->bits;
-		const uint32_t len = wt->frame_len;
-
 		osc_wtbPlanBlock(osc, count, size, &plan);
 		for (s = 0u; s < plan.segments; s++) {
 			const uint8_t *a = osc_wtbFrame(osc, wt, plan.pair[s]);
@@ -2948,8 +2824,8 @@ static OSC_S087_LOOP void osc_wtbBlendBlock(OscInfo* osc, int16_t* buf,
 			float ff = plan.ff[s];
 
 			for (; i < plan.end[s]; i++) {
-				const float x0 = osc_wtbRead(a, bits, len, ph);
-				const float x1 = osc_wtbRead(b, bits, len, ph);
+				const float x0 = osc_wtbRead(a, ph);
+				const float x1 = osc_wtbRead(b, ph);
 				const float out = x0 + ff * (x1 - x0);
 
 				buf[i] = (int16_t)(out * gain);
@@ -2994,7 +2870,7 @@ static OSC_S087_LOOP void osc_wtbFmBlock(OscInfo* osc, const int16_t* mod,
 			const uint32_t rp = ph + ((uint32_t)__SSAT(
 				(int32_t)((float)mod[i] * osc->fmMod), 16) << 19);
 
-			buf[i] = (int16_t)(osc_wtbRead(base, wt->bits, wt->frame_len, rp) *
+			buf[i] = (int16_t)(osc_wtbRead(base, rp) *
 			                   gain);
 			ph += inc;
 		}
@@ -3038,9 +2914,6 @@ static OSC_S087_LOOP void osc_wtbFmBlendBlock(OscInfo* osc,
 		return;
 	}
 	{
-		const uint8_t bits = wt->bits;
-		const uint32_t len = wt->frame_len;
-
 		osc_wtbPlanBlock(osc, count, size, &plan);
 		for (s = 0u; s < plan.segments; s++) {
 			const uint8_t *a = osc_wtbFrame(osc, wt, plan.pair[s]);
@@ -3050,8 +2923,8 @@ static OSC_S087_LOOP void osc_wtbFmBlendBlock(OscInfo* osc,
 			for (; i < plan.end[s]; i++) {
 				const uint32_t rp = ph + ((uint32_t)__SSAT(
 					(int32_t)((float)mod[i] * osc->fmMod), 16) << 19);
-				const float x0 = osc_wtbRead(a, bits, len, rp);
-				const float x1 = osc_wtbRead(b, bits, len, rp);
+				const float x0 = osc_wtbRead(a, rp);
+				const float x1 = osc_wtbRead(b, rp);
 				const float out = x0 + ff * (x1 - x0);
 
 				buf[i] = (int16_t)(out * gain);
@@ -3092,7 +2965,7 @@ static OSC_S087_LOOP void osc_wtbRingBlock(OscInfo* osc, const int16_t* modBuf,
 		const uint8_t *base = osc_wtbFrame(osc, wt, frame);
 
 		for (i = 0u; i < size; i++) {
-			const float out = osc_wtbRead(base, wt->bits, wt->frame_len, ph);
+			const float out = osc_wtbRead(base, ph);
 
 			/* S087 P1: S085 ring law, d_i = depthQ15 + (i + 1) x step. */
 			depth += depthStepQ15;
@@ -3143,9 +3016,6 @@ static OSC_S087_LOOP void osc_wtbRingBlendBlock(OscInfo* osc,
 		return;
 	}
 	{
-		const uint8_t bits = wt->bits;
-		const uint32_t len = wt->frame_len;
-
 		osc_wtbPlanBlock(osc, count, size, &plan);
 		for (s = 0u; s < plan.segments; s++) {
 			const uint8_t *a = osc_wtbFrame(osc, wt, plan.pair[s]);
@@ -3153,8 +3023,8 @@ static OSC_S087_LOOP void osc_wtbRingBlendBlock(OscInfo* osc,
 			float ff = plan.ff[s];
 
 			for (; i < plan.end[s]; i++) {
-				const float x0 = osc_wtbRead(a, bits, len, ph);
-				const float x1 = osc_wtbRead(b, bits, len, ph);
+				const float x0 = osc_wtbRead(a, ph);
+				const float x1 = osc_wtbRead(b, ph);
 				const float out = x0 + ff * (x1 - x0);
 
 				depth += depthStepQ15;
@@ -3193,7 +3063,7 @@ static OSC_S087_LOOP void osc_wtbSyncBlock(OscInfo* osc, const uint32_t* over,
 		const uint8_t *base = osc_wtbFrame(osc, wt, frame);
 
 		for (i = 0u; i < size; i++) {
-			buf[i] = (int16_t)osc_wtbRead(base, wt->bits, wt->frame_len, ph);
+			buf[i] = (int16_t)osc_wtbRead(base, ph);
 			ph = osc_syncPull(ph + inc, over[i], ratioQ16, depthQ30);
 		}
 	}
@@ -3243,9 +3113,6 @@ static OSC_S087_LOOP void osc_wtbSyncBlendBlock(OscInfo* osc,
 		return;
 	}
 	{
-		const uint8_t bits = wt->bits;
-		const uint32_t len = wt->frame_len;
-
 		osc_wtbPlanBlock(osc, count, size, &plan);
 		for (s = 0u; s < plan.segments; s++) {
 			const uint8_t *a = osc_wtbFrame(osc, wt, plan.pair[s]);
@@ -3253,8 +3120,8 @@ static OSC_S087_LOOP void osc_wtbSyncBlendBlock(OscInfo* osc,
 			float ff = plan.ff[s];
 
 			for (; i < plan.end[s]; i++) {
-				const float x0 = osc_wtbRead(a, bits, len, ph);
-				const float x1 = osc_wtbRead(b, bits, len, ph);
+				const float x0 = osc_wtbRead(a, ph);
+				const float x1 = osc_wtbRead(b, ph);
 				const float out = x0 + ff * (x1 - x0);
 
 				buf[i] = (int16_t)out;
@@ -3555,8 +3422,8 @@ static OSC_S089P3_LOOP void osc_slpFmRampBlock(OscInfo* osc,
  * Inputs:     osc (bound wtb: sampleCacheIndex/Data, positionApplied, phase,
  *             phaseInc), mod[size], size, gain, d0, dStep.
  * Outputs:    buf[size]; osc->phase.
- * Cost:       the original's 32 (8-bit) / 34 (16-bit) instructions per
- *             sample + 1.
+ * Cost:       31 instructions per sample with the S093 P8 fixed 1,024-point
+ *             16-bit read (linked S093 P8 schedule §0.4).
  * Accessors:  osc_wtbFmBlendRampBlock() (fallback).
  * Affiliates: osc_wtbFmBlock() (keep in step); osc_wtbFrameOf(),
  *             osc_wtbFrame(), osc_wtbRead().
@@ -3593,7 +3460,7 @@ static OSC_S089P3_LOOP void osc_wtbFmRampBlock(OscInfo* osc,
 
 			/* Depth steps after its use (sample 0 = d0). */
 			d += dStep;
-			buf[i] = (int16_t)(osc_wtbRead(base, wt->bits, wt->frame_len, rp) *
+			buf[i] = (int16_t)(osc_wtbRead(base, rp) *
 			                   gain);
 			ph += inc;
 		}
@@ -3618,8 +3485,8 @@ static OSC_S089P3_LOOP void osc_wtbFmRampBlock(OscInfo* osc,
  * Inputs:     osc (bound wtb), mod[size], size, gain, d0, dStep.
  * Outputs:    buf[size]; osc->phase; one interpolation slot claimed for this
  *             block (modNode_interpClaim()), exactly as the original.
- * Cost:       the original's 46 (16-bit) / 42 (8-bit) instructions per
- *             sample + 1.
+ * Cost:       42 instructions per sample with the S093 P8 fixed 1,024-point
+ *             16-bit read (linked S093 P8 schedule §0.4).
  * Accessors:  osc_renderTypedFmRamp().
  * Affiliates: osc_wtbFmBlendBlock() (keep in step); osc_wtbPlanBlock(),
  *             osc_wtbFmRampBlock() (fallback), modNode_interpClaim().
@@ -3649,9 +3516,6 @@ static OSC_S089P3_LOOP void osc_wtbFmBlendRampBlock(OscInfo* osc,
 		return;
 	}
 	{
-		const uint8_t bits = wt->bits;
-		const uint32_t len = wt->frame_len;
-
 		osc_wtbPlanBlock(osc, count, size, &plan);
 		/* i runs on across the segments: segment s ends at plan.end[s]. */
 		for (s = 0u; s < plan.segments; s++) {
@@ -3663,8 +3527,8 @@ static OSC_S089P3_LOOP void osc_wtbFmBlendRampBlock(OscInfo* osc,
 				/* One FM read point for both frames (S0 when d == fmMod). */
 				const uint32_t rp = ph + ((uint32_t)__SSAT(
 					(int32_t)((float)mod[i] * d), 16) << 19);
-				const float x0 = osc_wtbRead(a, bits, len, rp);
-				const float x1 = osc_wtbRead(b, bits, len, rp);
+				const float x0 = osc_wtbRead(a, rp);
+				const float x1 = osc_wtbRead(b, rp);
 				/* Frame blend at this sample's fractional position. */
 				const float out = x0 + ff * (x1 - x0);
 
@@ -3711,13 +3575,765 @@ void __attribute__((noinline, noclone)) osc_renderTypedFmRamp(
 	case OSC_BIND_SLP:
 		osc_slpFmRampBlock(osc, mod, buf, size, gain, d0, dStep);
 		break;
-	case OSC_BIND_WTB8:
 	case OSC_BIND_WTB16:
 		osc_wtbFmBlendRampBlock(osc, mod, buf, size, gain, d0, dStep);
+		break;
+	case OSC_BIND_PWM:
+		/* S094 P1 S3: the same form, with Drum's per-sample FM-depth ramp. */
+		osc_pwmRenderFmRamp(osc, mod, buf, size, gain, d0, dStep);
 		break;
 	default:
 		osc_zeroBlock(buf, size);
 		break;
 	}
+}
+
+/* =========================================================================
+** S094 P1 S3: PWM (typ pwm) for Drum, Snare, Cymbal and HiHat osc1
+** =========================================================================
+**
+** What:       the per-block plan, three always-inline reads, fifteen loops
+**             (forms D / WT / WS x roles plain, FM, FM ramp, ring, sync) and
+**             the five role renderers the typed dispatchers call for
+**             OSC_BIND_PWM.
+**               D   two reads of the descending saw row, d points apart
+**                   (oscPwmDRec / oscPwmDSaw[pos]), summed (Saw, sign +1) or
+**                   differenced (Rec, sign -1): a band-limited two-saw or
+**                   pulse, because each read is a band-limited saw;
+**               WT  the triangle row, phase-warped: the rising half-cycle
+**                   over [0, W), the falling one over [W, 2^32),
+**                   W = oscPwmTriW[pos], with the octave lifted by
+**                   oscPwmTriLift[pos] for the compressed half;
+**               WS  the same warp on sine_table (W = oscPwmSinW[pos]; a
+**                   -cos: trough first, so its halves are the rising and
+**                   falling ones and the warped wave has no DC; plan
+**                   finding 1).
+**             S094 P4 law: pos 0 is the unmodified wave (width 1/2), pos 127
+**             the narrowest (Rec 0.39 %, Saw and Tri 2.54 %, Sin 6.25 %),
+**             linear in width (oscPwmTables.h). Under S094 P1 the width was
+**             pos/128 about 64, and p and 128 - p played the same spectrum.
+** Why:        S094 P1 plan §5 / PWM draft §1: a width on every stock wave
+**             with a meaning of its own, inside every role's budget. Integer
+**             Q15 interpolation and a Q14 gain replace the stock loops' float
+**             interpolation and the two conversions, which pays for the
+**             second read (D) or the warp (W) (PWM draft §0: 23 against the
+**             stock read's 24 linked).
+** Placement:  loops in .itcm.s094p1, pinned after .itcm.s089p3 in
+**             STM32F765VIHx_FLASH.ld (no existing ITCM function moves);
+**             plan and role renderers in flash (noinline, noclone: one call
+**             per block each, kept out of the ITCM dispatchers and out of
+**             mixer_calcNextSampleBlock()).
+** Cost:       per sample, the PWM draft's standalone counts (plain D 23,
+**             WT 23, WS 22; FM 30-31; FM ramp 31; ring 31; sync 35) against
+**             the role ceilings after S2 (plain 27, FM 50, FM ramp 51, ring
+**             42, sync 41); per block, the plan (two table reads, one gain
+**             multiply) and one role call. Re-measured linked in S3.10.
+** Accessors:  osc_renderTyped(), osc_renderTypedFm(), osc_renderTypedSync(),
+**             osc_renderTypedRing(), osc_renderTypedFmRamp(),
+**             oscSection_renderOldCarrier().
+** Affiliates: oscPwmTables.h (generated); osc_userBind() (pwm bind);
+**             osc_typedPositionApply() (width slew); osc_syncPull(),
+**             osc_ringSample() (the S085 laws, reused unchanged);
+**             tools/dsp_test/modules/oscillator.c group pwm.
+*/
+#define OSC_S094P1_SECTION 
+#define OSC_S094P1_LOOP    OSC_S094P1_SECTION __attribute__((noinline, noclone))
+
+/* The three forms of a pwm block (osc_pwmPlan_t.form). */
+#define OSC_PWM_FORM_D   0u   /* two-read: Saw (sum), Rec (difference) */
+#define OSC_PWM_FORM_WT  1u   /* warp on a 1,024-point table row: Tri */
+#define OSC_PWM_FORM_WS  2u   /* warp on the 1,024-point sine: Sin */
+
+/*
+ * One pwm block's constants (S094 P1 S3).
+ *
+ * What:       row (D, WT: the 1,024-point row; WS: unused), wPh (the warp's
+ *             split point W), ra / rb (the half-cycle scales, oscPwmTables.h),
+ *             d (D: the second read's offset in points of 1,024), sign (D:
+ *             +1 sum, -1 difference), gQ14 (the store gain in Q14: level x
+ *             render gain), form. Every value comes from the pos-indexed
+ *             tables (S094 P4); fields a form does not read are left 0.
+ * Why:        filled once per block by osc_pwmPlan() and read by a loop
+ *             before its first sample, so nothing is computed per sample and
+ *             nothing stays live across the render in the engine.
+ * Lifetime:   a local of the role renderer (the stack), one block.
+ */
+typedef struct {
+	const int16_t *row;
+	uint32_t wPh;
+	uint32_t ra;
+	uint32_t rb;
+	uint32_t d;
+	int32_t  sign;
+	int32_t  gQ14;
+	uint8_t  form;
+} osc_pwmPlan_t;
+
+/*
+ * Build one pwm block's plan (S094 P1 S3; S094 P4 law).
+ *
+ * What:       k = positionApplied (0..127, the width after the slew); by wav:
+ *               Sin -> WS: W, ra, rb from oscPwmSin*[k], at gain;
+ *               Tri -> WT on triTable[min(tableOffset + oscPwmTriLift[k],
+ *                      10)], W, ra, rb from oscPwmTri*[k], at gain;
+ *               Saw -> D sum on sawTable[tableOffset], d = oscPwmDSaw[k], at
+ *                      gain x oscPwmLevelSawQ14[k] / 16384;
+ *               Rec (and any larger value) -> D difference, d =
+ *                      oscPwmDRec[k], at gain x oscPwmLevelRecQ14[k] / 16384.
+ * Why:        S094 P4 (user): pos 0 is the unmodified wave and pos 127 the
+ *             narrowest, with no wrap: every constant is a lookup by k, so
+ *             the law lives in one generator (gen_pwm_tables.py) and the
+ *             loops are unchanged. Rec narrows to 0.39 %, Saw and Tri to
+ *             2.54 %, Sin to 6.25 % (its warp has no octave rows; a narrower
+ *             half-cycle aliases). The S094 P1 clamp (pos 0 acts as 1) and
+ *             the mirrored index (128 - p) are gone: pos 0 is a width of its
+ *             own, bit-exact with the S094 P1 p = 64 (gen T6, law PW9).
+ * Inputs:     osc (waveform, tableOffset from osc_userBind(), positionApplied
+ *             from osc_typedPositionApply()), gain (0..1 at every call site).
+ * Outputs:    *pl.
+ * Cost:       per block, flash: one form's table loads and one multiply; no
+ *             division.
+ * Accessors:  the five osc_pwmRender*() roles.
+ * Affiliates: oscPwmTables.h; oscPwmWarp.h; AlkalineVoice.c alk_renderPwm()
+ *             (the same tables for the Alkaline).
+ */
+static __attribute__((noinline, noclone)) void osc_pwmPlan(const OscInfo* osc,
+                                                           float gain,
+                                                           osc_pwmPlan_t* pl)
+{
+	/* the applied width index, 0..127 (S094 P4: no clamp, no mirror) */
+	const uint32_t k = (uint32_t)(osc->positionApplied & 127u);
+
+	pl->wPh = 0u;
+	pl->ra = 0u;
+	pl->rb = 0u;
+	pl->d = 0u;
+	pl->sign = 0;
+	switch (osc->waveform) {
+	case SINE:
+		pl->form = OSC_PWM_FORM_WS;
+		pl->row = 0;
+		pl->wPh = oscPwmSinW[k];
+		pl->ra = oscPwmSinRa[k];
+		pl->rb = oscPwmSinRb[k];
+		pl->gQ14 = (int32_t)(gain * 16384.0f + 0.5f);
+		break;
+	case TRI: {
+		/* the octave row, lifted for the compressed half-cycle */
+		uint32_t r = (uint32_t)osc->tableOffset + oscPwmTriLift[k];
+
+		if (r > 10u)
+			r = 10u;
+		pl->form = OSC_PWM_FORM_WT;
+		pl->row = triTable[r];
+		pl->wPh = oscPwmTriW[k];
+		pl->ra = oscPwmTriRa[k];
+		pl->rb = oscPwmTriRb[k];
+		pl->gQ14 = (int32_t)(gain * 16384.0f + 0.5f);
+		break; }
+	case SAW:
+		pl->form = OSC_PWM_FORM_D;
+		pl->row = sawTable[osc->tableOffset];
+		pl->d = oscPwmDSaw[k];
+		pl->sign = 1;
+		pl->gQ14 = (int32_t)(gain * (float)oscPwmLevelSawQ14[k] + 0.5f);
+		break;
+	default:   /* REC; a stored value past Rec plays Rec (S087 r8) */
+		pl->form = OSC_PWM_FORM_D;
+		pl->row = sawTable[osc->tableOffset];
+		pl->d = oscPwmDRec[k];
+		pl->sign = -1;
+		pl->gQ14 = (int32_t)(gain * (float)oscPwmLevelRecQ14[k] + 0.5f);
+		break;
+	}
+}
+
+/* The warp (form W): osc_pwmWarp() in oscPwmWarp.h (S094 P4: shared with the
+ * Alkaline's fused ladder mode 4). */
+
+/*
+ * Read a 1,024-point row at psi, integer interpolation (S094 P1 S3).
+ *
+ * What:       a = row[psi >> 22], b = the next point (1,023 wraps to 0),
+ *             f = the next 15 bits ((psi >> 7) & 0x7FFF); returns
+ *             a + ((b - a) x f >> 15).
+ * Range:      |b - a| <= 32,767 for every stock row (measured: saw 32,767,
+ *             rec 32,753, tri 207), so (b - a) x f < 2^30: no overflow.
+ * Accessors:  the WT loops.
+ */
+static inline __attribute__((always_inline)) int32_t osc_pwmReadT(
+	const int16_t* row, const uint32_t ps)
+{
+	const uint32_t ia = ps >> 22;
+	const uint32_t na = (ia + 1u) & 0x3FFu;
+	const int32_t a = row[ia];
+
+	return a + (((row[na] - a) * (int32_t)((ps >> 7) & 0x7FFFu)) >> 15);
+}
+
+/*
+ * Read the 1,024-point sine at psi, integer interpolation (S094 P1 S3;
+ * S095 P2 step 0: 1,024 points).
+ *
+ * What:       a = sine_table[psi >> 22], b = the next point (the table's
+ *             guard point 1,024 makes the last one safe, as calcSineBlock()),
+ *             f = (psi >> 7) & 0x7FFF; returns a + ((b - a) x f >> 15).
+ * Range:      |b - a| <= 202 (measured on the 1,024-point table);
+ *             202 x 32,767 < 2^31.
+ * Accessors:  the WS loops.
+ */
+static inline __attribute__((always_inline)) int32_t osc_pwmReadS(
+	const uint32_t ps)
+{
+	const uint32_t ia = ps >> 22;
+	const int32_t a = sine_table[ia];
+
+	return a + (((sine_table[ia + 1u] - a) * (int32_t)((ps >> 7) & 0x7FFFu)) >> 15);
+}
+
+/*
+ * The two-read value at ph (S094 P1 S3, form D).
+ *
+ * What:       A at ph, B at ph - w (d points earlier, the row wraps):
+ *               d0 = row[ia] + sign x row[ib], d1 = the same one point on,
+ *               out = d0 + ((d1 - d0) x f >> 15), f = (ph >> 7) & 0x7FFF.
+ *             Both reads share one fraction (w is a whole number of points),
+ *             so the combined value is interpolated once.
+ * Why:        reading B at ph - w (not + w) makes the difference high for the
+ *             first w of the cycle, as the stock Rec is (plan finding 2);
+ *             pos 0 (d = 512; S094 P4) gives a band-limited square of the Rec
+ *             orientation.
+ * Range:      |d1 - d0| <= 2 x 32,767 = 65,534 and 65,534 x 32,767 < 2^31.
+ * Accessors:  the D loops.
+ */
+static inline __attribute__((always_inline)) int32_t osc_pwmReadD(
+	const int16_t* row, const uint32_t ph, const uint32_t d, const int32_t sign)
+{
+	const uint32_t ia = ph >> 22;
+	const uint32_t na = (ia + 1u) & 0x3FFu;
+	const uint32_t ib = (ia - d) & 0x3FFu;
+	const uint32_t nb = (ib + 1u) & 0x3FFu;
+	const int32_t d0 = row[ia] + sign * row[ib];
+	const int32_t d1 = row[na] + sign * row[nb];
+
+	return d0 + (((d1 - d0) * (int32_t)((ph >> 7) & 0x7FFFu)) >> 15);
+}
+
+/*
+ * The store (S094 P1 S3): (o x gQ14) >> 14, saturated to int16.
+ * |o| <= 65,534 and gQ14 <= 16,384, so the product fits int32; SSAT16
+ * catches the band-limited overshoot (Gibbs) of the two-read form.
+ */
+#define OSC_PWM_STORE(o, g) ((int16_t)__SSAT(((o) * (g)) >> 14, 16))
+
+/* ---------------------------------------------------------------- plain */
+
+/*
+ * pwm plain, form D (S094 P1 S3).
+ *
+ * What:       one block of the two-read value at the plan's row, offset and
+ *             sign, stored at gQ14; the phase advances by phaseInc.
+ * Inputs:     osc (phase, phaseInc), pl (row, d, sign, gQ14), buf, size.
+ * Outputs:    buf; osc->phase.
+ * Cost:       23 per sample (PWM draft m2c / d_plainSigned, standalone).
+ * Accessors:  osc_pwmRenderPlain().
+ */
+static OSC_S094P1_LOOP void osc_pwmDPlainBlock(OscInfo* osc,
+                                               const osc_pwmPlan_t* pl,
+                                               int16_t* buf, uint8_t size)
+{
+	const int16_t *row = pl->row;
+	const uint32_t d = pl->d;
+	const int32_t sign = pl->sign;
+	const int32_t g = pl->gQ14;
+	const uint32_t inc = osc->phaseInc;
+	uint32_t ph = osc->phase;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const int32_t o = osc_pwmReadD(row, ph, d, sign);
+
+		ph += inc;
+		buf[i] = OSC_PWM_STORE(o, g);
+	}
+	osc->phase = ph;
+}
+
+/*
+ * pwm plain, form WT (S094 P1 S3): the warped triangle row.
+ * As osc_pwmDPlainBlock(), with o = osc_pwmReadT(row, warp(ph)).
+ * Cost: 23 per sample (PWM draft m1b). Accessors: osc_pwmRenderPlain().
+ */
+static OSC_S094P1_LOOP void osc_pwmWtPlainBlock(OscInfo* osc,
+                                                const osc_pwmPlan_t* pl,
+                                                int16_t* buf, uint8_t size)
+{
+	const int16_t *row = pl->row;
+	const uint32_t wPh = pl->wPh, ra = pl->ra, rb = pl->rb;
+	const int32_t g = pl->gQ14;
+	const uint32_t inc = osc->phaseInc;
+	uint32_t ph = osc->phase;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const int32_t o = osc_pwmReadT(row, osc_pwmWarp(ph, wPh, ra, rb));
+
+		ph += inc;
+		buf[i] = OSC_PWM_STORE(o, g);
+	}
+	osc->phase = ph;
+}
+
+/*
+ * pwm plain, form WS (S094 P1 S3): the warped sine.
+ * As osc_pwmWtPlainBlock(), reading sine_table (osc_pwmReadS()).
+ * Cost: 22 per sample (PWM draft m1sin). Accessors: osc_pwmRenderPlain().
+ */
+static OSC_S094P1_LOOP void osc_pwmWsPlainBlock(OscInfo* osc,
+                                                const osc_pwmPlan_t* pl,
+                                                int16_t* buf, uint8_t size)
+{
+	const uint32_t wPh = pl->wPh, ra = pl->ra, rb = pl->rb;
+	const int32_t g = pl->gQ14;
+	const uint32_t inc = osc->phaseInc;
+	uint32_t ph = osc->phase;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const int32_t o = osc_pwmReadS(osc_pwmWarp(ph, wPh, ra, rb));
+
+		ph += inc;
+		buf[i] = OSC_PWM_STORE(o, g);
+	}
+	osc->phase = ph;
+}
+
+/* ------------------------------------------------------------------- FM */
+
+/*
+ * pwm FM carriers (S094 P1 S3; Cymbal/HiHat through osc_renderTypedFm()).
+ *
+ * What:       the plain loops with the read phase rp = ph + (ssat16(mod[i] x
+ *             fmMod) << 19), the table-FM fraction of a cycle (S087 A17: amt
+ *             means the same on every type). The warp (W) is applied to rp;
+ *             D reads both points at rp and rp - w. fmMod is loaded once
+ *             before the loop.
+ * Inputs:     osc (phase, phaseInc, fmMod), pl, mod[size] (the modulator
+ *             block), buf, size.
+ * Outputs:    buf; osc->phase.
+ * Cost:       30-31 per sample (PWM draft m2fm / m1fm) against the FM role's
+ *             50 (osc_slpFmBlock).
+ * Accessors:  osc_pwmRenderFm().
+ */
+static OSC_S094P1_LOOP void osc_pwmDFmBlock(OscInfo* osc, const osc_pwmPlan_t* pl,
+                                            const int16_t* mod, int16_t* buf,
+                                            uint8_t size)
+{
+	const int16_t *row = pl->row;
+	const uint32_t d = pl->d;
+	const int32_t sign = pl->sign, g = pl->gQ14;
+	const float fm = osc->fmMod;
+	const uint32_t inc = osc->phaseInc;
+	uint32_t ph = osc->phase;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		/* the FM read phase: the S087 table-FM offset */
+		const uint32_t rp = ph + ((uint32_t)__SSAT(
+			(int32_t)((float)mod[i] * fm), 16) << 19);
+		const int32_t o = osc_pwmReadD(row, rp, d, sign);
+
+		ph += inc;
+		buf[i] = OSC_PWM_STORE(o, g);
+	}
+	osc->phase = ph;
+}
+
+static OSC_S094P1_LOOP void osc_pwmWtFmBlock(OscInfo* osc, const osc_pwmPlan_t* pl,
+                                             const int16_t* mod, int16_t* buf,
+                                             uint8_t size)
+{
+	const int16_t *row = pl->row;
+	const uint32_t wPh = pl->wPh, ra = pl->ra, rb = pl->rb;
+	const int32_t g = pl->gQ14;
+	const float fm = osc->fmMod;
+	const uint32_t inc = osc->phaseInc;
+	uint32_t ph = osc->phase;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const uint32_t rp = ph + ((uint32_t)__SSAT(
+			(int32_t)((float)mod[i] * fm), 16) << 19);
+		const int32_t o = osc_pwmReadT(row, osc_pwmWarp(rp, wPh, ra, rb));
+
+		ph += inc;
+		buf[i] = OSC_PWM_STORE(o, g);
+	}
+	osc->phase = ph;
+}
+
+static OSC_S094P1_LOOP void osc_pwmWsFmBlock(OscInfo* osc, const osc_pwmPlan_t* pl,
+                                             const int16_t* mod, int16_t* buf,
+                                             uint8_t size)
+{
+	const uint32_t wPh = pl->wPh, ra = pl->ra, rb = pl->rb;
+	const int32_t g = pl->gQ14;
+	const float fm = osc->fmMod;
+	const uint32_t inc = osc->phaseInc;
+	uint32_t ph = osc->phase;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const uint32_t rp = ph + ((uint32_t)__SSAT(
+			(int32_t)((float)mod[i] * fm), 16) << 19);
+		const int32_t o = osc_pwmReadS(osc_pwmWarp(rp, wPh, ra, rb));
+
+		ph += inc;
+		buf[i] = OSC_PWM_STORE(o, g);
+	}
+	osc->phase = ph;
+}
+
+/* -------------------------------------------------------------- FM ramp */
+
+/*
+ * pwm FM carriers with a per-sample depth ramp (S094 P1 S3; Drum fm through
+ * osc_renderTypedFmRamp(), the S089 P3 twin rule).
+ *
+ * What:       the FM loops with the depth d = d0 on sample 0 and d += dStep
+ *             after each sample, in place of the loop-invariant fmMod. With
+ *             d0 = fmMod and dStep = 0 the output equals the FM loop's (law
+ *             PW6).
+ * Inputs:     osc, pl, mod[size], buf, size, d0, dStep.
+ * Outputs:    buf; osc->phase.
+ * Cost:       31 per sample (PWM draft d_fmRamp) against the FM-ramp role's
+ *             51 (osc_slpFmRampBlock).
+ * Accessors:  osc_pwmRenderFmRamp().
+ */
+static OSC_S094P1_LOOP void osc_pwmDFmRampBlock(OscInfo* osc,
+                                                const osc_pwmPlan_t* pl,
+                                                const int16_t* mod, int16_t* buf,
+                                                uint8_t size, float d0, float dStep)
+{
+	const int16_t *row = pl->row;
+	const uint32_t dp = pl->d;
+	const int32_t sign = pl->sign, g = pl->gQ14;
+	const uint32_t inc = osc->phaseInc;
+	uint32_t ph = osc->phase;
+	/* the ramped FM depth: d0 here, d0 + i x dStep at sample i */
+	float dd = d0;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const uint32_t rp = ph + ((uint32_t)__SSAT(
+			(int32_t)((float)mod[i] * dd), 16) << 19);
+		const int32_t o = osc_pwmReadD(row, rp, dp, sign);
+
+		/* the depth steps after its use (sample 0 = d0) */
+		dd += dStep;
+		ph += inc;
+		buf[i] = OSC_PWM_STORE(o, g);
+	}
+	osc->phase = ph;
+}
+
+static OSC_S094P1_LOOP void osc_pwmWtFmRampBlock(OscInfo* osc,
+                                                 const osc_pwmPlan_t* pl,
+                                                 const int16_t* mod, int16_t* buf,
+                                                 uint8_t size, float d0, float dStep)
+{
+	const int16_t *row = pl->row;
+	const uint32_t wPh = pl->wPh, ra = pl->ra, rb = pl->rb;
+	const int32_t g = pl->gQ14;
+	const uint32_t inc = osc->phaseInc;
+	uint32_t ph = osc->phase;
+	float dd = d0;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const uint32_t rp = ph + ((uint32_t)__SSAT(
+			(int32_t)((float)mod[i] * dd), 16) << 19);
+		const int32_t o = osc_pwmReadT(row, osc_pwmWarp(rp, wPh, ra, rb));
+
+		dd += dStep;
+		ph += inc;
+		buf[i] = OSC_PWM_STORE(o, g);
+	}
+	osc->phase = ph;
+}
+
+static OSC_S094P1_LOOP void osc_pwmWsFmRampBlock(OscInfo* osc,
+                                                 const osc_pwmPlan_t* pl,
+                                                 const int16_t* mod, int16_t* buf,
+                                                 uint8_t size, float d0, float dStep)
+{
+	const uint32_t wPh = pl->wPh, ra = pl->ra, rb = pl->rb;
+	const int32_t g = pl->gQ14;
+	const uint32_t inc = osc->phaseInc;
+	uint32_t ph = osc->phase;
+	float dd = d0;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const uint32_t rp = ph + ((uint32_t)__SSAT(
+			(int32_t)((float)mod[i] * dd), 16) << 19);
+		const int32_t o = osc_pwmReadS(osc_pwmWarp(rp, wPh, ra, rb));
+
+		dd += dStep;
+		ph += inc;
+		buf[i] = OSC_PWM_STORE(o, g);
+	}
+	osc->phase = ph;
+}
+
+/* ----------------------------------------------------------------- ring */
+
+/*
+ * pwm ring carriers (S094 P1 S3; Drum rng through osc_renderTypedRing()).
+ *
+ * What:       the carrier sample car = SSAT16((o x gQ14) >> 14) at the plan's
+ *             level (render gain 1, as the S085 ring copies), then the S085
+ *             ring law osc_ringSample(car, modBuf[i], d_i) with
+ *             d_i = depthQ15 + (i + 1) x depthStepQ15. d = 0 is the carrier
+ *             exactly (law PW6).
+ * Inputs:     osc, pl (gQ14 at gain 1), modBuf[size], buf, size, depthQ15,
+ *             depthStepQ15.
+ * Outputs:    buf; osc->phase.
+ * Cost:       31 per sample (PWM draft d_ring) against the ring role's 42.
+ * Accessors:  osc_pwmRenderRing().
+ */
+static OSC_S094P1_LOOP void osc_pwmDRingBlock(OscInfo* osc, const osc_pwmPlan_t* pl,
+                                              const int16_t* modBuf, int16_t* buf,
+                                              uint8_t size, int32_t depthQ15,
+                                              int32_t depthStepQ15)
+{
+	const int16_t *row = pl->row;
+	const uint32_t d = pl->d;
+	const int32_t sign = pl->sign, g = pl->gQ14;
+	const uint32_t inc = osc->phaseInc;
+	uint32_t ph = osc->phase;
+	/* the ramped ring depth, Q15 */
+	int32_t rd = depthQ15;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const int32_t o = osc_pwmReadD(row, ph, d, sign);
+
+		ph += inc;
+		rd += depthStepQ15;
+		buf[i] = osc_ringSample(OSC_PWM_STORE(o, g), modBuf[i], rd);
+	}
+	osc->phase = ph;
+}
+
+static OSC_S094P1_LOOP void osc_pwmWtRingBlock(OscInfo* osc, const osc_pwmPlan_t* pl,
+                                               const int16_t* modBuf, int16_t* buf,
+                                               uint8_t size, int32_t depthQ15,
+                                               int32_t depthStepQ15)
+{
+	const int16_t *row = pl->row;
+	const uint32_t wPh = pl->wPh, ra = pl->ra, rb = pl->rb;
+	const int32_t g = pl->gQ14;
+	const uint32_t inc = osc->phaseInc;
+	uint32_t ph = osc->phase;
+	int32_t rd = depthQ15;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const int32_t o = osc_pwmReadT(row, osc_pwmWarp(ph, wPh, ra, rb));
+
+		ph += inc;
+		rd += depthStepQ15;
+		buf[i] = osc_ringSample(OSC_PWM_STORE(o, g), modBuf[i], rd);
+	}
+	osc->phase = ph;
+}
+
+static OSC_S094P1_LOOP void osc_pwmWsRingBlock(OscInfo* osc, const osc_pwmPlan_t* pl,
+                                               const int16_t* modBuf, int16_t* buf,
+                                               uint8_t size, int32_t depthQ15,
+                                               int32_t depthStepQ15)
+{
+	const uint32_t wPh = pl->wPh, ra = pl->ra, rb = pl->rb;
+	const int32_t g = pl->gQ14;
+	const uint32_t inc = osc->phaseInc;
+	uint32_t ph = osc->phase;
+	int32_t rd = depthQ15;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const int32_t o = osc_pwmReadS(osc_pwmWarp(ph, wPh, ra, rb));
+
+		ph += inc;
+		rd += depthStepQ15;
+		buf[i] = osc_ringSample(OSC_PWM_STORE(o, g), modBuf[i], rd);
+	}
+	osc->phase = ph;
+}
+
+/* ----------------------------------------------------------------- sync */
+
+/*
+ * pwm sync slaves (S094 P1 S3; Drum snc through osc_renderTypedSync()).
+ *
+ * What:       the plain loops at render gain 1, with the phase update
+ *             ph = osc_syncPull(ph + inc, over[i], ratioQ16, depthQ30) (the
+ *             S085 pull: the reset lands on sample i + 1). The warp and the
+ *             two reads follow the pulled phase, so a hard sync restarts the
+ *             pulse at its rising edge. depthQ30 = 0 is the plain loop (law
+ *             PW6).
+ * Inputs:     osc, pl (gQ14 at gain 1), over[size], ratioQ16 (from the
+ *             dispatcher), depthQ30, buf, size.
+ * Outputs:    buf; osc->phase.
+ * Cost:       35 per sample (PWM draft d_sync) against the sync role's 41.
+ * Accessors:  osc_pwmRenderSync().
+ */
+static OSC_S094P1_LOOP void osc_pwmDSyncBlock(OscInfo* osc, const osc_pwmPlan_t* pl,
+                                              const uint32_t* over, uint32_t ratioQ16,
+                                              int32_t depthQ30, int16_t* buf,
+                                              uint8_t size)
+{
+	const int16_t *row = pl->row;
+	const uint32_t d = pl->d;
+	const int32_t sign = pl->sign, g = pl->gQ14;
+	const uint32_t inc = osc->phaseInc;
+	uint32_t ph = osc->phase;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const int32_t o = osc_pwmReadD(row, ph, d, sign);
+
+		ph = osc_syncPull(ph + inc, over[i], ratioQ16, depthQ30);
+		buf[i] = OSC_PWM_STORE(o, g);
+	}
+	osc->phase = ph;
+}
+
+static OSC_S094P1_LOOP void osc_pwmWtSyncBlock(OscInfo* osc, const osc_pwmPlan_t* pl,
+                                               const uint32_t* over, uint32_t ratioQ16,
+                                               int32_t depthQ30, int16_t* buf,
+                                               uint8_t size)
+{
+	const int16_t *row = pl->row;
+	const uint32_t wPh = pl->wPh, ra = pl->ra, rb = pl->rb;
+	const int32_t g = pl->gQ14;
+	const uint32_t inc = osc->phaseInc;
+	uint32_t ph = osc->phase;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const int32_t o = osc_pwmReadT(row, osc_pwmWarp(ph, wPh, ra, rb));
+
+		ph = osc_syncPull(ph + inc, over[i], ratioQ16, depthQ30);
+		buf[i] = OSC_PWM_STORE(o, g);
+	}
+	osc->phase = ph;
+}
+
+static OSC_S094P1_LOOP void osc_pwmWsSyncBlock(OscInfo* osc, const osc_pwmPlan_t* pl,
+                                               const uint32_t* over, uint32_t ratioQ16,
+                                               int32_t depthQ30, int16_t* buf,
+                                               uint8_t size)
+{
+	const uint32_t wPh = pl->wPh, ra = pl->ra, rb = pl->rb;
+	const int32_t g = pl->gQ14;
+	const uint32_t inc = osc->phaseInc;
+	uint32_t ph = osc->phase;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const int32_t o = osc_pwmReadS(osc_pwmWarp(ph, wPh, ra, rb));
+
+		ph = osc_syncPull(ph + inc, over[i], ratioQ16, depthQ30);
+		buf[i] = OSC_PWM_STORE(o, g);
+	}
+	osc->phase = ph;
+}
+
+/* ---------------------------------------------------------------- roles */
+
+/*
+ * The pwm role renderers (S094 P1 S3; declared before the typed dispatchers).
+ *
+ * What:       each builds the block's plan (render gain for plain / FM /
+ *             FM ramp; gain 1 for ring and sync, as the S085 copies) and calls
+ *             the form's loop: D, WT or WS.
+ * Why:        the ITCM dispatchers gain one call each; the three-way form
+ *             choice and the plan live in flash, once per block.
+ * Inputs:     the dispatcher's arguments.
+ * Outputs:    buf; osc->phase.
+ * Accessors:  the six typed dispatchers (S3.4).
+ */
+static __attribute__((noinline, noclone)) void osc_pwmRenderPlain(
+	OscInfo* osc, int16_t* buf, uint8_t size, float gain)
+{
+	osc_pwmPlan_t pl;
+
+	osc_pwmPlan(osc, gain, &pl);
+	if (pl.form == OSC_PWM_FORM_D)
+		osc_pwmDPlainBlock(osc, &pl, buf, size);
+	else if (pl.form == OSC_PWM_FORM_WT)
+		osc_pwmWtPlainBlock(osc, &pl, buf, size);
+	else
+		osc_pwmWsPlainBlock(osc, &pl, buf, size);
+}
+
+static __attribute__((noinline, noclone)) void osc_pwmRenderFm(
+	OscInfo* osc, const int16_t* mod, int16_t* buf, uint8_t size, float gain)
+{
+	osc_pwmPlan_t pl;
+
+	osc_pwmPlan(osc, gain, &pl);
+	if (pl.form == OSC_PWM_FORM_D)
+		osc_pwmDFmBlock(osc, &pl, mod, buf, size);
+	else if (pl.form == OSC_PWM_FORM_WT)
+		osc_pwmWtFmBlock(osc, &pl, mod, buf, size);
+	else
+		osc_pwmWsFmBlock(osc, &pl, mod, buf, size);
+}
+
+static __attribute__((noinline, noclone)) void osc_pwmRenderFmRamp(
+	OscInfo* osc, const int16_t* mod, int16_t* buf, uint8_t size, float gain,
+	float d0, float dStep)
+{
+	osc_pwmPlan_t pl;
+
+	osc_pwmPlan(osc, gain, &pl);
+	if (pl.form == OSC_PWM_FORM_D)
+		osc_pwmDFmRampBlock(osc, &pl, mod, buf, size, d0, dStep);
+	else if (pl.form == OSC_PWM_FORM_WT)
+		osc_pwmWtFmRampBlock(osc, &pl, mod, buf, size, d0, dStep);
+	else
+		osc_pwmWsFmRampBlock(osc, &pl, mod, buf, size, d0, dStep);
+}
+
+static __attribute__((noinline, noclone)) void osc_pwmRenderRing(
+	OscInfo* osc, const int16_t* modBuf, int16_t* buf, uint8_t size,
+	int32_t depthQ15, int32_t depthStepQ15)
+{
+	osc_pwmPlan_t pl;
+
+	osc_pwmPlan(osc, 1.0f, &pl);
+	if (pl.form == OSC_PWM_FORM_D)
+		osc_pwmDRingBlock(osc, &pl, modBuf, buf, size, depthQ15, depthStepQ15);
+	else if (pl.form == OSC_PWM_FORM_WT)
+		osc_pwmWtRingBlock(osc, &pl, modBuf, buf, size, depthQ15, depthStepQ15);
+	else
+		osc_pwmWsRingBlock(osc, &pl, modBuf, buf, size, depthQ15, depthStepQ15);
+}
+
+static __attribute__((noinline, noclone)) void osc_pwmRenderSync(
+	OscInfo* osc, const uint32_t* over, uint32_t ratioQ16, int32_t depthQ30,
+	int16_t* buf, uint8_t size)
+{
+	osc_pwmPlan_t pl;
+
+	osc_pwmPlan(osc, 1.0f, &pl);
+	if (pl.form == OSC_PWM_FORM_D)
+		osc_pwmDSyncBlock(osc, &pl, over, ratioQ16, depthQ30, buf, size);
+	else if (pl.form == OSC_PWM_FORM_WT)
+		osc_pwmWtSyncBlock(osc, &pl, over, ratioQ16, depthQ30, buf, size);
+	else
+		osc_pwmWsSyncBlock(osc, &pl, over, ratioQ16, depthQ30, buf, size);
 }
 

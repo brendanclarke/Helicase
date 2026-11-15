@@ -15,6 +15,20 @@
 
 #define FXBUF_STATE_EFFECT_WRITTEN     0x01u
 
+#define FXBUF_SEG_SIDE_L       0u
+
+#define FXBUF_SEG_SIDE_R       1u
+
+#define FXBUF_SEG_SIDE_BOTH    2u
+
+#define FXBUF_SEG_SIDE_MASK    3u
+
+#define FXBUF_SEG_SIDE_SHIFT(i_) (2u * (uint32_t)(i_))
+
+#define FXBUF_UQ15_ONE         0x8000u
+
+#define FXBUF_OFFSET_NONE              0xFFFFFFFFu
+
 typedef struct {
     uint8_t  *base;
     uint32_t offset;
@@ -34,4 +48,25 @@ typedef struct {
     uint8_t  effect_bits;
     uint8_t  state_flags;
     uint8_t  unit_owner_slot[FXBUF_VOICE_UNIT_COUNT];
+    /*
+     * S095 P1 segment description (D24; +16 B, D18). wrap_*: the arena
+     * region the segments live in (the outgoing tape, loop or ring), so a
+     * reader wraps exactly where the writer did. 0 bytes = no segments.
+     */
+    uint32_t effect_wrap_offset;
+    uint32_t effect_wrap_bytes;
+    /* Read speed of the recorded audio, uQ1.15 (0x8000 = 1.0): a tape's
+     * speed v at exit (varispeed, plan §4.1), so the feed keeps the recorded
+     * pitch; 1.0 for CrumpBit and for rings. */
+    uint16_t effect_speed_uq15;
+    /* The outgoing dry gain at exit, uQ1.15: the incoming dry ramps from it
+     * over 10 ms (plan §5.3 step 5). */
+    uint16_t effect_dry_uq15;
+    /* Gain from one side's summed segments to the outgoing wet level,
+     * uQ1.15 (the outgoing type's wet-normalization constant). */
+    uint16_t effect_feed_gain_uq15;
+    /* Bytes from one sample of a segment to the next: 1, 2 or 4. */
+    uint8_t  effect_stride;
+    /* Two bits per segment: FXBUF_SEG_SIDE_L / _R / _BOTH. */
+    uint8_t  effect_seg_sides;
 } fxbuf_handoff_t;

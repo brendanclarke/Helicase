@@ -249,7 +249,7 @@
  *
  * When DEV_MODE_DIAGNOSTIC is enabled and this id is nonzero, main.c commits
  * it through effects_changeType() immediately after normal boot Scene
- * activation. Id 1 is StereoFilter (`flt`). Production builds ignore this
+ * activation. Id 1 is CrumpBit (`cbt`). Production builds ignore this
  * hook. It exists so Steps 4–5 could exercise registry, AutoSave token, and
  * DSP initialization before a user path existed. From Step 7 the Effect
  * page's `typ` view is the normal path; the hook remains for bench diagnostics.
@@ -958,6 +958,8 @@
 ** their integer waveform ID for that block to bound CPU cost. This keeps user
 ** samples eligible for interpolation while preventing every modulated voice
 ** from doubling oscillator render work at once. */
+/* S095 P1: one of the two is locked while an Effect type-change feed runs
+   (effects_feedSlotLock()). */
 #define OSC_WAVE_INTERP_MAX_ACTIVE 2u
 
 

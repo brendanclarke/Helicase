@@ -105,6 +105,9 @@ it belongs in the summary or the log, not here.
 | 088 | 2026-10-29 | `dev-ph7-voice_expansion`, uncommitted on `80029d31` | Oscillator run modes `rst`/`fre`/`itp` (P0); fader zipper fix with block-rate one-pole smoothing (P1); float-through distortion for retrigger HF puff (P1) |
 | 089 | 2026-10-30 | `dev-ph7-voice_expansion`, uncommitted on `d944c87f` | Per-instrument SRR enable (P0); voice chain architecture + WFd wavefolder chain with 8 fold types (P1/P2); Drum FM depth ramp efficiency −9 instr/sample on 3 dearest carriers (P3); CPU at ceiling (binding) |
 | 090 | 2026-10-31/11-01 | `dev-ph7-voice_expansion`, uncommitted on `7f8b5d07` | Load/Save speed-up: RAM instrument snapshot replaces `.hctmp` (P1); mirror-served `.hcnames` reads, index reuse, type-step cancel (P1); AutoSave settle stage 13 + Load/Save drops AutoSave (P2); defect corrections — Save names, input lock, Scene Save freeze from FAT directory bloat, boot-time directory tail trim (P3); batch ticking 15 µs/500 µs, runtime watchdog 12 s every build, trace `w` owner (P5) |
+| 091 | 2026-11-04/06 | `dev-ph7-voice_expansion`, uncommitted on `5c9a92f9` | CrumpBit sub-type expansion (dly/cmb/pit/grn/rvb), granular rework, efficiency pass to 170-cap, labels hook, parameter cleanup |
+| 092 | 2026-11-07/08 | `dev-ph7-voice_expansion`, HEAD `3abaece5` (no code changes) | Alkaline (TB-303) pre-implementation: plan (P0), ngspice circuit models of VCO/Q8 (P1), VCF diode ladder (P2), VCA/VEG (P3), control network + end-to-end run (P4), DSP equations with golden and real-time solvers validated against SPICE (P6) |
+| 093 | 2026-11-08/10 | `dev-ph7-alkaline`, HEAD `1ea13d41` | Alkaline (TB-303) firmware implementation: C engine from DSP model (P0), overhead reductions B-R/B2R (P1/P2), kernel + control prep Re3/Sw3 removal (P3), firmware integration phases 1–2 (P4/P5), parameter tweaks attack/decay/resonance×1.5/drive×16/pos (P6), FAILED wavetable+samples (P7), wavetable reassessment with catalogue v3 8-bit removal and interpolation-slot blend (P8); device-tested and passing |
 
 ---
 
@@ -2304,3 +2307,94 @@ Session 091 expanded CrumpBit from a single tape-delay effect into a five sub-ty
   `EFFECTS_BUS_REFERENCE.md` (labels hook §4.2a, CrumpBit page §8.6, pitfall §15),
   `CPU_USE_DSP_AUDIT.md` (S091 items 65–70),
   `STORAGE_SRAM_MANIFEST.md` (S091 flash/runtime entries).
+
+### 092 — Alkaline (TB-303) Pre-Implementation: Circuit Modelling, DSP Equations, and Instrument Plan (2026-11-07/08)
+
+Session 092 defined the Alkaline instrument — a TB-303 emulation — through seven documents (P0 plan, P1–P4 circuit models, P4 end-to-end run, P6 DSP equations) without changing any firmware code. Branch `dev-ph7-voice_expansion`, HEAD `3abaece5`.
+
+The session began with the instrument plan (P0), which assessed the CPU budget (worst-case Drum ≈ 257 instructions/sample as the ceiling), determined that the existing `Re3`/`Sw3` stock waves are filtered output captures unsuitable as a VCO source, and proposed a new four-pole nonlinear diode-ladder ZDF filter as the central DSP element. It laid out parameter rows, trigger semantics (accent at velocity ≥ 101, slide latched from the previous note, gate 3.5/6 of a step), a gate timer (the sequencer has no native gate), and a six-phase implementation plan with host-test laws AL1–AL9.
+
+Four SPICE circuit models followed, each built from the Roland TB-303 Service Notes (first edition, 19 Feb 1982) with ngspice 47:
+
+- **P1 (VCO):** the saw core (C33/Q26/Q28) is straight to 0.5 % bow; `sawTable` confirmed as a match. The Q8 square shaper produces a pitch-dependent pulse (51 % on-time at C1, 23 % at C5) whose level rises with pitch (−2.5 dB to +3.2 dB against the saw). D8 encodes these per octave level. The VCF input network (R62 220 kΩ, C17 1 µF) divides by 101; corner 0.72 Hz (inaudible).
+- **P2 (VCF):** the diode ladder (C18 0.018 µF bottom, C19/C24/C26 0.033 µF) with R110 = **22 kΩ** (not the printed 2.2 kΩ; the only value the x0xb0x KiCad schematic disagrees on, and the only value that gives a resonance matching the [SN] p7 calibration). Loop gain 18.7 against a threshold of 19.1 at Res full, 98 % of oscillation. Resonance frequency ≈ 12× the ladder's −3 dB point. A high-pass inside the loop (C27/C25 into Q21, 60–120 Hz) causes low-cutoff resonance loss and a lightly damped lower peak at 7–9 Hz (Stinchcombe's "very real" peak).
+- **P3 (VCA):** VEG with 12 V gate (decided); attack 2.5–3 ms (trigger width 0.65–0.75 ms); decay τ 1.5 s with offset (−6 dB at 1.0 s, silent at 4.5 s); accent +5.9/+11.4 dB; release under 1 µs. The VCA input's high-pass corner moves from 66 Hz (Res 0) to 127 Hz (Res full), raising the level by 10 dB. The OTA is linear at the 303's levels. Roland constants chosen over [XB]'s x0xb0x-derived values (D10).
+- **P4 (Control network + end-to-end run):** the Cutoff/Env Mod/expo converter (Q9/Q10/Q11, TM3 calibrates to 153 kΩ), the MEG (decay 173 ms to 2.54 s), and the accent sweep (C13/R46/VR4b second gang). An 8-step pattern through all four models confirmed slide (τ 22 ms, legato), accent behaviour (Resonance-dependent: sharp spike at low Res, smooth swell at high Res with accumulation over consecutive accents), the VEG as a state not a restart, and the accent tail past gate-off.
+
+The DSP equations phase (P6) translated the SPICE models into a real-time DSP form:
+
+- The ladder equations with four spread-pole stages, secant-linearised nonlinearities (the "mystran" method), and a tridiagonal ZDF solve closed through the whole linear network.
+- The network around the ladder (eight capacitors: C14, C15, C16, C17, C21, C22, C22F, C23) solved as a state-space system and split by speed: two fast eigenmodes and two one-pole asymptotes per sample, the slow remainder per block.
+- Control-rate equations: expo converter (three fixed-point passes), MEG (RC with a diode-stack floor), accent network (5 × 5 nodal solve of both VR7 branches together, because separate solves put the first accent 27 % high), VEG (C42 state with a fitted current table), and TPT prewarp.
+- Two solver options validated against SPICE: A_rt (linear rungs, ≈ 145 total) and B_rt (all nonlinearities, ≈ 230 total). At the 303's own drive both match SPICE within 0.1 dB per step; B follows the reference under drive (LSD 0.22 dB at ×8) and A does not (0.78 dB).
+
+Eleven user decisions were recorded (D1–D11, D8), covering accent threshold (velocity 101), filter choice (B2R, decided in S093), flash trade-off, SRR, tuning range (±700 cents), gate length (3.5/6), VEG constants (Roland), release (one-block ramp), and extras (E1–E4).
+
+- **Find here**: [092_SESSION_HANDOFF_LOG.md](092_SESSION_HANDOFF_LOG.md),
+  `ALKALINE_MODELLING_REFERENCE.md` (circuit models, SPICE validation, DSP equations),
+  `ALKALINE_MODULE_REFERENCE.md` (firmware module design and signal path),
+  `INSTRUMENTS_DSP_REFERENCE.md` (§5.5 Alkaline, §9.2 add-a-type checklist).
+
+### 093 — Alkaline (TB-303) Firmware Implementation: C Engine, Overhead Reductions, Firmware Integration, Parameter Tweaks, Wavetable Reassessment (2026-11-08/10)
+
+Session 093 took the Alkaline instrument from DSP equations (S092) through full firmware integration, parameter expansion, and wavetable support. Branch `dev-ph7-alkaline`, HEAD `1ea13d41`. Device-tested and passing.
+
+**P0 — C engine from DSP model.** Translated S092's DSP equations into C files: `DiodeLadder.c/.h` (the diode-ladder filter), `AlkalineControl.c/.h` (expo converter, MEG, accent network, VEG, prewarp), `AlkalineVoice.c/.h` (voice struct 508 B, init, trigger, async, sync block), `AlkalineTables.h/.c` (generated constant tables), `AlkalineSquareTable.c` (per-octave Q8 square table, 22,528 B flash). Two kernel variants: A-R (linear rungs, ≈ 145+3 VDIV) and B-R (all rungs nonlinear, ≈ 230+3 VDIV). Signal chain: table wave → driveGain → B2R ladder → OTA (iAbc × makeup) → int16.
+
+**P1 — Overhead reductions.** B-R = `B_n1rq_ota32` at 230+3 VDIV. Network form N1: block-rate network with per-sample asymptote one-poles at 50 Hz (loop) and 120 Hz (VCA), replacing per-sample fast modes. Drive fixes (input-pair tail current, 7 V output clip). Linear Q21 approximation. [3/2] Padé rungs. Decision: B-R under Drum as Basic.
+
+**P2 — Pre-implementation brief, B2R chosen.** B2R (rungs 0–1 nonlinear, rungs 2–3 linear) at 209+3 VDIV. Tier 1+2 control-path reductions (fast maths: `alk_log2f`/`exp2f`/`tanf`, written-out accent network, one-Newton MEG, warm-started expo, direct pitch from note number, `osc_setTableFreq()`). Per-block 3,010 → ≈ 1,005 projected. 28 parameter rows. Integration plan with 19 dispatch sites.
+
+**P3 — Kernel + control prep, Re3/Sw3 removal.** Drum ceiling frozen at 261.3 instructions/sample. `Re3`/`Sw3` stock table waves removed from firmware: `OSC_SAMPLE_START` 8 → 6, 45 KB flash freed. B2R loop 197 per sample. Control path 3,010 → 1,476 → 1,393 through Tier 1/2 reductions. Round 2 optimisation: T2-3 (two-block split) accepted, T2-4 (four-block) rejected; fused oscillator read (AL-X: −9 per sample, the table wave read inside the B2R loop, bit-identical); r6 adopted (6-state reduced-order network on one balanced basis common to every Res point, −3.3 per sample, inaudible); division batching. Final B2R ≈ 256.5 (≈ 253 with r6). **Gate tools created:** `control_cost.py --elf` (linked per-block cost), `elf_loopsrc.py` (source-attributed loop comparison).
+
+**P4 — Firmware integration phase 1.** r6 applied. Trigger with platform calls and `seq_trackStepSamples()` (gate = 7/12 step). `AlkalineParameters.h/.c` (26 rows, 7 sub-pages). `MenuText.h` additions (`ONOFF_TAG_ALK_WAVE`, `alkWaveNames`). `check_special_tags.py` expanded. `InstrumentManager` wired: enum `INSTRUMENT_TYPE_ALK`, registry row (Basic, `alk`, `.alk`, `Alkaline`), union member, 11 dispatch-site cases. `Makefile` and `storageTypes` updated. Findings: F1 `init.alk` required for first load; F2 `ToText` driven from registry; F3 Instrument Load page = SELECT button; F4 fresh slot defaults. Registry invariants and guards with `check_special_tags.py registry_check()`.
+
+**P5 — Firmware integration phase 2 (storage verification, gates, tools).** Storage items S1–S14 verified. Gates G1–G8 all passed: G1 49,412 B headroom; G3 214/3 VDIV per-sample; G4 1,218/9 VDIV per block; G5 252.1 per sample; G6 0 mixer loops grew; G7 93/93 exact oscillator loops; G8 14,552 B ITCM. AutoSave header fix (K11: leading-part header accepted, types appended only). B1 fix (`elf_loopsrc.py --compare` by cyclic cost multisets). B3 doc corrections. Records moved to `tools/dsp_test/baselines/`.
+
+**P6 — Parameter tweaks.** Attack: CPU trigger width 0.70 → 0.55 ms; SPICE-fitted current table (108 B flash); `alk_attack` row, 0..127 (0 = 0.70 ms, 127 = 0.55 ms); `AlkalineVoice` 540 → 548 B (+8 for `AlkVeg.keep` + `attack`). Decay: −20 %/+50 % range via fitted constants. Resonance: wiper transformer model, ×1.5 (`ALK_RES_KMAX` 1.5), self-oscillation allowed, 13 Res points (+4 over P4's 9; +1,152 B flash); self-oscillation pitch within 0.35 % of golden. Drive: 16^drive curve (x1..x16). `pos`: start phase on Saw/Sqr, 0 = free-running, 1..127 = pos/128 of cycle. Menu reorganised: OSC (coa tun wav pos), AEG (atk dec), mod (dst amt sld), click (acc), FILTER (cut res env drv), LFO, MIX (vol pan). Descriptor count 26 → 28 (appended `alk_attack` and `osc1_position`). Per block 1,218 → 1,230 (P6 image). Res ×1.5 costs 0 per sample (64-sample network absorbs it). Flash: +1,280 B tables + code.
+
+**P7 — FAILED: wavetable and samples implementation.** Fused sample/wavetable reader loops measured 217–262 per sample (plan 214–218). Per-block typed control path +537 (estimated +115). All typed modes exceeded the ceiling. Decision P7-D1 recommended Advanced class. Marked as failed/discarded; the attempt informed P8.
+
+**P8 — Wavetable reassessment: catalogue v3, 8-bit removal, blend with interpolation slot.** Wavetables only (no samples/loops for Alkaline; D7). Storage: one 1,024-point 16-bit copy per frame shared by every instrument (D1′); source frames resampled by an H=32 band-limited periodic resampler at install time. 8-bit support removed throughout (D9/D10): the 8-bit reader loops removed from all ten ITCM wavetable functions; an 8-bit WAV file is skipped during install. Catalogue v3: magic `LXC3`, version 3; v2 cards read STALE and must be reinstalled. Name-cache loan (D8): `fs_list_cache_name` (9,000 B) borrowed as install buffer during the modal install, no new RAM. Installer counts source points (fixes S4 bug: `ak_hvox` stored 56 of 104 frames because frame counter incremented per call not per frame). All readers use the fixed 1,024-point table read (`ph >> 22`, mask `0x3FF`), the cheapest form measured. Revision 3 (D12): Alkaline wavetable frame blending with an interpolation slot, claimed in `Alkaline_calcVoiceAsync()` (never in the sync render — a claim there moved mixer hot loops, item 79). Blend loop 228, no-slot 213, per block 1,391, whole voice 256.5 (no slot) / 271.5 (slot held). D13: the over-budget 271.5 accepted. Results: flash headroom 44,556 B; ITCM 14,552 → 12,128 B (−2,424); RAM unchanged; wavetable readers all faster than P6 (22–45 vs 24–48).
+
+**Bug fixes:** K11 AutoSave header rejecting leading-part tokens on type addition; B1 `elf_loopsrc.py --compare` false positives; S4 installer frame-count bug (`ak_hvox` 56/104 frames); S7 16-bit reader slower after 8-bit removal (fixed by 1,024-point table read).
+
+- **Find here**: [093_SESSION_HANDOFF_LOG.md](093_SESSION_HANDOFF_LOG.md),
+  `ALKALINE_MODULE_REFERENCE.md` (firmware module: files, signal path, control, cost),
+  `ALKALINE_MODELLING_REFERENCE.md` (circuit models and DSP equations, S092),
+  `INSTRUMENTS_DSP_REFERENCE.md` (§5.5 Alkaline, §3.1 type table, §9.2 checklist),
+  `CPU_USE_DSP_AUDIT.md` (items 71–79: Alkaline cost, wavetable readers, pool ceiling),
+  `OSC_INTERP_AUDIT.md` (slot budget),
+  `FILESYSTEM_SPEC.md` (`.alk` file, catalogue v3, Re3/Sw3 removal, Alkaline keys),
+  `STORAGE_SRAM_MANIFEST.md` (flash, ITCM, SRAM after S093).
+
+### 094 — Voice DSP Adjustments, SRAM D-Cache Discovery, Cycle Budget, Memory Allocation Speed-ups, PWM Position Law Fix (2026-11-11/12)
+
+Session 094 implemented voice DSP adjustments (crash wave removal, PWM oscillator type, Alkaline VCA overdrive + tone, LFO sync fix and rate table), discovered and fixed the SRAM D-cache being disabled since Session 013, adopted a cycle-based budget replacing the instruction model, implemented QADD and memory allocation speed-ups, fixed the PWM position law, and expanded the Alkaline wave set. Branch `dev-ph7-alkaline`, HEAD `264c1e34`. Device-tested across four hardware runs.
+
+**P0 — Planning drafts.** Three draft proposals for review (no code changed): sample and voice reductions (crash removal analysis, sync blend cost, Advanced ceiling first frozen at ≈ 292.9 for Cymbal/HiHat); PWM as an oscillator type (hybrid mechanism: phase warp for Sin/Tri, two-read for Saw/Rec; integer Q15/Q14 interpolation paying for the second read; 15 ITCM loops; Alkaline fused mode 3 at 212 instructions); Alkaline post-filter overdrive + tone (P9-A′: the OTA input gain as a per-block variable, one-pole low-pass on the OTA output in the `c` form; A3 drive/makeup from tables; rows 29 `instrument_drive` and 30 `alk_tone`; Overdrive 0 / Tone 127 = bit-identical to before; ≈ 261.5 per sample accepted).
+
+**P1 — Voice DSP adjustments (S0–S6).** One implementation pass. S0: baselines and Alkaline golden capture (law AL-OD0). S1: LFO sync fix (`IM_SPECIAL_LFO_SYNC` writer 23, count 24; five `lfo_sync` rows become `ROW_MENU_SPECIAL`; `lfo_setSync()` recomputes `phaseInc`; sync wins: rate scale 1.0 while synced) and new rate table (`lfoRateHz[128]`: `frq` 0 = stopped, `frq` 1 = 100 s cycle, semitone grid 63..127; `LFO_MAX_F` removed). S2: crash wave removal (`crashSample` deleted; `OSC_STOCK_LAST` → `NOISE`; `OSC_SAMPLE_START` 6 → 5; `Cym` removed from `waveformNames`; savings: Drum −3, Snare −3, Cymbal/HiHat −6 per sample, ITCM −≈ 540 B, flash −32,769 B; card sample `SD_CARD/samples/02_crash.wav` generated from ROM data). S3: PWM on Drum, Snare, Cymbal, HiHat (`typ` 4 `pwm`; `OSC_TYPE_MODLIST` 5; `OSC_BIND_PWM` 3; 15 loops in `.itcm.s094p1`; integer Q15/Q14 interpolation). S4: Alkaline VCA overdrive + tone (`otaIn`, `toneC`, `toneZ` in `DiodeLadder`; A3 tables in `AlkalinePostTables.c/.h`; rows 29–30 appended; mix page vol pan ton drv). S5: Alkaline PWM (fused mode 3; `ALK_TYP_PWM` 2u; read form 2, 204 instructions). S6: ceiling assessment (Basic worst 257.8; first frozen Advanced ceiling). Key finding: the sine table starts at its trough (−cos), so the warped sine has no DC and P-D8 (DC correction) was not needed.
+
+**P2 — Alkaline savings: SRAM D-cache, cycle probe, budget.** Triggered by three Alkalines pinning the CPU after P1. The cycle probe (DEV_MODE_LOGGING only, DWT_CYCCNT, seven mixer sections, trace stage `p`, 94 B RAM) showed the whole block was 95.1 % of capacity. Root cause: MPU region 0 had S=1 (shareable) since S013 — the D-cache was effectively OFF for all SRAM. Fix: clear the S bit. Result: **−14.8 %** on the same Scene; six Alkalines at 80.9 %; worst Scene 84.0 %. Post-filter overdrive doubled (`OVD_OCT` 4.0 → 5.0, gain ×1..×32; `OVD_MAKEUP_OCT` −2.0 → −2.5). `bufferTool_satAdd32()` → `__QADD()` (stereo dry add 41–42 → 26 instructions/sample; with send 56–57 → 33–34). Cymbal and HiHat moved to Basic (`INSTRUMENT_FLAG_BASIC` set); no current type is Advanced. CrumpBit resonant TPT SVF restored on `grn`/`rvb` (S091 P5 F1 had replaced it with one-pole; `grn` 180.8 instructions/frame; cap 170 → 181). Budget adopted: **97 % average cap** of 156,705 cycles per block: 4 Basic × 19,620 + 2 Advanced × 21,803 + Effect 16,634 + shared mixer 12,784 + outside-mixer 4,701 + 500 slack.
+
+**P3 — Memory allocation speed-ups.** All four in one build. A: dedicated `filesystem_copy_clear_scratch_t` (+1,932 B SRAM1), removing the 9 KB name-cache loan for copy/clear (AutoSave, settings and Load no longer refused during paste). B: AsyncFATFS cache 8 → 16 sectors (+4,224 B SRAM1; 10 free slots instead of 2). C: discardable hint for regular-file data reads in AsyncFATFS (streamed data stops evicting directory/FAT sectors). D: write-back stack region (MPU region 2 over SRAM2, `TEX 001 C1 B1 S0`, SRD `0x01` for the IWDG capsule; speeds up spill stores). Stall record part 1 changed to 32-bit layout. SRAM1 free after: **87,404 B** (DEV link).
+
+**P4 — PWM position law fix and Alkaline wave additions.** Investigation: `pos` *p* and `128 − p` produce identical harmonic content; half the knob repeats. Fix: position-indexed tables; `pos` 0 = 50 % (unmodified wave), `pos` 127 = narrowest; 128 distinct widths. Narrowest: Rec 0.39 %, Saw/Tri 2.54 %, Sin 6.25 %. Alkaline `wav` gains Tri (index 2; 0 per sample in the existing fused loop; appended to preserve stored values). Alkaline `pwm` gains Tri (index 2; new fused ladder mode). No Sin (the ladder filters highs so strongly that warped sine and warped triangle sound the same), no Noi, Rec is the existing Sqr.
+
+**Bug fixes:** SRAM D-cache disabled since S013 (MPU region 0 S=1; −14.8 %); LFO sync/rate desync (plain byte store, no phaseInc recomputation); PWM pos law mirror symmetry (half the knob wasted); Alkaline tone spill cost (6 per sample; AS-2 open); CrumpBit build note (`menu.c` missing `AlkalineVoice.h` include during concurrent edit).
+
+**ITCM after S094:** **13,984 / 16,384 B** (was 12,128 at start of S094).
+
+- **Find here**: [094_SESSION_HANDOFF_LOG.md](094_SESSION_HANDOFF_LOG.md),
+  `INSTRUMENTS_DSP_REFERENCE.md` (PWM type, crash removal, Alkaline post-FX and waves),
+  `CPU_USE_DSP_AUDIT.md` (SRAM D-cache, QADD, cycle budget, CrumpBit SVF),
+  `EFFECTS_MODULES_DSP_REFERENCE.md` (CrumpBit SVF restored),
+  `ALKALINE_MODULE_REFERENCE.md` (post-FX, PWM, Tri wave, A3 tables),
+  `FILESYSTEM_SPEC.md` (OSC_SAMPLE_START 5, 02_crash.wav, typ pwm, Alkaline rows 29–30),
+  `STORAGE_SRAM_MANIFEST.md` (ITCM 13,984, SRAM1 +6,156 B, MPU region 2),
+  `ASYNCFATFS_REFERENCE.md` (16 sectors, discardable hint),
+  `COPYCLEAR_UTILITIES.md` (dedicated scratch, D53 wait removed),
+  `OSC_INTERP_AUDIT.md` (PWM no slot, crash removal pool 90→84),
+  `DEV_MODES.md` (cycle probe),
+  `MODULE_INTERCHANGE_SPEC.md` (IM_SPECIAL_LFO_SYNC, instrument_drive Alkaline branch).

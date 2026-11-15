@@ -332,6 +332,23 @@ typedef enum {
      * tools/diagnostic_tools/decode_devlogs.py ('w' branch).
      */
     AUTOSAVE_TRACE_STAGE_FS_OWNER = 'w',
+    /*
+     * p: per-slot and per-section render cycle probe (S094 P2, DEV only).
+     * One window of 2048 audio blocks (about 1.5 s) writes sixteen records.
+     * flags 0..5: slot in bits 0..2, instrument_type_t in bits 3..7;
+     * value32 bits 16..31 = average DWT cycles per block of the slot's
+     * block-rate work (filter recalc + calcSlotAsync), bits 0..15 = average
+     * of its render (calcSlotSyncBlock), each saturated at 0xFFFF. flags 6:
+     * value32 = average cycles of the whole mixer_calcNextSampleBlock();
+     * flags 7: value32 = its maximum in the window. flags 6 | (n << 3),
+     * n = 1..7: value32 = the average of mixer section n - 1
+     * (MIXER_PROBE_SEC_*: control/LFO, effects_service, set-up, SRR,
+     * output/send adds, Effect, compressor); n = 8: value32 = MPU region
+     * 0's RASR (bit 18 S set: SRAM not D-cached). 216 MHz / 1378.4 blocks per
+     * second = 156,705 cycles per block. Producer: mixer_probeEnd().
+     * Consumer: tools/diagnostic_tools/decode_devlogs.py ('p' branch).
+     */
+    AUTOSAVE_TRACE_STAGE_CPU_PROBE = 'p',
 } autosave_trace_stage_t;
 
 #define AUTOSAVE_TRACE_MLRN_WRITE    0x01u

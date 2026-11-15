@@ -1,0 +1,55 @@
+# S094 P1 S6 Basic worst case (D-1) -- PROPOSED, pending user review
+#
+# Image:    build/lxr02.elf after S5 (flash 688,756 B, ITCM 14,032 B); -g twin of
+#           the same tree for the mixer-inlined loops (scratch build, same code).
+# Method:   tools/dsp_test/baselines/s093p4/drum_ceiling.txt (elf_looppath.py
+#           --cond-heads --in-range on linked loops; elf_loopsrc.py on the -g
+#           twin for mixer-inlined loops, source-paired against the S0 -g twin;
+#           elf_blockpath.py per block; control_cost.py --elf for Alkaline).
+# Per block: measured. osc_setFreq's paths split by exit (it tail-branches
+#           to osc_userBind; see advanced_ceiling.txt): stock 128 -> 87,
+#           typed + bind 118 -> 96.
+#
+# ---- Drum, dearest: fm with an slp carrier, slp modulator (crash removed), T+D
+osc_slpFmRampBlock (carrier)                    51   0 VDIV   linked, = S0
+modulator: osc_slpPlainBlock (l entry)          27   0 VDIV   linked (was crash 30)
+transient_calcClickBlock                        22   0 VDIV   Drum sync block (out of line since S3), = S0
+transient mix-in                               2.5   0 VDIV   as frozen
+SVF_calcBlockZDF (dearest type loop)            92   2 VDIV   linked, = S0
+voicePost_drum                                  25   1 VDIV   Drum sync block, = S0
+per-sample loops                             219.5   3 VDIV
+per block: frozen 922 (Drum_calcVoiceAsync 63, slopeEg2_calc 28,
+  dispatch 14, SVF entry 161 all = S0), osc_setFreq 2 x 128 -> 2 x 96 (carrier
+  and l-entry modulator: typed path + osc_userBind) -64, osc_renderUserList
+  (the l-entry modulator) +14: 872 / 32                         27.3
+mixer SRR (mixer_decimateBlock)                 11   0 VDIV   S0 10: +1 from S3, accepted (see below)
+charged: 219.5 + 27.3 + 11 = 257.8 per sample, 3 VDIV   (S0 frozen 261.3)
+
+# ---- Snare: not the Basic dearest (frozen work: S094_P0 reductions §1.1);
+# its tonal oscillator falls 30 -> 27 with crash removed; the mixer-inlined
+# Snare post-chain is 30 (= S0); its distortion loop measures 45 (S0 79).
+
+# ---- Alkaline (S4 + S5, control_cost.py --elf, elf_looppath.py)
+no slot (wav): DiodeLadder_renderB2Osc 221 + 1,366/32 (42.7)   = 263.7, 3 VDIV + 9/32
+slot held:     DiodeLadder_renderB2Osc2 234 + 1,374/32 (42.9)  = 276.9
+pwm (form 2):  DiodeLadder_renderB2OscPwm 215 + 1,330/32 (41.6) = 256.6
+# S0: 213 / 228, per block 1,378 (256.1 / 271.1). Accepted for S4 (P9-D8 / P9-D2):
+# about 261.5 / 276.5. Measured no-slot is 2.2 above that and 2.4 above the
+# 261.3 Basic gate: a user decision (S4.13), not yet taken.
+
+# ---- Basic worst case: the Alkaline without a slot, 263.7 per sample.
+#
+# ---- Mixer against S0 (elf_loopsrc.py --compare, -g twins):
+# mixer_decimateBlock 10 -> 11 (GREW, every SRR voice). Bisected to the S3
+# PWM cases in the typed dispatchers, which LTO inlines into the engine
+# renders inside the mixer; routing pwm through the dispatchers' default arm
+# instead removed it but raised six FX-send loops by 1-4, so it was not taken.
+# ACCEPTED under S089's offset rule (user, 2026-11-11): only SRR voices pay
+# it, and crash removal saved more on those same paths (Drum 257.8 with it,
+# under 261.3; Advanced 285.9 with it, under the former ~292.9). The Alkaline,
+# the Basic worst case, uses no SRR. The FX-send function, which every slot
+# with an active send runs (the Alkaline included), is unchanged against S0
+# (out of line, 0xd88 B, 27 -> 27 loops, 0 grew).
+# The S2-recorded calcFmSineBlock +1 groups are gone in the final image
+# (Cymbal 28, HiHat 29, = S0). New mixer-inlined copies of calcSineBlock (22)
+# and calcWavetableOscBlock (23) are at or below their out-of-line loops.

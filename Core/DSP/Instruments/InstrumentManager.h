@@ -65,6 +65,51 @@ typedef enum {
     INSTRUMENT_TYPE_SNR,
     INSTRUMENT_TYPE_CYM,
     INSTRUMENT_TYPE_HAT,
+    /*
+     * S093 P4: the Alkaline (TB-303) type, before UNKNOWN.
+     *
+     * What:       value 4; UNKNOWN moves from 4 to 5.
+     * Why:        UNKNOWN is the count of real types: every type-sized array
+     *             (menu_instrumentLoadIndex[], menu.c l. 1728: +2 B, R1) and
+     *             every `type >= INSTRUMENT_TYPE_UNKNOWN` guard grow with it.
+     *             A new type goes here, before UNKNOWN, with a registry row
+     *             at the same index (InstrumentManager.c static assert and
+     *             check_special_tags.py registry_check()).
+     * Stored data: no stored value changes meaning. Types are stored as text
+     *             tokens (AutoSave, .hcnames, instrument files, midilrn.cfg);
+     *             the numeric value lives only in RAM. The .hcnames header
+     *             lists the tokens in enum order; a header written before a
+     *             type was appended is a leading part of the current list
+     *             and is accepted (filesystem_validateHcnamesHeader()), so
+     *             the register and AutoSave survive the addition. A
+     *             rejected header would regenerate /.hcnames with every row
+     *             flagged R and discard the AutoSave payload (S093 P4 field
+     *             report). New types are appended only.
+     */
+    INSTRUMENT_TYPE_ALK,
+    /*
+     * S095 P2: the Colloid type (token "col"), before UNKNOWN.
+     *
+     * What:       value 5; UNKNOWN moves from 5 to 6.
+     * Why:        appended (the standing rule, as the Alkaline in S093 P4):
+     *             no stored value changes meaning; every type-sized array
+     *             (menu_instrumentLoadIndex[], menu.c: +2 B .bss) and every
+     *             `type >= INSTRUMENT_TYPE_UNKNOWN` guard follow; the
+     *             .hcnames header written before the addition is a leading
+     *             part of the new list and is accepted.
+     */
+    INSTRUMENT_TYPE_COL,
+    /*
+     * S096 P1: the Tetrakt type (token "tkt"), before UNKNOWN.
+     *
+     * What:       value 6; UNKNOWN moves from 6 to 7.
+     * Why:        appended (the standing rule, as the Colloid in S095 P2): no
+     *             stored value changes meaning; menu_instrumentLoadIndex[]
+     *             (menu.c: +2 B .bss) and every `type >= UNKNOWN` guard
+     *             follow; a .hcnames header written before the addition is
+     *             a leading part of the new list and is accepted.
+     */
+    INSTRUMENT_TYPE_TKT,
     INSTRUMENT_TYPE_UNKNOWN
 } instrument_type_t;
 
@@ -189,8 +234,28 @@ typedef enum {
      * Accessors:  instrumentManager_writeSpecialRuntime() switch.
      * Affiliates: VOICE_CHAIN_* (voiceFold.h); voiceChainNames (MenuText.h);
      *             the four voice_chain rows; tools/dsp_test/check_special_tags.py.
-     */
+    */
     IM_SPECIAL_VOICE_CHAIN,
+    /*
+     * S094 P1 S1: lfo_sync writer.
+     *
+     * What:       IM_SPECIAL_LFO_SYNC = 23 (next after IM_SPECIAL_VOICE_CHAIN,
+     *             22); IM_SPECIAL_WRITER_COUNT becomes 24 (<= 32, the 5-bit
+     *             writer field, asserted below). The writer calls
+     *             lfo_setSync(), which stores the byte and recomputes the
+     *             LFO's phase step.
+     * Why:        the plain ROW_MENU store left phaseInc at the previous
+     *             mode's rate until a frq or tempo change (S094 bug report),
+     *             and a Kit/Scene/Instrument load applied lfo_rate (an earlier
+     *             row) with the previous sound's sync byte.
+     * Inputs:     slot, byte value (0..11; MENU_SYNC_RATES).
+     * Outputs:    the slot LFO's sync and phaseInc.
+     * Accessors:  instrumentManager_writeSpecialRuntime() switch.
+     * Affiliates: lfo_setSync() (lfo.c); the five lfo_sync rows;
+     *             tools/dsp_test/check_special_tags.py; the diagnostic
+     *             classifier.
+     */
+    IM_SPECIAL_LFO_SYNC,
     IM_SPECIAL_WRITER_COUNT
 } instrument_special_writer_t;
 
@@ -302,6 +367,25 @@ _Static_assert(sizeof(ParamDescriptor) == 28u,
 
 #define INSTRUMENT_MENU_EMPTY 0xffu
 #define INSTRUMENT_MENU_SKIP  0xfeu
+/*
+ * Bit cells of a page (S096 P1 SD1).
+ *
+ * What:       a page cell code 0xF0 + b (b 0..3) is "bit b of the type's
+ *             switch row" (the registry row's switch_row_plus1).
+ *             instrumentManager_menuDescriptorIndex() resolves it to the
+ *             switch row's descriptor and instrumentManager_menuCellBitPlus1()
+ *             returns b; the menu shows and edits that one bit as an on/off
+ *             cell and commits the whole row.
+ * Why:        the Tetrakt's four layer switches are one 4-bit row (plan
+ *             §4.3, user R4) shown as four controls. Descriptor indices are
+ *             0..63 and 0xFE / 0xFF are SKIP / EMPTY, so 0xF0..0xF3 are
+ *             free.
+ * Accessors:  TetraktParameters.c (tetrakt_menu_pages[]); menu.c
+ *             menu_resolveCellAbsolute().
+ */
+#define INSTRUMENT_MENU_BIT_FIRST  0xf0u
+#define INSTRUMENT_MENU_BIT_COUNT  4u
+#define INSTRUMENT_MENU_BIT(b)     ((uint8_t)(INSTRUMENT_MENU_BIT_FIRST + (b)))
 #define INSTRUMENT_MENU_PAGE_CELLS 16u
 
 typedef struct {
@@ -338,6 +422,16 @@ typedef struct {
     uint8_t descriptor_count;
     const instrument_menu_page_t *menu_pages;
     uint8_t menu_page_count;
+    /*
+     * The switch row behind the page's bit cells (S096 P1 SD1).
+     *
+     * What:       the descriptor index + 1 of the row that
+     *             INSTRUMENT_MENU_BIT(b) cells edit; 0 = the type has no
+     *             bit cells.
+     * Why:        +1 so every positional registry row written before this
+     *             field (zero-initialised) means "none".
+     */
+    uint8_t switch_row_plus1;
 } instrument_registry_entry_t;
 
 instrument_param_id_t instrumentParam_make(uint8_t slot, uint8_t descriptor_index);
@@ -381,6 +475,16 @@ const ParamDescriptor *instrumentManager_menuDescriptor(instrument_type_t type,
                                                          uint8_t position);
 const ParamDescriptor *instrumentManager_menuDescriptorIndex(
     instrument_type_t type, uint8_t page, uint8_t position, uint8_t *index_out);
+/*
+ * The bit of a page cell (S096 P1 SD1).
+ *
+ * What:       b + 1 when the cell is INSTRUMENT_MENU_BIT(b) on a type with a
+ *             switch row; 0 for every other cell.
+ * Inputs:     type, page (sub-page), position (0..15).
+ * Accessors:  menu.c menu_resolveCellAbsolute().
+ */
+uint8_t instrumentManager_menuCellBitPlus1(instrument_type_t type, uint8_t page,
+                                           uint8_t position);
 const ParamDescriptor *instrumentManager_voicePageDescriptorIndex(
     instrument_type_t type, uint8_t voice_page, uint8_t page, uint8_t position,
     uint8_t *index_out);
@@ -792,6 +896,46 @@ uint8_t instrumentManager_slotFoldType(uint8_t slot);
 void instrumentManager_calcSlotAsync(uint8_t slot);
 void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
                                          uint8_t size);
+/*
+ * The slot's right output block, for a stereo engine (S095 P2, draft §5).
+ *
+ * What:       the Colloid's or the Tetrakt's (S096 P1) voice->right (32
+ *             int16, written by its sync
+ *             block in the same call that fills the mixer's left buffer), or
+ *             NULL for every other type and for an empty slot.
+ * Why:        the mixer renders one mono stack block per slot (sampleData);
+ *             the right block lives inside the voice (the slot reserve), so a
+ *             stereo voice costs no new RAM. noinline keeps the call out of
+ *             mixer_calcNextSampleBlock()'s register allocation.
+ * Inputs:     slot 0..5. Outputs: a borrowed pointer valid until the next
+ *             render of the slot, or NULL.
+ * Accessors:  mixer_calcNextSampleBlock() (once per slot per block, after
+ *             instrumentManager_calcSlotSyncBlock()).
+ */
+const int16_t *instrumentManager_slotRight(uint8_t slot) __attribute__((noinline));
+/*
+ * Whether an instrument cell has no effect in the slot's current mode
+ * (S095 P2, C-D16, C-D20).
+ *
+ * What:       for a Colloid slot, colloidParameters_cellInactive() (pos and
+ *             psp under typ wav; spr and mot in fmd ser); 0 for every other
+ *             type.
+ * Why:        the compact cell shows "---" (menu_formatCellValue3()).
+ * Inputs:     slot 0..5, the cell's descriptor.
+ * Accessors:  menu.c menu_formatCellValue3().
+ */
+uint8_t instrumentManager_cellInactive(uint8_t slot, const ParamDescriptor *descriptor);
+/*
+ * Whether a target is a Tetrakt velocity group (S096 P1 SD3).
+ *
+ * What:       1 when target is a voice parameter on a Tetrakt slot whose
+ *             local index is a layer-A row of one of the nine groups
+ *             (tetraktParameters_velocityKind() != TKT_KIND_NONE); else 0.
+ * Why:        the velocity destination cell marks a group "all four layers"
+ *             with a '*' (tn* for tnA; plan §4.2).
+ * Accessors:  menu.c menu_formatCellValue3(), the single-parameter painter.
+ */
+uint8_t instrumentManager_targetIsVelocityGroup(uint16_t target);
 uint8_t instrumentManager_runtimePan(uint8_t slot);
 /*
  * Read the current slot instrument's channel volume for the mixer.

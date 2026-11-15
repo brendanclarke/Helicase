@@ -100,12 +100,23 @@ static inline float bufferTool_interpolatedGain(const uint8_t i,
 	return lastGain + frac*(gain - lastGain);
 }
 
+/*
+ * Signed saturating 32-bit add (S094 P2, AS-10).
+ *
+ * What:       a + b clamped to [INT32_MIN, INT32_MAX], as one QADD.
+ * Why:        the former int64 add and two range tests compiled to a 64-bit
+ *             add plus two compare-and-branch pairs per call (about 8-9
+ *             instructions), in every output and FX-send add of the mixer:
+ *             about 9.5 % of the block on the device (S094 P2 §17.3). QADD
+ *             gives the same result for every input.
+ * Inputs:     two signed-24-in-32 bus values.
+ * Outputs:    their saturated sum.
+ * Accessors:  mixer.c output, FX-send and FX-return adds.
+ * Affiliates: __QADD (cmsis_intrinsics.h), bufferTool_satSub32().
+ */
 static inline sample_mx_t bufferTool_satAdd32(sample_mx_t a, sample_mx_t b)
 {
-	int64_t acc = (int64_t)a + (int64_t)b;
-	if (acc > INT32_MAX) return INT32_MAX;
-	if (acc < INT32_MIN) return INT32_MIN;
-	return (sample_mx_t)acc;
+	return (sample_mx_t)__QADD(a, b);
 }
 
 static inline sample_mx_t bufferTool_satSub32(sample_mx_t a, sample_mx_t b)

@@ -4,7 +4,7 @@
 
 This is the authoritative reference for the menu system, LCD display, LED
 management, button handling, and endless-pot controls, **current as of
-Session 091** (2026-11-05, `dev-ph7-voice_expansion`).
+Session 094** (2026-11-13, `dev-ph7-alkaline`).
 
 This document covers the UI framework: page structure, cell resolution, the
 dtype system, display and LED rendering, input handling, parameter commit flow,
@@ -72,6 +72,51 @@ descriptors, not from `menuPages.h`.  Each cell resolves to a descriptor row
 with a parameter ID, display type, label, value range, and Morph/automation
 attributes.  The descriptor system allows each instrument type (Drum, Snare,
 Cymbal, HiHat) to present its own parameter layout.
+
+#### 2.1.1 Oscillator type menu (`typ`, S094 P1 S3)
+
+The `typ` row on the main oscillator selects the oscillator reader.
+`DTYPE_MENU` with id `MENU_OSC_TYPE`.  Not morphable, stored single-ended at
+`OscInfo.oscType` byte 34.
+
+| `typ` value | Name | Reader |
+|---|---|---|
+| 0 | `wav` | `OSC_TYPE_WAV` — stock waves only |
+| 1 | `smp` | `OSC_TYPE_SMP` — one-shot sample reader |
+| 2 | `slp` | `OSC_TYPE_SLP` — looped sample reader |
+| 3 | `wtb` | `OSC_TYPE_WTB` — wavetable with frame blending |
+| 4 | `pwm` | `OSC_TYPE_PWM` — pulse-width modulation (S094) |
+
+`OSC_TYPE_MODLIST` is 5 (the menu list length: sin, saw, rec, noi, pwm).  The
+stored `typ` byte uses indices 0-4; `pwm` = 4.  PWM is present on Drum,
+Snare, Cymbal, and HiHat.
+
+When `typ` = `pwm`, the `pos` knob controls pulse width: 0 = 50 % duty cycle
+(unmodified wave), 127 = narrowest pulse.  Hybrid mechanism: warp (W) for
+Sin/Tri, two-read (D) for Saw/Rec.
+
+#### 2.1.2 Alkaline mix page (S094 P1 S4)
+
+The Alkaline MIX sub-page layout:
+
+| Cell | Label | Descriptor row | Range | Meaning |
+|---|---|---|---|---|
+| 0 | `vol` | `instrument_volume` | 0..127 | output volume |
+| 1 | `pan` | `instrument_pan` | 0..127 (centre 64) | stereo pan |
+| 2 | `ton` | `alk_tone` (row 30) | 0..127 | low-pass tone: 127 = no filtering, 0 = maximum low-pass |
+| 3 | `drv` | `instrument_drive` (row 29) | 0..127 | overdrive: 0 = unity gain, 127 = maximum overdrive |
+
+Row 29 (`instrument_drive`) uses the shared key with the Alkaline branch in
+the writer.  Row 30 (`alk_tone`) is Alkaline-specific.
+
+#### 2.1.3 LFO sync rows (S094 P1 S1)
+
+Five `lfo_sync` rows become `ROW_MENU_SPECIAL` (named menu dtype).  The sync
+writer is `lfo_setSync(v)` — writer 23; `IM_SPECIAL_WRITER_COUNT` 24.
+
+The LFO rate table `lfoRateHz[128]`: frq 0 = stopped (DC), frq 1 = 100 s
+period (0.01 Hz), semitone grid from index 63 to 127 (musical rate
+quantisation above the midpoint).
 
 ### 2.2 Effect page (registry-driven)
 

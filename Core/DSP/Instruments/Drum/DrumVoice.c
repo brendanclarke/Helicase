@@ -365,8 +365,8 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 		 *
 		 * What:       adds osc_positionTrigger() to the start phase set above:
 		 *             position << 25 (position/128 of the phase range) for Sin,
-		 *             Tri, Saw, Rec, Re3, Sw3 and Cym (the whole crash sample),
-		 *             0 for noise and v1 user samples. The helper also sets
+		 *             Tri, Saw, Rec, Re3, Sw3 (removed in S093) and Cym (removed
+		 *             in S094 P1 S2), 0 for noise and v1 user samples. The helper also sets
 		 *             positionApplied = position, so the first block after the
 		 *             hit does not bend.
 		 * Why:        the hit starts exactly at today's start phase + pos;

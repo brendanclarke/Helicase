@@ -3,6 +3,9 @@
 #include "SnareParameters.h"
 #include "CymbalParameters.h"
 #include "HiHatParameters.h"
+#include "AlkalineParameters.h"   /* S093 P4: registry row */
+#include "ColloidParameters.h"    /* S095 P2: registry row, the inactive-cell test */
+#include "TetraktParameters.h"    /* S096 P1: registry row, the velocity groups */
 #include "SceneData.h"
 #include "SceneModTargets.h"
 #include "presetManager.h"
@@ -12,6 +15,12 @@
 #include "Snare.h"
 #include "CymbalVoice.h"
 #include "HiHat.h"
+#include "AlkalineVoice.h"        /* S093 P4: the runtime member and its entry points */
+#include "ColloidVoice.h"         /* S095 P2: the runtime member and its entry points */
+#include "TetraktVoice.h"         /* S096 P1: the runtime member and its entry points */
+#include "FxBuffer.h"             /* S096 P1: the voice unit (claim, release, borrow) */
+#include "sequencer.h"            /* S093 P4: seq_trackStepSamples() (read-only) for the
+                                   * Alkaline gate */
 #include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* clamps */
 #include "mixer.h"
 #include "modulationNode.h"
@@ -26,33 +35,85 @@
  * storage.
  *
  * ParameterArray/SceneData allocate the amount of per-slot storage. These
- * descriptors define what each storage cell means for a drum/snare/cymbal/hat
- * slot and how the value reaches that instrument's runtime instance. The
+ * descriptors define what each storage cell means for each instrument type
+ * and how the value reaches that instrument's runtime instance. The
  * extension and storage_directory fields are intentionally adjacent in every
  * row: filesystem.c can classify a filename and navigate to its `.hcindex`
  * folder through one registry record, with no parallel type-folder table.
+ *
+ * S093 P4 (F2: the type count is open-ended): rows are designated by their
+ * type, so row index == type value. The .hcnames header writer/validator
+ * walk the type values 0, 1, 2, ... through storage_instrumentTypeToText()
+ * until NULL (filesystem.c l. 6614, 24616); a gap or a reordering would end
+ * that walk early. The count assert below and check_special_tags.py
+ * registry_check() (3-character tokens, enum order) hold the invariants. A
+ * new type adds: an enum value before UNKNOWN, a row here, its
+ * <Type>Parameters.h/.c, its runtime member and dispatch cases, a TABLES
+ * entry, and its folder under SD_CARD/Instrument.
  */
 static const instrument_registry_entry_t instrument_registry[] = {
+    [INSTRUMENT_TYPE_DRM] =
     { INSTRUMENT_TYPE_DRM, "drm", drum_instrument_display_label, ".drm", "Drum",
       DRUM_INSTRUMENT_TYPE_FLAGS,
       drum_param_descriptors, DRUM_PARAM_DESCRIPTOR_COUNT,
       drum_menu_pages, DRUM_MENU_PAGE_COUNT },
+    [INSTRUMENT_TYPE_SNR] =
     { INSTRUMENT_TYPE_SNR, "snr", snare_instrument_display_label, ".snr", "Snare",
       SNARE_INSTRUMENT_TYPE_FLAGS,
       snare_param_descriptors, SNARE_PARAM_DESCRIPTOR_COUNT,
       snare_menu_pages, SNARE_MENU_PAGE_COUNT },
+    [INSTRUMENT_TYPE_CYM] =
     { INSTRUMENT_TYPE_CYM, "cym", cymbal_instrument_display_label, ".cym", "Cymbal",
       CYMBAL_INSTRUMENT_TYPE_FLAGS,
       cymbal_param_descriptors, CYMBAL_PARAM_DESCRIPTOR_COUNT,
       cymbal_menu_pages, CYMBAL_MENU_PAGE_COUNT },
+    [INSTRUMENT_TYPE_HAT] =
     { INSTRUMENT_TYPE_HAT, "hat", hihat_instrument_display_label, ".hat", "HiHat",
       HIHAT_INSTRUMENT_TYPE_FLAGS,
       hihat_param_descriptors, HIHAT_PARAM_DESCRIPTOR_COUNT,
       hihat_menu_pages, HIHAT_MENU_PAGE_COUNT },
+    /*
+     * S093 P4: Alkaline. Token/extension "alk"/".alk"; directory
+     * /Instrument/Alkaline (8 characters; SD_CARD/Instrument/Alkaline in the
+     * card image with init.alk). Basic: may take any slot.
+     */
+    [INSTRUMENT_TYPE_ALK] =
+    { INSTRUMENT_TYPE_ALK, "alk", alkaline_instrument_display_label, ".alk", "Alkaline",
+      ALKALINE_INSTRUMENT_TYPE_FLAGS,
+      alkaline_param_descriptors, ALKALINE_PARAM_DESCRIPTOR_COUNT,
+      alkaline_menu_pages, ALKALINE_MENU_PAGE_COUNT },
+    /*
+     * S095 P2: Colloid. Token/extension "col"/".col"; directory
+     * /Instrument/Colloid (7 characters; SD_CARD/Instrument/Colloid in the
+     * card image with init.col). Basic (C-D1): may take any slot.
+     */
+    [INSTRUMENT_TYPE_COL] =
+    { INSTRUMENT_TYPE_COL, "col", colloid_instrument_display_label, ".col", "Colloid",
+      COLLOID_INSTRUMENT_TYPE_FLAGS,
+      colloid_param_descriptors, COLLOID_PARAM_DESCRIPTOR_COUNT,
+      colloid_menu_pages, COLLOID_MENU_PAGE_COUNT },
+    /*
+     * S096 P1: Tetrakt. Token/extension "tkt"/".tkt"; directory
+     * /Instrument/Tetrakt (7 characters; SD_CARD/Instrument/Tetrakt in the
+     * card image with init.tkt). Basic (plan Q2): may take any slot. The
+     * switch row (lon) is named for the MOD page's bit cells (SD1).
+     */
+    [INSTRUMENT_TYPE_TKT] =
+    { INSTRUMENT_TYPE_TKT, "tkt", tetrakt_instrument_display_label, ".tkt", "Tetrakt",
+      TETRAKT_INSTRUMENT_TYPE_FLAGS,
+      tetrakt_param_descriptors, TETRAKT_PARAM_DESCRIPTOR_COUNT,
+      tetrakt_menu_pages, TETRAKT_MENU_PAGE_COUNT,
+      (uint8_t)(TETRAKT_PARAM_LAYER_ON_INDEX + 1u) },
 };
 
 #define INSTRUMENT_REGISTRY_COUNT \
     ((uint8_t)(sizeof(instrument_registry) / sizeof(instrument_registry[0])))
+
+/* S093 P4: one row per real type and no gap. A designated row past the last
+ * type would grow the array (and fail here); a missing row would leave a
+ * zeroed hole (and fail here, or registry_check() for the order). */
+_Static_assert(INSTRUMENT_REGISTRY_COUNT == INSTRUMENT_TYPE_UNKNOWN,
+               "instrument_registry needs exactly one row per instrument_type_t value");
 
 /*
  * Resolved descriptor modulation target.
@@ -173,6 +234,9 @@ typedef union {
     SnareVoice snare;
     CymbalVoice cymbal;
     HiHatVoice hihat;
+    AlkalineVoice alkaline;   /* S093 P4: 540 B at r6 (measured); slot reserve 1,264 B */
+    ColloidVoice colloid;     /* S095 P3: 1,112 B (measured); slot reserve 1,264 B */
+    TetraktVoice tetrakt;     /* S096 P1: ≈ 1,090 B (est.; asserted below); slot reserve 1,264 B */
     uint8_t reserved[INSTRUMENT_RUNTIME_SLOT_BYTES];
 } InstrumentRuntimeSlot;
 static InstrumentRuntimeSlot runtime_slots[INSTRUMENT_SLOT_COUNT];
@@ -185,6 +249,23 @@ _Static_assert(sizeof(CymbalVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES,
                "CymbalVoice exceeds tagged slot reserve");
 _Static_assert(sizeof(HiHatVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES,
                "HiHatVoice exceeds tagged slot reserve");
+/* S093 P4: the Alkaline voice fits the tagged slot (no RAM growth: the union
+ * is sized by INSTRUMENT_RUNTIME_SLOT_BYTES = 2 x sizeof(DrumVoice) =
+ * 2 x 632 B). */
+_Static_assert(sizeof(AlkalineVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES,
+               "AlkalineVoice exceeds tagged slot reserve");
+/* S095 P2: the Colloid voice fits the tagged slot (no RAM growth: 1,032 B;
+ * S095 P3: 1,112 B with the per-oscillator slewed pitch and the post stage,
+ * its right output block and both buses included, against 2 x 632 B). */
+_Static_assert(sizeof(ColloidVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES,
+               "ColloidVoice exceeds tagged slot reserve");
+/* S096 P1: the Tetrakt voice fits the tagged slot (no RAM growth; the
+ * mix buses are the shared 448 B work area in TetraktVoice.c, approved),
+ * and its line is exactly one FxBuffer voice unit. */
+_Static_assert(sizeof(TetraktVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES,
+               "TetraktVoice exceeds tagged slot reserve");
+_Static_assert(TKT_LINE_SAMPLES == FXBUF_VOICE_UNIT_SAMPLES,
+               "the Tetrakt line is one voice unit");
 _Static_assert(sizeof(InstrumentRuntimeSlot) == INSTRUMENT_RUNTIME_SLOT_BYTES,
                "Tagged slot reserve changed through alignment or member size");
 
@@ -244,6 +325,73 @@ static HiHatVoice *instrumentManager_hihatRuntime(uint8_t slot)
     return (slot < INSTRUMENT_SLOT_COUNT) ? &runtime_slots[slot].hihat : 0;
 }
 
+/*
+ * The slot's Alkaline runtime (S093 P4).
+ *
+ * What:       the tagged union member for slot, or NULL out of range. Like
+ *             the four other accessors it does not check the slot's type:
+ *             every caller switches on instrumentManager_slotType() first.
+ * Accessors:  the dispatch sites of §5.6 (S093_P4).
+ */
+static AlkalineVoice *instrumentManager_alkalineRuntime(uint8_t slot)
+{
+    return (slot < INSTRUMENT_SLOT_COUNT) ? &runtime_slots[slot].alkaline : 0;
+}
+
+/*
+ * The slot's Colloid runtime (S095 P2).
+ *
+ * What:       the tagged union member for slot, or NULL out of range. Like
+ *             the other accessors it does not check the slot's type: every
+ *             caller switches on instrumentManager_slotType() first.
+ */
+static ColloidVoice *instrumentManager_colloidRuntime(uint8_t slot)
+{
+    return (slot < INSTRUMENT_SLOT_COUNT) ? &runtime_slots[slot].colloid : 0;
+}
+
+/*
+ * The slot's Tetrakt runtime (S096 P1).
+ *
+ * What:       the tagged union member for slot, or NULL out of range. Like
+ *             the other accessors it does not check the slot's type: every
+ *             caller switches on instrumentManager_slotType() first.
+ */
+static TetraktVoice *instrumentManager_tetraktRuntime(uint8_t slot)
+{
+    return (slot < INSTRUMENT_SLOT_COUNT) ? &runtime_slots[slot].tetrakt : 0;
+}
+
+/*
+ * The voice unit a slot's incoming type needs (S096 P1 SD11).
+ *
+ * What:       makes the slot own exactly the units its type uses (one for a
+ *             Tetrakt, none for every other type) and returns the Tetrakt's
+ *             line, or NULL. A slot that already owns the right count keeps
+ *             its unit, so a Tetrakt -> Tetrakt reset does not release and
+ *             reclaim (no Effect reseat). Any other change releases first,
+ *             then claims (fxbuf_voiceAcquire() notifies the Effect through
+ *             the share callback, foreground only).
+ * Why:        the FxBuffer contract: units belong to the slot's runtime and
+ *             are claimed at type assignment, never at a row change (plan
+ *             §10). With six Tetrakts six of the twelve units are owned.
+ * Inputs:     slot, type (the incoming runtime type).
+ * Outputs:    the unit's samples or NULL (no unit: S1 muted, SD11).
+ * Accessors:  instrumentManager_runtimeInit(),
+ *             instrumentManager_resetRuntimeSlotFromScene().
+ */
+static int16_t *instrumentManager_slotVoiceUnits(uint8_t slot, instrument_type_t type)
+{
+    const uint8_t wanted = (type == INSTRUMENT_TYPE_TKT) ? 1u : 0u;
+
+    if (fxbuf_voiceUnitCount(slot) != wanted) {
+        fxbuf_voiceRelease(slot);
+        if (wanted)
+            (void)fxbuf_voiceAcquire(slot, wanted);
+    }
+    return wanted ? fxbuf_voiceUnit(slot, 0u) : 0;
+}
+
 static char instrumentManager_lower(char c)
 {
     return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
@@ -295,8 +443,9 @@ uint8_t instrumentManager_registryCount(void)
      *
      * Inputs: none. Output: number of immutable registry rows. This is a thin
      * accessor, but it is the narrow boundary that lets Menu/filesystem
-     * enumerate supported types without duplicating the static registry array
-     * or depending on enum contiguity.
+     * enumerate supported types without duplicating the static registry array;
+     * rows are indexed by type (S093 P4); clients still enumerate through
+     * this accessor.
      */
     return INSTRUMENT_REGISTRY_COUNT;
 }
@@ -530,6 +679,17 @@ const ParamDescriptor *instrumentManager_menuDescriptorIndex(
         position >= INSTRUMENT_MENU_PAGE_CELLS)
         return 0;
     descriptor_index = entry->menu_pages[page].descriptor_index[position];
+    /*
+     * S096 P1 SD1: a bit cell resolves to the type's switch row (the cell's
+     * bit comes from instrumentManager_menuCellBitPlus1()). A type without a
+     * switch row treats the code as an empty cell.
+     */
+    if (descriptor_index >= INSTRUMENT_MENU_BIT_FIRST &&
+        descriptor_index < INSTRUMENT_MENU_BIT_FIRST + INSTRUMENT_MENU_BIT_COUNT) {
+        if (!entry->switch_row_plus1)
+            return 0;
+        descriptor_index = (uint8_t)(entry->switch_row_plus1 - 1u);
+    }
     if (descriptor_index == INSTRUMENT_MENU_SKIP) {
         if (index_out)
             *index_out = descriptor_index;
@@ -542,6 +702,23 @@ const ParamDescriptor *instrumentManager_menuDescriptorIndex(
     if (index_out)
         *index_out = descriptor_index;
     return &entry->descriptors[descriptor_index];
+}
+
+uint8_t instrumentManager_menuCellBitPlus1(instrument_type_t type, uint8_t page,
+                                           uint8_t position)
+{
+    /* S096 P1 SD1. Contract: InstrumentManager.h. */
+    const instrument_registry_entry_t *entry = instrumentManager_registryEntry(type);
+    uint8_t code;
+
+    if (!entry || !entry->menu_pages || !entry->switch_row_plus1 ||
+        page >= entry->menu_page_count || position >= INSTRUMENT_MENU_PAGE_CELLS)
+        return 0u;
+    code = entry->menu_pages[page].descriptor_index[position];
+    if (code < INSTRUMENT_MENU_BIT_FIRST ||
+        code >= INSTRUMENT_MENU_BIT_FIRST + INSTRUMENT_MENU_BIT_COUNT)
+        return 0u;
+    return (uint8_t)(code - INSTRUMENT_MENU_BIT_FIRST + 1u);
 }
 
 const ParamDescriptor *instrumentManager_voicePageDescriptorIndex(
@@ -770,9 +947,10 @@ static uint8_t instrumentManager_descriptorSupportsModulationRange(
  * Highest legal value of an oscillator wave row (S087 stage D; S087 P1).
  *
  * What:       osc1_wave: the last entry of osc1's current type (wav:
- *             OSC_STOCK_LAST; smp/slp: samples - 1; wtb: tables - 1; 0 when
- *             none); a modulator wave row: the last entry of the flat list
- *             (osc_userListCount() - 1). Any other row: OSC_STOCK_LAST.
+ *             OSC_STOCK_LAST; an Alkaline under wav or pwm: ALK_WAVE_COUNT
+ *             - 1 (Saw, Sqr, Tri); smp/slp: samples - 1; wtb: tables - 1; 0
+ *             when none); a modulator wave row: the last entry of the flat
+ *             list (osc_userListCount() - 1). Any other row: OSC_STOCK_LAST.
  * Why:        LFO and velocity ranges, the menu clamp and the automation
  *             display must agree on what exists (S087 P0 r8, §12.4).
  * Inputs:     slot (INSTRUMENT_SLOT_COUNT = unknown), descriptor.
@@ -784,11 +962,41 @@ static uint8_t instrumentManager_descriptorSupportsModulationRange(
 static uint8_t instrumentManager_waveDomainMax(uint8_t slot,
                                                const ParamDescriptor *descriptor)
 {
+    /*
+     * S096 P1: a Tetrakt sample row (tkt_sample_a..d) lists the installed
+     * samples: 0 .. count - 1 (0 with none installed: the layer is silent).
+     * The rows are MENU_WAVEFORM selectors (TetraktParameters.c
+     * ROW_MENU_SELECT), so this is their menu clamp and automation range
+     * (instrumentManager_waveCellCount()).
+     */
+    if (descriptor && descriptor->file_key &&
+        strncmp(descriptor->file_key, "tkt_sample_", 11u) == 0) {
+        const uint8_t samples = sampleMemory_getNumSamples();
+
+        return samples ? (uint8_t)(samples - 1u) : 0u;
+    }
     if (descriptor && descriptor->file_key &&
         strstr(descriptor->file_key, "_wave")) {
         if (strcmp(descriptor->file_key, "osc1_wave") == 0 &&
             slot < INSTRUMENT_SLOT_COUNT) {
             const OscInfo *osc = instrumentManager_osc(slot, "osc1_wave");
+
+            /* S093 P8 / S094 P4: an Alkaline slot under wav or pwm lists
+             * Saw, Sqr, Tri. The LFO/velocity range, menu clamp, edit count
+             * and typ switch clamp all take it from here. */
+            if (osc && (osc->oscType == OSC_TYPE_WAV || osc->oscType == OSC_TYPE_PWM) &&
+                instrumentManager_slotType(slot) == INSTRUMENT_TYPE_ALK)
+                return (uint8_t)(ALK_WAVE_COUNT - 1u);
+            /* S095 P2 (C-D20): a Colloid slot lists Saw Rec Tri Sin under
+             * wav and (S095 P3 F2) Sin Tri Saw Rec under pwm; under wtb the
+             * shared count below (the installed tables) applies. */
+            if (osc && instrumentManager_slotType(slot) == INSTRUMENT_TYPE_COL) {
+                if (osc->oscType == OSC_TYPE_WAV)
+                    return (uint8_t)(COL_WAVE_COUNT - 1u);
+                if (osc->oscType == OSC_TYPE_PWM)
+                    return (uint8_t)(COL_PWM_WAVE_COUNT - 1u);
+            }
+
             const uint8_t count = osc ? osc_userCount(osc->oscType)
                                       : (uint8_t)OSC_SAMPLE_START;
 
@@ -1335,8 +1543,48 @@ uint8_t instrumentManager_targetValidForVelocitySource(
         return sceneModTarget_valid(sceneModTarget_voiceMorphId(source_slot),
                                     SCENE_MOD_TARGET_USE_VELOCITY);
     }
+    /*
+     * S096 P1 SD3: a Tetrakt names each velocity group once, by its layer-A
+     * row; the B, C and D rows of the nine groups are not velocity targets
+     * (a stored one reads as off).
+     */
+    if (instrumentManager_slotType(source_slot) == INSTRUMENT_TYPE_TKT &&
+        tetraktParameters_velocityTokenHidden(token))
+        return 0u;
     return instrumentManager_targetTokenValidForSlot(
         scene_index, source_slot, token, INSTRUMENT_TARGET_MODULATION);
+}
+
+/*
+ * One step of the velocity list's local part (S096 P1 SD3).
+ *
+ * What:       instrumentManager_stepTargetTokenForSlot() in the given
+ *             direction, repeated while the result is a hidden Tetrakt token
+ *             (the B, C, D rows of a group), at most INSTRUMENT_PARAM_COUNT
+ *             times; for every other type exactly one step.
+ * Why:        the velocity list names each group once (tu* lv* dy* pn* dr*
+ *             sr* sp* tn* te*); the LFO lists keep every row.
+ * Accessors:  instrumentManager_stepVelocityTargetForSource().
+ */
+static instrument_target_token_t instrumentManager_stepVelocityLocal(
+    uint8_t scene_index, uint8_t source_slot, instrument_target_token_t token,
+    int8_t direction)
+{
+    const uint8_t tkt = (uint8_t)(instrumentManager_slotType(source_slot) ==
+                                  INSTRUMENT_TYPE_TKT);
+    instrument_target_token_t next = token;
+    uint8_t n;
+
+    for (n = 0u; n < INSTRUMENT_PARAM_COUNT; n++) {
+        instrument_target_token_t prev = next;
+
+        next = instrumentManager_stepTargetTokenForSlot(
+            scene_index, source_slot, prev, direction, INSTRUMENT_TARGET_MODULATION);
+        if (next == prev || !tkt || next == INSTRUMENT_TARGET_TOKEN_OFF ||
+            !tetraktParameters_velocityTokenHidden(next))
+            return next;
+    }
+    return next;
 }
 
 instrument_target_token_t instrumentManager_stepVelocityTargetForSource(
@@ -1364,10 +1612,10 @@ instrument_target_token_t instrumentManager_stepVelocityTargetForSource(
     if (direction > 0) {
         if (normalized == INSTRUMENT_TARGET_TOKEN_OFF ||
             normalized <= INSTRUMENT_TARGET_TOKEN_MAX_LOCAL) {
+            /* S096 P1 SD3: the walk skips hidden Tetrakt tokens */
             instrument_target_token_t next =
-                instrumentManager_stepTargetTokenForSlot(
-                    scene_index, source_slot, normalized, 1,
-                    INSTRUMENT_TARGET_MODULATION);
+                instrumentManager_stepVelocityLocal(scene_index, source_slot,
+                                                    normalized, 1);
             if (next != normalized)
                 return next;
             return instrumentManager_targetValidForVelocitySource(
@@ -1383,9 +1631,8 @@ instrument_target_token_t instrumentManager_stepVelocityTargetForSource(
             scene_index, source_slot, INSTRUMENT_TARGET_MODULATION);
     }
     if (normalized <= INSTRUMENT_TARGET_TOKEN_MAX_LOCAL) {
-        return instrumentManager_stepTargetTokenForSlot(
-            scene_index, source_slot, normalized, -1,
-            INSTRUMENT_TARGET_MODULATION);
+        return instrumentManager_stepVelocityLocal(scene_index, source_slot,
+                                                   normalized, -1);
     }
     return INSTRUMENT_TARGET_TOKEN_OFF;
 }
@@ -1406,6 +1653,9 @@ void *instrumentManager_runtimeInstance(uint8_t slot)
     case INSTRUMENT_TYPE_SNR: return instrumentManager_snareRuntime(slot);
     case INSTRUMENT_TYPE_CYM: return instrumentManager_cymbalRuntime(slot);
     case INSTRUMENT_TYPE_HAT: return instrumentManager_hihatRuntime(slot);
+    case INSTRUMENT_TYPE_ALK: return instrumentManager_alkalineRuntime(slot);
+    case INSTRUMENT_TYPE_COL: return instrumentManager_colloidRuntime(slot);   /* S095 P2 */
+    case INSTRUMENT_TYPE_TKT: return instrumentManager_tetraktRuntime(slot);   /* S096 P1 */
     default: return 0;
     }
 }
@@ -1424,6 +1674,15 @@ static Lfo *instrumentManager_runtimeLfo(uint8_t slot)
         return voice ? &voice->lfo : 0; }
     case INSTRUMENT_TYPE_HAT: {
         HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? &voice->lfo : 0; }
+    case INSTRUMENT_TYPE_ALK: {   /* S093 P4: the Alkaline voice owns its LFO like every engine */
+        AlkalineVoice *voice = instrumentManager_alkalineRuntime(slot);
+        return voice ? &voice->lfo : 0; }
+    case INSTRUMENT_TYPE_COL: {   /* S095 P2: the Colloid voice owns its LFO like every engine */
+        ColloidVoice *voice = instrumentManager_colloidRuntime(slot);
+        return voice ? &voice->lfo : 0; }
+    case INSTRUMENT_TYPE_TKT: {   /* S096 P1: the Tetrakt voice owns its LFO like every engine */
+        TetraktVoice *voice = instrumentManager_tetraktRuntime(slot);
         return voice ? &voice->lfo : 0; }
     default:
         return 0;
@@ -1493,6 +1752,22 @@ void instrumentManager_runtimeInit(void)
         case INSTRUMENT_TYPE_HAT:
             HiHat_initVoice(instrumentManager_hihatRuntime(slot));
             break;
+        case INSTRUMENT_TYPE_ALK:
+            Alkaline_initVoice(instrumentManager_alkalineRuntime(slot));
+            break;
+        case INSTRUMENT_TYPE_COL:   /* S095 P2 */
+            Colloid_initVoice(instrumentManager_colloidRuntime(slot));
+            break;
+        case INSTRUMENT_TYPE_TKT:
+            /*
+             * S096 P1: the boot claim of the Tetrakt's voice unit
+             * (fxbuf_init() ran first in main.c; the Effect registers its
+             * share callback afterwards in effects_init() and reads the
+             * share when its type starts, so nothing is notified here).
+             */
+            Tetrakt_initVoice(instrumentManager_tetraktRuntime(slot), slot,
+                              instrumentManager_slotVoiceUnits(slot, INSTRUMENT_TYPE_TKT));
+            break;
         default:
             break;
         }
@@ -1513,6 +1788,33 @@ uint8_t instrumentManager_ampEnvelopeQuiet(uint8_t slot)
      */
     if (slot >= INSTRUMENT_SLOT_COUNT)
         return 1u;
+    /*
+     * S093 P4: Alkaline has no SlopeEg2, so the generic test below would call
+     * it quiet (no envelope) while a note sounds. Its own test: gate closed,
+     * ACCENT low and the OTA current (before the make-up) below 1e-7 A
+     * (Alkaline_isQuiet(), AlkalineVoice.h l. 119).
+     */
+    if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_ALK) {
+        const AlkalineVoice *voice = instrumentManager_alkalineRuntime(slot);
+        return voice ? Alkaline_isQuiet(voice) : 1u;
+    }
+    /*
+     * S096 P1 SD10: the Tetrakt is quiet when all four layers are idle (a
+     * still-ringing S1 tail does not hold a swap).
+     */
+    if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_TKT) {
+        const TetraktVoice *voice = instrumentManager_tetraktRuntime(slot);
+        return voice ? Tetrakt_isQuiet(voice) : 1u;
+    }
+    /*
+     * S095 P2: the Colloid has no SlopeEg2 either; it is quiet when its amp
+     * envelope is idle (Colloid_isQuiet(): the release fell below 1e-4, this
+     * function's threshold).
+     */
+    if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_COL) {
+        const ColloidVoice *voice = instrumentManager_colloidRuntime(slot);
+        return voice ? Colloid_isQuiet(voice) : 1u;
+    }
     ampEg = instrumentManager_ampEg(slot);
     if (!ampEg)
         return 1u;
@@ -1611,6 +1913,20 @@ void instrumentManager_resetRuntimeSlotFromScene(uint8_t slot,
     memset(&runtime_slots[slot], 0, sizeof(runtime_slots[slot]));
     runtime_slot_type[slot] =
         incoming ? incoming->type : INSTRUMENT_TYPE_UNKNOWN;
+    /*
+     * S096 P1 SD11: the slot owns exactly the voice units its incoming type
+     * uses (a Tetrakt one, every other type none). This is the only
+     * tagged-member replacement point, so it is the only place units change
+     * owner after boot. Foreground (the Preset activation worker, between
+     * render blocks), as the FxBuffer share callback requires.
+     */
+    {
+        int16_t *const line =
+            instrumentManager_slotVoiceUnits(slot, instrumentManager_slotType(slot));
+
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_TKT)
+            Tetrakt_initVoice(instrumentManager_tetraktRuntime(slot), slot, line);
+    }
     switch (instrumentManager_slotType(slot)) {
     case INSTRUMENT_TYPE_DRM:
         Drum_initVoice(instrumentManager_drumRuntime(slot), slot);
@@ -1623,6 +1939,12 @@ void instrumentManager_resetRuntimeSlotFromScene(uint8_t slot,
         break;
     case INSTRUMENT_TYPE_HAT:
         HiHat_initVoice(instrumentManager_hihatRuntime(slot));
+        break;
+    case INSTRUMENT_TYPE_ALK:
+        Alkaline_initVoice(instrumentManager_alkalineRuntime(slot));
+        break;
+    case INSTRUMENT_TYPE_COL:   /* S095 P2 */
+        Colloid_initVoice(instrumentManager_colloidRuntime(slot));
         break;
     default:
         break;
@@ -1739,6 +2061,15 @@ uint8_t instrumentManager_runtimePan(uint8_t slot)
     case INSTRUMENT_TYPE_HAT: {
         HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
         return voice ? voice->pan : 64u; }
+    case INSTRUMENT_TYPE_ALK: {
+        AlkalineVoice *voice = instrumentManager_alkalineRuntime(slot);
+        return voice ? voice->pan : 64u; }
+    case INSTRUMENT_TYPE_COL: {   /* S095 P2: the mixer's per-slot pan (C-D11) */
+        ColloidVoice *voice = instrumentManager_colloidRuntime(slot);
+        return voice ? voice->pan : 64u; }
+    case INSTRUMENT_TYPE_TKT: {   /* S096 P1: the voice pan, the L-R balance (plan §2) */
+        TetraktVoice *voice = instrumentManager_tetraktRuntime(slot);
+        return voice ? voice->pan : 64u; }
     default:
         return 64u;
     }
@@ -1767,6 +2098,15 @@ float instrumentManager_runtimeVolume(uint8_t slot)
         return voice ? voice->vol : 0.0f; }
     case INSTRUMENT_TYPE_HAT: {
         HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? voice->vol : 0.0f; }
+    case INSTRUMENT_TYPE_ALK: {
+        AlkalineVoice *voice = instrumentManager_alkalineRuntime(slot);
+        return voice ? voice->vol : 0.0f; }
+    case INSTRUMENT_TYPE_COL: {   /* S095 P2 */
+        ColloidVoice *voice = instrumentManager_colloidRuntime(slot);
+        return voice ? voice->vol : 0.0f; }
+    case INSTRUMENT_TYPE_TKT: {   /* S096 P1 */
+        TetraktVoice *voice = instrumentManager_tetraktRuntime(slot);
         return voice ? voice->vol : 0.0f; }
     default:
         return 0.0f;
@@ -1944,7 +2284,13 @@ uint8_t instrumentManager_itpFadeSlotAvailable(uint8_t exclude_slot)
             continue;
         count = (uint8_t)(count + instrumentManager_slotHasActiveItpFade(slot));
     }
-    return (uint8_t)(count < OSC_WAVE_INTERP_MAX_ACTIVE);
+    /*
+     * S095 P1 (plan §5.7): one slot fewer while an Effect feed runs; a fade
+     * already running keeps its slot until it ends (<= 132 samples), the
+     * accepted residual of D19.
+     */
+    return (uint8_t)(count < (uint8_t)(OSC_WAVE_INTERP_MAX_ACTIVE -
+                                       effects_feedSlotLock()));
 }
 
 void instrumentManager_calcSlotAsync(uint8_t slot)
@@ -1990,6 +2336,15 @@ void instrumentManager_calcSlotAsync(uint8_t slot)
     case INSTRUMENT_TYPE_HAT:
         HiHat_calcAsyncVoice(instrumentManager_hihatRuntime(slot));
         break;
+    case INSTRUMENT_TYPE_ALK:   /* S093 P4: control rate; the audio loop is the sync block */
+        Alkaline_calcVoiceAsync(instrumentManager_alkalineRuntime(slot));
+        break;
+    case INSTRUMENT_TYPE_COL:   /* S095 P2: control rate; the audio loops are the sync block */
+        Colloid_calcVoiceAsync(instrumentManager_colloidRuntime(slot));
+        break;
+    case INSTRUMENT_TYPE_TKT:   /* S096 P1: control rate; the audio loops are the sync block */
+        Tetrakt_calcVoiceAsync(instrumentManager_tetraktRuntime(slot));
+        break;
     default:
         break;
     }
@@ -2024,6 +2379,43 @@ void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
     case INSTRUMENT_TYPE_HAT:
         HiHat_calcSyncBlockVoice(instrumentManager_hihatRuntime(slot), buf, size);
         break;
+    case INSTRUMENT_TYPE_ALK:
+        /*
+         * S093 P4: Alkaline_calcVoiceAsync() (control rate: pitch, MEG,
+         * accent network, expo, VEG, prewarp, setNet; about 915 instructions
+         * per block, no libm) and Alkaline_calcVoiceSyncBlock() (the fused
+         * oscillator + B2R loop, 213 per sample, and the slow network chunk).
+         * Both are noinline (AlkalineVoice.h l. 106-107): LTO must not
+         * inline them into mixer_calcNextSampleBlock() (S086 F1 register
+         * pressure).
+         */
+        Alkaline_calcVoiceSyncBlock(instrumentManager_alkalineRuntime(slot), buf, size);
+        break;
+    case INSTRUMENT_TYPE_COL:
+        /*
+         * S095 P2: Colloid_calcVoiceAsync() (control rate: envelopes, pitch
+         * and glide, every oscillator's increment, row and stereo position,
+         * both filters' coefficient ramps) and Colloid_calcVoiceSyncBlock()
+         * (the oscillator pair loops, ITCM, then the filter/output loop).
+         * buf receives the left block; the right block stays in the voice
+         * for the mixer (instrumentManager_slotRight()). Both are noinline
+         * (ColloidVoice.h): LTO must not inline them into
+         * mixer_calcNextSampleBlock() (S086 F1 register pressure).
+         */
+        Colloid_calcVoiceSyncBlock(instrumentManager_colloidRuntime(slot), buf, size);
+        break;
+    case INSTRUMENT_TYPE_TKT:
+        /*
+         * S096 P1: Tetrakt_calcVoiceAsync() (control: the layers' stages,
+         * pitches and binds, tone ramps, drive, gains, SRR, W2; the space
+         * stage) and Tetrakt_calcVoiceSyncBlock() (per layer the post
+         * loop, which reads the bound sample itself since S096 P1 §19; the
+         * space stage and the pack). buf receives the left block;
+         * the right block stays in the voice (instrumentManager_slotRight()).
+         * Both are noinline (TetraktVoice.h).
+         */
+        Tetrakt_calcVoiceSyncBlock(instrumentManager_tetraktRuntime(slot), buf, size);
+        break;
     default:
         memset(buf, 0, size * sizeof(buf[0]));
         break;
@@ -2049,6 +2441,50 @@ uint8_t instrumentManager_slotUsesSrr(uint8_t slot)
     default:
         return 0u;
     }
+}
+
+/*
+ * The slot's right output block (S095 P2). Contract: InstrumentManager.h.
+ */
+const int16_t *instrumentManager_slotRight(uint8_t slot)
+{
+    /* S095 P2: the Colloid; S096 P1: the Tetrakt. NULL for every mono type. */
+    if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_COL) {
+        const ColloidVoice *voice = instrumentManager_colloidRuntime(slot);
+        return voice ? voice->right : 0;
+    }
+    if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_TKT) {
+        const TetraktVoice *voice = instrumentManager_tetraktRuntime(slot);
+        return voice ? voice->right : 0;
+    }
+    return 0;
+}
+
+/*
+ * Whether an instrument cell has no effect now (S095 P2). Contract:
+ * InstrumentManager.h.
+ */
+uint8_t instrumentManager_cellInactive(uint8_t slot, const ParamDescriptor *descriptor)
+{
+    const ColloidVoice *voice;
+
+    if (!descriptor || instrumentManager_slotType(slot) != INSTRUMENT_TYPE_COL)
+        return 0u;
+    voice = instrumentManager_colloidRuntime(slot);
+    return voice ? colloidParameters_cellInactive(voice, descriptor) : 0u;
+}
+
+/*
+ * Whether a target is a Tetrakt velocity group (S096 P1 SD3). Contract:
+ * InstrumentManager.h.
+ */
+uint8_t instrumentManager_targetIsVelocityGroup(uint16_t target)
+{
+    if (!instrumentParam_isVoiceParameter(target) ||
+        instrumentManager_slotType(instrumentParam_slot(target)) != INSTRUMENT_TYPE_TKT)
+        return 0u;
+    return (uint8_t)(tetraktParameters_velocityKind(instrumentParam_local(target)) !=
+                     TKT_KIND_NONE);
 }
 
 static void instrumentManager_applySlot6AlternateDecay(uint8_t alternate)
@@ -2149,6 +2585,42 @@ void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
     case INSTRUMENT_TYPE_HAT:
         HiHat_triggerVoice(instrumentManager_hihatRuntime(slot), slot,
                            velocity, alternate_slot6, note);
+        break;
+    case INSTRUMENT_TYPE_ALK:
+        /*
+         * S093 P4: the Alkaline needs the triggering track's step length for
+         * its gate (7/12 of a step) and ACCENT lane (one step). trigger_track,
+         * not slot: track 7 plays slot 5 with its own scale (B-9: the two
+         * tracks share one voice's slide latch and gate). The platform part
+         * (LFO retrigger, velocity nodes) runs inside Alkaline_triggerVoice()
+         * for `slot`, as in Drum_triggerVoice(). The slot-5 alternate decay
+         * above finds no amp_envelope_decay row and does nothing.
+         */
+        Alkaline_triggerVoice(instrumentManager_alkalineRuntime(slot), slot,
+                              velocity, note, seq_trackStepSamples(trigger_track));
+        break;
+    case INSTRUMENT_TYPE_COL:
+        /*
+         * S095 P2: no step length (C-D8: the sustain switch ends notes). The
+         * platform part (LFO retrigger, velocity nodes) runs inside
+         * Colloid_triggerVoice() for `slot`; the slot-5 alternate decay
+         * above finds no amp_envelope_decay row and does nothing, so track 7
+         * plays slot 5 as an ordinary hit.
+         */
+        Colloid_triggerVoice(instrumentManager_colloidRuntime(slot), slot,
+                             velocity, note);
+        break;
+    case INSTRUMENT_TYPE_TKT:
+        /*
+         * S096 P1: no step length (one-shot layers that decay). The
+         * platform part (LFO retrigger, velocity nodes) runs inside
+         * Tetrakt_triggerVoice() for `slot`; the slot-5 alternate decay above
+         * finds no amp_envelope_decay row and does nothing, so track 7 plays
+         * slot 5 as an ordinary hit (plan §11). The layer switch is read
+         * here, after this step's automation (voiceControl_processPending()).
+         */
+        Tetrakt_triggerVoice(instrumentManager_tetraktRuntime(slot), slot,
+                             velocity, note);
         break;
     default:
         break;
@@ -2269,6 +2741,16 @@ static OscInfo *instrumentManager_osc(uint8_t slot, const char *key)
         if (strncmp(key, "osc2_", 5) == 0) return &voice->modOsc;
         if (strncmp(key, "osc3_", 5) == 0) return &voice->modOsc2;
     }
+    if (type == INSTRUMENT_TYPE_ALK) {
+        AlkalineVoice *voice = instrumentManager_alkalineRuntime(slot);
+        if (!voice) return 0;
+        if (strncmp(key, "osc1_", 5) == 0) return &voice->osc;
+    }
+    if (type == INSTRUMENT_TYPE_COL) {   /* S095 P2: the pitch anchor */
+        ColloidVoice *voice = instrumentManager_colloidRuntime(slot);
+        if (!voice) return 0;
+        if (strncmp(key, "osc1_", 5) == 0) return &voice->osc;
+    }
     return 0;
 }
 
@@ -2314,6 +2796,16 @@ static OscInfo *instrumentManager_oscBySelector(uint8_t slot, uint8_t selector)
         if (selector == IM_SPECIAL_OSC1) return &voice->osc;
         if (selector == IM_SPECIAL_OSC2) return &voice->modOsc;
         if (selector == IM_SPECIAL_OSC3) return &voice->modOsc2;
+        return 0; }
+    case INSTRUMENT_TYPE_ALK: {
+        AlkalineVoice *voice = instrumentManager_alkalineRuntime(slot);
+        if (!voice) return 0;
+        if (selector == IM_SPECIAL_OSC1) return &voice->osc;
+        return 0; }
+    case INSTRUMENT_TYPE_COL: {   /* S095 P2 */
+        ColloidVoice *voice = instrumentManager_colloidRuntime(slot);
+        if (!voice) return 0;
+        if (selector == IM_SPECIAL_OSC1) return &voice->osc;
         return 0; }
     default:
         return 0;
@@ -3724,6 +4216,32 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         transient->pitch = 1.0f + ((byteValue / 33.9f) - 0.75f);
         return 1u; }
     case IM_SPECIAL_INSTRUMENT_DRIVE: {
+        /*
+         * S094 P1 S4 (K1): an Alkaline slot's instrument_drive is the VCA
+         * overdrive, kept as the byte 0..127 (the index of the voice's
+         * overdrive tables, read per block by the async). The
+         * Alkaline has no Distortion, so without this branch the lookup below
+         * returned 0 and the write fell through to the generic offset store
+         * by accident; the branch makes the meaning explicit.
+         */
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_ALK) {
+            AlkalineVoice *alk = instrumentManager_alkalineRuntime(slot);
+
+            if (!alk) return 0u;
+            alk->vcaDrive = (byteValue > 127u) ? 127u : byteValue;
+            return 1u;
+        }
+        /* S095 P3 F10: a Colloid slot's instrument_drive is its post-filter
+         * overdrive, the byte 0..127 (the index of the Alkaline's overdrive
+         * tables, read per block by Colloid_calcVoiceAsync()); the Colloid has
+         * no Distortion either. */
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_COL) {
+            ColloidVoice *col = instrumentManager_colloidRuntime(slot);
+
+            if (!col) return 0u;
+            col->vcaDrive = (byteValue > 127u) ? 127u : byteValue;
+            return 1u;
+        }
         Distortion *distortion = instrumentManager_distortion(slot);
         if (!distortion) return 0u;
         setDistortionShape(distortion, byteValue);
@@ -3760,11 +4278,32 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         lfo->phaseOffset =
             (uint32_t)(((uint64_t)byteValue * 0xFFFFFFFFu) / 127u);
         return 1u; }
+    case IM_SPECIAL_LFO_SYNC: {
+        /*
+         * lfo_sync writer (S094 P1 S1).
+         *
+         * What:       lfo_setSync(): stores the byte and recomputes phaseInc
+         *             from the LFO's free rate (sync 0) or the tempo (1..11).
+         * Why:        every path (menu, Kit/Scene/Instrument apply, step
+         *             automation, MIDI) now changes the rate with the mode; the
+         *             row order on load no longer matters, because lfo->freq is
+         *             kept current by IM_SPECIAL_LFO_RATE in both modes.
+         * Inputs:     slot, byteValue (0..11; larger values behave as free,
+         *             lfo_calcPhaseInc()'s default case).
+         * Outputs:    lfo->sync, lfo->phaseInc.
+         * Affiliates: IM_SPECIAL_LFO_RATE (lfo_setFreq()); seq_setBpm() ->
+         *             instrumentManager_recalcRuntimeLfoSync() (tempo).
+         */
+        Lfo *lfo = instrumentManager_runtimeLfo(slot);
+        if (!lfo) return 0u;
+        lfo_setSync(lfo, byteValue);
+        return 1u; }
     case IM_SPECIAL_OSC_TYPE: {
         /*
-         * osc1_type writer (S087 stage B).
+         * osc1_type writer (S087 stage B; S093 P8 Alkaline dispatch).
          *
-         * What:       osc_setType() on the tagged oscillator, then
+         * What:       osc_setType() on the tagged oscillator, or for an
+         *             Alkaline slot Alkaline_setOscType(), then
          *             instrumentManager_waveDomainChanged(slot) so LFO adapters
          *             and direct targets on the slot's wave rows pick up the
          *             new type's range.
@@ -3773,12 +4312,26 @@ static uint8_t instrumentManager_writeSpecialRuntime(
          * Inputs:     slot, descriptor tag (IM_SPECIAL_OSC1), byte value.
          * Outputs:    the oscillator's type state; refreshed wave domains.
          * Callers:    instrumentManager_writeRuntimeInternal() via the tag.
-         * Affiliates: osc_setType(); the osc1_type rows; S087 P0 §12.5.
+         * Affiliates: osc_setType(), Alkaline_setOscType(); the osc1_type
+         *             rows; S087 P0 §12.5, S093 P8.
          */
         OscInfo *osc = instrumentManager_oscBySelector(
             slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
         if (!osc) return 0u;
-        osc_setType(osc, byteValue);
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_ALK) {
+            AlkalineVoice *alk = instrumentManager_alkalineRuntime(slot);
+
+            if (!alk) return 0u;
+            Alkaline_setOscType(alk, byteValue);
+        } else if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_COL) {
+            /* S095 P2 (C-D20): the Colloid's typ (wav / wtb / pwm) */
+            ColloidVoice *col = instrumentManager_colloidRuntime(slot);
+
+            if (!col) return 0u;
+            Colloid_setOscType(col, byteValue);
+        } else {
+            osc_setType(osc, byteValue);
+        }
         instrumentManager_waveDomainChanged(slot);
         return 1u; }
     case IM_SPECIAL_OSC_RUN: {
@@ -3937,6 +4490,12 @@ static uint8_t instrumentManager_classifySpecialKey(instrument_type_t type,
      * being written raw by the TYPE_UINT32 path.
      */
     if (strcmp(key, "lfo_offset") == 0) return IM_SPECIAL_LFO_OFFSET;
+    /*
+     * S094 P1 S1: lfo_sync uses IM_SPECIAL_LFO_SYNC so a sync change
+     * recomputes the LFO's phase step (the boot diagnostic compares every
+     * descriptor tag against this rule).
+     */
+    if (strcmp(key, "lfo_sync") == 0) return IM_SPECIAL_LFO_SYNC;
     return IM_SPECIAL_NONE;
 }
 
@@ -4038,6 +4597,24 @@ static uint8_t instrumentManager_writeRuntimeInternal(
          * Morph token. Runtime installation expands it here only long enough to
          * use the existing descriptor/Scene modulation backends.
          */
+        /*
+         * S096 P1 SD3: on a Tetrakt slot, a token that names a velocity group
+         * (a layer-A row of the nine) is applied by the voice to all four
+         * layers, each with its own latched velocity; the platform node gets
+         * no destination (installing INVALID also restores any supplemental
+         * target). Every other token (off, a voice row, the own Morph) takes
+         * the platform path, and the voice's group is cleared.
+         */
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_TKT) {
+            TetraktVoice *tkt = instrumentManager_tetraktRuntime(slot);
+            const uint8_t kind = (value <= INSTRUMENT_TARGET_TOKEN_MAX_LOCAL)
+                ? tetraktParameters_velocityKind((uint8_t)value) : TKT_KIND_NONE;
+
+            Tetrakt_setVelocityKind(tkt, kind);
+            if (kind != TKT_KIND_NONE)
+                return instrumentManager_installVelocityModulationTarget(
+                    slot, INSTRUMENT_PARAM_INVALID);
+        }
         return instrumentManager_installVelocityModulationTarget(
             slot,
             instrumentManager_velocityTargetIdFromToken(

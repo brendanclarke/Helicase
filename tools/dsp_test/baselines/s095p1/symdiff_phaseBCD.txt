@@ -1,0 +1,62 @@
+net 15166
+Space new            +14196
+Manager/FxBuffer     +444
+CrumpBit             +410
+other                +116
+--- top growth
+  +1302 space_writeParam [Space new]
+  +1164 space_delayRun [Space new]
+  +1118 space_plateRun [Space new]
+   +988 space_reverbProcess [Space new]
+   +768 space_tapeBegin [Space new]
+   +756 space_reverbDescriptors [Space new]
+   +612 space_echoDescriptors [Space new]
+   +548 space_echoTapeRun [Space new]
+   +540 space_delayDescriptors [Space new]
+   +510 space_echoProcess [Space new]
+   +500 space_formatValue [Space new]
+   +456 space_plateSetup [Space new]
+   +456 space_export [Space new]
+   +426 space_echoOut [Space new]
+   +392 space_shimmerRun [Space new]
+   +300 space_hbDown [Space new]
+   +256 crumpBit_delaySamples [CrumpBit]
+   +218 space_rvbOut [Space new]
+   +214 space_enter [Space new]
+   +192 space_plateGeom [Space new]
+   +192 effects_registry [Manager/FxBuffer]
+   +184 space_tapeEnd [Space new]
+   +184 sk_idleAfter [Space new]
+   +144 space_reverbInit [Space new]
+   +130 space_delayProcess [Space new]
+   +128 sk_idleBlock [Space new]
+   +128 crumpBit_formatDelayRow [CrumpBit]
+   +102 space_tapeStart [Space new]
+    +98 space_plateDecay [Space new]
+    +96 effects_process [Manager/FxBuffer]
+    +86 space_echoInit [Space new]
+    +84 space_preLimit [Space new]
+    +84 numtostrpu [other]
+    +72 space_bufferChanged [Space new]
+    +72 fxbuf_effectShare [Manager/FxBuffer]
+    +68 sk_clear [Space new]
+    +64 effects_returnGain [Manager/FxBuffer]
+    +60 space_monoPeak [Space new]
+    +56 space_sprRatio [Space new]
+    +56 space_shareTape [Space new]
+--- top shrink
+     +0 CSWTCH.1790
+     +0 CSWTCH.1789
+     +0 CSWTCH.119
+     +0 CSWTCH.118
+     +0 BusFault_Handler
+     +0 Alkaline_triggerVoice
+     +0 Alkaline_isQuiet
+     +0 Alkaline_initVoice
+     +0 Alkaline_calcVoiceSyncBlock
+     -4 mixer_probeAdd
+     -4 crumpBit_runGrain
+     -8 patSvc_requiredChunks
+     -8 crumpBit_runPitch
+    -20 sk_feedMix
+    -28 mixer_calcNextSampleBlock
