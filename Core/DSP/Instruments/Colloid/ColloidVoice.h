@@ -96,6 +96,24 @@
  *   Rejoin:   an oscillator that starts rendering again lands on its target
  *             pitch and width in its first block (ColloidVoice.oscLive,
  *             col_oscControl()); it does not glide from where it stopped.
+ * S096 P2 F5 (user, 2026-11-15): Saw/Rec back to 6, with gliding widths.
+ *   What:     COL_PWM_COUNT 8 -> 6 (three pairs), equal to
+ *             COL_PWM_WARP_COUNT again. The pulse's second read now has its
+ *             own phase, which glides from the block's start width to its
+ *             end width (col_pwmPairStore/Add), and the warp forms' W, ra and
+ *             rb glide the same way (col_warpStore/Add).
+ *   Why:      a moving width (an LFO or a knob on pos) changed the pulse's
+ *             second read by whole table points once per block, up to 8
+ *             points at the slew limit, so its edge jumped at the block
+ *             boundary: a click whenever the edge passed the sample being
+ *             read (S096_P2_INSTRUMENT_FIXES.md §5). The gliding read costs
+ *             8 instructions per oscillator per sample; at 8 oscillators that
+ *             was about 21,500 cycles per block, over the Basic share, and 7
+ *             needs an odd-count loop and was still over. At 6 the voice is
+ *             cheaper than the clicking 8 was.
+ *   Level:    COL_NORM_PWM is 1 / sqrt(6) again (ColloidVoice.c).
+ *   Tables:   the first six colDetC / colHome entries balance (as before
+ *             S095 P5; gen_col_tables.py asserts it).
  * Constant:   the count follows the mode, never a parameter value: every
  *             block of a given typ and form renders exactly this many
  *             oscillators.
@@ -103,7 +121,7 @@
 #ifndef COL_OSC_COUNT
 #define COL_OSC_COUNT         12u
 #endif
-#define COL_PWM_COUNT         8u
+#define COL_PWM_COUNT         6u    /* S096 P2 F5: was 8 (S095 P5) */
 #define COL_PWM_WARP_COUNT    6u
 #define COL_PAIR_MAX          (COL_OSC_MAX / 2u)
 _Static_assert(COL_OSC_COUNT >= 2u && COL_OSC_COUNT <= COL_OSC_MAX &&
@@ -159,8 +177,8 @@ _Static_assert(COL_PWM_WARP_COUNT >= 2u && COL_PWM_WARP_COUNT <= COL_PWM_COUNT &
  *             (1), given osc.waveform under typ pwm; a byte past Rec plays
  *             Rec, a pulse form, so the test is w <= COL_PWM_TRI.
  *             COL_PWM_FORM_COUNT(w) is that form's oscillator count:
- *             COL_PWM_WARP_COUNT (6) for Sin/Tri, COL_PWM_COUNT (8) for
- *             Saw/Rec.
+ *             COL_PWM_WARP_COUNT (6) for Sin/Tri, COL_PWM_COUNT for Saw/Rec
+ *             (8 in S095 P5, 6 again since S096 P2 F5).
  * Why:        one definition for the async (count, level) and the sync block
  *             (the warp loop's bound), so the two can never render different
  *             counts in the same block.
@@ -196,7 +214,10 @@ _Static_assert(COL_PWM_WAVE_COUNT == OSC_PWM_WAVE_COUNT,
  * The filter's type and route (S095 P3 F9).
  *
  * What:       typ (filtType) is the left / first filter's response,
- *             COL_FT_*: LP, BP, HP, notch, peak. rte (route): COL_RTE_STR 0 is
+ *             COL_FT_*: LP, BP, HP, notch, peak, UBP (unity-gain band-pass),
+ *             off (the input passed). UBP and off are appended (S096 P2 F3),
+ *             so the stored values of the first five do not move. rte
+ *             (route): COL_RTE_STR 0 is
  *             stereo, the right filter the left's type with the offsets;
  *             1..5 are mono, the second filter in series of type rte - 1
  *             (COL_RTE_TYPE()).
@@ -211,7 +232,9 @@ _Static_assert(COL_PWM_WAVE_COUNT == OSC_PWM_WAVE_COUNT,
 #define COL_FT_HP             2u
 #define COL_FT_NOTCH          3u
 #define COL_FT_PEAK           4u
-#define COL_FT_COUNT          5u
+#define COL_FT_UBP            5u    /* S096 P2 F3 */
+#define COL_FT_OFF            6u    /* S096 P2 F3 */
+#define COL_FT_COUNT          7u
 #define COL_RTE_STR           0u
 #define COL_RTE_COUNT         (1u + COL_FT_COUNT)
 #define COL_RTE_TYPE(r)       ((uint8_t)((r) - 1u))
@@ -281,11 +304,13 @@ typedef struct ColloidVoiceStruct
 	const int16_t *row[COL_OSC_MAX];  /* the 1,024-point row played, this block */
 	float    pitchCur[COL_OSC_MAX];   /* F3: the slewed pitch, log2 Hz (before LFO/velocity) */
 	uint32_t posPair[COL_PAIR_MAX];   /* pair j: Q15 position of 2j (low half), 2j+1 (high) */
-	uint16_t pwD[COL_OSC_MAX];        /* pwm Saw/Rec: pulse width in row points, this block */
+	uint16_t pwD[COL_OSC_MAX];        /* pwm Saw/Rec: pulse width in row points, this block's end */
+	uint16_t pwD0[COL_OSC_MAX];       /* S096 P2 F5: the same at this block's start (the glide) */
 	uint32_t motPhase[COL_OSC_MAX];   /* the motion LFO phase, 2^32 per cycle */
 	int16_t  rnd[COL_OSC_MAX];        /* the draw of the last trigger, Q15 */
 	uint8_t  frame[COL_OSC_MAX];      /* wtb: the frame latched at the trigger */
 	uint8_t  pwPos[COL_OSC_MAX];      /* pwm: the slewed width index 0..127 */
+	uint8_t  pwPos0[COL_OSC_MAX];     /* S096 P2 F5: the index at this block's start (warp glide) */
 	/* --- state: the block --- */
 	int32_t  busM[OUTPUT_DMA_SIZE];   /* mid: sum of every oscillator */
 	int32_t  busS[OUTPUT_DMA_SIZE];   /* side: sum of s x p / 2 */

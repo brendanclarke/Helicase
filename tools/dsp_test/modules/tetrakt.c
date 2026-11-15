@@ -35,7 +35,7 @@
  *                        the same (the (1 - env)^2 mix is 0);
  *               TK-S1    stm 127, sdt 0, sfb 0: the left tap returns the send
  *                        delayed by tapL samples (+-1); sdt 127 puts the
- *                        right tap at tapL x 0.85 (+-wobble); sfb 127 with a
+ *                        right tap at tapL x (1 - TKT_SDT_SPAN); sfb 127 with a
  *                        held impulse: the line's peak decays (bounded);
  *               TK-VEL   with veloKind TONE and amount 1: layer A hit at 127
  *                        and layer C at 0 apply 0 and -127 bytes to their own
@@ -671,7 +671,7 @@ static void test_s1(void)
 	       V.tapL, 50.0 * 44.1080729);
 	V.spaceDetune = 127u;
 	tkt_spaceControl(&V);
-	want = V.tapL * 0.85f;   /* the wobble is fixed (trim 3) */
+	want = V.tapL * (1.0f - TKT_SDT_SPAN);   /* the wobble is fixed (trim 3); S096 P2 F4: 0.5 */
 	expect(G_S1, fabs(V.tapR - want) < 0.001, "tapR detune", V.tapR, want);
 
 	/* The left tap returns the send delayed by tapL, +-1 sample. */

@@ -37,9 +37,16 @@
  *                     over the first 8 steps (COL_POST_WET_STEPS' rule).
  * TKT_DC_R            the bus DC blocker, a one-pole HP at 8 Hz:
  *                     1 - 2 pi 8 / fs.
- * TKT_SDT_SPAN        sdt 127 puts the right tap 15 % earlier.
- * TKT_BUS_AP          W2's one allpass coefficient on the summed right bus.
- * TKT_FB_MAX          sfb 127 -> loop gain 0.9 (bounded; the write
+ * TKT_SDT_SPAN        sdt 127 puts the right tap 50 % earlier (S096 P2 F4;
+ *                     was 15 %).
+ * TKT_BUS_AP          W2's one allpass coefficient on the summed right bus:
+ *                     -0.6 puts its 90 degree point at 3.4 kHz (-32 degrees
+ *                     at 1 kHz, -6.5 at 200 Hz, so the lows stay centred and
+ *                     a mono sum loses little). S096 P2 F4: it was +0.4,
+ *                     whose 90 degree point is 16 kHz (-3.5 degrees at
+ *                     1 kHz), so the width barely reached the audible band.
+ * TKT_FB_MAX          sfb 127 -> loop gain 0.97 (S096 P2 F4; was 0.9;
+ *                     below 1 with the loop's one-pole, so bounded; the write
  *                     saturates as well).
  * TKT_VELO_SPAN       velocity offsets are in row bytes: the row's 127.
  * TKT_RING            S1's ring (S096 P1 §17): the unit's samples 1 ..
@@ -65,10 +72,10 @@
 #define TKT_BIAS_MAX        0.25f
 #define TKT_WET_STEPS       8u
 #define TKT_DC_R            0.998860393f
-#define TKT_SDT_SPAN        0.15f
-#define TKT_FB_MAX          0.9f
+#define TKT_SDT_SPAN        0.5f
+#define TKT_FB_MAX          0.97f
 #define TKT_VELO_SPAN       127.0f
-#define TKT_BUS_AP          0.4f
+#define TKT_BUS_AP          (-0.6f)
 #define TKT_RING            (TKT_LINE_SAMPLES - 1u)
 #define TKT_TAP_MAX         ((float)(TKT_RING - 2u) + 0.999f)
 

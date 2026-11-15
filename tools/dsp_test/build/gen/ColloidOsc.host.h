@@ -16,21 +16,30 @@
  *                 frame), linearly interpolated;
  *               col_pwmPairStore / col_pwmPairAdd  the two-read pulse: the
  *                 saw row read at the phase plus `sign` x the saw row read
- *                 `width` points earlier, interpolated once (the shipped
- *                 osc_pwmReadD() form: sign -1 Rec, +1 Saw; S095 P3 F2);
+ *                 at a second phase `width` points earlier (sign -1 Rec, +1
+ *                 Saw; S095 P3 F2). S096 P2 F5: the second read has its own
+ *                 phase and interpolation, and its offset glides across the
+ *                 block from width0 (the block's start) to width (its end),
+ *                 so a moving width never steps (it was a whole-point
+ *                 offset sharing the first read's fraction, held per block);
  *               col_warpStore / col_warpAdd  one oscillator per pass: a
  *                 1,024-point row (sine_table or a triTable octave row) read
  *                 at the warped phase osc_pwmWarp(ph, W, ra, rb) (the shipped
  *                 WS / WT forms; S095 P3 F2), its position in pq's low half.
+ *                 S096 P2 F5: W, ra and rb glide by dW, dRa, dRb per sample
+ *                 from the block's start values toward its end values.
  * Why:        S095 P2 draft §2.1/§2.4: a pair per pass is the cheapest form
  *             measured (13 per oscillator plain, 22 PWM, before the side
  *             term); the side term is one SMLAW per oscillator with both
  *             positions packed in one register (posPair: oscillator 0 in the
  *             low half, oscillator 1 in the high half).
  * Inputs:     row[0..1] (the pair's rows), phase[0..1] (updated in place),
- *             inc[0..1], width[0..1] (pwm: the pulse width in row points,
- *             1..1,023), sign (pwm: -1 Rec, +1 Saw), posPair, busM[32],
- *             busS[32]; the warp loops: one row, phase, inc, W, ra, rb and pq.
+ *             inc[0..1], width[0..1] / width0[0..1] (pwm: the pulse width in
+ *             row points, 1..1,023, at the block's end / start), sign (pwm:
+ *             -1 Rec, +1 Saw), posPair, busM[32], busS[32]; the warp loops:
+ *             one row, phase, inc, W, ra, rb (the block's start), dW, dRa,
+ *             dRb (their steps per sample), pq and bus[64]: the mid bus then
+ *             the side bus in one array (S096 P2 F5).
  * Outputs:    busM, busS; phase[0..1] advanced by 32 x inc.
  * Accessors:  Colloid_calcVoiceSyncBlock() (ColloidVoice.c), once per pair
  *             per block.
@@ -51,18 +60,20 @@ void col_oscPairAdd(const int16_t *const *row, uint32_t *phase,
                     int32_t *busM, int32_t *busS);
 void col_pwmPairStore(const int16_t *const *row, uint32_t *phase,
                       const uint32_t *inc, const uint16_t *width,
-                      uint32_t posPair, int32_t *busM, int32_t *busS,
-                      int32_t sign);
+                      const uint16_t *width0, uint32_t posPair,
+                      int32_t *busM, int32_t *busS, int32_t sign);
 void col_pwmPairAdd(const int16_t *const *row, uint32_t *phase,
                     const uint32_t *inc, const uint16_t *width,
-                    uint32_t posPair, int32_t *busM, int32_t *busS,
-                    int32_t sign);
+                    const uint16_t *width0, uint32_t posPair,
+                    int32_t *busM, int32_t *busS, int32_t sign);
 void col_warpStore(const int16_t *row, uint32_t *phase, uint32_t inc,
-                   uint32_t wPh, uint32_t ra, uint32_t rb, uint32_t pq,
-                   int32_t *busM, int32_t *busS);
+                   uint32_t wPh, uint32_t ra, uint32_t rb,
+                   int32_t dW, int32_t dRa, int32_t dRb, uint32_t pq,
+                   int32_t *bus);
 void col_warpAdd(const int16_t *row, uint32_t *phase, uint32_t inc,
-                 uint32_t wPh, uint32_t ra, uint32_t rb, uint32_t pq,
-                 int32_t *busM, int32_t *busS);
+                 uint32_t wPh, uint32_t ra, uint32_t rb,
+                 int32_t dW, int32_t dRa, int32_t dRb, uint32_t pq,
+                 int32_t *bus);
 
 #endif /* COLLOIDOSC_H_ */
 

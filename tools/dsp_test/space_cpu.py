@@ -34,6 +34,17 @@ Why:        the caps are gates, not hand counts (plan Q15). Caps per type
             the service 1,070 + 124.5 cycles per row: Delay (15 rows) 202.9,
             Reverb (21) 191.8, Echo (17) 199.2; a feed block +20
             (CrumpBit's 184 / 204 rule).
+            S096 P2 F1 (user decision, 2026-11-15): the Delay's and the
+            Echo's extra heads and the Delay's reverse windows read linearly
+            (they read the nearest frame and ticked under wow). That costs
+            +57 (Delay, its reverse path) and +17 (Echo) a frame, so their
+            caps are raised to the measured totals, DLY_CAP_P2 252.0 and
+            ECH_CAP_P2 210.5 (feed +20 as before). The model's 67.5 cycles a
+            frame-instruction is about 25 % above the device: S096 P1 §18
+            measured the Effect section at 12,406 cycles a block with the
+            Delay at 194.6, so 251.6 scales to about 16,040 of the 16,634
+            share. A device probe with `rev` on confirms it
+            (S096_P2_INSTRUMENT_FIXES.md §1).
 Inputs:     --elf PATH.
 Outputs:    one line per type; exit 1 when a total is above its cap.
 Accessors:  tools/dsp_test/Makefile space_cpu_check (after `make all`).
@@ -52,6 +63,11 @@ def CAP(rows):
     """The type's cap (plan §1): (16,634 - its service) / 67.5, the service
     1,070 + 124.5 per row (the measured OFF and CrumpBit points, plan §1)."""
     return (16634.0 - (1070.0 + 124.5 * rows)) / 67.5
+
+
+# S096 P2 F1: the Delay and Echo caps after the linear heads (see Why).
+DLY_CAP_P2 = 252.0
+ECH_CAP_P2 = 210.5
 # Type: (cap, [(sym, ranks, weight, 'longest' | 'shortest')], [per-block
 # syms], [(sym, rank, iterations per block)]). ranks: which of the
 # function's loops (1 = the longest) are its frame loops; the others are the
@@ -59,7 +75,7 @@ def CAP(rows):
 # their iterations (the tape set-up's channels; the halfband history and
 # the ring-guard copies, 16 B an iteration).
 TYPES = {
-    'dly': (CAP(15), [('space_delayRun', (1,), 1.0, 'longest')],
+    'dly': (DLY_CAP_P2, [('space_delayRun', (1,), 1.0, 'longest')],
             ['space_delayProcess', 'space_tapeBegin', 'space_tapeEnd',
              'space_delayRun'],
             [('space_tapeBegin', 1, 2)]),
@@ -73,7 +89,7 @@ TYPES = {
              'space_shimmerRun', 'space_hbDown', 'space_rvbOut'],
             [('space_hbDown', 2, 3), ('space_hbDown', 3, 3),
              ('space_plateRun', 2, 4)]),
-    'ech': (CAP(17), [('space_monoPeak', (1,), 1.0, 'longest'),
+    'ech': (ECH_CAP_P2, [('space_monoPeak', (1,), 1.0, 'longest'),
                   ('space_echoTapeRun', (1,), 1.0, 'longest'),
                   ('space_echoProcess', (1,), 0.25, 'longest'),
                   ('space_plateRun', (1,), 0.25, 'shortest'),

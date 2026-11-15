@@ -65,7 +65,8 @@ OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
 all: oscillator modulation voice_control sequencer seq_steplen instrument_manager samples \
      sampleoptimize run_modes special_tags stock_tables voicefold fold_tables pwm_tables \
      crumpbit crumpbit_tables alkaline alkaline_tables alk_post_tables lfo lfo_rate_table \
-     space colloid colloid_tables distortion dist_makeup_table tetrakt tetrakt_tables
+     space colloid colloid_tables distortion dist_makeup_table tetrakt tetrakt_tables \
+     buscomp
 
 $(GEN):
 	mkdir -p $(GEN)
@@ -710,7 +711,7 @@ colloid: $(GEN)/Oscillator.host.h $(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables
 	  echo "colloid_break_fold: FAILED (a width fold without the modulo not caught)"; exit 1; \
 	else echo "colloid_break_fold: caught (law CO-PWM fails as expected)"; fi
 	mkdir -p build/break_col_rte
-	sed 's/cutR = col_clamp01(voice->cut + voice->cutOfs - 63.0f \/ 127.0f);/cutR = col_clamp01(voice->cut);/' \
+	sed 's/cutR = col_clamp01(voice->cut + (voice->cutOfs - 63.0f \/ 127.0f));/cutR = col_clamp01(voice->cut);/' \
 	  $(GEN)/ColloidVoice.host.c > build/break_col_rte/ColloidVoice.host.c
 	@grep -q 'cutR = col_clamp01(voice->cut);' build/break_col_rte/ColloidVoice.host.c || \
 	  { echo "colloid_break_rte: sed did not apply"; exit 1; }
@@ -719,6 +720,27 @@ colloid: $(GEN)/Oscillator.host.h $(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables
 	@if ./build/colloid_break_rte >/dev/null 2>&1; then \
 	  echo "colloid_break_rte: FAILED (a right filter that ignores fro not caught)"; exit 1; \
 	else echo "colloid_break_rte: caught (law CO-RTE fails as expected)"; fi
+	@# S096 P2 F5: the pulse's second read without its glide, and the warp
+	@# without its W glide, must fail CO-PWG.
+	mkdir -p build/break_col_pwg build/break_col_wpg
+	sed 's/const uint32_t j0 = i0 - (uint32_t)(((int32_t)width\[0\] - (int32_t)width0\[0\]) \* 131072);/const uint32_t j0 = i0;/' \
+	  $(GEN)/ColloidOsc.host.c > build/break_col_pwg/ColloidOsc.host.c
+	@grep -q 'const uint32_t j0 = i0;' build/break_col_pwg/ColloidOsc.host.c || \
+	  { echo "colloid_break_pwg: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_pwg $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_pwg -lm
+	@if ./build/colloid_break_pwg >/dev/null 2>&1; then \
+	  echo "colloid_break_pwg: FAILED (a pulse width that steps not caught)"; exit 1; \
+	else echo "colloid_break_pwg: caught (law CO-PWG fails as expected)"; fi
+	sed 's/w += (uint32_t)dW;    \/\* S096 P2 F5: the glide \*\//(void)dW;/' \
+	  $(GEN)/ColloidOsc.host.c > build/break_col_wpg/ColloidOsc.host.c
+	@grep -q '(void)dW;' build/break_col_wpg/ColloidOsc.host.c || \
+	  { echo "colloid_break_wpg: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_wpg $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_wpg -lm
+	@if ./build/colloid_break_wpg >/dev/null 2>&1; then \
+	  echo "colloid_break_wpg: FAILED (a warp boundary that jumps not caught)"; exit 1; \
+	else echo "colloid_break_wpg: caught (law CO-PWG fails as expected)"; fi
 	mkdir -p build/break_col_tone
 	sed 's/tzL = ol + tc \* (tzL - ol);/tzL = tzL + (1.0f - tc) * (ol - tzL);/' \
 	  $(GEN)/ColloidVoice.host.c > build/break_col_tone/ColloidVoice.host.c
@@ -844,6 +866,27 @@ tetrakt: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c $(GEN)/oscPwmTables.h
 
 tetrakt_tables:
 	cd $(ROOT) && python3 tools/tetrakt/gen_tkt_tables.py --check
+
+# S096 P2 F6: the bus compressor's sidechain duck (law BC-SC), and a break
+# build whose duck always lands in one block (it must fail BC-SC).
+buscomp: | $(GEN)
+	$(EX) --src $(ROOT)/Core/Bank/Scene/SceneData.h --typedef scene_bus_comp_field_t \
+	  --macro SCENE_BUS_COMP_MODE_OFF --macro SCENE_BUS_COMP_MODE_ST1 \
+	  --macro SCENE_BUS_COMP_MODE_ST2 --macro SCENE_BUS_COMP_SIDECHAIN_OFF \
+	  --out $(GEN)/sc_scene.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/BusCompressor.c --body \
+	  --out $(GEN)/BusCompressor.host.c
+	$(HOSTCC) $(HOSTFLAGS) modules/buscomp.c -o build/buscomp -lm
+	./build/buscomp
+	mkdir -p build/break_bc_sc
+	sed 's/const float n = busComp_scAttackBlocks(t \* 127.0f);/const float n = 0.0f * busComp_scAttackBlocks(t * 127.0f);/' \
+	  $(GEN)/BusCompressor.host.c > build/break_bc_sc/BusCompressor.host.c
+	@grep -q 'const float n = 0.0f \* busComp_scAttackBlocks' build/break_bc_sc/BusCompressor.host.c || \
+	  { echo "buscomp_break_sc: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_bc_sc $(HOSTFLAGS) modules/buscomp.c -o build/buscomp_break_sc -lm
+	@if ./build/buscomp_break_sc >/dev/null 2>&1; then \
+	  echo "buscomp_break_sc: FAILED (a duck that always snaps not caught)"; exit 1; \
+	else echo "buscomp_break_sc: caught (law BC-SC fails as expected)"; fi
 
 tetrakt_cpu_check:
 	python3 tetrakt_cpu.py --elf $(FW_ELF) $(if $(TKT_BASE),--baseline $(TKT_BASE))
@@ -1384,6 +1427,25 @@ space: crumpbit
 	  --out $(GEN)/SpaceEffect.host.c
 	$(HOSTCC) $(HOSTFLAGS) modules/space.c -o build/space -lm
 	./build/space
+	@# S096 P2 F1: the stereo and mono linear reads without their fraction
+	@# (back to a frame-stepped read) must fail SP11.
+	mkdir -p build/break_sp_lin2 build/break_sp_lin1
+	sed 's/\*l = al + f \* /*l = al + 0.0f * /' \
+	  $(GEN)/SpaceEffect.host.c > build/break_sp_lin2/SpaceEffect.host.c
+	@grep -q '\*l = al + 0.0f \* ' build/break_sp_lin2/SpaceEffect.host.c || \
+	  { echo "space_break_lin2: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_sp_lin2 $(HOSTFLAGS) modules/space.c -o build/space_break_lin2 -lm
+	@if ./build/space_break_lin2 >/dev/null 2>&1; then \
+	  echo "space_break_lin2: FAILED (a frame-stepped Delay head not caught)"; exit 1; \
+	else echo "space_break_lin2: caught (law SP11 fails as expected)"; fi
+	sed 's/return a + f \* ((float)t\[i + 1\] - a);/return a + 0.0f * ((float)t[i + 1] - a);/' \
+	  $(GEN)/SpaceEffect.host.c > build/break_sp_lin1/SpaceEffect.host.c
+	@grep -q 'return a + 0.0f \* ((float)t' build/break_sp_lin1/SpaceEffect.host.c || \
+	  { echo "space_break_lin1: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_sp_lin1 $(HOSTFLAGS) modules/space.c -o build/space_break_lin1 -lm
+	@if ./build/space_break_lin1 >/dev/null 2>&1; then \
+	  echo "space_break_lin1: FAILED (a frame-stepped Echo head not caught)"; exit 1; \
+	else echo "space_break_lin1: caught (law SP11 fails as expected)"; fi
 
 # S095 P1 (§S18): the Space types' instructions per frame (space_cpu.py).
 space_cpu_check:

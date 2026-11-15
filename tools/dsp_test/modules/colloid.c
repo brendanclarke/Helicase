@@ -33,7 +33,10 @@
  *               CO-AMP  the amp ramp: no output step between samples larger
  *                       than the block's level change / 32 (x full scale)
  *                       plus the oscillator's own step;
- *               CO-SVF  the filters: 20,000 blocks of random cutoff,
+ *               CO-SVF  (S096 P2: also off passes the input exactly, UBP
+ *                       is unity at its centre at res 0.2 and 0.9, and a
+ *                       full-depth envelope reaches 115.7 / 0 semitones)
+ *                       the filters: 20,000 blocks of random cutoff,
  *                       resonance, type, envelope and drive stay finite and
  *                       bounded; every block's ramp starts exactly on the
  *                       previous block's target; LP passes DC at unity
@@ -54,6 +57,10 @@
  *                       indices per block; every form's voice bus equals the
  *                       restated form on its rows and widths; psp 1 keeps
  *                       every width in 0..127 (S095 P3 F7 folds);
+ *               CO-PWG  (S096 P2 F5) a moving pwm width does not click:
+ *                       every form, a slow sweep and the full slew, the
+ *                       largest third difference within 3 x the still
+ *                       width's + 0.002;
  *               CO-WTB  wtb: psp 0 puts every oscillator on pos's frame;
  *                       frames stay latched when pos moves during a note;
  *                       an empty catalogue plays silence;
@@ -130,10 +137,11 @@ int16_t GetRngValue(void)
 
 #define BLK OUTPUT_DMA_SIZE
 enum { G_OSC, G_POS, G_W, G_MOT, G_INT, G_SLEW, G_EG, G_AMP, G_SVF, G_SER, G_RTE, G_POST,
-       G_PWM, G_WTB, G_MX, G_RND, G_JOIN, G_N };
+       G_PWM, G_WTB, G_MX, G_RND, G_JOIN, G_PWG, G_N };
 static const char *g_name[G_N] = { "CO-OSC", "CO-POS", "CO-W", "CO-MOT", "CO-INT", "CO-SLEW",
                                    "CO-EG", "CO-AMP", "CO-SVF", "CO-SER", "CO-RTE", "CO-POST",
-                                   "CO-PWM", "CO-WTB", "MX-ST", "CO-RND", "CO-JOIN" };
+                                   "CO-PWM", "CO-WTB", "MX-ST", "CO-RND", "CO-JOIN",
+                                   "CO-PWG" };
 static unsigned g_fail[G_N];
 
 static void fail(int g, const char *what, double a, double b)
@@ -176,6 +184,17 @@ static int32_t ref_pulse(const int16_t *row, uint32_t ph, uint32_t d, int32_t si
 
 static int32_t ref_side(int32_t s, int16_t q) { return (int32_t)(((int64_t)s * q) >> 16); }
 
+/* S096 P2 F5: the gliding pulse law: A at ph, B at its own phase q, which
+ * starts w0 points earlier and glides to w points earlier over the block */
+static int32_t ref_pulseG(const int16_t *row, uint32_t ph0, uint32_t inc, unsigned n,
+                          uint32_t w, uint32_t w0, int32_t sign)
+{
+	const uint32_t j = inc - (uint32_t)(((int32_t)w - (int32_t)w0) * 131072);
+	const uint32_t q = ph0 - (w0 << 22) + n * j;
+
+	return ref_read(row, ph0 + n * inc) + sign * ref_read(row, q);
+}
+
 /* the warp law (S095 P3 F2): the shared osc_pwmWarp(), then the read law */
 static int32_t ref_warp(const int16_t *row, uint32_t ph, uint32_t w, uint32_t ra, uint32_t rb)
 {
@@ -199,37 +218,50 @@ static void test_osc(int pwm, int32_t sign)
 	uint32_t ph[4] = { 0x00000000u, 0x7fff1234u, 0xfffff000u, 0x12345678u };
 	const uint32_t inc[4] = { 0x01234567u, 0x00a00000u, 0x7ffffff0u, 0x00010001u };
 	const uint16_t wid[4] = { 512u, 3u, 1000u, 64u };
+	/* S096 P2 F5: pass 0 a still width (start = end), pass 1 a glide */
+	const uint16_t wid0g[4] = { 504u, 11u, 992u, 72u };
 	const uint32_t pq0 = (uint32_t)(uint16_t)(int16_t)-20000 | ((uint32_t)(uint16_t)(int16_t)31000 << 16);
 	const uint32_t pq1 = (uint32_t)(uint16_t)(int16_t)32767 | ((uint32_t)(uint16_t)(int16_t)-32768 << 16);
 	int32_t M[BLK], S[BLK];
 	uint32_t p[4];
 	int g = pwm ? G_PWM : G_OSC;
-	unsigned n, o;
+	unsigned n, o, pass;
 
 	for (n = 0u; n < 1024u; n++)
 		edge[n] = (n & 1u) ? -32768 : 32767;
-	memcpy(p, ph, sizeof(p));
-	if (pwm) {
-		col_pwmPairStore(&rows[0], &p[0], &inc[0], &wid[0], pq0, M, S, sign);
-		col_pwmPairAdd(&rows[2], &p[2], &inc[2], &wid[2], pq1, M, S, sign);
-	} else {
-		col_oscPairStore(&rows[0], &p[0], &inc[0], pq0, M, S);
-		col_oscPairAdd(&rows[2], &p[2], &inc[2], pq1, M, S);
-	}
-	for (n = 0u; n < BLK; n++) {
-		int32_t m = 0, s = 0;
-		for (o = 0u; o < 4u; o++) {
-			const uint32_t at = ph[o] + n * inc[o];
-			const int32_t v = pwm ? ref_pulse(rows[o], at, wid[o], sign) : ref_read(rows[o], at);
-			const uint32_t pq = (o < 2u) ? pq0 : pq1;
-			m += v;
-			s += ref_side(v, (int16_t)((o & 1u) ? (pq >> 16) : (pq & 0xFFFFu)));
+	for (pass = 0u; pass < (pwm ? 2u : 1u); pass++) {
+		const uint16_t *const wid0 = pass ? wid0g : wid;
+
+		memcpy(p, ph, sizeof(p));
+		if (pwm) {
+			col_pwmPairStore(&rows[0], &p[0], &inc[0], &wid[0], &wid0[0], pq0, M, S, sign);
+			col_pwmPairAdd(&rows[2], &p[2], &inc[2], &wid[2], &wid0[2], pq1, M, S, sign);
+		} else {
+			col_oscPairStore(&rows[0], &p[0], &inc[0], pq0, M, S);
+			col_oscPairAdd(&rows[2], &p[2], &inc[2], pq1, M, S);
 		}
-		if (M[n] != m) fail(g, "mid bus", M[n], m);
-		if (S[n] != s) fail(g, "side bus", S[n], s);
+		for (n = 0u; n < BLK; n++) {
+			int32_t m = 0, s = 0, old = 0;
+			for (o = 0u; o < 4u; o++) {
+				const uint32_t at = ph[o] + n * inc[o];
+				const int32_t v = pwm ? ref_pulseG(rows[o], ph[o], inc[o], n, wid[o], wid0[o], sign)
+				                      : ref_read(rows[o], at);
+				const uint32_t pq = (o < 2u) ? pq0 : pq1;
+				m += v;
+				s += ref_side(v, (int16_t)((o & 1u) ? (pq >> 16) : (pq & 0xFFFFu)));
+				if (pwm)
+					old += ref_pulse(rows[o], at, wid[o], sign);
+			}
+			if (M[n] != m) fail(g, pass ? "mid bus (glide)" : "mid bus", M[n], m);
+			if (S[n] != s) fail(g, pass ? "side bus (glide)" : "side bus", S[n], s);
+			/* a still width is the S095 shared-fraction pulse to within the
+			 * two reads' separate rounding: 1 per oscillator */
+			if (pwm && !pass && abs(M[n] - old) > 4)
+				fail(g, "still width = the S095 pulse (+-1 per oscillator)", M[n], old);
+		}
+		for (o = 0u; o < 4u; o++)
+			if (p[o] != ph[o] + BLK * inc[o]) fail(g, "phase advance", p[o], ph[o] + BLK * inc[o]);
 	}
-	for (o = 0u; o < 4u; o++)
-		if (p[o] != ph[o] + BLK * inc[o]) fail(g, "phase advance", p[o], ph[o] + BLK * inc[o]);
 }
 
 /* CO-PWM (S095 P3 F2): the warp loops against the restated law, store then add */
@@ -241,29 +273,52 @@ static void test_warp(void)
 	const uint32_t k[3] = { 0u, 70u, 127u };
 	const uint32_t pq[3] = { (uint32_t)(uint16_t)(int16_t)-20000, 32767u,
 	                         (uint32_t)(uint16_t)(int16_t)-32768 };
-	int32_t M[BLK], S[BLK];
+	/* S096 P2 F5: the warp loops take one bus, mid then side */
+	int32_t MS[2u * BLK];
+	int32_t *const M = MS;
+	int32_t *const S = MS + BLK;
 	uint32_t p[3];
 	unsigned n, o;
 
-	memcpy(p, ph, sizeof(p));
-	col_warpStore(rows[0], &p[0], inc[0], oscPwmSinW[k[0]], oscPwmSinRa[k[0]], oscPwmSinRb[k[0]], pq[0], M, S);
-	col_warpAdd(rows[1], &p[1], inc[1], oscPwmTriW[k[1]], oscPwmTriRa[k[1]], oscPwmTriRb[k[1]], pq[1], M, S);
-	col_warpAdd(rows[2], &p[2], inc[2], oscPwmTriW[k[2]], oscPwmTriRa[k[2]], oscPwmTriRb[k[2]], pq[2], M, S);
-	for (n = 0u; n < BLK; n++) {
-		int32_t m = 0, sd = 0;
+	/* S096 P2 F5: pass 0 a still width (steps 0), pass 1 a glide from the
+	 * start index k0 to k: W, ra, rb step by (end - start) / 32 per sample */
+	const uint32_t k0g[3] = { 2u, 68u, 125u };
+	unsigned pass;
+
+	for (pass = 0u; pass < 2u; pass++) {
+		uint32_t W0[3], A0[3], B0[3];
+		int32_t dW[3], dA[3], dB[3];
+
 		for (o = 0u; o < 3u; o++) {
-			const uint32_t at = ph[o] + n * inc[o];
-			const int32_t v = (o == 0u)
-			    ? ref_warp(rows[o], at, oscPwmSinW[k[o]], oscPwmSinRa[k[o]], oscPwmSinRb[k[o]])
-			    : ref_warp(rows[o], at, oscPwmTriW[k[o]], oscPwmTriRa[k[o]], oscPwmTriRb[k[o]]);
-			m += v;
-			sd += ref_side(v, (int16_t)(pq[o] & 0xFFFFu));
+			const uint32_t ks = pass ? k0g[o] : k[o];
+			const uint32_t *const tW = o ? oscPwmTriW : oscPwmSinW;
+			const uint32_t *const tA = o ? oscPwmTriRa : oscPwmSinRa;
+			const uint32_t *const tB = o ? oscPwmTriRb : oscPwmSinRb;
+
+			W0[o] = tW[ks]; A0[o] = tA[ks]; B0[o] = tB[ks];
+			dW[o] = ((int32_t)(tW[k[o]] - tW[ks])) / 32;
+			dA[o] = ((int32_t)(tA[k[o]] - tA[ks])) / 32;
+			dB[o] = ((int32_t)(tB[k[o]] - tB[ks])) / 32;
 		}
-		if (M[n] != m) fail(G_PWM, "warp mid bus", M[n], m);
-		if (S[n] != sd) fail(G_PWM, "warp side bus", S[n], sd);
+		memcpy(p, ph, sizeof(p));
+		col_warpStore(rows[0], &p[0], inc[0], W0[0], A0[0], B0[0], dW[0], dA[0], dB[0], pq[0], MS);
+		col_warpAdd(rows[1], &p[1], inc[1], W0[1], A0[1], B0[1], dW[1], dA[1], dB[1], pq[1], MS);
+		col_warpAdd(rows[2], &p[2], inc[2], W0[2], A0[2], B0[2], dW[2], dA[2], dB[2], pq[2], MS);
+		for (n = 0u; n < BLK; n++) {
+			int32_t m = 0, sd = 0;
+			for (o = 0u; o < 3u; o++) {
+				const uint32_t at = ph[o] + n * inc[o];
+				const int32_t v = ref_warp(rows[o], at, W0[o] + n * (uint32_t)dW[o],
+				                           A0[o] + n * (uint32_t)dA[o], B0[o] + n * (uint32_t)dB[o]);
+				m += v;
+				sd += ref_side(v, (int16_t)(pq[o] & 0xFFFFu));
+			}
+			if (M[n] != m) fail(G_PWM, pass ? "warp mid bus (glide)" : "warp mid bus", M[n], m);
+			if (S[n] != sd) fail(G_PWM, pass ? "warp side bus (glide)" : "warp side bus", S[n], sd);
+		}
+		for (o = 0u; o < 3u; o++)
+			if (p[o] != ph[o] + BLK * inc[o]) fail(G_PWM, "warp phase advance", p[o], ph[o]);
 	}
-	for (o = 0u; o < 3u; o++)
-		if (p[o] != ph[o] + BLK * inc[o]) fail(G_PWM, "warp phase advance", p[o], ph[o]);
 }
 
 static void test_pos_and_w(void)
@@ -501,7 +556,7 @@ static void test_svf(void)
 			V.resOfs = (float)(golden_rand(&s) & 127u) / 127.0f;
 			V.envOfs = (float)(golden_rand(&s) & 127u) / 127.0f;
 			V.driveOfs = (float)(golden_rand(&s) & 127u) / 127.0f;
-			V.filtType = (uint8_t)(golden_rand(&s) % 5u);
+			V.filtType = (uint8_t)(golden_rand(&s) % COL_FT_COUNT);
 			V.route = (uint8_t)(golden_rand(&s) % COL_RTE_COUNT);
 			V.fAmount = (float)(golden_rand(&s) & 127u) / 127.0f;
 			V.drive = (float)(golden_rand(&s) & 127u) / 127.0f;
@@ -531,6 +586,50 @@ static void test_svf(void)
 			y = f.mH * x + f.mB * v1 + f.mL * v2;
 		}
 		if (fabsf(y - 0.5f) > 0.005f) fail(G_SVF, "LP DC gain", y, 0.5);
+	}
+	/* S096 P2 F3: off passes the input exactly; UBP is unity at its centre */
+	{
+		ColSvf f;
+		float ic1, ic2;
+		uint32_t r = 7u;
+		col_svfInit(&f, 0.5f, 0.8f, COL_FT_OFF);
+		ic1 = f.ic1; ic2 = f.ic2;
+		for (i = 0u; i < 2000u; i++) {
+			const float x = (float)(int32_t)golden_rand(&r) * (1.0f / 2147483648.0f);
+			const float v3 = x - ic2, v1 = f.a1 * ic1 + f.a2 * v3, v2 = ic2 + f.a2 * ic1 + f.a3 * v3;
+			const float y = f.mH * x + f.mB * v1 + f.mL * v2;
+			ic1 = 2.0f * v1 - ic1; ic2 = 2.0f * v2 - ic2;
+			if (y != x) { fail(G_SVF, "off is the input", y, x); break; }
+		}
+	}
+	{
+		static const float resList[2] = { 0.2f, 0.9f };
+		unsigned q;
+		for (q = 0u; q < 2u; q++) {
+			ColSvf f;
+			float ic1, ic2, peak = 0.0f, hz;
+			col_svfInit(&f, 0.5f, resList[q], COL_FT_UBP);
+			hz = COL_CUT_BASE_HZ * powf(2.0f, f.cutSt / 12.0f);
+			ic1 = f.ic1; ic2 = f.ic2;
+			for (i = 0u; i < 40000u; i++) {
+				const float x = 0.5f * sinf(2.0f * 3.14159265f * hz * (float)i / REAL_FS);
+				const float v3 = x - ic2, v1 = f.a1 * ic1 + f.a2 * v3, v2 = ic2 + f.a2 * ic1 + f.a3 * v3;
+				const float y = f.mH * x + f.mB * v1 + f.mL * v2;
+				ic1 = 2.0f * v1 - ic1; ic2 = 2.0f * v2 - ic2;
+				if (i > 30000u && fabsf(y) > peak) peak = fabsf(y);
+			}
+			if (fabsf(peak - 0.5f) > 0.01f) fail(G_SVF, "UBP unity at the centre", peak, resList[q]);
+		}
+	}
+	/* S096 P2 F2: a full-depth envelope sweeps the whole range from either end */
+	{
+		ColSvf f;
+		col_svfInit(&f, 0.0f, 0.3f, COL_FT_LP);
+		for (i = 0u; i < 200u; i++) col_svfControl(&f, 0.0f, 0.3f, COL_FT_LP, COL_FENV_ST);
+		if (fabsf(f.cutSt - COL_CUT_ST_MAX) > 0.01f) fail(G_SVF, "full +fam from cut 0 reaches the top", f.cutSt, COL_CUT_ST_MAX);
+		col_svfInit(&f, 1.0f, 0.3f, COL_FT_LP);
+		for (i = 0u; i < 200u; i++) col_svfControl(&f, 1.0f, 0.3f, COL_FT_LP, -COL_FENV_ST);
+		if (fabsf(f.cutSt) > 0.01f) fail(G_SVF, "full -fam from cut 1 reaches the bottom", f.cutSt, 0);
 	}
 }
 
@@ -640,7 +739,8 @@ static void check_pwm_form(uint8_t form)
 	Colloid_calcVoiceSyncBlock(&V, L, BLK);
 	for (n = 0u; n < BLK; n++) {
 		int32_t m = 0;
-		/* S095 P5: each form renders its own count (6 Sin/Tri, 8 Saw/Rec) */
+		/* S095 P5: each form renders its own count (6 Sin/Tri, 6 Saw/Rec
+		 * since S096 P2 F5) */
 		for (i = 0u; i < COL_PWM_FORM_COUNT(form); i++) {
 			const uint32_t at = ph[i] + n * V.inc[i];
 			const uint32_t k = V.pwPos[i] & 127u;
@@ -649,9 +749,9 @@ static void check_pwm_form(uint8_t form)
 				v = ref_warp(sine_table, at, oscPwmSinW[k], oscPwmSinRa[k], oscPwmSinRb[k]);
 			else if (form == COL_PWM_TRI)
 				v = ref_warp(V.row[i], at, oscPwmTriW[k], oscPwmTriRa[k], oscPwmTriRb[k]);
-			else
-				v = ref_pulse(V.row[i], at, (form == COL_PWM_SAW) ? oscPwmDSaw[k] : oscPwmDRec[k],
-				              (form == COL_PWM_SAW) ? 1 : -1);
+			else   /* S096 P2 F5: the gliding pulse, from pwD0 to pwD */
+				v = ref_pulseG(V.row[i], ph[i], V.inc[i], n, V.pwD[i], V.pwD0[i],
+				               (form == COL_PWM_SAW) ? 1 : -1);
 			m += v;
 		}
 		if (V.busM[n] != m) { fail(G_PWM, "form bus", form, n); break; }
@@ -845,6 +945,9 @@ static void test_rnd(void)
  * Why:        without ColloidVoice.oscLive the rejoining oscillators glided
  *             from where they stopped (the break build colloid_break_join
  *             removes the test and must fail here).
+ *             S096 P2 F5: Saw/Rec render 6 again, so Sin -> Saw has no
+ *             rejoining oscillator (the loop is empty); pwm -> wav rejoins
+ *             6..11, measured against oscillator 0's settled pitch.
  */
 static void test_join(void)
 {
@@ -864,7 +967,9 @@ static void test_join(void)
 	V.slew = 120u;
 	Colloid_triggerVoice(&V, 0u, 100u, 75u);
 	V.osc.position = 127u;
-	want = V.pitchCur[6] + 1.0f;
+	/* S096 P2 F5: oscillator 0's settled pitch (6 was the first idle one
+	 * while Saw rendered 8 and Sin 6; both render 6 now) */
+	want = V.pitchCur[0] + 1.0f;
 	block();
 	V.osc.waveform = COL_PWM_SAW;
 	block();
@@ -881,6 +986,75 @@ static void test_join(void)
 	if (V.oscLive != COL_OSC_COUNT) fail(G_JOIN, "wav count", V.oscLive, COL_OSC_COUNT);
 	for (i = COL_PWM_COUNT; i < COL_OSC_COUNT; i++)
 		if (fabsf(V.pitchCur[i] - want) > 1e-5f) fail(G_JOIN, "pwm -> wav: rejoin pitch", i, V.pitchCur[i] - want);
+}
+
+/*
+ * CO-PWG (S096 P2 F5): a moving pwm width glides, it does not click.
+ *
+ * What:       for each pwm form (Sin, Tri, Saw, Rec) a low note (31) with the
+ *             filter off, 2,400 blocks after 400 to settle: once with the
+ *             width still (pos 100), once swept by a slow sine (0.4 Hz over
+ *             the whole range) and once at the full slew (pos 0 <-> 127 every
+ *             80 blocks, the width moving 2 index steps a block). The largest
+ *             third difference of the output must stay within 3 x the still
+ *             width's + 0.002 in both moving runs.
+ * Why:        before S096 P2 F5 the width changed once per block in whole
+ *             table points (Saw/Rec) or moved the warp's half-cycle boundary
+ *             in one jump (Sin/Tri): the largest third differences under the
+ *             slow sweep were 0.51 / 0.49 (Saw / Rec, still 0.033 / 0.028)
+ *             and 0.033 / 0.063 (Sin / Tri, still 0.0001 / 0.0005), heard as
+ *             a light popping (S096_P2_INSTRUMENT_FIXES.md §5). The gliding
+ *             second read and the gliding warp bring them to 0.039 / 0.037
+ *             and 0.0006 / 0.0023.
+ */
+static float pwg_out[2400u * BLK];
+
+static float pwg_run(uint8_t form, int mode)
+{
+	unsigned b, i, k = 0u;
+	float mx = 0.0f;
+
+	voice_init(); host_running = 1u;
+	Colloid_setOscType(&V, COL_TYP_PWM);
+	V.osc.waveform = form;
+	V.osc.position = 100u; V.posSpread = 97.0f / 127.0f;
+	V.osc.midiFreq = (uint16_t)((31u << 8) | 63u);
+	V.attack = 0u; V.decay = 0u; V.sustainLevel = 1.0f; V.sustain = 1u;
+	V.spread = 0.0f; V.motion = 0.0f; V.detune = 58.0f / 127.0f;
+	V.filtType = COL_FT_OFF; V.route = COL_RTE_STR; V.cut = 1.0f;
+	V.fAmount = 63.0f / 127.0f;
+	Colloid_triggerVoice(&V, 0u, 127u, 31u);
+	for (b = 0u; b < 2800u; b++) {
+		if (mode == 1)
+			V.osc.position = (uint8_t)(64.0f + 63.0f * sinf(2.0f * 3.14159265f * 0.4f * (float)b / 1378.4f));
+		else if (mode == 2)
+			V.osc.position = ((b / 80u) & 1u) ? 127u : 0u;
+		block();
+		if (b >= 400u)
+			for (i = 0u; i < BLK; i++)
+				pwg_out[k++] = (float)L[i] * (1.0f / 32768.0f);
+	}
+	for (i = 3u; i < k; i++) {
+		const float d3 = fabsf(pwg_out[i] - 3.0f * pwg_out[i - 1u] + 3.0f * pwg_out[i - 2u] - pwg_out[i - 3u]);
+		if (d3 > mx)
+			mx = d3;
+	}
+	return mx;
+}
+
+static void test_pwg(void)
+{
+	uint8_t form;
+
+	for (form = COL_PWM_SIN; form <= COL_PWM_REC; form++) {
+		const float still = pwg_run(form, 0);
+		const float lim = 3.0f * still + 0.002f;
+		const float swept = pwg_run(form, 1);
+		const float fast = pwg_run(form, 2);
+
+		if (swept > lim) fail(G_PWG, "swept width clicks", form, swept);
+		if (fast > lim) fail(G_PWG, "full-slew width clicks", form, fast);
+	}
 }
 
 int main(void)
@@ -906,6 +1080,7 @@ int main(void)
 	test_mixer();
 	test_rnd();
 	test_join();
+	test_pwg();
 	for (g = 0u; g < G_N; g++) {
 		printf("colloid %-7s failures: %u\n", g_name[g], g_fail[g]);
 		total += g_fail[g];

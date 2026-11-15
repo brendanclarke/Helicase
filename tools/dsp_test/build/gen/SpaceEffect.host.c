@@ -246,13 +246,47 @@ static inline __attribute__((always_inline)) int32_t space_idx(float x,
     return (i > nw) ? i - nw : i;
 }
 
-/* A nearest-frame read at tape position x (the extra and reverse heads). */
-static inline __attribute__((always_inline)) float space_near(
-    const int16_t *t, float x, int32_t nw, const int32_t S)
+/*
+ * Linear reads at tape position x (S096 P2 F1): the extra heads (D/3, 2D/3)
+ * and the reverse head's two windows, which read the nearest frame before.
+ *
+ * What:       space_lin1(): the Echo's mono int16 tape, t[i] + f (t[i + 1] -
+ *             t[i]). space_lin2(): the Delay's stereo frames (L low, R high
+ *             in one 32-bit word), the same per channel; one load for frame
+ *             i and one for i + 1.
+ * Why:        a nearest-frame read is clean only while its position moves
+ *             exactly one frame per sample. Wow, flutter and drift (and the
+ *             reverse windows, and a slowed tape at long delays) move it by
+ *             fractions, so the nearest frame now and then repeated or
+ *             skipped one: a faint tick, more of them as `wow` rose (host
+ *             law SP11; S096_P2_INSTRUMENT_FIXES.md §1). i + 1 never wraps:
+ *             space_idx() returns 1 .. n and the guard frames n .. n + 2
+ *             copy 0 .. 2.
+ * Cost:       per head about 15 instructions a frame more than the nearest
+ *             read (S096 P2 §1.6).
+ */
+static inline __attribute__((always_inline)) float space_lin1(
+    const int16_t *t, float x, int32_t nw)
 {
     float f;
+    const int32_t i = space_idx(x, nw, &f);
+    const float a = (float)t[i];
 
-    return (float)t[space_idx(x, nw, &f) * S];
+    return a + f * ((float)t[i + 1] - a);
+}
+
+static inline __attribute__((always_inline)) void space_lin2(
+    const uint32_t *tape, float x, int32_t nw, float *l, float *r)
+{
+    float f;
+    const int32_t i = space_idx(x, nw, &f);
+    const uint32_t a = tape[i];
+    const uint32_t b = tape[i + 1];
+    const float al = (float)(int16_t)a;
+    const float ar = (float)((int32_t)a >> 16);
+
+    *l = al + f * ((float)(int16_t)b - al);
+    *r = ar + f * ((float)((int32_t)b >> 16) - ar);
 }
 
 /*
@@ -343,11 +377,13 @@ static inline __attribute__((always_inline)) float space_loop(
  * What, per frame (the write position p advancing by va):
  * 1. heads per channel: D through a linear read (§S18; the plan's Hermite
  *    was over the cap), or with
- *    `rev` two nearest-frame heads reading backwards through L's last D in
- *    triangular crossfaded windows, both channels from one frame load per
- *    window (O4); D/3 and 2D/3 as nearest-frame
- *    heads at L's time for both channels (O6; one frame load each); the
- *    weighted sum, gated by `valid`, is the wet (the clean read, D5);
+ *    `rev` two heads reading backwards through L's last D in triangular
+ *    crossfaded windows, both channels from each frame load (O4); D/3 and
+ *    2D/3 at L's time for both channels (O6); the weighted sum, gated by
+ *    `valid`, is the wet (the clean read, D5). S096 P2 F1: the reverse
+ *    windows and the D/3, 2D/3 heads read linearly (space_lin2(), two
+ *    frame loads each); they read the nearest frame before, which slipped a
+ *    frame whenever wow or the reverse ramp moved them by fractions;
  * 2. the output: in x dry + wet x wg (both ramped), and the input peak
  *    (the ducking follower, per block);
  * 3. the loop: the cross-feed (D23: each channel takes xfb of the other's
@@ -425,15 +461,16 @@ space_delayRun(uint32_t *tape, space_hdr_t *h, const space_pass_t *ps,
             const float pb = pl + 0.5f - (float)(int32_t)(pl + 0.5f);
             const float wl = 1.0f - fabsf(2.0f * pl - 1.0f);
             const float x0 = p + n - SPACE_D_MIN;
-            const uint32_t ha = tape[space_idx(x0 - pl * (dl - SPACE_D_MIN),
-                                               nw, &f)];
-            const uint32_t hb = tape[space_idx(x0 - pb * (dl - SPACE_D_MIN),
-                                               nw, &f)];
-            const float bl = (float)(int16_t)hb;
-            const float br = (float)((int32_t)hb >> 16);
+            float al;
+            float ar;
+            float bl;
+            float br;
 
-            yl = bl + wl * ((float)(int16_t)ha - bl);
-            yr = br + wl * ((float)((int32_t)ha >> 16) - br);
+            /* S096 P2 F1: both windows read linearly (were nearest) */
+            space_lin2(tape, x0 - pl * (dl - SPACE_D_MIN), nw, &al, &ar);
+            space_lin2(tape, x0 - pb * (dl - SPACE_D_MIN), nw, &bl, &br);
+            yl = bl + wl * (al - bl);
+            yr = br + wl * (ar - br);
             pl += dpl;
             pl -= (float)(int32_t)pl;
         } else {
@@ -448,17 +485,19 @@ space_delayRun(uint32_t *tape, space_hdr_t *h, const space_pass_t *ps,
             yr = (float)q[0] + f * ((float)q[2] - (float)q[0]);
         }
         /*
-         * D/3 and 2D/3 at L's time for both channels: one 32-bit frame load
-         * gives L and R (§S18).
+         * D/3 and 2D/3 at L's time for both channels: each 32-bit frame load
+         * gives L and R (§S18); S096 P2 F1: read linearly (were nearest).
          */
         {
-            const uint32_t h1 = tape[space_idx(p - dl * third + n, nw, &f)];
-            const uint32_t h2 = tape[space_idx(p - dl * (2.0f * third) + n,
-                                               nw, &f)];
+            float h1l;
+            float h1r;
+            float h2l;
+            float h2r;
 
-            yl = g3 * yl + g1 * (float)(int16_t)h1 + g2 * (float)(int16_t)h2;
-            yr = g3 * yr + g1 * (float)((int32_t)h1 >> 16) +
-                 g2 * (float)((int32_t)h2 >> 16);
+            space_lin2(tape, p - dl * third + n, nw, &h1l, &h1r);
+            space_lin2(tape, p - dl * (2.0f * third) + n, nw, &h2l, &h2r);
+            yl = g3 * yl + g1 * h1l + g2 * h2l;
+            yr = g3 * yr + g1 * h1r + g2 * h2r;
         }
         /* 2. The output and the input peak. */
         l[m] = xl * dry + yl * wg;
@@ -497,6 +536,8 @@ space_delayRun(uint32_t *tape, space_hdr_t *h, const space_pass_t *ps,
 /*
  * The Echo's mono tape (plan §4.3: the Delay's laws on one channel, a
  * linear main read, the Delay's D/3 and 2D/3 heads, no `rev` or cross-feed).
+ * S096 P2 F1: the D/3 and 2D/3 heads read linearly (space_lin1(); they read
+ * the nearest frame before, which slipped under wow).
  * What, per frame: heads -> e[m] (the echo, gated: the wet), the loop
  * chain, the record of in[m] + ka x pmq[m / 4] (the routed plate, quarter
  * rate) at floor(p), int16 mono with the guard; and the plate's input
@@ -538,8 +579,9 @@ static SPACE_LOOP void space_echoTapeRun(
         i = space_idx(p - d + n, nw, &f);
         y = (float)t[i];
         y += f * ((float)t[i + 1] - y);
-        y = g3 * y + g1 * space_near(t, p - d * third + n, nw, 1) +
-            g2 * space_near(t, p - d * (2.0f * third) + n, nw, 1);
+        /* S096 P2 F1: the extra heads read linearly (were nearest) */
+        y = g3 * y + g1 * space_lin1(t, p - d * third + n, nw) +
+            g2 * space_lin1(t, p - d * (2.0f * third) + n, nw);
         e[m] = y;
         pi[m] = ce * y + cm * in[m];
         rn = rn * 1664525u + 1013904223u;

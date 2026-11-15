@@ -51,6 +51,37 @@
 #define BUS_COMP_SAT_SPAN          1.5f
 
 /*
+ * The sidechain duck's attack (S096 P2 F6).
+ *
+ * What:       a csc trigger ducks the fast cell by (2 + 19 cam) x (v/127)^3
+ *             dB. Up to ctm BUS_COMP_SC_ROUND_FROM (5) the duck is reached
+ *             in the trigger's next block, as before. From there to
+ *             BUS_COMP_SC_ROUND_TO (45) the attack time grows by a
+ *             smoothstep (slow at first) to BUS_COMP_SC_ATTACK_MAX_MS
+ *             (10 ms) and stays there above 45 (range: user, 2026-11-15). Over that time the cell moves toward the duck in an
+ *             eased S-curve in dB: each block it moves depth x shape(x) x
+ *             BUS_COMP_SC_EASE_NORM / n, x being the duck's progress (0 at
+ *             the start, 1 at the depth), shape(x) = FLOOR + (1 - FLOOR)
+ *             4 x (1 - x) (a quarter of full speed at the start and the end,
+ *             full speed half way), n the attack in blocks. NORM is the
+ *             integral of 1 / shape over 0..1 (1.5207 for FLOOR 0.25), so the
+ *             duck arrives in about n blocks.
+ * Why:        the duck used to land in one block whatever ctm said: up to
+ *             21 dB in 32 samples (0.73 ms), heard as a pop on the
+ *             sidechained voice. Short times keep that snap; longer times
+ *             now round its attack off progressively (user, 2026-11-15).
+ * State:      none added (the state is approved for 32 B): sc_pending, the
+ *             trigger's weight, stays set until the duck reaches its depth.
+ * Cost:       block rate only, a handful of operations while a duck runs.
+ * Affiliates: busComp_scAttackBlocks(), busComp_processBlock().
+ */
+#define BUS_COMP_SC_ROUND_FROM     5.0f
+#define BUS_COMP_SC_ROUND_TO       45.0f
+#define BUS_COMP_SC_ATTACK_MAX_MS  10.0f
+#define BUS_COMP_SC_EASE_FLOOR     0.25f
+#define BUS_COMP_SC_EASE_NORM      1.5207f
+
+/*
  * Band-split saturation and output ceiling constants (S074_COMP_SAT_UPDATE.md).
  *
  * What:       BUS_COMP_SPLIT_HZ is the one-pole crossover that divides each
@@ -125,6 +156,25 @@ static INDTCMZ bus_comp_state_t busComp;
 static inline float busComp_coef(float tau_ms)
 {
     return BUS_COMP_BLOCK_MS / (tau_ms + 0.5f * BUS_COMP_BLOCK_MS);
+}
+
+/*
+ * The sidechain duck's attack in blocks for a ctm byte (S096 P2 F6).
+ *
+ * Inputs:     row, the ctm byte 0..127.
+ * Outputs:    0 up to BUS_COMP_SC_ROUND_FROM (the duck lands in one block);
+ *             then BUS_COMP_SC_ATTACK_MAX_MS x smoothstep((row - 5) / 40)
+ *             in blocks, the maximum from BUS_COMP_SC_ROUND_TO on.
+ * Caller:     busComp_processBlock().
+ */
+static inline float busComp_scAttackBlocks(float row)
+{
+    float u = (row - BUS_COMP_SC_ROUND_FROM) *
+              (1.0f / (BUS_COMP_SC_ROUND_TO - BUS_COMP_SC_ROUND_FROM));
+
+    u = fminf(fmaxf(u, 0.0f), 1.0f);
+    return BUS_COMP_SC_ATTACK_MAX_MS * u * u * (3.0f - 2.0f * u) *
+           (1.0f / BUS_COMP_BLOCK_MS);
 }
 
 /*
@@ -323,13 +373,33 @@ void busComp_processBlock(sample_mx_t *st1, sample_mx_t *st2,
      * was 9 + 9a). Extremely mild at low cam (2 dB at cam 0), 9.2 dB at the
      * default 48, and fairly extreme at the top (21 dB at cam 127, was 18).
      * Velocity still scales it by (v/127)^3.
+     *
+     * S096 P2 F6: the duck's attack follows ctm (BUS_COMP_SC_* above). With
+     * n <= 1 block (ctm up to about 12) it lands at once, as before;
+     * otherwise the cell moves an eased step toward it each block and
+     * sc_pending stays set until it arrives (a new trigger only raises it).
      */
     if (busComp.sc_pending > 0.0f) {
-        const float duck_db = target - (2.0f + 19.0f * a) * busComp.sc_pending;
+        const float depth_db = (2.0f + 19.0f * a) * busComp.sc_pending;
+        const float duck_db = target - depth_db;
+        const float n = busComp_scAttackBlocks(t * 127.0f);
 
-        if (duck_db < busComp.gr_fast_db)
-            busComp.gr_fast_db = duck_db;
-        busComp.sc_pending = 0.0f;
+        if (n <= 1.0f || duck_db >= busComp.gr_fast_db) {
+            if (duck_db < busComp.gr_fast_db)
+                busComp.gr_fast_db = duck_db;
+            busComp.sc_pending = 0.0f;
+        } else {
+            const float x = fminf(fmaxf((target - busComp.gr_fast_db) / depth_db,
+                                        0.0f), 1.0f);
+            const float shape = BUS_COMP_SC_EASE_FLOOR +
+                                (1.0f - BUS_COMP_SC_EASE_FLOOR) * 4.0f * x * (1.0f - x);
+
+            busComp.gr_fast_db -= depth_db * shape * (BUS_COMP_SC_EASE_NORM / n);
+            if (busComp.gr_fast_db <= duck_db) {
+                busComp.gr_fast_db = duck_db;
+                busComp.sc_pending = 0.0f;
+            }
+        }
     }
     memory_target = BUS_COMP_MEMORY_SHARE * busComp.gr_fast_db;
     k = (memory_target < busComp.gr_memory_db)

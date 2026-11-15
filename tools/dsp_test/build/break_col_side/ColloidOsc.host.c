@@ -118,36 +118,32 @@ static inline __attribute__((always_inline)) int32_t col_read(const int16_t *row
 }
 
 /*
- * One band-limited two-read pulse (S095 P2; S095 P3 F2: the sign).
+ * The two-read pulse with a gliding width (S095 P2; S095 P3 F2: the sign;
+ * S096 P2 F5: the glide).
  *
- * What:       A at ph, B at ph - d (d points earlier, the row wraps):
- *               d0 = row[ia] + sign x row[ib], d1 = the same one point on,
- *               out = d0 + ((d1 - d0) x f >> 15), f = (ph >> 7) & 0x7FFF.
- *             Both reads share one fraction (d is a whole number of points),
- *             so the combination is interpolated once.
- * Why:        osc_pwmReadD() (Oscillator.c, S094 P1 S3), restated because it
- *             is static there: sign -1 is the Rec pulse (the saw-row
- *             difference, high for the first d points), sign +1 the Saw form
- *             (the sum). The sign multiplies (an MLA in place of P2's SUB, the
- *             same issue cost), so both forms are one loop.
- * Range:      |d1 - d0| <= 2 x 32,767 on the stock saw rows (the S094 P1
- *             bound: every adjacent step <= 32,767) for either sign, and
- *             65,534 x 32,767 < 2^31.
+ * What:       per sample s = col_read(row, p) + sign x col_read(row, q):
+ *             A at the oscillator's phase p, B at its own phase q. At the
+ *             block's start q = p - (width0 << 22) (width0 points earlier);
+ *             q advances by j = inc - (width - width0) x 2^17 per sample, so
+ *             after the block's 32 samples q = p - (width << 22) exactly,
+ *             which is where the next block starts it. sign -1 is the Rec
+ *             pulse (the saw-row difference), +1 the Saw form (the sum).
+ * Why:        the S095 form read B at a whole number of points before A and
+ *             shared A's fraction, so the width could only change by whole
+ *             points at a block boundary: up to 8 points at the slew limit,
+ *             and the pulse's second edge jumped with it, a click whenever
+ *             the edge passed the sample being read (host law CO-PWG). With
+ *             its own phase and interpolation B moves smoothly, by a
+ *             fraction of a point per sample, and with a still width
+ *             (width0 = width) it reads exactly the old points: the output
+ *             differs from the old shared-fraction form only by the two
+ *             reads rounding separately (at most 1).
+ * Range:      |s| <= 2 x 32,767 for either sign (each read is a row value or
+ *             between two), as before.
+ * Cost:       66 instructions a pair per sample (was 50 / 51): the second
+ *             interpolation and the second phase add.
  * Accessors:  col_pwmPairStore(), col_pwmPairAdd().
  */
-static inline __attribute__((always_inline)) int32_t col_pulse(const int16_t *row, uint32_t ph,
-                                                             uint32_t d, int32_t sign)
-{
-	const uint32_t ia = ph >> 22;
-	const uint32_t na = (ia + 1u) & 0x3FFu;
-	const uint32_t ib = (ia - d) & 0x3FFu;
-	const uint32_t nb = (ib + 1u) & 0x3FFu;
-	const int32_t d0 = row[ia] + sign * row[ib];
-	const int32_t d1 = row[na] + sign * row[nb];
-
-	return d0 + (((d1 - d0) * (int32_t)((ph >> 7) & 0x7FFFu)) >> 15);
-}
-
 /*
  * The first plain pair of a block: stores both buses (S095 P2).
  * Loop: n = 0..31; s0, s1 the two reads; M = s0 + s1; S = s0 p0/2 + s1 p1/2;
@@ -210,32 +206,39 @@ COL_LOOP void col_oscPairAdd(const int16_t *const *row, uint32_t *phase,
 /*
  * The first pwm pair of a block: stores both buses (S095 P2; S095 P3 F2).
  * As col_oscPairStore() with the two-read pulse; each oscillator has its own
- * width (width[0], width[1]: the per-block widths after the slew); sign is
- * -1 for Rec, +1 for Saw (the voice's whole stack plays one form).
+ * width (width[0], width[1]: the block's end widths after the slew;
+ * width0[0..1] the start widths, S096 P2 F5); sign is -1 for Rec, +1 for Saw
+ * (the voice's whole stack plays one form).
  */
 COL_LOOP void col_pwmPairStore(const int16_t *const *row, uint32_t *phase,
                                const uint32_t *inc, const uint16_t *width,
-                               const uint32_t posPair, int32_t *busM, int32_t *busS,
-                               const int32_t sign)
+                               const uint16_t *width0, const uint32_t posPair,
+                               int32_t *busM, int32_t *busS, const int32_t sign)
 {
 	const int16_t *const r0 = row[0];
 	const int16_t *const r1 = row[1];
 	const uint32_t i0 = inc[0];
 	const uint32_t i1 = inc[1];
-	const uint32_t d0 = width[0];
-	const uint32_t d1 = width[1];
+	/* B's increment: the width's change over the block, 2^17 per point a
+	 * sample (S096 P2 F5) */
+	const uint32_t j0 = i0 - (uint32_t)(((int32_t)width[0] - (int32_t)width0[0]) * 131072);
+	const uint32_t j1 = i1 - (uint32_t)(((int32_t)width[1] - (int32_t)width0[1]) * 131072);
 	uint32_t p0 = phase[0];
 	uint32_t p1 = phase[1];
+	uint32_t q0 = p0 - ((uint32_t)width0[0] << 22);
+	uint32_t q1 = p1 - ((uint32_t)width0[1] << 22);
 	uint32_t n;
 
 	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
-		const int32_t s0 = col_pulse(r0, p0, d0, sign);
-		const int32_t s1 = col_pulse(r1, p1, d1, sign);
+		const int32_t s0 = col_read(r0, p0) + sign * col_read(r0, q0);
+		const int32_t s1 = col_read(r1, p1) + sign * col_read(r1, q1);
 
 		busM[n] = s0 + s1;
 		busS[n] = col_smlawb(s1, posPair, col_smulwb(s0, posPair));
 		p0 += i0;
 		p1 += i1;
+		q0 += j0;
+		q1 += j1;
 	}
 	phase[0] = p0;
 	phase[1] = p1;
@@ -246,27 +249,31 @@ COL_LOOP void col_pwmPairStore(const int16_t *const *row, uint32_t *phase,
  */
 COL_LOOP void col_pwmPairAdd(const int16_t *const *row, uint32_t *phase,
                              const uint32_t *inc, const uint16_t *width,
-                             const uint32_t posPair, int32_t *busM, int32_t *busS,
-                             const int32_t sign)
+                             const uint16_t *width0, const uint32_t posPair,
+                             int32_t *busM, int32_t *busS, const int32_t sign)
 {
 	const int16_t *const r0 = row[0];
 	const int16_t *const r1 = row[1];
 	const uint32_t i0 = inc[0];
 	const uint32_t i1 = inc[1];
-	const uint32_t d0 = width[0];
-	const uint32_t d1 = width[1];
+	const uint32_t j0 = i0 - (uint32_t)(((int32_t)width[0] - (int32_t)width0[0]) * 131072);
+	const uint32_t j1 = i1 - (uint32_t)(((int32_t)width[1] - (int32_t)width0[1]) * 131072);
 	uint32_t p0 = phase[0];
 	uint32_t p1 = phase[1];
+	uint32_t q0 = p0 - ((uint32_t)width0[0] << 22);
+	uint32_t q1 = p1 - ((uint32_t)width0[1] << 22);
 	uint32_t n;
 
 	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
-		const int32_t s0 = col_pulse(r0, p0, d0, sign);
-		const int32_t s1 = col_pulse(r1, p1, d1, sign);
+		const int32_t s0 = col_read(r0, p0) + sign * col_read(r0, q0);
+		const int32_t s1 = col_read(r1, p1) + sign * col_read(r1, q1);
 
 		busM[n] += s0 + s1;
 		busS[n] = col_smlawt(s1, posPair, col_smlawb(s0, posPair, busS[n]));
 		p0 += i0;
 		p1 += i1;
+		q0 += j0;
+		q1 += j1;
 	}
 	phase[0] = p0;
 	phase[1] = p1;
@@ -283,6 +290,18 @@ COL_LOOP void col_pwmPairAdd(const int16_t *const *row, uint32_t *phase,
  *             position in the low half of pq. row is sine_table (Sin) or a
  *             triTable octave row (Tri); W, ra, rb are oscPwmSin* /
  *             oscPwmTri*[the oscillator's width index] (oscPwmTables.h).
+ *             S096 P2 F5: W, ra and rb start at the block's start index's
+ *             values and add dW, dRa, dRb per sample, (end - start) / 32,
+ *             so a moving width glides instead of moving the half-cycle
+ *             boundary in one jump at the block start (a click on every
+ *             block while the width moved; host law CO-PWG). The next block
+ *             starts on the table values again, within 31 phase units of
+ *             where this one ended (the warp's own precision is 64). The
+ *             linear glide keeps W ra = 2^57 only at the ends: between them
+ *             the half-cycle boundary is off by at most a quarter of
+ *             (dW x 32 / W)^2, 0.3 % of a half-cycle for Sin and 2.2 % for
+ *             Tri at the narrowest widths at the full slew, far below the
+ *             jump it replaces. Cost: 3 adds per sample.
  * Why:        the platform's WS and WT forms (Oscillator.c osc_pwmWsPlainBlock,
  *             osc_pwmWtPlainBlock): the same warp (oscPwmWarp.h, shared with
  *             the Alkaline) and the same interpolated read (col_read() equals
@@ -294,7 +313,9 @@ COL_LOOP void col_pwmPairAdd(const int16_t *const *row, uint32_t *phase,
  *             forms share the loop: only the row and the constants differ.
  * Range:      |row[n+1] - row[n]| <= 32,767 on every stock row (osc_pwmReadT()
  *             bound); s x q fits easily.
- * Inputs:     row, phase (updated), inc, wPh, ra, rb, pq, busM[32], busS[32].
+ * Inputs:     row, phase (updated), inc, wPh, ra, rb (the block's start), dW,
+ *             dRa, dRb (their steps per sample), pq, bus[64] (mid then side;
+ *             S096 P2 F5).
  * Accessors:  Colloid_calcVoiceSyncBlock() (typ pwm, wav Sin or Tri), once
  *             per oscillator per block: the first oscillator stores.
  * Affiliates: tools/dsp_test modules/colloid.c law CO-PWM (against
@@ -302,35 +323,59 @@ COL_LOOP void col_pwmPairAdd(const int16_t *const *row, uint32_t *phase,
  */
 COL_LOOP_P3 void col_warpStore(const int16_t *row, uint32_t *phase, const uint32_t inc,
                                const uint32_t wPh, const uint32_t ra, const uint32_t rb,
-                               const uint32_t pq, int32_t *busM, int32_t *busS)
+                               const int32_t dW, const int32_t dRa, const int32_t dRb,
+                               const uint32_t pq, int32_t *bus)
 {
+	/* bus is the mid bus (32 words) followed by the side bus (32): one
+	 * pointer for both keeps the glide's three steps in registers (S096 P2
+	 * F5; the voice struct's busM / busS layout is asserted in
+	 * ColloidVoice.c) */
+	int32_t *bm = bus;
+	int32_t *const end = bus + OUTPUT_DMA_SIZE;
 	uint32_t ph = *phase;
-	uint32_t n;
+	uint32_t w = wPh;
+	uint32_t a = ra;
+	uint32_t b = rb;
+	do {
+		const int32_t s = col_read(row, osc_pwmWarp(ph, w, a, b));
 
-	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
-		const int32_t s = col_read(row, osc_pwmWarp(ph, wPh, ra, rb));
-
-		busM[n] = s;
-		busS[n] = col_smulwb(s, pq);
+		bm[0] = s;
+		bm[OUTPUT_DMA_SIZE] = col_smulwb(s, pq);
+		bm++;
 		ph += inc;
-	}
+		w += (uint32_t)dW;    /* S096 P2 F5: the glide */
+		a += (uint32_t)dRa;
+		b += (uint32_t)dRb;
+	} while (bm != end);
 	*phase = ph;
 }
 
 COL_LOOP_P3 void col_warpAdd(const int16_t *row, uint32_t *phase, const uint32_t inc,
                              const uint32_t wPh, const uint32_t ra, const uint32_t rb,
-                             const uint32_t pq, int32_t *busM, int32_t *busS)
+                             const int32_t dW, const int32_t dRa, const int32_t dRb,
+                             const uint32_t pq, int32_t *bus)
 {
+	/* bus is the mid bus (32 words) followed by the side bus (32): one
+	 * pointer for both keeps the glide's three steps in registers (S096 P2
+	 * F5; the voice struct's busM / busS layout is asserted in
+	 * ColloidVoice.c) */
+	int32_t *bm = bus;
+	int32_t *const end = bus + OUTPUT_DMA_SIZE;
 	uint32_t ph = *phase;
-	uint32_t n;
+	uint32_t w = wPh;
+	uint32_t a = ra;
+	uint32_t b = rb;
+	do {
+		const int32_t s = col_read(row, osc_pwmWarp(ph, w, a, b));
 
-	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
-		const int32_t s = col_read(row, osc_pwmWarp(ph, wPh, ra, rb));
-
-		busM[n] += s;
-		busS[n] = col_smlawb(s, pq, busS[n]);
+		bm[0] += s;
+		bm[OUTPUT_DMA_SIZE] = col_smlawb(s, pq, bm[OUTPUT_DMA_SIZE]);
+		bm++;
 		ph += inc;
-	}
+		w += (uint32_t)dW;    /* S096 P2 F5: the glide */
+		a += (uint32_t)dRa;
+		b += (uint32_t)dRb;
+	} while (bm != end);
 	*phase = ph;
 }
 

@@ -601,6 +601,93 @@ static void law_sp10(void)
     }
 }
 
+/*
+ * SP11 (S096 P2 F1): no frame slips in the extra heads or the reverse head.
+ *
+ * What:       a 440 Hz sine at 0.5 into the Delay (feedback 0) and the Echo
+ *             (feedback 0), 4 s after the glides settle; the largest third
+ *             difference of the output L. A smooth (or smoothly wobbled)
+ *             sine gives about 1.2e-4 and the linear main head's moving
+ *             fraction about 4e-3; a one-frame slip of this sine 0.06 ..
+ *             0.09. Cases: Delay heads ABC at wow 127; Delay reverse (heads
+ *             C) at wow 0 and 127; Echo heads ABC at wow 127. Each must stay
+ *             below 0.012.
+ * Why:        the D/3 and 2D/3 heads and the reverse windows read the
+ *             nearest frame before S096 P2, which slipped as soon as wow
+ *             (or the reverse ramp) moved their positions by fractions: the
+ *             user's quiet popping (S096_P2_INSTRUMENT_FIXES.md §1).
+ */
+static float sp11_buf[44100u * 4u];
+
+static float sp11_run(const effect_type_ops_t *ops, const uint8_t *rows, uint32_t nrows)
+{
+    float l[32];
+    float r[32];
+    uint32_t b;
+    uint32_t n;
+    uint32_t k = 0u;
+    uint32_t ph = 0u;
+    float mx = 0.0f;
+
+    cb_bpm = 120u;
+    sp_enter(ops, NULL, rows, nrows);
+    for (b = 0u; b < 9000u + (44100u * 4u) / 32u; b++) {
+        for (n = 0u; n < 32u; n++)
+            l[n] = r[n] = 0.5f * sinf(2.0f * 3.14159265f * 440.0f * (float)(ph++) / 44108.07f);
+        sp_block(ops, l, r);
+        if (b >= 9000u)
+            for (n = 0u; n < 32u; n++)
+                sp11_buf[k++] = l[n];
+    }
+    for (n = 3u; n < k; n++) {
+        const float d3 = sp11_buf[n] - 3.0f * sp11_buf[n - 1u] +
+                         3.0f * sp11_buf[n - 2u] - sp11_buf[n - 3u];
+
+        if (fabsf(d3) > mx)
+            mx = fabsf(d3);
+    }
+    return mx;
+}
+
+static void law_sp11(void)
+{
+    static const struct { uint8_t hed, rev, wow; const char *what; } dly[3] = {
+        { 6u, 0u, 127u, "Delay heads ABC, wow 127" },
+        { SPACE_HEADS_DEFAULT, 1u, 0u, "Delay reverse, wow 0" },
+        { SPACE_HEADS_DEFAULT, 1u, 127u, "Delay reverse, wow 127" },
+    };
+    char msg[160];
+    uint32_t c;
+
+    for (c = 0u; c < 3u; c++) {
+        uint8_t rows[SP_DLY_ROWS];
+        float mx;
+
+        memcpy(rows, sp_dlyRows, sizeof(rows));
+        rows[2] = 0u;            /* fbk */
+        rows[6] = dly[c].wow;    /* wow */
+        rows[8] = dly[c].rev;    /* rev */
+        rows[9] = dly[c].hed;    /* hed */
+        mx = sp11_run(&space_delayOps, rows, SP_DLY_ROWS);
+        snprintf(msg, sizeof msg, "SP11 %s: largest third difference %.4f (< 0.012)",
+                 dly[c].what, mx);
+        expect(mx < 0.012f, msg);
+    }
+    {
+        uint8_t rows[SP_ECH_ROWS];
+        float mx;
+
+        memcpy(rows, sp_echRows, sizeof(rows));
+        rows[1] = 0u;            /* fbk */
+        rows[4] = 127u;          /* wow */
+        rows[10] = 6u;           /* hed ABC */
+        mx = sp11_run(&space_echoOps, rows, SP_ECH_ROWS);
+        snprintf(msg, sizeof msg, "SP11 Echo heads ABC, wow 127: largest third difference %.4f (< 0.012)",
+                 mx);
+        expect(mx < 0.012f, msg);
+    }
+}
+
 int main(void)
 {
     law_sp1();
@@ -613,6 +700,7 @@ int main(void)
     law_sp8();
     law_sp9();
     law_sp10();
+    law_sp11();
     printf("space failures: %d\n", failures);
     return failures ? 1 : 0;
 }

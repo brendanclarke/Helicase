@@ -309,17 +309,19 @@ static const char alkWaveNames[][4] = {
  *                    left's type plus the offsets), then the type of the
  *                    second filter of a mono series route: LP BP HP Nch Pek
  *                    (COL_RTE_STR, 1 + COL_FT_*).
- * colFiltTypeNames   typ: LP BP HP Nch Pek (COL_FT_*).
+ * colFiltTypeNames   typ: LP BP HP Nch Pek UBP off (COL_FT_*; UBP and off
+ *                    appended in S096 P2 F3). colRouteNames: str, then the
+ *                    same seven as the mono route's second filter.
  * colWaveNames       the osc1_wave cell under typ wav: Saw Rec Tri Sin
  *                    (COL_WAVE_*); under pwm the cell takes the shared pwm
  *                    branch (waveformNames: Sin Tri Saw Rec, S095 P3 F2;
  *                    menu_formatWaveCell()).
  */
 static const char colRouteNames[][4] = {
-    {6}, {"str"},{"LP "},{"BP "},{"HP "},{"Nch"},{"Pek"},
+    {8}, {"str"},{"LP "},{"BP "},{"HP "},{"Nch"},{"Pek"},{"UBP"},{"off"},
 };
 static const char colFiltTypeNames[][4] = {
-    {5}, {"LP "},{"BP "},{"HP "},{"Nch"},{"Pek"},
+    {7}, {"LP "},{"BP "},{"HP "},{"Nch"},{"Pek"},{"UBP"},{"off"},
 };
 static const char colWaveNames[][4] = {
     {4}, {"Saw"},{"Rec"},{"Tri"},{"Sin"},
