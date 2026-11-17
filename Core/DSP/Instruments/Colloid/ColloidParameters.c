@@ -223,96 +223,96 @@ const ParamDescriptor colloid_param_descriptors[] = {
      * note every block, and every oscillator slews to it (slw). Their
      * LFO/velocity target is osc.modNodeValue, the base frequency's
      * multiplier (after the slew). coa 48 = C3 at the default note 63. */
-    ROW_SPECIAL("osc1_pitch_coarse", "Oscilltr", "Coarse", "coa", DTYPE_0B127, MOD_0_127, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC1),
-    ROW_SPECIAL("osc1_pitch_fine", "Oscilltr", "Fine", "fin", DTYPE_PM63, MOD_PM63, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_FINE | IM_SPECIAL_OSC1),
+    ROW_SPECIAL("osc1_pitch_coarse", CAT_OSC, LONG_COARSE, SHORT_COARSE, DTYPE_0B127, MOD_0_127, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC1),
+    ROW_SPECIAL("osc1_pitch_fine", CAT_OSC, LONG_FINE, SHORT_FINE, DTYPE_PM63, MOD_PM63, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_FINE | IM_SPECIAL_OSC1),
     /* pos: the frame centre under wtb (latched at the trigger, C-D4), the
      * width under pwm (every block, slewed); "---" under wav */
-    ROW("osc1_position", "Oscilltr", "Position", "pos", DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
+    ROW("osc1_position", CAT_OSC, LONG_POSITION, SHORT_POS, DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
     /* psp: the frame spread (wtb) or the width spread (pwm) around pos, on
      * the S095 P3 F7 curve (P2's maximum at 40, x5 at 127) */
-    ROW("col_pos_spread", "Oscilltr", "PosSprd", "psp", DTYPE_0B127, MOD_0_127, posSpread, TYPE_FLT),
+    ROW("col_pos_spread", CAT_OSC, LONG_POSSPRD, SHORT_PSP, DTYPE_0B127, MOD_0_127, posSpread, TYPE_FLT),
     /* wav: under typ wav Saw Rec Tri Sin, under pwm Sin Tri Saw Rec (S095 P3
      * F2, the platform's list), under wtb the table (wNN); the shared wave
      * helpers key on "osc1_wave" and know the Colloid case
      * (instrumentManager_waveDomainMax(), menu_formatWaveCell()) */
-    ROW_MENU("osc1_wave", "Oscilltr", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, osc.waveform, TYPE_UINT8),
+    ROW_MENU("osc1_wave", CAT_OSC, LONG_WAVE, SHORT_WAVE, MENU_WAVEFORM, MOD_WAVE, osc.waveform, TYPE_UINT8),
     /* typ: wav / wtb / pwm / wts (S096 P3: the Colloid's own list,
      * colTypeNames, ONOFF_TAG_COL_TYPE); the writer is Colloid_setOscType()
      * (IM_SPECIAL_OSC_TYPE's Colloid branch) */
-    ROW_SELECT_ONOFF_SPECIAL("osc1_type", "Oscilltr", "Type", "typ", ONOFF_TAG_COL_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
+    ROW_SELECT_ONOFF_SPECIAL("osc1_type", CAT_OSC, LONG_TYPE, SHORT_FIL_TYPE, ONOFF_TAG_COL_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
     /* --- AEG: the amp ADSR (draft §4.1): times are colEgK rows, 1 ms .. 10 s --- */
-    ROW("col_attack", "Amp EG", "Attack", "atk", DTYPE_0B127, MOD_0_127, attack, TYPE_UINT8),
-    ROW("col_decay", "Amp EG", "Decay", "dec", DTYPE_0B127, MOD_0_127, decay, TYPE_UINT8),
-    ROW("col_sustain_level", "Amp EG", "SustLvl", "slv", DTYPE_0B127, MOD_0_127, sustainLevel, TYPE_FLT),
-    ROW("col_release", "Amp EG", "Release", "rel", DTYPE_0B127, MOD_0_127, release, TYPE_UINT8),
+    ROW("col_attack", CAT_AMP_EG, LONG_ATTACK, SHORT_ATTACK, DTYPE_0B127, MOD_0_127, attack, TYPE_UINT8),
+    ROW("col_decay", CAT_AMP_EG, LONG_DECAY, SHORT_DECAY, DTYPE_0B127, MOD_0_127, decay, TYPE_UINT8),
+    ROW("col_sustain_level", CAT_AMP_EG, LONG_SUSTLVL, SHORT_SLV, DTYPE_0B127, MOD_0_127, sustainLevel, TYPE_FLT),
+    ROW("col_release", CAT_AMP_EG, LONG_RELEASE, SHORT_REL, DTYPE_0B127, MOD_0_127, release, TYPE_UINT8),
     /* --- MOD (after the velocity dst / amt cells) --- */
     /* sus (C-D8): hold at the sustain level while on and the transport runs
      * (C-D19); a step lock or Pattern automation turns it off to end a note.
      * S095 P3 F8: on the MOD page. */
-    ROW_SELECT_ONOFF("col_sustain", "Amp EG", "Sustain", "sus", 0u, sustain, TYPE_UINT8),
+    ROW_SELECT_ONOFF("col_sustain", CAT_AMP_EG, LONG_SUSTAIN, SHORT_SUS, 0u, sustain, TYPE_UINT8),
     /* slw (S095 P3 F3, Q1): the pitch slew rate. 0 instant; 1..127 a constant
      * rate from 1 octave per ms to 1 octave per 10 s. Every oscillator
      * travels to its own target (note, coa, fin, intervals, detune) at it. */
-    ROW("col_slew", "Pitch", "Slew", "slw", DTYPE_0B127, MOD_0_127, slew, TYPE_UINT8),
+    ROW("col_slew", CAT_PITCH, LONG_SLEW, SHORT_SLW, DTYPE_0B127, MOD_0_127, slew, TYPE_UINT8),
     /* --- FM: the pitch groups and the stack's spread --- */
     /* in1..in3 (S095 P3 F4): literal intervals in semitones, -63..+63 (63 =
      * 0), for the oscillators of groups 1..3 (o mod 4); group 0 is the root */
-    ROW("col_interval_1", "Pitch", "Intrvl1", "in1", DTYPE_PM63, MOD_PM63, interval[0], TYPE_UINT8),
-    ROW("col_interval_2", "Pitch", "Intrvl2", "in2", DTYPE_PM63, MOD_PM63, interval[1], TYPE_UINT8),
-    ROW("col_interval_3", "Pitch", "Intrvl3", "in3", DTYPE_PM63, MOD_PM63, interval[2], TYPE_UINT8),
+    ROW("col_interval_1", CAT_PITCH, LONG_INTRVL1, SHORT_IN1, DTYPE_PM63, MOD_PM63, interval[0], TYPE_UINT8),
+    ROW("col_interval_2", CAT_PITCH, LONG_INTRVL2, SHORT_IN2, DTYPE_PM63, MOD_PM63, interval[1], TYPE_UINT8),
+    ROW("col_interval_3", CAT_PITCH, LONG_INTRVL3, SHORT_IN3, DTYPE_PM63, MOD_PM63, interval[2], TYPE_UINT8),
     /* dtn (F5: up to +-250 cents), spr (F6: x5), mot (F6: depth x5) */
-    ROW("col_detune", "Unison", "Detune", "dtn", DTYPE_0B127, MOD_0_127, detune, TYPE_FLT),
-    ROW("col_spread", "Unison", "Spread", "spr", DTYPE_0B127, MOD_0_127, spread, TYPE_FLT),
-    ROW("col_motion", "Unison", "Motion", "mot", DTYPE_0B127, MOD_0_127, motion, TYPE_FLT),
+    ROW("col_detune", CAT_UNISON, LONG_DETUNE, SHORT_DTN, DTYPE_0B127, MOD_0_127, detune, TYPE_FLT),
+    ROW("col_spread", CAT_UNISON, LONG_SPREAD, SHORT_SPR, DTYPE_0B127, MOD_0_127, spread, TYPE_FLT),
+    ROW("col_motion", CAT_UNISON, LONG_MOTION, SHORT_MOT, DTYPE_0B127, MOD_0_127, motion, TYPE_FLT),
     /* --- click: the filter ADSR (draft §4.2), its bipolar amount, and the
      * filter drive (S095 P3 F10: moved here from the filter page) --- */
-    ROW("col_fenv_attack", "Filt EG", "Attack", "fat", DTYPE_0B127, MOD_0_127, fAttack, TYPE_UINT8),
-    ROW("col_fenv_decay", "Filt EG", "Decay", "fde", DTYPE_0B127, MOD_0_127, fDecay, TYPE_UINT8),
-    ROW("col_fenv_sustain_level", "Filt EG", "SustLvl", "fsl", DTYPE_0B127, MOD_0_127, fSustain, TYPE_FLT),
-    ROW("col_fenv_release", "Filt EG", "Release", "fre", DTYPE_0B127, MOD_0_127, fRelease, TYPE_UINT8),
-    ROW("col_fenv_amount", "Filt EG", "Amount", "fam", DTYPE_PM63, MOD_PM63, fAmount, TYPE_FLT),
-    ROW("col_drive", "Filter", "Drive", "drv", DTYPE_0B127, MOD_0_127, drive, TYPE_FLT),
+    ROW("col_fenv_attack", CAT_FILT_EG, LONG_ATTACK, SHORT_FAT, DTYPE_0B127, MOD_0_127, fAttack, TYPE_UINT8),
+    ROW("col_fenv_decay", CAT_FILT_EG, LONG_DECAY, SHORT_FDE, DTYPE_0B127, MOD_0_127, fDecay, TYPE_UINT8),
+    ROW("col_fenv_sustain_level", CAT_FILT_EG, LONG_SUSTLVL, SHORT_FSL, DTYPE_0B127, MOD_0_127, fSustain, TYPE_FLT),
+    ROW("col_fenv_release", CAT_FILT_EG, LONG_RELEASE, SHORT_FRE, DTYPE_0B127, MOD_0_127, fRelease, TYPE_UINT8),
+    ROW("col_fenv_amount", CAT_FILT_EG, LONG_AMOUNT, SHORT_FAM, DTYPE_PM63, MOD_PM63, fAmount, TYPE_FLT),
+    ROW("col_drive", CAT_FILTER, LONG_DRIVE_WORD, SHORT_DRIVE, DTYPE_0B127, MOD_0_127, drive, TYPE_FLT),
     /* --- FILTER (S095 P3 F9): one filter, its route, the right offsets --- */
-    ROW("col_cutoff", "Filter", "Cutoff", "frq", DTYPE_0B127, MOD_0_127, cut, TYPE_FLT),
-    ROW("col_reso", "Filter", "Reso", "res", DTYPE_0B127, MOD_0_127, res, TYPE_FLT),
+    ROW("col_cutoff", CAT_FILTER, LONG_CUTOFF, SHORT_FREQ, DTYPE_0B127, MOD_0_127, cut, TYPE_FLT),
+    ROW("col_reso", CAT_FILTER, LONG_RESO, SHORT_FIL_RESO, DTYPE_0B127, MOD_0_127, res, TYPE_FLT),
     /* typ: the left (str) or first (mono) filter's type */
-    ROW_SELECT_ONOFF("col_filt_type", "Filter", "FiltType", "typ", ONOFF_TAG_COL_FILT_TYPE, filtType, TYPE_UINT8),
+    ROW_SELECT_ONOFF("col_filt_type", CAT_FILTER, LONG_FILTTYPE, SHORT_FIL_TYPE, ONOFF_TAG_COL_FILT_TYPE, filtType, TYPE_UINT8),
     /* rte: str (stereo: the right filter the left's type plus offsets), or a
      * type: mono, that filter in series after the first */
-    ROW_SELECT_ONOFF("col_route", "Filter", "Route", "rte", ONOFF_TAG_COL_ROUTE, route, TYPE_UINT8),
+    ROW_SELECT_ONOFF("col_route", CAT_FILTER, LONG_ROUTE, SHORT_RTE, ONOFF_TAG_COL_ROUTE, route, TYPE_UINT8),
     /* the right / second filter's offsets in their cell's own units (63 = 0) */
-    ROW("col_cut_ofs", "Filter", "CutOfs", "fro", DTYPE_PM63, MOD_PM63, cutOfs, TYPE_FLT),
-    ROW("col_res_ofs", "Filter", "ResOfs", "reo", DTYPE_PM63, MOD_PM63, resOfs, TYPE_FLT),
-    ROW("col_env_ofs", "Filter", "EnvOfs", "eno", DTYPE_PM63, MOD_PM63, envOfs, TYPE_FLT),
-    ROW("col_drive_ofs", "Filter", "DrvOfs", "dro", DTYPE_PM63, MOD_PM63, driveOfs, TYPE_FLT),
+    ROW("col_cut_ofs", CAT_FILTER, LONG_CUTOFS, SHORT_FRO, DTYPE_PM63, MOD_PM63, cutOfs, TYPE_FLT),
+    ROW("col_res_ofs", CAT_FILTER, LONG_RESOFS, SHORT_REO, DTYPE_PM63, MOD_PM63, resOfs, TYPE_FLT),
+    ROW("col_env_ofs", CAT_FILTER, LONG_ENVOFS, SHORT_ENO, DTYPE_PM63, MOD_PM63, envOfs, TYPE_FLT),
+    ROW("col_drive_ofs", CAT_FILTER, LONG_DRVOFS, SHORT_DRO, DTYPE_PM63, MOD_PM63, driveOfs, TYPE_FLT),
     /* --- MIX: the platform rows (the mixer reads vol and pan, C-D11), then
      * the post-filter tone and overdrive (S095 P3 F10, the Alkaline's) --- */
-    ROW("instrument_vol", "Voice", "Volume", "vol", DTYPE_0B127, MOD_0_127, vol, TYPE_FLT),
-    ROW("instrument_pan", "Voice", "Panning", "pan", DTYPE_PM63, MOD_PM63, pan, TYPE_UINT8),
+    ROW("instrument_vol", CAT_VOICE, LONG_VOL, SHORT_VOL, DTYPE_0B127, MOD_0_127, vol, TYPE_FLT),
+    ROW("instrument_pan", CAT_VOICE, LONG_PAN, SHORT_PAN, DTYPE_PM63, MOD_PM63, pan, TYPE_UINT8),
     /* ton: alkToneC[byte]: 127 = open (exact), lower rolls off toward ~800 Hz */
-    ROW("col_tone", "Voice", "Tone", "ton", DTYPE_0B127, MOD_0_127, tone, TYPE_UINT8),
+    ROW("col_tone", CAT_VOICE, LONG_TONE, SHORT_TON, DTYPE_0B127, MOD_0_127, tone, TYPE_UINT8),
     /* drv: the shared instrument_drive key and labels (the NRPN voice-drive
      * group, the Learn pattern); the byte goes to vcaDrive through
      * IM_SPECIAL_INSTRUMENT_DRIVE's Colloid branch (InstrumentManager.c) */
-    ROW_SPECIAL("instrument_drive", "Voice", "Overdriv", "drv", DTYPE_0B127, MOD_0_127, vcaDrive, TYPE_UINT8, IM_SPECIAL_INSTRUMENT_DRIVE),
+    ROW_SPECIAL("instrument_drive", CAT_VOICE, LONG_DRIVE, SHORT_DRIVE, DTYPE_0B127, MOD_0_127, vcaDrive, TYPE_UINT8, IM_SPECIAL_INSTRUMENT_DRIVE),
     /* --- the LFO pair: one oscillator, two destinations (AlkalineParameters.c) --- */
-    ROW_SPECIAL("lfo_rate", "LFO", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, lfo.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_LFO_RATE),
-    ROW("lfo_amount", "LFO", "Amount", "am1", DTYPE_0B127, MOD_0_127, lfo.modTarget.amount, TYPE_FLT),
-    ROW("lfo_amount_2", "LFO", "Amount 2", "am2", DTYPE_0B127, MOD_0_127, lfo.modTarget2.amount, TYPE_FLT),
-    ROW_MENU("lfo_wave", "LFO", "Waveform", "wav", MENU_LFO_WAVES, MOD_NONE, lfo.waveform, TYPE_UINT8),
-    ROW_MENU("lfo_retrigger_voice", "LFO", "Retriggr", "rtg", MENU_RETRIGGER, MOD_NONE, lfo.retrigger, TYPE_UINT8),
-    ROW("lfo_polarity", "LFO", "Polarity", "pol", DTYPE_LFO_POLARITY, MOD_NONE, lfo.polarity, TYPE_UINT8),
-    ROW_MENU_SPECIAL("lfo_sync", "LFO", "ClockSnc", "snc", MENU_SYNC_RATES, MOD_NONE, lfo.sync, TYPE_UINT8, IM_SPECIAL_LFO_SYNC),
-    ROW_SPECIAL("lfo_offset", "LFO", "Offset", "ofs", DTYPE_0B127, MOD_NONE, lfo.phaseOffset, TYPE_UINT32, IM_SPECIAL_LFO_OFFSET),
+    ROW_SPECIAL("lfo_rate", CAT_LFO, LONG_FREQ, SHORT_FREQ, DTYPE_0B127, MOD_0_127, lfo.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_LFO_RATE),
+    ROW("lfo_amount", CAT_LFO, LONG_AMOUNT, SHORT_AM1, DTYPE_0B127, MOD_0_127, lfo.modTarget.amount, TYPE_FLT),
+    ROW("lfo_amount_2", CAT_LFO, LONG_AMOUNT_2, SHORT_AM2, DTYPE_0B127, MOD_0_127, lfo.modTarget2.amount, TYPE_FLT),
+    ROW_MENU("lfo_wave", CAT_LFO, LONG_WAVE, SHORT_WAVE, MENU_LFO_WAVES, MOD_NONE, lfo.waveform, TYPE_UINT8),
+    ROW_MENU("lfo_retrigger_voice", CAT_LFO, LONG_RETRIGGER, SHORT_RETRIGGER, MENU_RETRIGGER, MOD_NONE, lfo.retrigger, TYPE_UINT8),
+    ROW("lfo_polarity", CAT_LFO, LONG_POLARITY, SHORT_POL, DTYPE_LFO_POLARITY, MOD_NONE, lfo.polarity, TYPE_UINT8),
+    ROW_MENU_SPECIAL("lfo_sync", CAT_LFO, LONG_CLOCKSYNC, SHORT_SYNC, MENU_SYNC_RATES, MOD_NONE, lfo.sync, TYPE_UINT8, IM_SPECIAL_LFO_SYNC),
+    ROW_SPECIAL("lfo_offset", CAT_LFO, LONG_OFFSET, SHORT_OFFSET, DTYPE_0B127, MOD_NONE, lfo.phaseOffset, TYPE_UINT32, IM_SPECIAL_LFO_OFFSET),
     /* velocity: it reaches the envelopes only through its dst targets (the
      * vol row, fam), C-D18 */
-    ROW_NOBIND_IMAGE("velo_mod_amount", "Velocity", "Amount", "amt", DTYPE_0B127, MOD_NONE, INSTRUMENT_BIND_VELOCITY_AMOUNT),
-    ROW_NOBIND("velo_mod_dest", "Velocity", "DstParam", "dst", DTYPE_TARGET_SELECTION_VELO, INSTRUMENT_BIND_VELOCITY_TARGET),
+    ROW_NOBIND_IMAGE("velo_mod_amount", CAT_VELOCITY, LONG_AMOUNT, SHORT_FM_AMNT, DTYPE_0B127, MOD_NONE, INSTRUMENT_BIND_VELOCITY_AMOUNT),
+    ROW_NOBIND("velo_mod_dest", CAT_VELOCITY, LONG_DEST_PARAM, SHORT_DEST, DTYPE_TARGET_SELECTION_VELO, INSTRUMENT_BIND_VELOCITY_TARGET),
     /* the LFO destinations */
-    ROW_NOBIND("lfo_target_voice", "LFO", "DstVoice", "vo1", DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE),
-    ROW_NOBIND("lfo_target_param", "LFO", "DstParam", "ds1", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM),
-    ROW_NOBIND("lfo_target_voice_2", "LFO", "DstVoice2", "vo2", DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE_2),
-    ROW_NOBIND("lfo_target_param_2", "LFO", "DstParam2", "ds2", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM_2),
+    ROW_NOBIND("lfo_target_voice", CAT_LFO, LONG_DEST_VOICE, SHORT_VO1, DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE),
+    ROW_NOBIND("lfo_target_param", CAT_LFO, LONG_DEST_PARAM, SHORT_DS1, DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM),
+    ROW_NOBIND("lfo_target_voice_2", CAT_LFO, LONG_DSTVOICE2, SHORT_VO2, DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE_2),
+    ROW_NOBIND("lfo_target_param_2", CAT_LFO, LONG_DSTPARAM2, SHORT_DS2, DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM_2),
     /*
      * S096 P3 rows (plan §3.1; decisions Q1, Q7).
      *
@@ -332,15 +332,15 @@ const ParamDescriptor colloid_param_descriptors[] = {
      * check_special_tags.py), morphable, LFO/velocity targets and
      * step-automatable (FLAGS_IMAGE).
      */
-    ROW("col_penv_attack", "Pitch EG", "Attack", "pat", DTYPE_0B127, MOD_0_127, pAttack, TYPE_UINT8),
-    ROW("col_penv_decay", "Pitch EG", "Decay", "pde", DTYPE_0B127, MOD_0_127, pDecay, TYPE_UINT8),
-    ROW("col_penv_sustain_level", "Pitch EG", "SustLvl", "psl", DTYPE_0B127, MOD_0_127, pSustain, TYPE_FLT),
-    ROW("col_penv_release", "Pitch EG", "Release", "pre", DTYPE_0B127, MOD_0_127, pRelease, TYPE_UINT8),
-    ROW("col_penv_amount", "Pitch EG", "Amount", "pam", DTYPE_PM63, MOD_PM63, pAmount, TYPE_FLT),
-    ROW("col_noise_level", "Noise", "Level", "nlv", DTYPE_0B127, MOD_0_127, nLevel, TYPE_UINT8),
-    ROW("col_noise_tone", "Noise", "Tone", "nto", DTYPE_PM63, MOD_PM63, nTone, TYPE_UINT8),
-    ROW("col_noise_width", "Noise", "Width", "nwd", DTYPE_0B127, MOD_0_127, nWidth, TYPE_UINT8),
-    ROW("col_noise_pan", "Noise", "Pan", "npn", DTYPE_PM63, MOD_PM63, nPan, TYPE_UINT8),
+    ROW("col_penv_attack", CAT_PITCH_ENV, LONG_ATTACK, SHORT_PAT, DTYPE_0B127, MOD_0_127, pAttack, TYPE_UINT8),
+    ROW("col_penv_decay", CAT_PITCH_ENV, LONG_DECAY, SHORT_PDE, DTYPE_0B127, MOD_0_127, pDecay, TYPE_UINT8),
+    ROW("col_penv_sustain_level", CAT_PITCH_ENV, LONG_SUSTLVL, SHORT_PSL, DTYPE_0B127, MOD_0_127, pSustain, TYPE_FLT),
+    ROW("col_penv_release", CAT_PITCH_ENV, LONG_RELEASE, SHORT_PRE, DTYPE_0B127, MOD_0_127, pRelease, TYPE_UINT8),
+    ROW("col_penv_amount", CAT_PITCH_ENV, LONG_AMOUNT, SHORT_PAM, DTYPE_PM63, MOD_PM63, pAmount, TYPE_FLT),
+    ROW("col_noise_level", CAT_NOISE, LONG_LEVEL, SHORT_NLV, DTYPE_0B127, MOD_0_127, nLevel, TYPE_UINT8),
+    ROW("col_noise_tone", CAT_NOISE, LONG_TONE, SHORT_NTO, DTYPE_PM63, MOD_PM63, nTone, TYPE_UINT8),
+    ROW("col_noise_width", CAT_NOISE, LONG_WIDTH, SHORT_NWD, DTYPE_0B127, MOD_0_127, nWidth, TYPE_UINT8),
+    ROW("col_noise_pan", CAT_NOISE, LONG_PAN_WORD, SHORT_NPN, DTYPE_PM63, MOD_PM63, nPan, TYPE_UINT8),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */

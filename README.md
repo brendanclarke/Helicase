@@ -164,8 +164,9 @@ make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build
     │       └── App/                 ← usb_manager, usb_midi_core, etc.
     ├── Menu/
     │   ├── menu.c/h                 ← full port, all pages, load/save UI
-    │   ├── menuPages.h              ← 16-page × 8-subpage table
-    │   ├── MenuText.h               ← all label strings
+    │   ├── menuPages.h              ← static-page table (6 pages × 8 sub-pages, S097)
+    │   ├── MenuText.h               ← value-name tables, label pool accessors
+    │   ├── MenuLabels.c             ← short/category/long label pools (S097)
     │   ├── Cc2Text.c                ← modTargets[] 205 entries
     │   ├── CcNr2Text.h
     │   ├── copyClearTools.c/h       ← copy/clear UI; pattern mutation through PatternData

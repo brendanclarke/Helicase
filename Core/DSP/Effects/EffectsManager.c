@@ -526,9 +526,9 @@ void effects_rowLabels(effect_type_id_t type, uint8_t variant, uint8_t index,
 
     if (!descriptor)
         return;
-    s = descriptor->base.short_name;
-    c = descriptor->base.category;
-    l = descriptor->base.long_name;
+    s = menuLabel_short(descriptor->base.short_id);
+    c = menuLabel_cat(descriptor->base.cat_id);
+    l = menuLabel_long(descriptor->base.long_id);
     if (entry && entry->ui && entry->ui->labels)
         (void)entry->ui->labels(index, variant, &s, &c, &l);
     if (short3)

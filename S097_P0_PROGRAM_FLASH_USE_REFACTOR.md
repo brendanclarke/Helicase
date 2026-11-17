@@ -4,7 +4,10 @@ Date: 2026-11-17. Branch `dev-ph7-alkaline` at `131f567e` (S096 P3).
 Scope: §1–§7 are the assessment, measured on the unchanged tree. All
 experiments ran on a copy of the tree in the session scratch folder. §8 records
 the work done afterwards at the user's request: the SOM generator archived
-(−8,536 B) and the stale comments of §6 fixed.
+(−8,536 B) and the stale comments of §6 fixed. The source refactors D–K were
+then worked in `S097_P1_MENU_SEMANTICS_REFACTOR_IMPLEMENTATION.md` (results
+in the table below), and the `-Os` plan is
+`S097_P2_UI_STORAGE_CODE_OPTIMIZATION.md`.
 
 Goal set by the user: reduce program flash without changing function. Find
 tables or functions that overlap, padding, dead space, and places where UI text,
@@ -22,18 +25,18 @@ under the 16 KiB `link_budget.py` warning. ITCM: 15,960 of 16,384 B.
 | # | Candidate | Saving (B) | How known | Function | Gate risk |
 |---|-----------|-----------:|-----------|----------|-----------|
 | C | SOM generator archived (§8); was: store only the read columns (−7,056) | **−8,536** | **measured, done** | SOM page removed (generator never ran) | **passed gate** |
-| D | `menuPages`: 122 of 136 rows are all-zero | ≈ −2,790 | table sizes | identical | jitter only |
-| F | Descriptor labels as indexes, not pointers (28 → 20 B/row) | ≈ −3,200 | `sizeof` probe | identical | jitter only |
-| G | One shared LFO descriptor block instead of 7 copies | ≈ −1,400 (after F) | row count | identical | jitter only |
-| E | Fixed-width name tables trimmed to real width | ≈ −1,160 | measured padding | 3 long names shortened | jitter only |
-| I | Value-name table merges, enum/padding fixes | ≈ −700 | table sizes | identical / label edits | jitter only |
-| J | Merge the four value formatters | ≈ −1,000 to −2,000 | estimate | identical | jitter only |
-| K | Filesystem clone families | ≈ −2,000 to −3,000 | estimate | identical | jitter only |
-| S | Semantic label merges (pitch/tune, cutoff/freq, …) | small directly; enables F | — | label text changes | jitter only |
-| **Subtotal, source refactors** | | **≈ −21,500** (≈ −13,000 still open) | | | |
-| B1 | `DEV_STALL_DETECTION 0` | −1,856 | **measured** | dev feature off | **passes gate** |
-| B2 | `DEV_MODE_LOGGING 0` | −17,820 | **measured** | dev feature off | 3 osc loops +1 |
-| A | `-Os` on cold (UI/storage/USB/descriptor) sources | **−93,600** | **measured** | identical | 14 hot loops +1 (blocked) |
+| D | `menuPages`: 122 of 136 rows are all-zero | **−2,040** (P1 §1; half, with padding kept) | **measured, done** | identical | passed gate |
+| F | Descriptor labels as indexes, not pointers (28 → 20 B/row) | **−3,032** (P1 §2) | **measured, done** | identical (403 rows checked) | passed gate |
+| G | One shared LFO descriptor block instead of 7 copies | ≈ −1,900 at best | row count | identical | **paused**: premise wrong, see P1 §3 |
+| E | Fixed-width name tables trimmed to real width | **−1,160** | **measured, done** | 3 long names shortened | passed gate |
+| I | Value-name table merges, enum/padding fixes | ≈ 0 (padding claims wrong) / ≈ 100 (merges) | measured | — | **not done**, see P1 §5.1–5.2 |
+| J | Merge the shared value-formatter branches | **−288** | **measured, done** | identical | passed gate |
+| K | Filesystem clone families | **−984** (2 of 6 families) | **measured, done** | identical | passed gate |
+| S | Semantic label merges (pitch/tune, cutoff/freq, …) | small directly; enables F | — | label text changes | user decision pending |
+| **Subtotal, source refactors** | | **−15,040 done** (C −8,536 + D/E/F/J/K −7,504) | | | |
+| B1 | `DEV_STALL_DETECTION 0` | −1,856 | **measured** | dev feature off | **passes gate**; **future lever** (§4 B) |
+| B2 | `DEV_MODE_LOGGING 0` | −17,820 | **measured** | dev feature off | 3 osc loops +1; **future lever** (§4 B) |
+| A | `-Os` on cold (UI/storage/USB/descriptor) sources | **−93,600** | **measured** | identical | 14 hot loops +1; plan in `S097_P2_…` |
 | M | `alk_zeroRow` (2 KB of zeros) to RAM | −2,048 | size | identical | needs RAM sign-off |
 
 "Jitter only" is explained in §3: today, any change to the LTO unit moves some
@@ -192,15 +195,23 @@ Load/Save loops are bounded by `filesystem_batchHasTime()`, so behaviour holds,
 but throughput per tick drops. This needs a hardware Load/Save timing check.
 **Blocked** by §3 (9 mixer loops and 5 oscillator loops +1) until §3.3 is done.
 
-### B. Release configuration — −19,676 B (measured)
+### B. Release configuration — −19,676 B (measured) — FUTURE LEVER
+
+**Status (user, 2026-11-17): not changed now.** The dev/logging system stays as
+it is while development continues. This is recorded as a notable potential
+saving for later, when the program is further along and a release
+configuration is decided.
 
 - `DEV_STALL_DETECTION 0`: −1,856 B, gate clean.
-- `DEV_MODE_LOGGING 0`: −17,820 B. 3 oscillator loops +1, 4 shrank.
+- `DEV_MODE_LOGGING 0`: −17,820 B. 3 oscillator loops +1, 4 shrank (LTO
+  jitter, §3); this needs the gate again, and possibly a fix, when it is applied.
 - `MEMTEST_ENABLED 0`: 0 B. `memtest_run()` is commented out in `main.c`, so
   `memtest.c` is compiled but never linked.
+- Together: ≈ −19.7 KB of flash, plus the RAM the logging rings and records use
+  (not measured here; `DEV_MODE_LOGGING` owns them).
 
-These remove dev functions, so they are a policy decision for the user, not a
-refactor. If the shipped image keeps logging, there is nothing to take here.
+These remove dev functions, so they are a policy decision, not a refactor. If
+the shipped image keeps logging, there is nothing to take here.
 
 ### C. SOM node tables — −7,056 B, identical output (superseded: archived, §8)
 
@@ -221,7 +232,7 @@ The comment at `sequencer.c:211` says `seq_stepIndex` is "fixed 0..15". That
 contradicts the 1..128 track length. The comment is stale; nothing in this item
 depends on it.
 
-### D. `menuPages` — ≈ −2,790 B, identical
+### D. `menuPages` — ≈ −2,790 B, identical (done at about half: −2,040 B, P1 §1)
 
 `menuPages[NUM_PAGES][NUM_SUB_PAGES]` is 17 × 8 rows × 24 B = 3,264 B.
 **122 of the 136 rows are all-zero.** Voice pages now come from instrument
@@ -231,7 +242,7 @@ real rows (336 B) and add a 136-byte row index (0 = empty, which reads as an
 all-`TEXT_EMPTY` row). The page/subpage pairs that are actually used can be
 listed from the table itself.
 
-### E. Fixed-width name tables — ≈ −1,160 B
+### E. Fixed-width name tables — ≈ −1,160 B (done: −1,160 B, P1 §4)
 
 `static const char name[][N]` tables pad every entry to the longest one. Measured padding:
 
@@ -273,7 +284,13 @@ Instrument and effect MIDI Learn entries use `file_key`, so instrument and
 effect labels are display-only. A Scene-target label rename changes stored
 MIDI Learn lines.
 
-### G. One shared LFO descriptor block — ≈ −1,400 B (after F)
+### G. One shared LFO descriptor block — ≈ −1,400 B (after F) — premise wrong, paused
+
+**Correction (P1 §3):** the LFO rows are not a tail. They sit mid-table at a
+different index in each type, split by the Velocity rows, and the descriptor
+index is the storage cell, so rows cannot move. Sharing needs a row accessor
+at 41 sites, including main-loop descriptor walks. P1 §3 sets out the options.
+The original text follows.
 
 Each of the 7 instruments carries the same 12 LFO rows (`lfo_rate` …
 `lfo_target_param_2`). They differ only in the binding offset, because `lfo` sits
@@ -284,12 +301,18 @@ today's 28 B rows). Cost: descriptor lookup becomes "own rows + shared tail",
 which touches `instrumentManager_*` row access and the descriptor-index maps.
 This is medium effort. The row indices and file keys stay as they are.
 
-### I. Value tables and padding — ≈ −700 B
+### I. Value tables and padding — ≈ −700 B (corrected: ≈ 0 B padding, ≈ 100 B merges)
 
-- `parameter_dtypes[NUM_PARAMS]` is `const enum Datatypes` (4 B per entry,
-  384 B, 315 B zero). As `uint8_t`: −288 B. It is the only enum-typed const table.
-- `scene_mod_targets` uses `ModTarg {uint8_t nameIdx; uint16_t param;}`, which
-  pads to 4 B (252 entries, 1,008 B). Split arrays or a packed 3-byte form: −252 B.
+**Correction (P1 §5.1):** both padding claims below were wrong. In this build
+enums are 1 byte and `NUM_PARAMS` is 384, so `parameter_dtypes[]` is already
+384 × 1 B. `scene_mod_targets` is `scene_mod_target_descriptor_t` (24 B × 42,
+packed); `ModTarg`'s `modTargets[]` is 4 B. The value-name merges come to
+≈ 100 B and were not done (P1 §5.2).
+
+- ~~`parameter_dtypes[NUM_PARAMS]` is `const enum Datatypes` (4 B per entry,
+  384 B, 315 B zero). As `uint8_t`: −288 B.~~ Wrong; see above.
+- ~~`scene_mod_targets` uses `ModTarg {uint8_t nameIdx; uint16_t param;}`,
+  which pads to 4 B (252 entries, 1,008 B).~~ Wrong; see above.
 - Identical or overlapping value-name tables:
   - `colFiltTypeNames` is `colRouteNames` without its first entry ("str"): share one table.
   - `stepRollRateNames[1..9]` equals `perfBtnTypeNames[6..14]`: share one table.
@@ -308,7 +331,11 @@ This is medium effort. The row indices and file keys stay as they are.
 
   These are small in bytes (≈ 150 B), but they are where the consistency work lands.
 
-### J. Value formatters — ≈ −1,000 to −2,000 B (estimate)
+### J. Value formatters — ≈ −1,000 to −2,000 B (estimate; done: −288 B)
+
+**Result (P1 §5.3):** the effect and CrumpBit formatters already delegate or
+are effect-specific, and `menu_cellDisplayValue()` returns a value, not text.
+The shared branches of three switches were merged: −288 B.
 
 Values are turned into text by several separate dtype switches:
 `menu_cellDisplayValue` (1,104), `va_formatValue3` (716),
@@ -319,7 +346,11 @@ by all of them, removes the parallel switches. This needs a display-equivalence
 check per dtype. A host test over every dtype × 0..255, old against new, makes
 it mechanical.
 
-### K. Filesystem clone families — ≈ −2,000 to −3,000 B (estimate)
+### K. Filesystem clone families — ≈ −2,000 to −3,000 B (estimate; done: −984 B)
+
+**Result (P1 §5.4):** the save-settings/save-Learn safe writes and the three
+blocking open helpers were merged (−984 B). The load pair, the scanners and the
+preset pair have real behaviour differences or tiny payoffs and were left.
 
 Pairwise similarity of normalised instruction streams:
 

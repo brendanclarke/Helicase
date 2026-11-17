@@ -3335,6 +3335,70 @@ static void va_queueMarkerTransaction(const uint8_t desired_base[4],
 }
 
 /*
+ * Shared 3-character value text (S097 P1 item 5, J).
+ *
+ * What: menu_formatDtype3() renders the dtypes that menu_formatCellValue3(),
+ * va_formatValue3() and menu_formatAutomationValue3() all rendered with the
+ * same code: DTYPE_PM63, DTYPE_NOTE_NAME, DTYPE_MIX_FM (S085 P1: fm / mix /
+ * snc / rng), DTYPE_LFO_POLARITY and a tagged DTYPE_ON_OFF (S088 P0 §2.1 D12:
+ * a non-zero high nibble names the tag table, menu_onoffTagNames(); S089 P2:
+ * the table follows the tag). It returns 1 when it wrote out[0..2] and 0 for
+ * every other dtype, including an untagged on/off: the callers keep their own
+ * rule for that (`value == 1` for cells, `value != 0` for automation).
+ * menu_formatMenuCell3() renders a DTYPE_MENU cell, as the cell and
+ * automation-marker formatters did: a WFd slot's wav cell shows the fold type
+ * (S089 P2), wav follows osc1's type or the modulator list
+ * (menu_formatWaveValue3(), S087 P2), every other menu uses its table.
+ * Why: one copy of each branch. Each caller calls these where its switch
+ * began, after its own special cases, so the text is the same.
+ * Inputs: the full dtype byte (low nibble type, high nibble tag or menu id).
+ */
+static uint8_t __attribute__((noinline))
+menu_formatDtype3(uint8_t dtype, uint8_t value, char *out)
+{
+    switch (dtype & 0x0fu) {
+    case DTYPE_PM63:
+        numtostrps(out, (int8_t)(value - 63));
+        return 1u;
+    case DTYPE_NOTE_NAME:
+        setNoteName(value, out);
+        return 1u;
+    case DTYPE_MIX_FM:
+        menu_getMixFmName(value, out);
+        return 1u;
+    case DTYPE_LFO_POLARITY:
+        menu_getLfoPolarityName(value, out);
+        return 1u;
+    case DTYPE_ON_OFF:
+        if ((uint8_t)(dtype >> 4) != 0u) {
+            const char (*names)[4] = menu_onoffTagNames((uint8_t)(dtype >> 4));
+            const uint8_t idx = (value < (uint8_t)names[0][0])
+                ? (uint8_t)value : 0u;
+            memcpy(out, names[1 + idx], 3);
+            return 1u;
+        }
+        return 0u;
+    default:
+        return 0u;
+    }
+}
+
+static void __attribute__((noinline))
+menu_formatMenuCell3(const menu_cell_t *cell, uint8_t value, char *out)
+{
+    if (menu_cellIsFoldWave(cell)) {
+        memcpy(out, foldTypeNames[1u + ((value < VOICE_FOLD_COUNT)
+                                        ? value : VOICE_FOLD_COUNT - 1u)], 3);
+        return;
+    }
+    if ((uint8_t)(menu_cellDtype(cell) >> 4) == MENU_WAVEFORM) {
+        menu_formatWaveValue3(cell, value, out);
+        return;
+    }
+    getMenuItemNameForValue((uint8_t)(menu_cellDtype(cell) >> 4), value, out);
+}
+
+/*
  * Format one automation value using the cell's dtype vocabulary.
  *
  * Mirrors the dtype switch in menu_formatCellValue3() but accepts an explicit
@@ -3382,63 +3446,15 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value,
     if (menu_getS080StaticName(cell, value, out))
         return;
 
+    if (menu_formatDtype3(menu_cellDtype(cell), value, out))
+        return;
+
     switch (dtype) {
-    case DTYPE_PM63:
-        numtostrps(out, (int8_t)(value - 63));
-        break;
-    case DTYPE_MIX_FM:
-        /* S085 P1: fm / mix / snc / rng (menu_getMixFmName()). */
-        menu_getMixFmName(value, out);
-        break;
-    case DTYPE_ON_OFF:
-        /*
-         * S088 P0 §2.1 D12: high-nibble tag on DTYPE_ON_OFF.
-         *
-         * What:       when the descriptor's dtype high nibble is non-zero the
-         *             cell is a tagged on/off sub-type (currently only
-         *             ONOFF_TAG_OSC_RUN = 1) and shows the tag table's name
-         *             (rst/fre/itp). With a zero high nibble the ordinary
-         *             on/off path runs unchanged, bit for bit.
-         * Why:        all 16 DTYPE_MENU ids are taken; the tag reuses the same
-         *             packing pattern on a dtype whose high nibble was free.
-         * Inputs:     the cell's dtype byte and value.
-         * Outputs:    3 characters into out[].
-         * Accessors:  every DTYPE_ON_OFF cell whose descriptor is tagged.
-         * Affiliates: menu_onoffTagNames(), oscRunNames, voiceChainNames,
-         *             ONOFF_TAG_* (MenuText.h).
-         */
-        if ((uint8_t)(menu_cellDtype(cell) >> 4) != 0u) {
-            /* S089 P2: the table follows the tag (run mode or voice chain). */
-            const char (*names)[4] = menu_onoffTagNames(
-                (uint8_t)(menu_cellDtype(cell) >> 4));
-            const uint8_t idx = (value < (uint8_t)names[0][0])
-                ? (uint8_t)value : 0u;
-            memcpy(out, names[1 + idx], 3);
-        } else {
-            memcpy(out, (value == 1u) ? menuText_on : menuText_off, 3);
-        }
-        break;
-    case DTYPE_LFO_POLARITY:
-        menu_getLfoPolarityName(value, out);
+    case DTYPE_ON_OFF:              /* untagged: tagged lists are above */
+        memcpy(out, (value == 1u) ? menuText_on : menuText_off, 3);
         break;
     case DTYPE_MENU:
-        /* S087 P2: wav follows osc1's type or the modulator list
-         * (menu_formatWaveValue3()), as in menu_formatCellValue3(). */
-        /* S089 P2: a WFd slot's wav cell shows the fold type. */
-        if (menu_cellIsFoldWave(cell)) {
-            memcpy(out, foldTypeNames[1u + ((value < VOICE_FOLD_COUNT)
-                                            ? value : VOICE_FOLD_COUNT - 1u)], 3);
-            break;
-        }
-        if ((uint8_t)(menu_cellDtype(cell) >> 4) == MENU_WAVEFORM) {
-            menu_formatWaveValue3(cell, value, out);
-            break;
-        }
-        getMenuItemNameForValue((uint8_t)(menu_cellDtype(cell) >> 4),
-                                value, out);
-        break;
-    case DTYPE_NOTE_NAME:
-        setNoteName(value, out);
+        menu_formatMenuCell3(cell, value, out);
         break;
     case DTYPE_0b1:
         numtostrpu(out, (uint8_t)(value + 1u), ' ');
@@ -4650,6 +4666,27 @@ void menu_enterStepTrackAutomationOverlay(uint8_t voiceNr)
     menu_repaint();
 }
 
+/*
+ * One static-page row (S097 P1 item 1).
+ *
+ * What: the row of a page id and sub-page from menuStaticPages[] (menuPages.h),
+ * or the shared all-zero row (every cell TEXT_EMPTY / PAR_NONE) for a page with
+ * no table block. Why: the former menuPages[NUM_PAGES][NUM_SUB_PAGES] held
+ * all-zero rows for those pages; this returns the same contents.
+ * Inputs: page < NUM_PAGES, subPage < NUM_SUB_PAGES (all callers bound it).
+ * Outputs: pointer to a const row. Affiliates: menuStaticPageSlot[].
+ */
+static const Page menu_emptyPageRow;
+
+static const Page *menu_pageRow(uint8_t page, uint8_t subPage)
+{
+    uint8_t slot = (page < NUM_PAGES) ? menuStaticPageSlot[page] : 0u;
+
+    if (slot == 0u)
+        return &menu_emptyPageRow;
+    return &menuStaticPages[slot - 1u][subPage];
+}
+
 static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position)
 {
     menu_cell_t cell;
@@ -4665,7 +4702,7 @@ static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position)
      * Resolve one absolute menu cell without assuming one global parameter ID
      * namespace.
      *
-     * Static pages still come from menuPages[][] and parameter_values[]. Voice
+     * Static pages still come from menuStaticPages[][] and parameter_values[]. Voice
      * pages now come from the active Scene slot's instrument descriptors: the
      * descriptor supplies text/dtype and descriptor_index supplies the storage
      * cell in SceneData. This keeps old global/Pattern pages stable while
@@ -4765,7 +4802,7 @@ static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position)
 
     if (position >= MENU_STATIC_SUBPAGE_CELLS)
         return cell;
-    page = &menuPages[menu_activePage][subPage];
+    page = menu_pageRow(menu_activePage, subPage);
     cell.text_id = (&page->top1)[position];
     cell.static_param = (&page->bot1)[position];
     if (cell.text_id == TEXT_EMPTY || cell.static_param == PAR_NONE)
@@ -6375,7 +6412,7 @@ static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText)
         return;
     }
 
-    menu_copyPaddedField(valueAsText, descriptor->short_name, 3u);
+    menu_copyPaddedField(valueAsText, menuLabel_short(descriptor->short_id), 3u);
 }
 
 static void menu_displayInstrumentTargetFull(uint16_t target)
@@ -6448,8 +6485,8 @@ static void menu_displayInstrumentTargetFull(uint16_t target)
      */
     {
         /* S089 P2: WFd relabels the transient cells. */
-        const char *cat = descriptor->category;
-        const char *lng = descriptor->long_name;
+        const char *cat = menuLabel_cat(descriptor->cat_id);
+        const char *lng = menuLabel_long(descriptor->long_id);
 
         menu_instrumentCellLabels(slot, descriptor, &cat, &lng);
         menu_copyPaddedField(&editDisplayBuffer[1][0], cat, 8u);
@@ -6659,6 +6696,8 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
     if (cell && cell->kind == MENU_CELL_STATIC &&
         menu_busCompValueText(cell->static_param, value, valueAsText))
         return;
+    if (menu_formatDtype3(menu_cellDtype(cell), value, valueAsText))
+        return;
 
     switch (dtype) {
     case DTYPE_TARGET_SELECTION_VELO:
@@ -6682,52 +6721,12 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
          */
         menu_displayModTargetShort(value, valueAsText);
         break;
-    case DTYPE_PM63:
-        numtostrps(valueAsText, (int8_t)(value - 63));
-        break;
-    case DTYPE_NOTE_NAME:
-        setNoteName(value, valueAsText);
-        break;
-    case DTYPE_MIX_FM:
-        /* S085 P1: fm / mix / snc / rng (menu_getMixFmName()). */
-        menu_getMixFmName(value, valueAsText);
-        break;
-    case DTYPE_ON_OFF:
-        /*
-         * S088 P0 §2.1 D12: tagged on/off sub-type display.
-         * What: high nibble != 0 shows the tag table's name
-         *       (menu_onoffTagNames(): run modes, voice chains or the
-         *       Alkaline type), otherwise
-         *       on/off as before. Same rule as va_formatValue3().
-         */
-        if ((uint8_t)(menu_cellDtype(cell) >> 4) != 0u) {
-            /* S089 P2: the table follows the tag (run mode or voice chain). */
-            const char (*names)[4] = menu_onoffTagNames(
-                (uint8_t)(menu_cellDtype(cell) >> 4));
-            const uint8_t idx = (value < (uint8_t)names[0][0])
-                ? (uint8_t)value : 0u;
-            memcpy(valueAsText, names[1 + idx], 3);
-        } else if (value == 1u) memcpy(valueAsText, menuText_on, 3);
-        else                    memcpy(valueAsText, menuText_off, 3);
-        break;
-    case DTYPE_LFO_POLARITY:
-        menu_getLfoPolarityName(value, valueAsText);
+    case DTYPE_ON_OFF:              /* untagged: tagged lists are above */
+        if (value == 1u) memcpy(valueAsText, menuText_on, 3);
+        else             memcpy(valueAsText, menuText_off, 3);
         break;
     case DTYPE_MENU:
-        /* S087 P2: wav follows osc1's type or the modulator list
-         * (menu_formatWaveValue3()); every other menu uses its table. */
-        /* S089 P2: a WFd slot's wav cell shows the fold type. */
-        if (menu_cellIsFoldWave(cell)) {
-            memcpy(valueAsText, foldTypeNames[1u + ((value < VOICE_FOLD_COUNT)
-                                                    ? value : VOICE_FOLD_COUNT - 1u)], 3);
-            break;
-        }
-        if ((uint8_t)(menu_cellDtype(cell) >> 4) == MENU_WAVEFORM) {
-            menu_formatWaveValue3(cell, value, valueAsText);
-            break;
-        }
-        getMenuItemNameForValue((uint8_t)(menu_cellDtype(cell) >> 4),
-                                value, valueAsText);
+        menu_formatMenuCell3(cell, value, valueAsText);
         break;
     case DTYPE_0b1:
         numtostrpu(valueAsText, (uint8_t)(value + 1u), ' ');
@@ -12591,8 +12590,8 @@ static void menu_instrumentCellLabels(uint8_t slot,
         "Ratio",
     };
 
-    *cat = descriptor->category;
-    *lng = descriptor->long_name;
+    *cat = menuLabel_cat(descriptor->cat_id);
+    *lng = menuLabel_long(descriptor->long_id);
     if (instrumentManager_slotVoiceChain(slot) != VOICE_CHAIN_WAVEFOLDER)
         return;
     if (strcmp(descriptor->file_key, "transient_wave") == 0) {
@@ -13401,7 +13400,7 @@ static uint8_t checkScrollSign(uint8_t activePage, uint8_t activeParameter)
             return '^';
         if (is2ndPage) {
             if ((activePage < NUM_SUB_PAGES-1) &&
-                (menuPages[MENU_MIDI_PAGE][activePage+1].top1 != TEXT_EMPTY))
+                (menu_pageRow(MENU_MIDI_PAGE, activePage + 1)->top1 != TEXT_EMPTY))
                 return '*';
             else
                 return '<';
@@ -14247,6 +14246,8 @@ static void menu_formatAutomationValue3(const ParamDescriptor *descriptor,
         numtostrpu(buf, value, ' ');
         return;
     }
+    if (menu_formatDtype3(descriptor->dtype, value, buf))
+        return;
     dtype_lo = (uint8_t)(descriptor->dtype & 0x0fu);
     switch (dtype_lo) {
     case DTYPE_MENU: {
@@ -14259,31 +14260,8 @@ static void menu_formatAutomationValue3(const ParamDescriptor *descriptor,
             numtostrpu(buf, value, ' ');
         return;
     }
-    case DTYPE_ON_OFF:
-        /* S088 P0 §2.1 D12: tagged on/off automation display. */
-        if ((uint8_t)(descriptor->dtype >> 4) != 0u) {
-            /* S089 P2: the table follows the tag (run mode or voice chain). */
-            const char (*names)[4] = menu_onoffTagNames(
-                (uint8_t)(descriptor->dtype >> 4));
-            const uint8_t idx = (value < (uint8_t)names[0][0])
-                ? value : 0u;
-            memcpy(buf, names[1 + idx], 3);
-        } else {
-            memcpy(buf, value ? menuText_on : menuText_off, 3);
-        }
-        return;
-    case DTYPE_MIX_FM:
-        /* S085 P1: fm / mix / snc / rng (menu_getMixFmName()). */
-        menu_getMixFmName(value, buf);
-        return;
-    case DTYPE_LFO_POLARITY:
-        menu_getLfoPolarityName(value, buf);
-        return;
-    case DTYPE_PM63:
-        numtostrps(buf, (int8_t)(value - 63));
-        return;
-    case DTYPE_NOTE_NAME:
-        setNoteName(value, buf);
+    case DTYPE_ON_OFF:              /* untagged: tagged lists are above */
+        memcpy(buf, value ? menuText_on : menuText_off, 3);
         return;
     default:
         numtostrpu(buf, value, ' ');
@@ -15113,8 +15091,8 @@ static void menu_repaintStepAutomation(void)
                     : 0;
                 if (descriptor) {
                     /* S089 P2: WFd relabels the transient cells. */
-                    const char *cat = descriptor->category;
-                    const char *lng = descriptor->long_name;
+                    const char *cat = menuLabel_cat(descriptor->cat_id);
+                    const char *lng = menuLabel_long(descriptor->long_id);
                     uint8_t i = 0u;
                     uint8_t j = 0u;
 
@@ -15255,7 +15233,7 @@ static void menu_repaintStepAutomation(void)
             numtostru(&editDisplayBuffer[1][5], (uint8_t)(slot + 1u));
             if (descriptor)
                 menu_copyPaddedField(&editDisplayBuffer[1][9],
-                                     descriptor->short_name, 3u);
+                                     menuLabel_short(descriptor->short_id), 3u);
             else
                 menu_copyPaddedField(&editDisplayBuffer[1][9], "inv", 3u);
         } else if (menu_stepAutomationIsEffect(target)) {
@@ -15266,7 +15244,7 @@ static void menu_repaintStepAutomation(void)
             memcpy(&editDisplayBuffer[1][5], "fx ", 3u);
             menu_copyPaddedField(&editDisplayBuffer[1][9],
                                  effect_descriptor
-                                     ? effect_descriptor->base.short_name
+                                     ? menuLabel_short(effect_descriptor->base.short_id)
                                      : "inv", 3u);
         } else if (menu_stepAutoCategory < 6u) {
             numtostru(&editDisplayBuffer[1][5],
@@ -15406,8 +15384,8 @@ static void menu_repaintGeneric(void)
                        cell.kind == MENU_CELL_KIT_SETTING ||
                        cell.kind == MENU_CELL_EFFECT) {
                 /* S089 P2: WFd relabels the transient cells. */
-                const char *cat = cell.descriptor->category;
-                const char *lng = cell.descriptor->long_name;
+                const char *cat = menuLabel_cat(cell.descriptor->cat_id);
+                const char *lng = menuLabel_long(cell.descriptor->long_id);
 
                 if (cell.kind == MENU_CELL_INSTRUMENT)
                     menu_instrumentCellLabels(cell.slot, cell.descriptor,
@@ -15624,7 +15602,7 @@ static void menu_repaintGeneric(void)
             } else if (cell.kind == MENU_CELL_INSTRUMENT ||
                        cell.kind == MENU_CELL_KIT_SETTING) {
                 menu_copyPaddedField(&editDisplayBuffer[0][4u * i],
-                                     cell.descriptor->short_name, 3u);
+                                     menuLabel_short(cell.descriptor->short_id), 3u);
                 /* S096 P1 SD2: a bit cell is named on + its layer: onA .. onD. */
                 if (cell.kind == MENU_CELL_INSTRUMENT && cell.bit_plus1) {
                     editDisplayBuffer[0][4u * i]      = 'o';
@@ -20790,7 +20768,7 @@ uint8_t menu_getViewedPattern(void) { return menu_shownPattern; }
 static void menu_devCheckGlobalSceneSubPage(void)
 {
     const Page *scene_page =
-        &menuPages[MENU_MIDI_PAGE][MENU_GLOBAL_SCENE_SUBPAGE];
+        menu_pageRow(MENU_MIDI_PAGE, MENU_GLOBAL_SCENE_SUBPAGE);
     uint8_t bad = (uint8_t)(scene_page->top1 != TEXT_BUS_COMP_MODE ||
                             scene_page->top4 != TEXT_BUS_COMP_SIDECHAIN ||
                             scene_page->top5 != TEXT_BUS_COMP_GR ||
@@ -20800,7 +20778,7 @@ static void menu_devCheckGlobalSceneSubPage(void)
 
     for (sub_page = (uint8_t)(MENU_GLOBAL_SCENE_SUBPAGE + 1u);
          sub_page < NUM_SUB_PAGES; sub_page++) {
-        if (menuPages[MENU_MIDI_PAGE][sub_page].top1 != TEXT_EMPTY)
+        if (menu_pageRow(MENU_MIDI_PAGE, sub_page)->top1 != TEXT_EMPTY)
             bad = 1u;
     }
     if (!bad)

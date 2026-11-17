@@ -94,6 +94,7 @@ SRCS = \
   Core/Hardware/USB/App/usbd_usr.c \
   Core/Menu/menu.c \
   Core/Menu/menuEffects.c \
+  Core/Menu/MenuLabels.c \
   Core/Sequencer/StepScale.c \
   Core/Menu/Cc2Text.c \
   Core/Menu/CopyClear/copyClearSession.c \

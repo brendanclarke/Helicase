@@ -1,7 +1,7 @@
 /*
  * menuPages.h — LXR-02 menu page table.
  * Ported from original LXR AVR menuPages.h by Julian Schmidt.
- * PROGMEM removed. Unused pages padded with {0} initializers.
+ * PROGMEM removed. Since S097 P1 only the static pages have rows.
  */
 
 /*
@@ -20,14 +20,32 @@
 #define MENUPAGES_H_
 #include "menu.h"
 
-const Page menuPages[NUM_PAGES][NUM_SUB_PAGES] = {
-/* VOICE1 */ { {0} },
-/* VOICE2 */ { {0} },
-/* VOICE3 */ { {0} },
-/* VOICE4 (snare) */ { {0} },
-/* VOICE5 (cymbal) */ { {0} },
-/* VOICE6 (HH closed) */ { {0} },
-/* VOICE7 (HH open) */ { {0} },
+/*
+ * Static menu pages (S097 P1 item 1).
+ *
+ * What: only the six pages whose cells come from this table have rows here,
+ * each with all NUM_SUB_PAGES sub-pages; menuStaticPageSlot[] maps a page id
+ * to its block (1-based, 0 = not a table page). Every other page (VOICE1-7,
+ * LOAD, SAVE, SOM, EFFECT) resolves its cells elsewhere and reads the shared
+ * all-zero row in menu_pageRow() (menu.c), exactly as it read its zero rows
+ * of the former menuPages[NUM_PAGES][NUM_SUB_PAGES].
+ * Why: 88 of the 136 rows of the former table could never hold a cell
+ * (-2,112 B). The six table pages keep all eight sub-pages as room to grow;
+ * a new static page needs a block here and a slot entry.
+ * Accessors: menu_pageRow() only.
+ */
+#define MENU_STATIC_PAGE_COUNT 6u
+
+static const uint8_t menuStaticPageSlot[NUM_PAGES] = {
+    [MENU_MIDI_PAGE]        = 1u,
+    [PERFORMANCE_PAGE]      = 2u,
+    [SEQ_PAGE]              = 3u,
+    [EUKLID_PAGE]           = 4u,
+    [PATTERN_SETTINGS_PAGE] = 5u,
+    [RECORDING_PAGE]        = 6u,
+};
+
+static const Page menuStaticPages[MENU_STATIC_PAGE_COUNT][NUM_SUB_PAGES] = {
 /* MENU_MIDI_PAGE (globals)
 ** Session 025 warning: this table's empty cells are not harmless decoration.
 ** The menu traversal treats TEXT_EMPTY/PAR_NONE as page terminators in some
@@ -82,8 +100,6 @@ const Page menuPages[NUM_PAGES][NUM_SUB_PAGES] = {
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
 },
-/* LOAD_PAGE — special case, entries unused */ { {0} },
-/* SAVE_PAGE — special case, entries unused */ { {0} },
 /* PERFORMANCE_PAGE
  * Per-track shuffle moved to the STEP track-settings front page below.
  *
@@ -220,17 +236,6 @@ const Page menuPages[NUM_PAGES][NUM_SUB_PAGES] = {
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
 },
-/* SOM_PAGE: unused since S097 (SOM generator archived in archive/som/). */ {
-  {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-  {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-  {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-  {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-  {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-  {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-  {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-  {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-},
-/* EFFECT_PAGE — cells resolved by menuEffects.c (Session 072 step 7). */ { {0} },
 };
 
 #endif /* MENUPAGES_H_ */

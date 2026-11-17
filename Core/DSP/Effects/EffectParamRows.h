@@ -81,12 +81,12 @@
  * so SceneData defaults and registry defaults cannot diverge silently.
  */
 #define EFFECT_COMMON_ROWS(out_flags_, vol_flags_, pan_flags_) \
-    EFFECT_ROW_MENU("effect_audio_out", "Effect", "AudioOut", "out", \
+    EFFECT_ROW_MENU("effect_audio_out", CAT_EFFECT, LONG_AUDIO_OUT, SHORT_OUT, \
                     MENU_AUDIO_OUT, out_flags_, EFFECT_MOD_NONE, \
                     EFFECT_COMMON_DEFAULT_AUDIO_OUT, 5u), \
-    EFFECT_ROW("effect_level", "Effect", "Level", "vol", DTYPE_0B127, \
+    EFFECT_ROW("effect_level", CAT_EFFECT, LONG_LEVEL, SHORT_VOL, DTYPE_0B127, \
                vol_flags_, EFFECT_MOD_0_127, EFFECT_COMMON_DEFAULT_LEVEL, 127u), \
-    EFFECT_ROW("effect_pan", "Effect", "Panning", "pan", DTYPE_PM63, \
+    EFFECT_ROW("effect_pan", CAT_EFFECT, LONG_PAN, SHORT_PAN, DTYPE_PM63, \
                pan_flags_, EFFECT_MOD_0_127, EFFECT_COMMON_DEFAULT_PAN, 127u)
 
 #endif /* EFFECT_PARAM_ROWS_H_ */

@@ -22644,14 +22644,47 @@ static uint8_t op_settings_stall_last_phase = 0u;
 static uint32_t op_settings_stall_ticks = 0u;
 #endif
 
-static void filesystem_saveGlobals_tick(void)
+/*
+ * One safe text write: settings.cfg or midilrn.cfg (S097 P1 item 5, K).
+ *
+ * What: the safe-write phases shared by filesystem_saveGlobals_tick() and
+ * filesystem_saveMidiLearn_tick(), which were the same state machine with
+ * five different values: temp_name/final_name (the tmp and live file names),
+ * next_line (the line generator), stall_tag (the stall code, `StWr` or
+ * `MlWr`) and settings_revision (1: snapshot the settings dirty revision and
+ * mark the settings write active at phase 0; settings only).
+ * Why: one copy of the code. Phase numbers, the stall site and codes, and
+ * every afatfs call stay as they were. noinline/noclone keep LTO from
+ * specialising it back into two copies. Affiliates: the two wrappers below.
+ */
+typedef struct {
+    const char *temp_name;
+    const char *final_name;
+    uint8_t (*next_line)(char *, uint16_t, void *);
+    const char *stall_tag;
+    uint8_t settings_revision;
+} fs_safe_text_write_t;
+
+static const fs_safe_text_write_t fs_settings_safe_write = {
+    STORAGE_SETTINGS_TEMP_FILENAME, STORAGE_SETTINGS_FILENAME,
+    filesystem_nextSettingsLine, "StWr", 1u
+};
+
+static const fs_safe_text_write_t fs_midilearn_safe_write = {
+    STORAGE_MIDILEARN_TEMP_FILENAME, STORAGE_MIDILEARN_FILENAME,
+    filesystem_nextMidiLearnLine, "MlWr", 0u
+};
+
+static void __attribute__((noinline, noclone))
+filesystem_safeTextWrite_tick(const fs_safe_text_write_t *w)
 {
 #if DEV_STALL_DETECTION
     /*
-     * Detect and abort a Settings write phase stall.
+     * Detect and abort a Settings (or MIDI Learn) write phase stall.
      *
      * What: fires once after op_phase stays unchanged for 30,000 consecutive
-     * polls, writes a named error code `StWr NN` encoding the stalled phase,
+     * polls, writes a named error code `StWr NN` (`MlWr NN` for MIDI Learn,
+     * w->stall_tag) encoding the stalled phase,
      * records one PHASE_STALL trace entry, and calls filesystem_finish(ERROR)
      * to release the facade. Why: the settings writer is autonomous and its
      * errors are not displayed on screen, but a stall here keeps
@@ -22675,7 +22708,7 @@ static void filesystem_saveGlobals_tick(void)
         autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
                              AUTOSAVE_TRACE_PHASE_STALL_SITE_SETTINGS,
                              value);
-        filesystem_makeNamedErrorCode("StWr", op_phase);
+        filesystem_makeNamedErrorCode(w->stall_tag, op_phase);
         filesystem_finish(FS_STATUS_ERROR);
         return;
     }
@@ -22690,8 +22723,10 @@ static void filesystem_saveGlobals_tick(void)
          * line serialization is not an atomic SRAM snapshot. Affiliates:
          * filesystem_complete() and the background settings scheduler.
          */
-        op_settings_change_revision = fs_settings_change_revision;
-        op_settings_write_active = 1u;
+        if (w->settings_revision) {
+            op_settings_change_revision = fs_settings_change_revision;
+            op_settings_write_active = 1u;
+        }
         op_file_ready = false;
         op_file = NULL;
         /*
@@ -22700,7 +22735,7 @@ static void filesystem_saveGlobals_tick(void)
          * preserving temp-file content. This is the key difference from the
          * former in-place truncate of the live settings.cfg. See §4.
          */
-        if (!afatfs_fopen(STORAGE_SETTINGS_TEMP_FILENAME, "w", on_file_opened))
+        if (!afatfs_fopen(w->temp_name, "w", on_file_opened))
             return;
         op_phase = 1;
         return;
@@ -22718,7 +22753,7 @@ static void filesystem_saveGlobals_tick(void)
         return;
 
     case 2: /* WRITE LINES (including terminator) */
-        if (filesystem_writeTextLine(filesystem_nextSettingsLine, NULL))
+        if (filesystem_writeTextLine(w->next_line, NULL))
             return;
         op_phase = 3;
         return;
@@ -22759,7 +22794,7 @@ static void filesystem_saveGlobals_tick(void)
          */
         op_remove_done = 0u;
         op_remove_result = AFATFS_RESULT_OK;
-        if (!afatfs_removeObjects_lfn(STORAGE_SETTINGS_FILENAME,
+        if (!afatfs_removeObjects_lfn(w->final_name,
                                       AFATFS_MATCH_CASE_INSENSITIVE,
                                       AFATFS_REMOVE_FILES_ONLY,
                                       on_remove_complete))
@@ -22794,8 +22829,8 @@ static void filesystem_saveGlobals_tick(void)
         op_rename_result = AFATFS_RESULT_OK;
         memset(op_repair_rename_open_name, 0,
                sizeof(op_repair_rename_open_name));
-        if (!afatfs_renameObject_lfn(STORAGE_SETTINGS_TEMP_FILENAME,
-                                     STORAGE_SETTINGS_FILENAME,
+        if (!afatfs_renameObject_lfn(w->temp_name,
+                                     w->final_name,
                                      AFATFS_MATCH_CASE_INSENSITIVE,
                                      op_repair_rename_open_name,
                                      on_rename_complete))
@@ -22832,6 +22867,11 @@ static void filesystem_saveGlobals_tick(void)
         filesystem_finish(FS_STATUS_ERROR);
         return;
     }
+}
+
+static void filesystem_saveGlobals_tick(void)
+{
+    filesystem_safeTextWrite_tick(&fs_settings_safe_write);
 }
 
 /* -----------------------------------------------------------------------
@@ -23108,116 +23148,7 @@ static void filesystem_loadMidiLearn_tick(void)
 ** ----------------------------------------------------------------------- */
 static void filesystem_saveMidiLearn_tick(void)
 {
-#if DEV_STALL_DETECTION
-    if (filesystem_pollPhaseStall(op_phase,
-                                  &op_settings_stall_last_phase,
-                                  &op_settings_stall_ticks,
-                                  30000u)) {
-        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
-                             AUTOSAVE_TRACE_PHASE_STALL_SITE_SETTINGS,
-                             (uint32_t)op_phase <<
-                             AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT);
-        filesystem_makeNamedErrorCode("MlWr", op_phase);
-        filesystem_finish(FS_STATUS_ERROR);
-        return;
-    }
-#endif
-
-    switch (op_phase) {
-    case 0: /* OPEN midilrn.tmp (truncate) */
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen(STORAGE_MIDILEARN_TEMP_FILENAME, "w", on_file_opened))
-            return;
-        op_phase = 1;
-        return;
-
-    case 1: /* WAIT_OPEN */
-        if (!op_file_ready) return;
-        if (op_file == NULL) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_write_line_index = 0u;
-        op_write_line_len = 0u;
-        op_write_line_offset = 0u;
-        op_phase = 2;
-        return;
-
-    case 2: /* WRITE LINES (header, rows, terminator) */
-        if (filesystem_writeTextLine(filesystem_nextMidiLearnLine, NULL))
-            return;
-        op_phase = 3;
-        return;
-
-    case 3: /* CLOSE */
-        op_close_done = false;
-        if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 4;
-        return;
-
-    case 4: /* WAIT_CLOSE */
-        if (!op_close_done) return;
-        op_phase = 5;
-        return;
-
-    case 5: /* SYNC — the tmp is durable before the old file is touched */
-        if (!afatfs_sync())
-            return;
-        op_phase = 6;
-        return;
-
-    case 6: /* REMOVE old midilrn.cfg (not-found is OK: first Learn) */
-        op_remove_done = 0u;
-        op_remove_result = AFATFS_RESULT_OK;
-        if (!afatfs_removeObjects_lfn(STORAGE_MIDILEARN_FILENAME,
-                                      AFATFS_MATCH_CASE_INSENSITIVE,
-                                      AFATFS_REMOVE_FILES_ONLY,
-                                      on_remove_complete))
-            return;
-        op_phase = 7;
-        return;
-
-    case 7: /* WAIT_REMOVE — on error the durable tmp waits for boot */
-        if (!op_remove_done) return;
-        if (op_remove_result != AFATFS_RESULT_OK) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_phase = 8;
-        return;
-
-    case 8: /* RENAME midilrn.tmp -> midilrn.cfg */
-        op_rename_done = 0u;
-        op_rename_result = AFATFS_RESULT_OK;
-        memset(op_repair_rename_open_name, 0,
-               sizeof(op_repair_rename_open_name));
-        if (!afatfs_renameObject_lfn(STORAGE_MIDILEARN_TEMP_FILENAME,
-                                     STORAGE_MIDILEARN_FILENAME,
-                                     AFATFS_MATCH_CASE_INSENSITIVE,
-                                     op_repair_rename_open_name,
-                                     on_rename_complete))
-            return;
-        op_phase = 9;
-        return;
-
-    case 9: /* WAIT_RENAME — on error boot recovery promotes the tmp */
-        if (!op_rename_done) return;
-        if (op_rename_result != AFATFS_RESULT_OK) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_phase = 10;
-        return;
-
-    case 10: /* FINISH — shared flush makes the rename durable */
-        filesystem_finish(FS_STATUS_DONE);
-        return;
-
-    default:
-        filesystem_finish(FS_STATUS_ERROR);
-        return;
-    }
+    filesystem_safeTextWrite_tick(&fs_midilearn_safe_write);
 }
 
 /* -----------------------------------------------------------------------
@@ -24048,12 +23979,44 @@ static void filesystem_blockPoll(void)
     afatfs_poll();
 }
 
-static afatfsFilePtr_t filesystem_blockOpen(const char *filename)
+/*
+ * Blocking open of a file (8.3 or long name) or a directory (S097 P1, K).
+ *
+ * What: the three blocking open helpers were one loop with a different
+ * afatfs open call; mode picks the call: FS_BLOCK_OPEN_8_3 afatfs_fopen(),
+ * FS_BLOCK_OPEN_LFN afatfs_fopen_lfn(), FS_BLOCK_OPEN_DIR_LFN
+ * afatfs_opendir_lfn() (both case-insensitive). The open is retried and the
+ * callback waited for exactly as before. noinline/noclone keep LTO from
+ * specialising it back into three copies. Callers keep the three names.
+ */
+#define FS_BLOCK_OPEN_8_3     0u
+#define FS_BLOCK_OPEN_LFN     1u
+#define FS_BLOCK_OPEN_DIR_LFN 2u
+
+static afatfsFilePtr_t __attribute__((noinline, noclone))
+filesystem_blockOpenMode(const char *filename, uint8_t mode)
 {
     block_file_ready = 0;
     block_file = NULL;
 
-    while (!afatfs_fopen(filename, "r", filesystem_blockOpenCb)) {
+    for (;;) {
+        bool started;
+
+        if (mode == FS_BLOCK_OPEN_8_3)
+            started = afatfs_fopen(filename, "r", filesystem_blockOpenCb);
+        else if (mode == FS_BLOCK_OPEN_LFN)
+            started = afatfs_fopen_lfn(filename,
+                                       "r",
+                                       AFATFS_MATCH_CASE_INSENSITIVE,
+                                       NULL,
+                                       filesystem_blockOpenCb);
+        else
+            started = afatfs_opendir_lfn(filename,
+                                         AFATFS_MATCH_CASE_INSENSITIVE,
+                                         NULL,
+                                         filesystem_blockOpenCb);
+        if (started)
+            break;
         filesystem_blockPoll();
         if (!filesystem_blockFsOk())
             return NULL;
@@ -24068,51 +24031,19 @@ static afatfsFilePtr_t filesystem_blockOpen(const char *filename)
     return block_file;
 }
 
-static afatfsFilePtr_t filesystem_blockOpenLfn(const char *filename)
+static inline afatfsFilePtr_t filesystem_blockOpen(const char *filename)
 {
-    block_file_ready = 0;
-    block_file = NULL;
-
-    while (!afatfs_fopen_lfn(filename,
-                             "r",
-                             AFATFS_MATCH_CASE_INSENSITIVE,
-                             NULL,
-                             filesystem_blockOpenCb)) {
-        filesystem_blockPoll();
-        if (!filesystem_blockFsOk())
-            return NULL;
-    }
-
-    while (!block_file_ready) {
-        filesystem_blockPoll();
-        if (!filesystem_blockFsOk())
-            return NULL;
-    }
-
-    return block_file;
+    return filesystem_blockOpenMode(filename, FS_BLOCK_OPEN_8_3);
 }
 
-static afatfsFilePtr_t filesystem_blockOpenDirLfn(const char *filename)
+static inline afatfsFilePtr_t filesystem_blockOpenLfn(const char *filename)
 {
-    block_file_ready = 0;
-    block_file = NULL;
+    return filesystem_blockOpenMode(filename, FS_BLOCK_OPEN_LFN);
+}
 
-    while (!afatfs_opendir_lfn(filename,
-                               AFATFS_MATCH_CASE_INSENSITIVE,
-                               NULL,
-                               filesystem_blockOpenCb)) {
-        filesystem_blockPoll();
-        if (!filesystem_blockFsOk())
-            return NULL;
-    }
-
-    while (!block_file_ready) {
-        filesystem_blockPoll();
-        if (!filesystem_blockFsOk())
-            return NULL;
-    }
-
-    return block_file;
+static inline afatfsFilePtr_t filesystem_blockOpenDirLfn(const char *filename)
+{
+    return filesystem_blockOpenMode(filename, FS_BLOCK_OPEN_DIR_LFN);
 }
 
 static uint8_t filesystem_blockClose(afatfsFilePtr_t file)

@@ -327,9 +327,15 @@ typedef struct {
 
 typedef struct {
     const char *file_key;
-    const char *short_name;
-    const char *long_name;
-    const char *category;
+    /*
+     * Display labels as indexes into the MenuText.h pools (S097 P1 item 2):
+     * menuLabel_short(short_id), menuLabel_long(long_id),
+     * menuLabel_cat(cat_id); ids are enum shortNamesEnum / longNamesEnum /
+     * catNamesEnum (menu.h). file_key stays the storage key.
+     */
+    uint8_t short_id;
+    uint8_t long_id;
+    uint8_t cat_id;
     uint8_t dtype;
     uint8_t flags;
     /*
@@ -362,8 +368,8 @@ typedef struct {
  */
 _Static_assert(sizeof(instrument_runtime_binding_t) == 6u,
                "instrument_runtime_binding_t must stay 6 bytes");
-_Static_assert(sizeof(ParamDescriptor) == 28u,
-               "ParamDescriptor must stay 28 bytes");
+_Static_assert(sizeof(ParamDescriptor) == 20u,
+               "ParamDescriptor must stay 20 bytes (S097 P1 item 2: 28 -> 20)");
 
 #define INSTRUMENT_MENU_EMPTY 0xffu
 #define INSTRUMENT_MENU_SKIP  0xfeu

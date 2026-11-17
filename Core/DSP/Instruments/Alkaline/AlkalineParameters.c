@@ -175,55 +175,55 @@ const ParamDescriptor alkaline_param_descriptors[] = {
      *             table); the menu wave helpers.
      * Affiliates: ALK_WAVE_SAW / ALK_WAVE_SQUARE; alkWaveNames.
      */
-    ROW_MENU("osc1_wave", "Oscilltr", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, osc.waveform, TYPE_UINT8),
+    ROW_MENU("osc1_wave", CAT_OSC, LONG_WAVE, SHORT_WAVE, MENU_WAVEFORM, MOD_WAVE, osc.waveform, TYPE_UINT8),
     /* coa: the existing coarse writer (midiFreq high byte, osc_recalcFreq(),
      * which only sets osc.freq; the Alkaline async recomputes the pitch from
      * midiFreq and the note every block); its LFO/velocity target is
      * osc.modNodeValue, which osc_setTableFreq() multiplies in (T1-7);
      * 36 = C2 at the default note 63 ([SN] p7) */
-    ROW_SPECIAL("osc1_pitch_coarse", "Oscilltr", "Coarse", "coa", DTYPE_0B127, MOD_0_127, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC1),
+    ROW_SPECIAL("osc1_pitch_coarse", CAT_OSC, LONG_COARSE, SHORT_COARSE, DTYPE_0B127, MOD_0_127, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC1),
     /* tun: +-700 cents ([SN] p1, D6) by (tuning x 127 - 63) / 63 x 7/12 octave
      * at control rate; 63 = centre */
-    ROW("alk_tuning", "Oscilltr", "Tuning", "tun", DTYPE_PM63, MOD_PM63, tuning, TYPE_FLT),
+    ROW("alk_tuning", CAT_OSC, LONG_TUNING, SHORT_TUN, DTYPE_PM63, MOD_PM63, tuning, TYPE_FLT),
     /* sld: latched at each trigger, decides the next note (A10); an image
      * ON/OFF cell like Drum's velo_vol_on_off */
-    ROW("alk_slide", "Oscilltr", "Slide", "sld", DTYPE_ON_OFF, MOD_NONE, slide, TYPE_UINT8),
+    ROW("alk_slide", CAT_OSC, LONG_SLIDE, SHORT_SLD, DTYPE_ON_OFF, MOD_NONE, slide, TYPE_UINT8),
     /* the five 303 knobs: VR3 cutoff, VR4 resonance (both gangs), VR5 env
      * mod, VR6 decay, VR7 accent, as tapers in AlkalineControl.c */
-    ROW("alk_cutoff", "Filter", "Cutoff", "cut", DTYPE_0B127, MOD_0_127, cutoff, TYPE_FLT),
-    ROW("alk_reso", "Filter", "Resnance", "res", DTYPE_0B127, MOD_0_127, reso, TYPE_FLT),
-    ROW("alk_envmod", "Filter", "Env Mod", "env", DTYPE_0B127, MOD_0_127, envMod, TYPE_FLT),
-    ROW("alk_decay", "Filter", "Decay", "dec", DTYPE_0B127, MOD_0_127, decay, TYPE_FLT),
-    ROW("alk_accent", "Voice", "Accent", "acc", DTYPE_0B127, MOD_0_127, accent, TYPE_FLT),
+    ROW("alk_cutoff", CAT_FILTER, LONG_CUTOFF, SHORT_CUT, DTYPE_0B127, MOD_0_127, cutoff, TYPE_FLT),
+    ROW("alk_reso", CAT_FILTER, LONG_RESONANCE, SHORT_FIL_RESO, DTYPE_0B127, MOD_0_127, reso, TYPE_FLT),
+    ROW("alk_envmod", CAT_FILTER, LONG_ENV_MOD, SHORT_ENV, DTYPE_0B127, MOD_0_127, envMod, TYPE_FLT),
+    ROW("alk_decay", CAT_FILTER, LONG_DECAY, SHORT_DECAY, DTYPE_0B127, MOD_0_127, decay, TYPE_FLT),
+    ROW("alk_accent", CAT_VOICE, LONG_ACCENT, SHORT_ACC, DTYPE_0B127, MOD_0_127, accent, TYPE_FLT),
     /* drv: the ladder input x 8^(v/127) (D16) with the output make-up
      * 2^(ALK_MAKEUP_OCT (1 - v/127)) (B-2); 0 = the 303's own drive */
-    ROW("alk_drive", "Filter", "Overdriv", "drv", DTYPE_0B127, MOD_0_127, drive, TYPE_FLT),
+    ROW("alk_drive", CAT_FILTER, LONG_DRIVE, SHORT_DRIVE, DTYPE_0B127, MOD_0_127, drive, TYPE_FLT),
     /* platform rows (DrumParameters.c l. 257-258): the mixer reads them
      * through instrumentManager_runtimeVolume()/_runtimePan() */
-    ROW("instrument_vol", "Voice", "Volume", "vol", DTYPE_0B127, MOD_0_127, vol, TYPE_FLT),
-    ROW("instrument_pan", "Voice", "Panning", "pan", DTYPE_PM63, MOD_PM63, pan, TYPE_UINT8),
+    ROW("instrument_vol", CAT_VOICE, LONG_VOL, SHORT_VOL, DTYPE_0B127, MOD_0_127, vol, TYPE_FLT),
+    ROW("instrument_pan", CAT_VOICE, LONG_PAN, SHORT_PAN, DTYPE_PM63, MOD_PM63, pan, TYPE_UINT8),
     /* the LFO pair: one oscillator, two destinations (DrumParameters.c
      * l. 270-281) */
-    ROW_SPECIAL("lfo_rate", "LFO", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, lfo.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_LFO_RATE),
-    ROW("lfo_amount", "LFO", "Amount", "am1", DTYPE_0B127, MOD_0_127, lfo.modTarget.amount, TYPE_FLT),
-    ROW("lfo_amount_2", "LFO", "Amount 2", "am2", DTYPE_0B127, MOD_0_127, lfo.modTarget2.amount, TYPE_FLT),
-    ROW_MENU("lfo_wave", "LFO", "Waveform", "wav", MENU_LFO_WAVES, MOD_NONE, lfo.waveform, TYPE_UINT8),
-    ROW_MENU("lfo_retrigger_voice", "LFO", "Retriggr", "rtg", MENU_RETRIGGER, MOD_NONE, lfo.retrigger, TYPE_UINT8),
-    ROW("lfo_polarity", "LFO", "Polarity", "pol", DTYPE_LFO_POLARITY, MOD_NONE, lfo.polarity, TYPE_UINT8),
+    ROW_SPECIAL("lfo_rate", CAT_LFO, LONG_FREQ, SHORT_FREQ, DTYPE_0B127, MOD_0_127, lfo.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_LFO_RATE),
+    ROW("lfo_amount", CAT_LFO, LONG_AMOUNT, SHORT_AM1, DTYPE_0B127, MOD_0_127, lfo.modTarget.amount, TYPE_FLT),
+    ROW("lfo_amount_2", CAT_LFO, LONG_AMOUNT_2, SHORT_AM2, DTYPE_0B127, MOD_0_127, lfo.modTarget2.amount, TYPE_FLT),
+    ROW_MENU("lfo_wave", CAT_LFO, LONG_WAVE, SHORT_WAVE, MENU_LFO_WAVES, MOD_NONE, lfo.waveform, TYPE_UINT8),
+    ROW_MENU("lfo_retrigger_voice", CAT_LFO, LONG_RETRIGGER, SHORT_RETRIGGER, MENU_RETRIGGER, MOD_NONE, lfo.retrigger, TYPE_UINT8),
+    ROW("lfo_polarity", CAT_LFO, LONG_POLARITY, SHORT_POL, DTYPE_LFO_POLARITY, MOD_NONE, lfo.polarity, TYPE_UINT8),
     /* lfo_sync (S094 P1 S1): the special writer recomputes the LFO's phase
      * step with the mode (IM_SPECIAL_LFO_SYNC -> lfo_setSync()); a plain
      * byte store left the rate at the previous mode's until frq or the tempo
      * moved */
-    ROW_MENU_SPECIAL("lfo_sync", "LFO", "ClockSnc", "snc", MENU_SYNC_RATES, MOD_NONE, lfo.sync, TYPE_UINT8, IM_SPECIAL_LFO_SYNC),
-    ROW_SPECIAL("lfo_offset", "LFO", "Offset", "ofs", DTYPE_0B127, MOD_NONE, lfo.phaseOffset, TYPE_UINT32, IM_SPECIAL_LFO_OFFSET),
+    ROW_MENU_SPECIAL("lfo_sync", CAT_LFO, LONG_CLOCKSYNC, SHORT_SYNC, MENU_SYNC_RATES, MOD_NONE, lfo.sync, TYPE_UINT8, IM_SPECIAL_LFO_SYNC),
+    ROW_SPECIAL("lfo_offset", CAT_LFO, LONG_OFFSET, SHORT_OFFSET, DTYPE_0B127, MOD_NONE, lfo.phaseOffset, TYPE_UINT32, IM_SPECIAL_LFO_OFFSET),
     /* velocity (DrumParameters.c l. 283-284) */
-    ROW_NOBIND_IMAGE("velo_mod_amount", "Velocity", "Amount", "amt", DTYPE_0B127, MOD_NONE, INSTRUMENT_BIND_VELOCITY_AMOUNT),
-    ROW_NOBIND("velo_mod_dest", "Velocity", "DstParam", "dst", DTYPE_TARGET_SELECTION_VELO, INSTRUMENT_BIND_VELOCITY_TARGET),
+    ROW_NOBIND_IMAGE("velo_mod_amount", CAT_VELOCITY, LONG_AMOUNT, SHORT_FM_AMNT, DTYPE_0B127, MOD_NONE, INSTRUMENT_BIND_VELOCITY_AMOUNT),
+    ROW_NOBIND("velo_mod_dest", CAT_VELOCITY, LONG_DEST_PARAM, SHORT_DEST, DTYPE_TARGET_SELECTION_VELO, INSTRUMENT_BIND_VELOCITY_TARGET),
     /* the LFO destinations (DrumParameters.c l. 285-288) */
-    ROW_NOBIND("lfo_target_voice", "LFO", "DstVoice", "vo1", DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE),
-    ROW_NOBIND("lfo_target_param", "LFO", "DstParam", "ds1", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM),
-    ROW_NOBIND("lfo_target_voice_2", "LFO", "DstVoice2", "vo2", DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE_2),
-    ROW_NOBIND("lfo_target_param_2", "LFO", "DstParam2", "ds2", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM_2),
+    ROW_NOBIND("lfo_target_voice", CAT_LFO, LONG_DEST_VOICE, SHORT_VO1, DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE),
+    ROW_NOBIND("lfo_target_param", CAT_LFO, LONG_DEST_PARAM, SHORT_DS1, DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM),
+    ROW_NOBIND("lfo_target_voice_2", CAT_LFO, LONG_DSTVOICE2, SHORT_VO2, DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE_2),
+    ROW_NOBIND("lfo_target_param_2", CAT_LFO, LONG_DSTPARAM2, SHORT_DS2, DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM_2),
     /*
      * S093 P6: atk, the VEG attack as the 303's CPU trigger-pulse width.
      * Byte 0 = a 0.70 ms trigger, today's attack bit for bit; 127 = 0.55 ms
@@ -232,14 +232,14 @@ const ParamDescriptor alkaline_param_descriptors[] = {
      * alkVegAttack[] (generated). Heard after rests and long notes; on running
      * 16ths C42 has not recharged (the circuit's behaviour).
      */
-    ROW("alk_attack", "Veloc EG", "Attack", "atk", DTYPE_0B127, MOD_0_127, attack, TYPE_FLT),
+    ROW("alk_attack", CAT_VELO_EG, LONG_ATTACK, SHORT_ATTACK, DTYPE_0B127, MOD_0_127, attack, TYPE_FLT),
     /*
      * S093 P6: pos on Saw/Sqr, the Drum row shape (DrumParameters.c l. 314)
      * bound to the oscillator's position byte. 0 = free-running (the 303's
      * VCO, today's sound); 1..127 = every non-legato note starts at pos/128
      * of a cycle; while it moves, the per-block bend (AlkalineVoice.c).
      */
-    ROW("osc1_position", "Oscilltr", "Position", "pos", DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
+    ROW("osc1_position", CAT_OSC, LONG_POSITION, SHORT_POS, DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
     /*
      * S093 P8: typ, the oscillator type.
      *
@@ -253,7 +253,7 @@ const ParamDescriptor alkaline_param_descriptors[] = {
      * Accessors:  Alkaline_triggerVoice(), Alkaline_calcVoiceAsync(),
      *             Alkaline_calcVoiceSyncBlock() (osc.oscType).
      */
-    ROW_SELECT_ONOFF_SPECIAL("osc1_type", "Oscilltr", "Type", "typ", ONOFF_TAG_ALK_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
+    ROW_SELECT_ONOFF_SPECIAL("osc1_type", CAT_OSC, LONG_TYPE, SHORT_FIL_TYPE, ONOFF_TAG_ALK_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
     /*
      * S094 P1 S4: the VCA overdrive (K1, user P9-D9).
      *
@@ -269,7 +269,7 @@ const ParamDescriptor alkaline_param_descriptors[] = {
      *             types; the filter page's alk_drive keeps its labels (user:
      *             category "Filter" makes it clear).
      */
-    ROW_SPECIAL("instrument_drive", "Voice", "Overdriv", "drv", DTYPE_0B127, MOD_0_127, vcaDrive, TYPE_UINT8, IM_SPECIAL_INSTRUMENT_DRIVE),
+    ROW_SPECIAL("instrument_drive", CAT_VOICE, LONG_DRIVE, SHORT_DRIVE, DTYPE_0B127, MOD_0_127, vcaDrive, TYPE_UINT8, IM_SPECIAL_INSTRUMENT_DRIVE),
     /*
      * S094 P1 S4: the tone (post-FX draft §3.4.1).
      *
@@ -279,7 +279,7 @@ const ParamDescriptor alkaline_param_descriptors[] = {
      *             c from alkToneC[]: 127 = open (exact), lower values roll off
      *             toward about 800 Hz. Default 127.
      */
-    ROW("alk_tone", "Voice", "Tone", "ton", DTYPE_0B127, MOD_0_127, tone, TYPE_UINT8),
+    ROW("alk_tone", CAT_VOICE, LONG_TONE, SHORT_TON, DTYPE_0B127, MOD_0_127, tone, TYPE_UINT8),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */

@@ -19,6 +19,8 @@
 #ifndef MENUTEXT_H_
 #define MENUTEXT_H_
 
+#include <stdint.h>
+
 /* DTYPE_MENU stores its menu table id in the high nibble of one byte. Id 0 is
 ** valid and is reserved here for track scale so the new 21-entry scale menu can
 ** use the normal menu dtype path without widening the packed dtype table. */
@@ -378,7 +380,7 @@ static const char foldTypeLongNames[][9] = {
 static const char outputNames[][7] = {
     {6}, {"St1"},{"St2"},{"L1"},{"R1"},{"L2"},{"R2"},
 };
-static const char filterTypes[][8] = {
+static const char filterTypes[][4] = {
     {8}, {"LP"},{"HP"},{"BP"},{"UBP"},{"Nch"},{"Pek"},{"LP2"},{"off"},
 };
 /*
@@ -389,121 +391,28 @@ static const char filterTypes[][8] = {
 static const char midiRoutingNames[][6] = {
     {8}, {"off"},{"UtD"},{"DtD"},{"DtU"},{"bth"},{"DtA"},{"AtD"},{"all"},
 };
-static const char midiFilterNames[][16] = {
+static const char midiFilterNames[][4] = {
     {16},
     {"off"},{"N"},{"R"},{"RN"},{"C"},{"CN"},{"CR"},{"CRN"},
     {"P"},{"PN"},{"PR"},{"PRN"},{"PC"},{"PCN"},{"PCR"},{"all"},
 };
-static const char shortNames[][4] = {
-    {""}, {"coa"},{"fin"},{"atk"},{"dec"},{"eg2"},{"mod"},{"amt"},
-    {"frq"},{"drv"},{"vol"},{"pan"},{"noi"},{"rpt"},{"mix"},
-    {"res"},{"typ"},{"f1"},{"f2"},{"g1"},{"g2"},{"wav"},{"dst"},
-    {"snc"},{"rtg"},{"ofs"},{"voi"},{"slp"},{"d1"},{"d2"},
-    {"eqg"},{"eqf"},
-    {"rol"},{"mrp"},{"nte"},{"prb"},{"stp"},{"len"},{"rot"},
-    {"bpm"},{"ch"},{"out"},{"fxm"},{"nxt"},{"mod"},{"vel"},
-    /* TEXT_AUTOMATION_TRACK reused as the S081 rtk recording-track cell. */
-    {"fch"},{"flw"},{"qnt"},{"rtk"},{"val"},{"shu"},{"ssv"},
-    {"x"},{"y"},{"flx"},{"mid"},{"mrt"},{"txf"},{"rxf"},
-    {"cki"},{"co1"},{"co2"},{"pcr"},{"cpu"},{"oit"},{"sca"},
-    /* PERF per-voice Morph compact labels: voice number + "vm". */
-    {"1vm"},{"2vm"},{"3vm"},{"4vm"},{"5vm"},{"6vm"},
-    /* Read-only Pattern pool-use widget label. */
-    {"pts"},
-    /* Requested short label for the persistent Global AutoSave switch. */
-    {"ats"},
-    /* S074 bus compressor compact labels. */
-    {"cmp"},{"cam"},{"ctm"},{"csc"},{"cgr"},
-    /*
-     * S078 per-track run mode compact label (S078 P4: renamed from `mod`).
-     * `run` matches the FX sequencer's run-mode cell (menuEffects.c), so the
-     * same concept reads the same on the Effect page and the STEP track
-     * settings. Accessor: valueNames[TEXT_TRACK_PLAY_MODE] (menu.c).
-     */
-    {"run"},
-    /* S079 step-special compact labels: cdn/tim/rol/rtm/rfl (fix 2, P2). */
-    {"cdn"},{"tim"},{"rol"},{"rtm"},{"rfl"},
-    /* S080 E4/G10: BAR overlay, scene globals, and chain labels. The S080 F2
-     * duplicate "pcr" was removed in S080 P2 (Defect 5); index 63 above is the
-     * only pcr label. */
-    {"pb<"},{"pn<"},{"pb>"},{"pn>"},
-    {"scd"},{"qcd"},{"qac"},
-    {"cn1"},{"nx1"},{"cn2"},{"nx2"},
-    /* S080 P2 Defect 8a: per-track loopable. */
-    {"lop"},
-    /* S081 P2: per-track automation ramp; label `rmp` since the S083
-     * follow-up (user 2026-10-22; was `asm`). */
-    {"rmp"},
-    /* S083 follow-up: overlay roll velocity rhythm. */
-    {"pv<"},{"pv>"},
-};
+/*
+ * Short, category and long name pools (S097 P1 item 2).
+ *
+ * What: the three label pools are defined once in MenuLabels.c and indexed by
+ * enum shortNamesEnum / catNamesEnum / longNamesEnum (menu.h): by valueNames
+ * for static cells, and by ParamDescriptor.short_id / cat_id / long_id for
+ * instrument and effect rows. Why: one copy of each label, and 1-byte
+ * descriptor fields instead of three pointers (row 28 -> 20 B).
+ * Accessors: menuLabel_short(), menuLabel_cat(), menuLabel_long().
+ */
+extern const char shortNames[][4];
+extern const char catNames[][9];
+extern const char longNames[][10];
 
-static const char catNames[][16] = {
-    {""}, {"Oscilltr"},{"Veloc EG"},{"Mod EG"},{"PitchMod"},
-    {"FM"},{"Voice"},{"Noise"},{"Nois/Osc"},{"Filter"},
-    {"Mod Osc"},{"LFO"},{"Transnt"},{"EQ"},
-    {"Pattern"},{"Sound"},{"Step"},{"Euklid"},
-    {"Global"},{"Velocity"},{"Parametr"},{"Sequencr"},
-    {"Generatr"},{"MIDI"},{"Trigger"},
-    /* S074: CAT_SCENE, the full-view category of Scene-owned cells. */
-    {"Scene"},
-    /*
-     * S078 P4: CAT_TRACK, the full-view category of per-track Pattern
-     * settings. The clicked-in view of the STEP run-mode cell reads
-     * "Track   RunMode", in parallel with the FX sequencer's
-     * "FX Seq  RunMode". Accessor: valueNames[TEXT_TRACK_PLAY_MODE].
-     */
-    {"Track"},
-    /* S080 E4: BAR overlay settings category. */
-    {"Prfrmnc"},
-    /* S080 G10: scene chain settings category. */
-    {"Chain"},
-    /* S083 follow-up (user 2026-10-22): CAT_AUTOMATION for the track
-     * automation ramp cell `rmp` ("Automtn  Ramp"). */
-    {"Automtn"},
-};
-
-static const char longNames[][16] = {
-    {""}, {"Coarse"},{"Fine"},{"Attack"},{"Decay"},{"Amount"},
-    {"Frequncy"},{"Overdriv"},{"Volume"},{"Panning"},{"Mix"},
-    {"RepeatCt"},{"Resnance"},{"Type"},{"Gain"},{"Waveform"},
-    {"DstParam"},{"ClockSnc"},{"Retriggr"},{"Offset"},
-    {"DstVoice"},{"Slope"},{"Dcy Clsd"},{"Dcy Open"},
-    {"RollRate"},{"Morph"},{"Note"},{"Prbablty"},{"Number"},
-    {"Length"},{"Steps"},{"Rotation"},{"Tempo"},{"SyncInpt"},
-    {"AudioOut"},{"Channel"},{"FX Morph"},{"NextPatt"},{"Phase"},{"Mode"},
-    {"Vol mod"},{"Fetch"},{"Follow"},{"Quantize"},{"RecTrk"},
-    {"Aut Dest"},{"AutValue"},{"Shuffle"},{"Screensv"},
-    {"X Positn"},{"Y Positn"},{"Flux"},{"Velocity"},
-    {"Freqcy 1"},{"Freqcy 2"},{"Gain 1"},{"Gain 2"},
-    {"Routing"},{"TxFilter"},{"RxFilter"},
-    {"In PPQ"},{"Out1 PPQ"},{"Out2 PPQ"},{"Gate Mode"},{"PCReset"},
-    {"CPU use time"},{"OscIntrp"},{"Scale"},
-    /* Single-parameter long names for PERF per-voice Morph controls. */
-    {"1 Morph"},{"2 Morph"},{"3 Morph"},{"4 Morph"},{"5 Morph"},{"6 Morph"},
-    /* Read-only Pattern pool-use widget title; fits the 15-visible-char field. */
-    {"PtrnStoreUse"},
-    /* Requested long label; valueNames assigns it to category Global. */
-    {"AutoSave"},
-    /* S074 bus compressor long names. */
-    {"BusComp"},{"CompAmt"},{"CompTime"},{"CompSC"},{"CompGR"},
-    /* S078 per-track run mode long name (S078 P4: renamed from PlayMode to
-     * match the FX sequencer's RunMode). */
-    {"RunMode"},
-    /* S079 step-special long names (fix 2: Conditin, % Delay; P2: Rhythm). */
-    {"Conditin"},{"% Delay"},{"RollRate"},{"Rhythm"},{"RollFill"},
-    /* S080 E4/F4/G10: overlay, scene-global, and chain long names. */
-    {"BtnStat<"},{"BtnNote<"},{"BtnStat>"},{"BtnNote>"},
-    {"ChngDiv"},{"QueDiv"},{"QueActn"},
-    {"Conditn1"},{"NxtScn1"},{"Conditn2"},{"NxtScn2"},
-    /* S080 P2 Defect 8a. */
-    {"Loopable"},
-    /* S081 P2; "Ramp" since the S083 follow-up (was "Automtn", which is
-     * now the cell's category). */
-    {"Ramp"},
-    /* S083 follow-up: overlay roll velocity rhythm (Prfrmnc Rhythm</>). */
-    {"Rhythm<"},{"Rhythm>"},
-};
+static inline const char *menuLabel_short(uint8_t id) { return shortNames[id]; }
+static inline const char *menuLabel_cat(uint8_t id)   { return catNames[id]; }
+static inline const char *menuLabel_long(uint8_t id)  { return longNames[id]; }
 
 /*
  * Trigger condition display names (S079 §3; fix 3 extends to track 7;

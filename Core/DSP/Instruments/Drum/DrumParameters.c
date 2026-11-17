@@ -230,12 +230,12 @@ _Static_assert(DRUM_PARAM_DESCRIPTOR_COUNT == DRUM_PARAM_COUNT,
  * domain, and runtime binding for one descriptor-indexed storage cell.
  */
 const ParamDescriptor drum_param_descriptors[] = {
-    ROW_MENU("osc1_wave", "Oscilltr", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, osc.waveform, TYPE_UINT8),
-    ROW_SPECIAL("osc1_pitch_coarse", "Oscilltr", "Coarse", "coa", DTYPE_0B127, MOD_0_127, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC1),
-    ROW_SPECIAL("osc1_pitch_fine", "Oscilltr", "Fine", "fin", DTYPE_PM63, MOD_PM63, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_FINE | IM_SPECIAL_OSC1),
-    ROW_MENU("osc2_wave", "FM", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, modOsc.waveform, TYPE_UINT8),
-    ROW_SPECIAL("osc2_pitch_coarse", "FM", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, modOsc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC2),
-    ROW("osc2_mod_amount", "FM", "Amount", "amt", DTYPE_0B127, MOD_0_127, fmModAmount, TYPE_FLT),
+    ROW_MENU("osc1_wave", CAT_OSC, LONG_WAVE, SHORT_WAVE, MENU_WAVEFORM, MOD_WAVE, osc.waveform, TYPE_UINT8),
+    ROW_SPECIAL("osc1_pitch_coarse", CAT_OSC, LONG_COARSE, SHORT_COARSE, DTYPE_0B127, MOD_0_127, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC1),
+    ROW_SPECIAL("osc1_pitch_fine", CAT_OSC, LONG_FINE, SHORT_FINE, DTYPE_PM63, MOD_PM63, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_FINE | IM_SPECIAL_OSC1),
+    ROW_MENU("osc2_wave", CAT_FM, LONG_WAVE, SHORT_WAVE, MENU_WAVEFORM, MOD_WAVE, modOsc.waveform, TYPE_UINT8),
+    ROW_SPECIAL("osc2_pitch_coarse", CAT_FM, LONG_FREQ, SHORT_FREQ, DTYPE_0B127, MOD_0_127, modOsc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC2),
+    ROW("osc2_mod_amount", CAT_FM, LONG_AMOUNT, SHORT_FM_AMNT, DTYPE_0B127, MOD_0_127, fmModAmount, TYPE_FLT),
     /*
      * S085 P1: osc2 mod mode, stored 0 fm, 1 mix, 2 snc, 3 rng
      * (DRUM_MOD_*). The key, row index, automation ID and NRPN ID are
@@ -243,21 +243,21 @@ const ParamDescriptor drum_param_descriptors[] = {
      * MenuText.h mixFmNames (menu.c menu_getMixFmName()). The bound member
      * was renamed mixOscs -> modMode.
      */
-    ROW("osc2_mod_type", "FM", "Mode", "mod", DTYPE_MIX_FM, MOD_NONE, modMode, TYPE_UINT8),
-    ROW_SPECIAL("filter_freq", "Filter", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, filter.f, TYPE_FLT, IM_SPECIAL_FILTER_FREQ),
-    ROW_SPECIAL("filter_reso", "Filter", "Resnance", "res", DTYPE_0B127, MOD_0_127, filter.q, TYPE_FLT, IM_SPECIAL_FILTER_RESO),
-    ROW_SPECIAL("filter_drive", "Filter", "Overdriv", "drv", DTYPE_0B127, MOD_0_127, filter.drive, TYPE_FLT, IM_SPECIAL_FILTER_DRIVE),
-    ROW_MENU_SPECIAL("filter_type", "Filter", "Type", "typ", MENU_FILTER, MOD_NONE, filterType, TYPE_UINT8, IM_SPECIAL_FILTER_TYPE),
-    ROW_SPECIAL("amp_envelope_attack", "Veloc EG", "Attack", "atk", DTYPE_0B127, MOD_0_127, oscVolEg.attack, TYPE_FLT, IM_SPECIAL_AMP_ATTACK),
-    ROW_SPECIAL("amp_envelope_decay", "Veloc EG", "Decay", "dec", DTYPE_0B127, MOD_0_127, oscVolEg.decay, TYPE_FLT, IM_SPECIAL_AMP_DECAY),
-    ROW_SPECIAL("amp_envelope_slope", "Veloc EG", "Slope", "slp", DTYPE_0B127, MOD_0_127, oscVolEg.slope, TYPE_FLT, IM_SPECIAL_AMP_SLOPE),
-    ROW_SPECIAL("pitch_envelope_decay", "PitchMod", "Decay", "dec", DTYPE_0B127, MOD_0_127, oscPitchEg.decay, TYPE_FLT, IM_SPECIAL_PITCH_EG_DECAY),
-    ROW_SPECIAL("pitch_envelope_amount", "PitchMod", "Amount", "amt", DTYPE_0B127, MOD_0_127, egPitchModAmount, TYPE_FLT, IM_SPECIAL_PITCH_EG_AMOUNT),
-    ROW_SPECIAL("pitch_envelope_slope", "PitchMod", "Slope", "slp", DTYPE_0B127, MOD_0_127, oscPitchEg.slope, TYPE_FLT, IM_SPECIAL_PITCH_EG_SLOPE),
-    ROW("instrument_vol", "Voice", "Volume", "vol", DTYPE_0B127, MOD_0_127, vol, TYPE_FLT),
-    ROW("instrument_pan", "Voice", "Panning", "pan", DTYPE_PM63, MOD_PM63, pan, TYPE_UINT8),
-    ROW_SPECIAL("instrument_drive", "Voice", "Overdriv", "drv", DTYPE_0B127, MOD_0_127, distortion.shape, TYPE_FLT, IM_SPECIAL_INSTRUMENT_DRIVE),
-    ROW_SLOT_DECIMATION("instrument_decimation", "Voice", "SampleRt", "srt", DTYPE_0B127),
+    ROW("osc2_mod_type", CAT_FM, LONG_MODE, SHORT_MOD, DTYPE_MIX_FM, MOD_NONE, modMode, TYPE_UINT8),
+    ROW_SPECIAL("filter_freq", CAT_FILTER, LONG_FREQ, SHORT_FREQ, DTYPE_0B127, MOD_0_127, filter.f, TYPE_FLT, IM_SPECIAL_FILTER_FREQ),
+    ROW_SPECIAL("filter_reso", CAT_FILTER, LONG_RESONANCE, SHORT_FIL_RESO, DTYPE_0B127, MOD_0_127, filter.q, TYPE_FLT, IM_SPECIAL_FILTER_RESO),
+    ROW_SPECIAL("filter_drive", CAT_FILTER, LONG_DRIVE, SHORT_DRIVE, DTYPE_0B127, MOD_0_127, filter.drive, TYPE_FLT, IM_SPECIAL_FILTER_DRIVE),
+    ROW_MENU_SPECIAL("filter_type", CAT_FILTER, LONG_TYPE, SHORT_FIL_TYPE, MENU_FILTER, MOD_NONE, filterType, TYPE_UINT8, IM_SPECIAL_FILTER_TYPE),
+    ROW_SPECIAL("amp_envelope_attack", CAT_VELO_EG, LONG_ATTACK, SHORT_ATTACK, DTYPE_0B127, MOD_0_127, oscVolEg.attack, TYPE_FLT, IM_SPECIAL_AMP_ATTACK),
+    ROW_SPECIAL("amp_envelope_decay", CAT_VELO_EG, LONG_DECAY, SHORT_DECAY, DTYPE_0B127, MOD_0_127, oscVolEg.decay, TYPE_FLT, IM_SPECIAL_AMP_DECAY),
+    ROW_SPECIAL("amp_envelope_slope", CAT_VELO_EG, LONG_SLOPE, SHORT_SLOPE, DTYPE_0B127, MOD_0_127, oscVolEg.slope, TYPE_FLT, IM_SPECIAL_AMP_SLOPE),
+    ROW_SPECIAL("pitch_envelope_decay", CAT_PITCH_MOD, LONG_DECAY, SHORT_DECAY, DTYPE_0B127, MOD_0_127, oscPitchEg.decay, TYPE_FLT, IM_SPECIAL_PITCH_EG_DECAY),
+    ROW_SPECIAL("pitch_envelope_amount", CAT_PITCH_MOD, LONG_AMOUNT, SHORT_FM_AMNT, DTYPE_0B127, MOD_0_127, egPitchModAmount, TYPE_FLT, IM_SPECIAL_PITCH_EG_AMOUNT),
+    ROW_SPECIAL("pitch_envelope_slope", CAT_PITCH_MOD, LONG_SLOPE, SHORT_SLOPE, DTYPE_0B127, MOD_0_127, oscPitchEg.slope, TYPE_FLT, IM_SPECIAL_PITCH_EG_SLOPE),
+    ROW("instrument_vol", CAT_VOICE, LONG_VOL, SHORT_VOL, DTYPE_0B127, MOD_0_127, vol, TYPE_FLT),
+    ROW("instrument_pan", CAT_VOICE, LONG_PAN, SHORT_PAN, DTYPE_PM63, MOD_PM63, pan, TYPE_UINT8),
+    ROW_SPECIAL("instrument_drive", CAT_VOICE, LONG_DRIVE, SHORT_DRIVE, DTYPE_0B127, MOD_0_127, distortion.shape, TYPE_FLT, IM_SPECIAL_INSTRUMENT_DRIVE),
+    ROW_SLOT_DECIMATION("instrument_decimation", CAT_VOICE, LONG_SAMPLERT, SHORT_SRT, DTYPE_0B127),
     /*
      * LFO runtime rows.
      *
@@ -267,32 +267,32 @@ const ParamDescriptor drum_param_descriptors[] = {
      * Pair 1 keeps the original file keys; pair 2 adds new save/load-ready
      * keys without changing the Kit folder hierarchy.
      */
-    ROW_SPECIAL("lfo_rate", "LFO", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, lfo.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_LFO_RATE),
-    ROW("lfo_amount", "LFO", "Amount", "am1", DTYPE_0B127, MOD_0_127, lfo.modTarget.amount, TYPE_FLT),
-    ROW("lfo_amount_2", "LFO", "Amount 2", "am2", DTYPE_0B127, MOD_0_127, lfo.modTarget2.amount, TYPE_FLT),
-    ROW_MENU("lfo_wave", "LFO", "Waveform", "wav", MENU_LFO_WAVES, MOD_NONE, lfo.waveform, TYPE_UINT8),
-    ROW_MENU("lfo_retrigger_voice", "LFO", "Retriggr", "rtg", MENU_RETRIGGER, MOD_NONE, lfo.retrigger, TYPE_UINT8),
-    ROW("lfo_polarity", "LFO", "Polarity", "pol", DTYPE_LFO_POLARITY, MOD_NONE, lfo.polarity, TYPE_UINT8),
+    ROW_SPECIAL("lfo_rate", CAT_LFO, LONG_FREQ, SHORT_FREQ, DTYPE_0B127, MOD_0_127, lfo.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_LFO_RATE),
+    ROW("lfo_amount", CAT_LFO, LONG_AMOUNT, SHORT_AM1, DTYPE_0B127, MOD_0_127, lfo.modTarget.amount, TYPE_FLT),
+    ROW("lfo_amount_2", CAT_LFO, LONG_AMOUNT_2, SHORT_AM2, DTYPE_0B127, MOD_0_127, lfo.modTarget2.amount, TYPE_FLT),
+    ROW_MENU("lfo_wave", CAT_LFO, LONG_WAVE, SHORT_WAVE, MENU_LFO_WAVES, MOD_NONE, lfo.waveform, TYPE_UINT8),
+    ROW_MENU("lfo_retrigger_voice", CAT_LFO, LONG_RETRIGGER, SHORT_RETRIGGER, MENU_RETRIGGER, MOD_NONE, lfo.retrigger, TYPE_UINT8),
+    ROW("lfo_polarity", CAT_LFO, LONG_POLARITY, SHORT_POL, DTYPE_LFO_POLARITY, MOD_NONE, lfo.polarity, TYPE_UINT8),
     /* lfo_sync (S094 P1 S1): the special writer recomputes the LFO's phase
      * step with the mode (IM_SPECIAL_LFO_SYNC -> lfo_setSync()); a plain
      * byte store left the rate at the previous mode's until frq or the tempo
      * moved */
-    ROW_MENU_SPECIAL("lfo_sync", "LFO", "ClockSnc", "snc", MENU_SYNC_RATES, MOD_NONE, lfo.sync, TYPE_UINT8, IM_SPECIAL_LFO_SYNC),
+    ROW_MENU_SPECIAL("lfo_sync", CAT_LFO, LONG_CLOCKSYNC, SHORT_SYNC, MENU_SYNC_RATES, MOD_NONE, lfo.sync, TYPE_UINT8, IM_SPECIAL_LFO_SYNC),
     /*
      * S076 P2: scaled phase offset. IM_SPECIAL_LFO_OFFSET maps the 0..127
      * display value onto the full 32-bit phase accumulator range.
      */
-    ROW_SPECIAL("lfo_offset", "LFO", "Offset", "ofs", DTYPE_0B127, MOD_NONE, lfo.phaseOffset, TYPE_UINT32, IM_SPECIAL_LFO_OFFSET),
-    ROW("velo_vol_on_off", "Velocity", "Vol mod", "vel", DTYPE_ON_OFF, MOD_NONE, volumeMod, TYPE_UINT8),
-    ROW_NOBIND_IMAGE("velo_mod_amount", "Velocity", "Amount", "amt", DTYPE_0B127, MOD_NONE, INSTRUMENT_BIND_VELOCITY_AMOUNT),
-    ROW_NOBIND("velo_mod_dest", "Velocity", "DstParam", "dst", DTYPE_TARGET_SELECTION_VELO, INSTRUMENT_BIND_VELOCITY_TARGET),
-    ROW_NOBIND("lfo_target_voice", "LFO", "DstVoice", "vo1", DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE),
-    ROW_NOBIND("lfo_target_param", "LFO", "DstParam", "ds1", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM),
-    ROW_NOBIND("lfo_target_voice_2", "LFO", "DstVoice2", "vo2", DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE_2),
-    ROW_NOBIND("lfo_target_param_2", "LFO", "DstParam2", "ds2", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM_2),
-    ROW_MENU_SPECIAL("transient_wave", "Transnt", "Waveform", "wav", MENU_TRANS, MOD_NONE, transGen.waveform, TYPE_UINT8, IM_SPECIAL_TRANSIENT_WAVE),
-    ROW("transient_vol", "Transnt", "Volume", "vol", DTYPE_0B127, MOD_0_127, transGen.volume, TYPE_FLT),
-    ROW_SPECIAL("transient_freq", "Transnt", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, transGen.pitch, TYPE_FLT, IM_SPECIAL_TRANSIENT_FREQ),
+    ROW_SPECIAL("lfo_offset", CAT_LFO, LONG_OFFSET, SHORT_OFFSET, DTYPE_0B127, MOD_NONE, lfo.phaseOffset, TYPE_UINT32, IM_SPECIAL_LFO_OFFSET),
+    ROW("velo_vol_on_off", CAT_VELOCITY, LONG_VOLUME_MOD, SHORT_VELOCITY, DTYPE_ON_OFF, MOD_NONE, volumeMod, TYPE_UINT8),
+    ROW_NOBIND_IMAGE("velo_mod_amount", CAT_VELOCITY, LONG_AMOUNT, SHORT_FM_AMNT, DTYPE_0B127, MOD_NONE, INSTRUMENT_BIND_VELOCITY_AMOUNT),
+    ROW_NOBIND("velo_mod_dest", CAT_VELOCITY, LONG_DEST_PARAM, SHORT_DEST, DTYPE_TARGET_SELECTION_VELO, INSTRUMENT_BIND_VELOCITY_TARGET),
+    ROW_NOBIND("lfo_target_voice", CAT_LFO, LONG_DEST_VOICE, SHORT_VO1, DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE),
+    ROW_NOBIND("lfo_target_param", CAT_LFO, LONG_DEST_PARAM, SHORT_DS1, DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM),
+    ROW_NOBIND("lfo_target_voice_2", CAT_LFO, LONG_DSTVOICE2, SHORT_VO2, DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE_2),
+    ROW_NOBIND("lfo_target_param_2", CAT_LFO, LONG_DSTPARAM2, SHORT_DS2, DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM_2),
+    ROW_MENU_SPECIAL("transient_wave", CAT_TRANS, LONG_WAVE, SHORT_WAVE, MENU_TRANS, MOD_NONE, transGen.waveform, TYPE_UINT8, IM_SPECIAL_TRANSIENT_WAVE),
+    ROW("transient_vol", CAT_TRANS, LONG_VOL, SHORT_VOL, DTYPE_0B127, MOD_0_127, transGen.volume, TYPE_FLT),
+    ROW_SPECIAL("transient_freq", CAT_TRANS, LONG_FREQ, SHORT_FREQ, DTYPE_0B127, MOD_0_127, transGen.pitch, TYPE_FLT, IM_SPECIAL_TRANSIENT_FREQ),
     /*
      * osc1_position: pos, the oscillator position / PWM width (S094 P1 S3).
      *
@@ -317,7 +317,7 @@ const ParamDescriptor drum_param_descriptors[] = {
      *             Drum_calcVoiceSyncBlock(); FILESYSTEM_SPEC.md (the key);
      *             086_SESSION_HANDOFF_LOG.md §4.
      */
-    ROW("osc1_position", "Oscilltr", "Position", "pos", DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
+    ROW("osc1_position", CAT_OSC, LONG_POSITION, SHORT_POS, DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
     /*
      * osc1_type: typ, the oscillator type (S087 stage B; S094 P1 S3 pwm).
      *
@@ -338,7 +338,7 @@ const ParamDescriptor drum_param_descriptors[] = {
      * Affiliates: the typed renderers (Oscillator.c S087 section);
      *             FILESYSTEM_SPEC.md (the key); S087 P0 §12.5.
      */
-    ROW_SELECT_SPECIAL("osc1_type", "Oscilltr", "Type", "typ", MENU_OSC_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
+    ROW_SELECT_SPECIAL("osc1_type", CAT_OSC, LONG_TYPE, SHORT_FIL_TYPE, MENU_OSC_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
     /*
      * osc1_run: run, the oscillator run mode (S088 P0).
      *
@@ -357,7 +357,7 @@ const ParamDescriptor drum_param_descriptors[] = {
      * Affiliates: OSC_RUN_* (Oscillator.h); oscRunNames (MenuText.h);
      *             ONOFF_TAG_OSC_RUN; the six DTYPE_ON_OFF sites in menu.c.
      */
-    ROW_SELECT_ONOFF_SPECIAL("osc1_run", "Oscilltr", "Run Mode", "run", ONOFF_TAG_OSC_RUN, runMode, TYPE_UINT8, IM_SPECIAL_OSC_RUN | IM_SPECIAL_OSC1),
+    ROW_SELECT_ONOFF_SPECIAL("osc1_run", CAT_OSC, LONG_RUN_MODE, SHORT_PLAY_MODE, ONOFF_TAG_OSC_RUN, runMode, TYPE_UINT8, IM_SPECIAL_OSC_RUN | IM_SPECIAL_OSC1),
     /*
      * voice_chain: chn, the voice chain selector (S089 P2).
      *
@@ -381,7 +381,7 @@ const ParamDescriptor drum_param_descriptors[] = {
      * Affiliates: VOICE_CHAIN_* (voiceFold.h); voiceChainNames (MenuText.h);
      *             ONOFF_TAG_VOICE_CHAIN; menu_onoffTagNames() in menu.c.
      */
-    ROW_SELECT_ONOFF_SPECIAL("voice_chain", "Voice", "Chain", "chn", ONOFF_TAG_VOICE_CHAIN, chainType, TYPE_UINT8, IM_SPECIAL_VOICE_CHAIN),
+    ROW_SELECT_ONOFF_SPECIAL("voice_chain", CAT_VOICE, LONG_CHAIN, SHORT_CHN, ONOFF_TAG_VOICE_CHAIN, chainType, TYPE_UINT8, IM_SPECIAL_VOICE_CHAIN),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
