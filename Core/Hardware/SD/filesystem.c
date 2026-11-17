@@ -93,6 +93,23 @@
 #include <string.h>
 #include <stdint.h>
 
+/*
+ * FS_HOT_O2 (S097 P2 step 3).
+ *
+ * What: in the opt-in size build (make FS_OS=1, -DFS_OS_BUILD) this file is
+ * compiled with -Os; FS_HOT_O2 keeps at -O2 the few functions reachable from
+ * TIM3 (the Follow Scene-change repaint) or per MIDI message: the slot-name
+ * helpers, their callee filesystem_cachedLibraryName() and
+ * filesystem_setAutosaveEnabled(). In the default build it is
+ * empty. Why: those paths are the worst-case CPU users (S097_P2_UI_STORAGE_
+ * IMPLEMENTATION.md). Affiliates: Makefile FS_OS / OS_SRCS.
+ */
+#if defined(FS_OS_BUILD)
+#define FS_HOT_O2 __attribute__((optimize("O2")))
+#else
+#define FS_HOT_O2
+#endif
+
 #define FS_SECTOR_SIZE_BYTES 512u
 #define FS_NUM_FATS_EXPECTED 2u
 /*
@@ -2108,7 +2125,7 @@ static void filesystem_prepareLibraryNameCache(fs_name_cache_kind_t kind)
  * from accidentally using stale rows after a menu transition. The returned
  * pointer remains valid until the next cache disposal or replacement.
  */
-static const char *filesystem_cachedLibraryName(fs_name_cache_kind_t kind,
+static FS_HOT_O2 const char *filesystem_cachedLibraryName(fs_name_cache_kind_t kind,
                                                 uint16_t slot)
 {
     if (fs_list_cache_kind != kind || slot >= fs_list_cache_count)
@@ -11662,7 +11679,7 @@ static instrument_type_t filesystem_instrumentTypeFromFilename(
     return INSTRUMENT_TYPE_UNKNOWN;
 }
 
-static void filesystem_copyInstrumentStemDisplay(char dst[9],
+static FS_HOT_O2 void filesystem_copyInstrumentStemDisplay(char dst[9],
                                                  const char *filename)
 {
     char stem[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
@@ -26904,7 +26921,7 @@ void filesystem_patternAutosaveOnLoad(uint8_t scene_index)
         bank_invalidateSdCleanScene(scene_index);
 }
 
-void filesystem_setAutosaveEnabled(uint8_t enabled)
+FS_HOT_O2 void filesystem_setAutosaveEnabled(uint8_t enabled)
 {
     enabled = enabled ? 1u : 0u;
 
@@ -35463,7 +35480,7 @@ uint8_t filesystem_sceneSlotExists(uint16_t zero_based_slot)
                                         zero_based_slot);
 }
 
-const char *filesystem_sceneSlotName(uint16_t zero_based_slot)
+FS_HOT_O2 const char *filesystem_sceneSlotName(uint16_t zero_based_slot)
 {
     const char *name;
 
@@ -35505,7 +35522,7 @@ uint8_t filesystem_bankSlotExists(uint16_t zero_based_slot)
                                         zero_based_slot);
 }
 
-const char *filesystem_bankSlotName(uint16_t zero_based_slot)
+FS_HOT_O2 const char *filesystem_bankSlotName(uint16_t zero_based_slot)
 {
     /*
      * Return an eight-character root Bank display name.
@@ -35541,7 +35558,7 @@ uint8_t filesystem_patternSlotExists(uint16_t zero_based_slot)
                                         zero_based_slot);
 }
 
-const char *filesystem_patternSlotName(uint16_t zero_based_slot)
+FS_HOT_O2 const char *filesystem_patternSlotName(uint16_t zero_based_slot)
 {
     /* Blank means the Pattern cache domain has not resolved this coordinate;
      * Empty means a valid Pattern index has no file at this slot. */

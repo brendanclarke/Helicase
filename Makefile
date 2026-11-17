@@ -198,8 +198,63 @@ DSP_SRCS = \
 # -Ofast for DSP: enables -ffast-math (float reordering, NaN/Inf assumptions)
 CFLAGS_DSP = $(subst -O2,-Ofast,$(CFLAGS))
 
-OBJS = $(patsubst %.c,$(BUILD)/%.o,$(patsubst %.s,$(BUILD)/%.o,$(SRCS))) \
-       $(patsubst %.c,$(BUILD)/%.o,$(DSP_SRCS))
+# S097 P2 step 1: cold sources compiled for size (-Os). Only sources that never
+# run in an ISR, on the render path (audio_check_and_render(), the mixer,
+# voiceControl_processPending(), TIM3) or per MIDI message, checked by call
+# graph: the FAT engine (main loop, inside filesystem operations), sample
+# install (Load:[Samples], audio suspended) and boot-only code. Compile-time
+# -Os is kept per function through LTO. Gate (S097_P2_UI_STORAGE_IMPLEMENTATION.md):
+# every per-sample loop exact, hot call sets and ISR bodies unchanged. Do not
+# add a file here without that gate: a larger shrink moves the LTO partition
+# cuts and with them the DSP loops (S097 P0 §3).
+OS_SRCS = \
+  Core/Hardware/SD/asyncfatfs/asyncfatfs.c \
+  Core/SampleRom/SampleInstall.c \
+  Core/SampleRom/sampleFlash.c \
+  Core/Hardware/flashImage.c \
+  Core/Menu/SplashAnimation.c
+
+# S097 P2 step 3: filesystem.c with -Os as well (-36 KB, every per-sample loop
+# exact with COLD_LAST below). Off by default again: on the device the FS_OS=1
+# image showed a sequencer stumble during a Scene Load into non-playing slots
+# (user, 2026-11-17). The logs neither confirm nor exclude -Os as the cause, so
+# it waits for an A/B test of the same action on this FS_OS=0 image
+# (S097_P2_UI_STORAGE_IMPLEMENTATION.md §10). Build it with
+# `make clean && make all FS_OS=1`. FS_OS_BUILD keeps the helpers reachable
+# from TIM3/MIDI at -O2 (FS_HOT_O2 in filesystem.c). Changing FS_OS needs
+# `make clean` (compiler flags are not object prerequisites).
+FS_OS ?= 0
+ifeq ($(FS_OS),1)
+OS_SRCS += Core/Hardware/SD/filesystem.c
+$(BUILD)/Core/Hardware/SD/filesystem.o: CFLAGS += -DFS_OS_BUILD
+endif
+
+# S097 P2: cold UI/storage objects are linked after the DSP objects.
+#
+# What: COLD_LAST sources move from their SRCS position to the end of the link.
+# Why: LTO's balanced partitioner fills partitions in object order. With these
+# sources before the DSP objects, any change in their size moved the partition
+# cuts through the voice renders and the mixer, and so changed per-sample loops
+# (S097 P0 §3: ±1 instruction "jitter"). Linked last, they share partitions
+# only with each other. Measured on the S097 P1 image: every oscillator and
+# mixer loop exact, hot call sets and ISR bodies unchanged, -1,096 B; and
+# filesystem.c at -Os then leaves every loop exact (S097_P2_UI_STORAGE_
+# IMPLEMENTATION.md). Keep new cold UI/storage sources in this list.
+COLD_LAST = \
+  Core/Hardware/SD/filesystem.c \
+  Core/Hardware/SD/storageTypes.c \
+  Core/Hardware/SD/asyncfatfs/asyncfatfs.c \
+  Core/Hardware/SD/asyncfatfs/fat_standard.c \
+  Core/Menu/menu.c \
+  Core/Menu/menuEffects.c \
+  Core/Menu/CopyClear/copyClearSession.c \
+  Core/Menu/CopyClear/copyOps.c \
+  Core/Menu/CopyClear/clearOps.c \
+  Core/Menu/CopyClear/copyClearService.c
+
+OBJS = $(patsubst %.c,$(BUILD)/%.o,$(patsubst %.s,$(BUILD)/%.o,$(filter-out $(COLD_LAST),$(SRCS)))) \
+       $(patsubst %.c,$(BUILD)/%.o,$(DSP_SRCS)) \
+       $(patsubst %.c,$(BUILD)/%.o,$(COLD_LAST))
 
 -include $(OBJS:.o=.d)
 
@@ -319,6 +374,8 @@ $(BUILD)/Core/DSP/Effects/Space/SpaceKitDsp.o: Core/DSP/Effects/Space/SpaceKitDs
 $(BUILD)/Core/DSP/Effects/Space/SpaceEffect.o: Core/DSP/Effects/Space/SpaceEffect.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
+
+$(patsubst %.c,$(BUILD)/%.o,$(OS_SRCS)): CFLAGS += -Os
 
 $(BUILD)/%.o: %.c | $(BUILD)
 	@mkdir -p $(dir $@)

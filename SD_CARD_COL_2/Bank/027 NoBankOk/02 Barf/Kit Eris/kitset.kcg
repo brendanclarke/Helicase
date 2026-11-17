@@ -1,0 +1,29 @@
+format=helicase.kitset
+version=1
+slot6_track7_amp_envelope_decay=0
+slot6_track7_morph_amp_envelope_decay=0
+
+[slot1]
+type=drm
+file=erisd1 1.drm
+
+[slot2]
+type=drm
+file=erisd2 2.drm
+
+[slot3]
+type=drm
+file=erisd3 3.drm
+
+[slot4]
+type=snr
+file=eriss1 4.snr
+
+[slot5]
+type=cym
+file=erisc1 5.cym
+
+[slot6]
+type=hat
+file=erish1 6.hat
+

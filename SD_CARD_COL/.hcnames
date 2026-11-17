@@ -1,21 +1,21 @@
 #types	drm	snr	cym	hat	alk	col	tkt
-AlkalnSt	001
-AlkxTime	002
+CollidSt	014
+ColxTime	017
 FluxTime	-
 FluxTime	-
 FluxTime	-
 FluxMax	-
 Barf	-
 FluxTime	-
-Barf	-
+Barf	b001
+ColxTime	017
 FluxTime	-
-FluxTime	-
-Electro	-
-Eris	-
+Electro	b001
+Eris	b001
 AlkxTime	-
-808ceebe	-
-808cb	-
-Pop	-
+808ceebe	b001
+808cb	b001
+Pop	b001
 Hard	-
 Flux	-
 Flux	-
@@ -32,12 +32,12 @@ Hard	-
 Hard	-
 Hard	-
 Hard	-
-init	@	tkt
-beatmsd1	@	drm
-init	@	alk
-init	@	alk
-init	@	col
-foresth1	@	hat
+init	-	tkt
+beatmsd1	-	drm
+init	-	alk
+init	-	alk
+init	-	col
+foresth1	-	hat
 chipd3 1	-	drm
 fluxd2 2	-	drm
 brezeld3	-	drm
@@ -80,12 +80,12 @@ beatmsd3	-	drm
 beatmss4	-	snr
 beatmsc5	-	cym
 beatmsh6	-	hat
-brezeld1	-	drm
-hardd2 2	-	drm
-hardd1 3	-	drm
-hards1 4	-	snr
-hardc1 5	-	cym
-hardh1 6	-	hat
+init   1	-	tkt
+beatmsd2	-	drm
+init   3	-	alk
+init   4	-	alk
+init   5	-	col
+foresth6	-	hat
 brezeld1	-	drm
 init   2	-	drm
 dirtd1 3	-	drm
@@ -135,15 +135,15 @@ Empty	@
 Empty	@
 Empty	@
 Empty	@
-Barf	@
+Barf	@	R
+Empty	@	R
 Empty	@
+Electro	@	R
+Eris	@	R
 Empty	@
-Electro	@
-Eris	@
-Empty	@
-808ceebe	@
-808cb	@
-Pop	@
+808ceebe	@	R
+808cb	@	R
+Pop	@	R
 effects	-
 effects	-
 effects	-

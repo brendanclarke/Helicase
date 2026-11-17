@@ -1,7 +1,14 @@
 # S097 P2 — UI and Storage Code Optimised for Size: Plan
 
 Date: 2026-11-17. Branch `dev-ph7-alkaline`, after S097 P1 (729,688 B used).
-Status: **plan only; nothing here is applied to the tree.** Every number below
+Status: **implemented in part — see `S097_P2_UI_STORAGE_IMPLEMENTATION.md`.**
+What was done differs from this plan: a narrower step 1 (hot-path
+reachability), the cold sources linked after the DSP objects instead of a
+partition pin (every pin tried moved 3 PWM loops), and `filesystem.c` at `-Os`
+as an opt-in build (`FS_OS=1`) pending the device check. The plan below is
+kept as written.
+
+Original status: **plan only; nothing here is applied to the tree.** Every number below
 was measured on scratch copies of the tree at S097 P0 + P1 items 1/4/5
 (729,688 B), built with `make all`. P1 item 2 (labels as indexes, −3,032 B,
 726,656 B) landed afterwards. It touches only descriptor rows and menu
