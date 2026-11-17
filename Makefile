@@ -132,6 +132,7 @@ SRCS = \
   Core/MIDI/MidiOut.c \
   Core/MIDI/MidiNoteMap.c \
   Core/MIDI/MidiNotes.c \
+  Core/MIDI/MidiNoteModes.c \
   Core/MIDI/MidiProgram.c \
   Core/MIDI/MidiControl.c \
   Core/MIDI/MidiLearn.c \

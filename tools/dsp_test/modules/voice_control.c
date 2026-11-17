@@ -14,6 +14,11 @@
  *                  limit and wait for the next pass;
  *               4. leftover reset bits restore before the drain;
  *               5. a popped trigger without its reset bit does not restore.
+ *             S096 P3 C1 adds:
+ *               6. each trigger's reset flag reaches the fire (1 first hit,
+ *                  0 roll retrigger);
+ *               7. the order arm -> prepare -> drain -> fire -> decide for
+ *                  the Scene/track change masks.
  * Why:        S087 P0 D6: a step's own automation must land before its
  *             trigger, or every hit's first block uses the previous values.
  *             Break proof: built with -DBREAK_DRAIN_AFTER_FIRE, the test runs
@@ -40,6 +45,7 @@ typedef struct {
 	uint8_t voice;
 	uint8_t note;
 	uint8_t vel;
+	uint8_t layers;   /* S096 P3 */
 } VoiceTriggerEvent;
 
 /* The extracted functions' state, defined here exactly as in the source. */
@@ -49,7 +55,8 @@ static uint8_t voiceTriggerTail = 0;
 static uint8_t voiceControl_pendingReset;
 
 /* ------------------------------------------------------------------ log -- */
-enum { EV_DEFERRED = 1, EV_RESTORE, EV_MARK, EV_DRAIN, EV_TRIGGER };
+enum { EV_DEFERRED = 1, EV_RESTORE, EV_MARK, EV_DRAIN, EV_TRIGGER,
+       EV_RENEW, EV_ARM, EV_DECIDE };
 
 typedef struct { uint8_t kind; uint8_t a; uint8_t b; } ev_t;
 static ev_t evlog[256];
@@ -58,6 +65,14 @@ static uint8_t lastLimit;
 static uint8_t lastMark;
 static uint8_t g_queue;
 static uint8_t g_appendAfterMark;
+static uint8_t g_change;
+static uint8_t g_stepped;
+/* S096 P3 assessment F6: tracks whose step roll is running (a carry) */
+static uint8_t g_rollRunning;
+static uint8_t lastFireReset[7];
+static uint8_t lastFireLayers[7];
+static unsigned fireCount;
+static uint8_t firstFireReset;
 static int failures;
 
 static void log_ev(uint8_t kind, uint8_t a, uint8_t b)
@@ -120,10 +135,48 @@ void seq_drainPendingAutomationTo(uint8_t limit)
 	log_ev(EV_DRAIN, limit, 0u);
 }
 
-void instrumentManager_triggerTrack(uint8_t voice, uint8_t note, uint8_t vel)
+/* S096 P3 C1: the Scene/track change masks are taken with the batch. */
+void seq_takeChangeMasks(uint8_t *changed, uint8_t *stepped)
 {
+	*changed = g_change;
+	*stepped = g_stepped;
+	g_change = 0u;
+	g_stepped = 0u;
+}
+
+void instrumentManager_triggerTrack(uint8_t voice, uint8_t note, uint8_t vel,
+                                    uint8_t reset, uint8_t layers)
+{
+	lastFireReset[voice] = reset;
+	lastFireLayers[voice] = layers;
+	if (fireCount == 0u)
+		firstFireReset = reset;
+	fireCount++;
 	log_ev(EV_TRIGGER, voice, note | (vel << 4));
 }
+
+/* S096 P3 assessment F6: only a running roll's leftover reset is a carry. */
+uint8_t seq_rollRunning(uint8_t track)
+{
+	return (uint8_t)((g_rollRunning >> track) & 1u);
+}
+
+void instrumentManager_renewGate(uint8_t voice)
+{
+	log_ev(EV_RENEW, voice, 0u);
+}
+
+void instrumentManager_changeArm(uint8_t voice)
+{
+	log_ev(EV_ARM, voice, 0u);
+}
+
+void instrumentManager_changeDecide(uint8_t voice)
+{
+	log_ev(EV_DECIDE, voice, 0u);
+}
+
+void midiNoteMode_prepareTrigger(uint8_t voice) { (void)voice; }
 
 void busComp_sidechainTrigger(uint8_t voice, uint8_t vel)
 {
@@ -143,6 +196,17 @@ static void push(uint8_t voice, uint8_t note, uint8_t vel)
 	voiceTriggerRing[voiceTriggerHead].voice = voice;
 	voiceTriggerRing[voiceTriggerHead].note = note;
 	voiceTriggerRing[voiceTriggerHead].vel = vel;
+	voiceTriggerRing[voiceTriggerHead].layers = 0u;
+	voiceTriggerHead = (uint8_t)((voiceTriggerHead + 1u) & VOICE_TRIGGER_RING_MASK);
+}
+
+static void push_layers(uint8_t voice, uint8_t note, uint8_t vel,
+                        uint8_t layers)
+{
+	voiceTriggerRing[voiceTriggerHead].voice = voice;
+	voiceTriggerRing[voiceTriggerHead].note = note;
+	voiceTriggerRing[voiceTriggerHead].vel = vel;
+	voiceTriggerRing[voiceTriggerHead].layers = layers;
 	voiceTriggerHead = (uint8_t)((voiceTriggerHead + 1u) & VOICE_TRIGGER_RING_MASK);
 }
 
@@ -154,6 +218,12 @@ static void reset_world(void)
 	voiceControl_pendingReset = 0u;
 	g_queue = 0u;
 	g_appendAfterMark = 0u;
+	g_change = 0u;
+	g_stepped = 0u;
+	fireCount = 0u;
+	firstFireReset = 0u;
+	memset(lastFireReset, 0, sizeof(lastFireReset));
+	memset(lastFireLayers, 0, sizeof(lastFireLayers));
 	reset_log();
 }
 
@@ -165,11 +235,13 @@ static void broken_processPending(void)
 	uint8_t resetFlags[VOICE_TRIGGER_RING_SIZE];
 	uint8_t leftover, mark, n, i;
 
-	n = voiceControl_popPendingBatch(batch, resetFlags, &leftover, &mark);
+	n = voiceControl_popPendingBatch(batch, resetFlags, &leftover, &mark,
+	                                 &g_change, &g_stepped);
 	for (i = 0u; i < n; i++)
 		voiceControl_prepareTrigger(batch[i].voice, resetFlags[i]);
 	for (i = 0u; i < n; i++)
-		voiceControl_fireTrigger(batch[i].voice, batch[i].note, batch[i].vel);
+		voiceControl_fireTrigger(batch[i].voice, batch[i].note, batch[i].vel,
+		                         resetFlags[i], 0u);
 	seq_drainPendingAutomationTo(mark);
 }
 #endif
@@ -225,11 +297,23 @@ int main(void)
 	/* 4: a leftover reset bit restores before the drain. */
 	reset_world();
 	voiceControl_pendingReset = (uint8_t)(1u << 2);
+	g_rollRunning = (uint8_t)(1u << 2);   /* a roll carry */
 	g_queue = 1u;
 	run_pass();
-	expect(evn == 2, "law 4: restore then drain");
+	g_rollRunning = 0u;
+	expect(evn == 3, "law 4: restore, renew then drain");
 	expect(ev_is(0, EV_RESTORE, 2u), "law 4: leftover voice restores first");
-	expect(ev_is(1, EV_DRAIN, 1u), "law 4: drain after the leftover restore");
+	expect(ev_is(1, EV_RENEW, 2u), "law 4: a carried roll renews its gate (S096 P3)");
+	expect(ev_is(2, EV_DRAIN, 1u), "law 4: drain after the leftover restore");
+	/* S096 P3 assessment F6: a leftover bit from a dropped trigger (no roll
+	 * running: a mute or a Scene change dropped it) restores but does not
+	 * renew the gate */
+	reset_world();
+	voiceControl_pendingReset = (uint8_t)(1u << 2);
+	g_queue = 1u;
+	run_pass();
+	expect(evn == 2 && ev_is(0, EV_RESTORE, 2u) && ev_is(1, EV_DRAIN, 1u),
+	       "law 4: a dropped trigger's reset bit does not renew the gate");
 
 	/* 5: a popped trigger with no reset bit does not restore. */
 	reset_world();
@@ -238,6 +322,44 @@ int main(void)
 	run_pass();
 	expect(!ev_is(1, EV_RESTORE, 0u), "law 5: no restore without the bit");
 	expect(evn == 3, "law 5: deferred, drain, trigger");
+
+	/* 6 (S096 P3 C1): the reset flag reaches the fire. */
+	reset_world();
+	push(0u, 60u, 100u);
+	push(1u, 62u, 90u);
+	voiceControl_pendingReset = (uint8_t)(1u << 0);
+	g_queue = 1u;
+	run_pass();
+	expect(lastFireReset[0] == 1u, "law 6: the first hit's reset reaches the fire");
+	expect(lastFireReset[1] == 0u, "law 6: a roll retrigger's flag is 0");
+
+	/* 7 (S096 P3 C1): arm -> prepare -> drain -> fire -> decide. */
+	reset_world();
+	g_change = (uint8_t)(1u << 3);
+	g_stepped = (uint8_t)(1u << 3);
+	push(3u, 60u, 100u);
+	voiceControl_pendingReset = (uint8_t)(1u << 3);
+	g_queue = 1u;
+	run_pass();
+	expect(ev_is(0, EV_ARM, 3u), "law 7: arm before prepare");
+	expect(ev_is(1, EV_DEFERRED, 3u), "law 7: arm, then the deferred Scene apply");
+	expect(ev_is(2, EV_RESTORE, 3u), "law 7: restore after arm");
+	expect(ev_is(3, EV_DRAIN, 1u), "law 7: drain before fire");
+	expect(ev_is(4, EV_TRIGGER, 3u), "law 7: fire after the drain");
+	expect(ev_is(5, EV_DECIDE, 3u), "law 7: decide after the fire");
+
+	/* 8 (S096 P3 T1): two layer notes of one voice in one pass both fire;
+	 * the first carries the reset, the second does not. */
+	reset_world();
+	push_layers(2u, 60u, 100u, 1u);
+	push_layers(2u, 62u, 90u, 2u);
+	voiceControl_pendingReset = (uint8_t)(1u << 2);
+	g_queue = 1u;
+	run_pass();
+	expect(fireCount == 2u, "law 8: both layer triggers fired");
+	expect(firstFireReset == 1u, "law 8: the first layer resets");
+	expect(lastFireReset[2] == 0u, "law 8: the second layer does not reset");
+	expect(lastFireLayers[2] == 2u, "law 8: the layer mask reaches the fire");
 
 #ifdef BREAK_DRAIN_AFTER_FIRE
 	/* The break run must fail law 1 (it reports the failures). */

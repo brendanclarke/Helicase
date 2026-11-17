@@ -134,7 +134,9 @@ void    buttonHandler_clearAllMutes(void);
  * re-configured).
  * buttonHandler_overlayMidiNoteOn(): start overlay `which` (1/2) on `track`
  * at `internal` pitch; `midiNote` is remembered so its note-off ends a
- * roll; ageUs is the arrival age for the first hit's record placement.
+ * roll; ageUs is the arrival age for the first hit's record placement;
+ * sub is the note's place within a wide (Tetrakt) track's group of four,
+ * which selects the layer every hit plays (S096 P3).
  * buttonHandler_overlayMidiNoteOff(): end the roll held by `midiNote`
  * (the resolved track first, then any track holding that note); a flam's
  * main hit still plays.
@@ -145,7 +147,7 @@ uint8_t buttonHandler_overlayActive(void);
 void    buttonHandler_setOverlay(uint8_t which);
 void    buttonHandler_overlayMidiNoteOn(uint8_t track, uint8_t which,
                                         uint8_t internal, uint8_t midiNote,
-                                        uint16_t ageUs);
+                                        uint16_t ageUs, uint8_t sub);
 void    buttonHandler_overlayMidiNoteOff(uint8_t track, uint8_t midiNote);
 /* S083 C5: flash SHIFT/PLAY/REC while Learn is active; restore on off. */
 void    buttonHandler_setLearnLeds(uint8_t on);

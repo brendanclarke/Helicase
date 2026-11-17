@@ -270,11 +270,13 @@ static const char alkWaveNames[][4] = {
  * DTYPE_ON_OFF tags for the Colloid's selectors (S095 P2; S095 P3 F9).
  *
  * What:       ONOFF_TAG_COL_ROUTE 5 (rte, colRouteNames),
- *             ONOFF_TAG_COL_FILT_TYPE 6 (typ, colFiltTypeNames). The rows'
- *             dtype byte is DTYPE_ON_OFF | (tag << 4). Tags 1-3 stay
- *             (osc1_run, voice_chain, the Alkaline/Colloid typ); 4, 7 and
- *             8-15 free (S095 P3 removed P2's int (4) and pmd (7) lists; 5 was
- *             fmd's and now names the route).
+ *             ONOFF_TAG_COL_FILT_TYPE 6 (typ, colFiltTypeNames),
+ *             ONOFF_TAG_COL_TYPE 8 (the Colloid's osc1_type, colTypeNames).
+ *             The rows' dtype byte is DTYPE_ON_OFF | (tag << 4). Tags 1-3
+ *             stay (osc1_run, voice_chain, the Alkaline typ), tag 7 is the
+ *             Tetrakt's layers; 4 and 9-15 are free (S095 P3 removed P2's
+ *             int (4) and pmd (7) lists; 5 was fmd's and now names the
+ *             route; 8 was free until S096 P3).
  * Why:        every DTYPE_MENU id is taken (S078); menu.c resolves the name
  *             table per tag in menu_onoffTagNames(), so display, clamp,
  *             automation range and the step-edit line follow the count.
@@ -285,6 +287,7 @@ static const char alkWaveNames[][4] = {
  */
 #define ONOFF_TAG_COL_ROUTE        5u
 #define ONOFF_TAG_COL_FILT_TYPE    6u
+#define ONOFF_TAG_COL_TYPE         8u
 /*
  * The Tetrakt's layer switch (S096 P1, plan §4.3).
  *
@@ -325,6 +328,23 @@ static const char colFiltTypeNames[][4] = {
 };
 static const char colWaveNames[][4] = {
     {4}, {"Saw"},{"Rec"},{"Tri"},{"Sin"},
+};
+/*
+ * The Colloid's typ selector (S096 P3 C2c, plan §3.5).
+ *
+ * What:       ONOFF_TAG_COL_TYPE 8 (the first of the free 8..15, MenuText.h
+ *             l. 275-277); colTypeNames [0] = count (4), then wav, wtb, pwm,
+ *             wts: the Colloid typ byte 0..3 (COL_TYP_*). wts is the
+ *             wavetable scan: the frame follows pos every block and is always
+ *             interpolated between the two neighbouring frames.
+ * Why:        the Colloid no longer shares the Alkaline's typ list
+ *             (ONOFF_TAG_ALK_TYPE keeps wav wtb pwm, ALK_TYP_COUNT 3).
+ * Accessors:  ColloidParameters.c (osc1_type row); menu.c
+ *             menu_onoffTagNames().
+ * Affiliates: COL_TYP_COUNT (ColloidVoice.h), asserted in menu.c.
+ */
+static const char colTypeNames[][4] = {
+    {4}, {"wav"},{"wtb"},{"pwm"},{"wts"},
 };
 /*
  * The Tetrakt's layer-switch names (S096 P1, plan §4.3). [0] = count, then

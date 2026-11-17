@@ -977,8 +977,16 @@ float instrumentManager_runtimeVolume(uint8_t slot);
  * every type, so the srt value is kept across chain changes).
  */
 uint8_t instrumentManager_slotUsesSrr(uint8_t slot);
+/*
+ * Trigger the instrument assigned to a visible track.
+ * Inputs: trigger_track 0..6, note (internal), velocity, reset (the
+ *   trigger's reset flag: 1 for a first hit, 0 for a roll retrigger) and
+ *   layers (a Tetrakt layer mask; 0 = the `lon` row, S096 P3). Output: one
+ *   engine trigger; a Colloid gets the track's step length and the gate.
+ */
 void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
-                                    uint8_t velocity);
+                                    uint8_t velocity, uint8_t reset,
+                                    uint8_t layers);
 
 /*
  * Arm a fast gain fade-out on a track's voice (S079 P2 fix 4).
@@ -1003,6 +1011,42 @@ void instrumentManager_requestGateDuck(uint8_t trigger_track);
  * 0.0..1.0. Affiliates: mixer_faderGains().
  */
 float instrumentManager_gateGain(uint8_t slot);
+
+/*
+ * Gate requests and hooks for engines with a note gate (S096 P3 C1).
+ *
+ * instrumentManager_requestGateRelease(track, brk): close the track's slot
+ *   gate at its next async; brk 1 also breaks the effective sustain (a
+ *   forced release). Context: TIM3 or foreground.
+ * instrumentManager_renewGate(track): a roll carried into a new step renews
+ *   a Colloid's gate by one step of the track. Foreground.
+ * instrumentManager_changeArm(track) / changeDecide(track): the Scene/track
+ *   change rule (plan §2.1 rule 6). Foreground, from
+ *   voiceControl_processPending() with seq_takeChangeMasks().
+ * instrumentManager_automationWritten(slot, descriptor, value): told of every
+ *   value the automation drain or a ramp writes; a Colloid's sus row with
+ *   value 1 marks the change decision's susSeen. Foreground.
+ * Only INSTRUMENT_TYPE_COL acts; every other slot type ignores the calls.
+ * The full description is the comment block in InstrumentManager.c.
+ */
+void instrumentManager_requestGateRelease(uint8_t trigger_track, uint8_t brk);
+void instrumentManager_renewGate(uint8_t trigger_track);
+void instrumentManager_changeArm(uint8_t trigger_track);
+void instrumentManager_changeDecide(uint8_t trigger_track);
+void instrumentManager_automationWritten(uint8_t slot,
+                                         const ParamDescriptor *descriptor,
+                                         instrument_param_value_t value);
+/*
+ * Set or clear one slot's MIDI Learn delta overlay (S096 P3 C4): a voice
+ * row's non-destructive pressure/note/velocity delta on top of its base.
+ * delta 0 frees it and restores the base. Returns the effective value.
+ * Full contract in InstrumentManager.c.
+ */
+uint8_t instrumentManager_deltaOverlaySet(uint8_t slot, uint8_t local,
+                                          int8_t delta);
+/* The paraphonic hold (S096 P3 C3): on a Colloid slot, sus holds with the
+** transport stopped while MIDI keys are down. Other types ignore it. */
+void instrumentManager_setMidiHold(uint8_t slot, uint8_t on);
 /*
  * Return the type that currently owns a slot's live tagged runtime member.
  *

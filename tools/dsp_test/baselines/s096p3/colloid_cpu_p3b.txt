@@ -1,0 +1,19 @@
+# S096 P3b host CPU record (pitch envelope C2a, noise C2b).
+#
+# Command: python3 tools/dsp_test/colloid_cpu.py --elf build/lxr02.elf --count 12
+# Base (fresh fd3d58be): 390.6 / 376.5 / 379.6 (plain12 / pwm6 / pwmw6, stereo).
+# P3a record: colloid_cpu_p3a.txt (392.9 / 378.7 / 381.8).
+#
+# The noise read uses an inline RNG_DR load (col_rngRead()); with the
+# out-of-line GetRngValue() the loop measured +47 per sample instead of +39
+# because the call spills every live FP register around it. Same register,
+# same per-sample rate.
+plain12-par: loops 322 + per block 3637/32 = 435.7
+plain12-ser: loops 293 + per block 3640/32 = 406.8
+pwm6-par: loops 343 + per block 2512/32 = 421.5
+pwm6-ser: loops 314 + per block 2515/32 = 392.6
+pwmw6-par: loops 346 + per block 2516/32 = 424.6
+pwmw6-ser: loops 317 + per block 2519/32 = 395.7
+
+# Device estimate at the plan's 1.42 cycles/instruction, x32 samples per
+# block: plain12 19,799 (0.9 % over 19,620), pwm6 19,153, pwmw6 19,294.

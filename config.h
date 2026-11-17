@@ -333,6 +333,16 @@
 #define MIDI_LEARN_FULL_SHOW_MS    1000u
 
 /*
+ * MIDI note modes (S096 P3, plan §4.2; SRAM approved 2026-11-17, "every key,
+ * full detail"). MIDI_NOTEMODE_KEYS: held keys per group (a note number can
+ * be held once per group, so 128 never overflows). MIDI_NOTEMODE_GROUPS: one
+ * per slot at most (a group needs at least one voice slot). RAM: 6 x (4 +
+ * 128 x 3) + 6 x 8 + 4 = 2,380 B SRAM1. Affiliate: MidiNoteModes.c.
+ */
+#define MIDI_NOTEMODE_KEYS         128u
+#define MIDI_NOTEMODE_GROUPS       6u
+
+/*
  * Parameter transmit interval (S083 plan 3.9 C, R5): the minimum time
  * between two parameter messages of a knob sweep (the latest value of the
  * pending target is sent). A full NRPN is 9 bytes, ~2.9 ms on DIN; 10 ms

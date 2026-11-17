@@ -137,11 +137,13 @@ int16_t GetRngValue(void)
 
 #define BLK OUTPUT_DMA_SIZE
 enum { G_OSC, G_POS, G_W, G_MOT, G_INT, G_SLEW, G_EG, G_AMP, G_SVF, G_SER, G_RTE, G_POST,
-       G_PWM, G_WTB, G_MX, G_RND, G_JOIN, G_PWG, G_N };
+       G_PWM, G_WTB, G_MX, G_RND, G_JOIN, G_PWG, G_GATE, G_RETRIG, G_ROLLGATE,
+       G_CHANGE, G_PENV, G_NOISE, G_SCAN, G_N };
 static const char *g_name[G_N] = { "CO-OSC", "CO-POS", "CO-W", "CO-MOT", "CO-INT", "CO-SLEW",
                                    "CO-EG", "CO-AMP", "CO-SVF", "CO-SER", "CO-RTE", "CO-POST",
                                    "CO-PWM", "CO-WTB", "MX-ST", "CO-RND", "CO-JOIN",
-                                   "CO-PWG" };
+                                   "CO-PWG", "CO-GATE", "CO-RETRIG", "CO-ROLLGATE",
+                                   "CO-CHANGE", "CO-PENV", "CO-NOISE", "CO-SCAN" };
 static unsigned g_fail[G_N];
 
 static void fail(int g, const char *what, double a, double b)
@@ -327,7 +329,7 @@ static void test_pos_and_w(void)
 	/* CO-POS: spr 0, mot 0 */
 	voice_init();
 	V.spread = 0.0f; V.motion = 0.0f;
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	for (b = 0u; b < 50u; b++) {
 		block();
 		for (i = 0u; i < COL_PAIR_MAX; i++)
@@ -341,7 +343,7 @@ static void test_pos_and_w(void)
 	voice_init();
 	V.spread = 1.0f; V.motion = 0.0f; V.detune = 0.0f;
 	V.osc.midiFreq = (uint16_t)((24u << 8) | 63u);
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	block();
 	for (i = 0u; i < COL_PAIR_MAX; i++)
 		if (V.posPair[i] != 0u) fail(G_W, "low note not centred", i, V.posPair[i]);
@@ -369,7 +371,7 @@ static void test_motion(void)
 	voice_init();
 	V.spread = 0.5f; V.motion = 1.0f;
 	V.osc.midiFreq = (uint16_t)((84u << 8) | 63u);   /* w = 1: the full movement */
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	block();
 	for (i = 0u; i < COL_OSC_COUNT; i++)
 		last[i] = (int16_t)((i & 1u) ? (V.posPair[i >> 1] >> 16) : (V.posPair[i >> 1] & 0xFFFFu));
@@ -396,7 +398,7 @@ static void test_intervals(void)
 		voice_init();
 		V.detune = 0.0f;
 		memcpy(V.interval, ivb[s], 3u);
-		Colloid_triggerVoice(&V, 0u, 100u, 63u);
+		Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 		block();
 		for (i = 0u; i < COL_OSC_COUNT; i++) {
 			const unsigned g = i & 3u;
@@ -407,7 +409,7 @@ static void test_intervals(void)
 	}
 	voice_init();
 	V.detune = 1.0f;
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	block();
 	{
 		/* oscillators 6 and 7: colDetC +1 and -1 */
@@ -429,7 +431,7 @@ static void test_slew(void)
 	/* the first note after init lands at once, at any slw */
 	voice_init();
 	V.slew = 100u; V.detune = 0.0f;
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	block();
 	for (i = 0u; i < COL_OSC_COUNT; i++)
 		if (fabsf(V.pitchCur[i] - V.pitchCur[0]) > 1e-6f) fail(G_SLEW, "first note not landed", i, V.pitchCur[i]);
@@ -440,7 +442,7 @@ static void test_slew(void)
 		const float step = ref_slewStep(60u);
 		unsigned arrived = 0u;
 		V.slew = 60u;
-		Colloid_triggerVoice(&V, 0u, 100u, 75u);
+		Colloid_triggerVoice(&V, 0u, 100u, 75u, 5514u, 1u);
 		for (b = 0u; b < 20000u && !arrived; b++) {
 			float before[COL_OSC_MAX];
 			memcpy(before, V.pitchCur, sizeof(before));
@@ -458,7 +460,7 @@ static void test_slew(void)
 	}
 	/* slw 0: the next note lands in one block */
 	V.slew = 0u;
-	Colloid_triggerVoice(&V, 0u, 100u, 51u);
+	Colloid_triggerVoice(&V, 0u, 100u, 51u, 5514u, 1u);
 	{
 		const float want = V.pitchCur[0] - 2.0f;
 		block();
@@ -482,7 +484,7 @@ static void test_eg(void)
 	float lvl;
 	/* sus on, running: holds */
 	voice_init(); host_running = 1u; V.sustain = 1u;
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	if (run_until_stage(&V.ampEg, COL_EG_SUSTAIN, 5000u) >= 5000u) fail(G_EG, "no sustain", 0, 0);
 	for (b = 0u; b < 1000u; b++) {
 		block();
@@ -497,21 +499,441 @@ static void test_eg(void)
 	if (run_until_stage(&V.ampEg, COL_EG_IDLE, 20000u) >= 20000u) fail(G_EG, "release never ended", 0, 0);
 	if (!Colloid_isQuiet(&V)) fail(G_EG, "idle voice not quiet", 0, 0);
 	/* a hit while stopped: attack, decay, release, idle */
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	if (Colloid_isQuiet(&V)) fail(G_EG, "sounding voice quiet", 0, 0);
 	if (run_until_stage(&V.ampEg, COL_EG_IDLE, 40000u) >= 40000u) fail(G_EG, "stopped hit held", V.ampEg.stage, 0);
 	/* sus off while running: A-D-R */
 	host_running = 1u; V.sustain = 0u;
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	if (run_until_stage(&V.ampEg, COL_EG_IDLE, 40000u) >= 40000u) fail(G_EG, "sus off held", V.ampEg.stage, 0);
 	/* a retrigger while held: the attack restarts from the current level
 	 * (S095 P3 F3: no legato) */
 	V.sustain = 1u;
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	(void)run_until_stage(&V.ampEg, COL_EG_SUSTAIN, 5000u);
 	lvl = V.ampEg.level;
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	if (V.ampEg.stage != COL_EG_ATTACK || V.ampEg.level != lvl) fail(G_EG, "retrigger level", V.ampEg.level, lvl);
+}
+
+/* CO-GATE (S096 P3 C1, plan §2.3): the amp attack stretches the gate, then
+ * every envelope releases; sustain holds; the length special's release
+ * point is the gate's; the filter attack is cut by the gate but never before
+ * the amp attack ends. */
+static void test_gate(void)
+{
+	unsigned n, b, g;
+
+	/* the full amp attack's length in blocks, at this attack byte */
+	voice_init(); host_running = 1u; V.sustain = 0u;
+	V.attack = 60u; V.decay = 0u; V.release = 40u; V.sustainLevel = 0.5f;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 200000u, 1u);
+	n = 0u;
+	while (V.ampEg.stage == COL_EG_ATTACK && n < 4000u) {
+		block();
+		n++;
+	}
+	if (V.ampEg.stage != COL_EG_DECAY || n < 3u)
+		fail(G_GATE, "reference attack did not end", n, V.ampEg.stage);
+
+	/* a step shorter than the attack: the whole attack plays, then RELEASE
+	 * (no DECAY block), with the envelope at 1.0 when the gate ends */
+	voice_init(); host_running = 1u; V.sustain = 0u;
+	V.attack = 60u; V.decay = 0u; V.release = 40u; V.sustainLevel = 0.5f;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, (uint32_t)(n / 2u) * 32u, 1u);
+	for (b = 0u; b < n; b++)
+		block();
+	if (V.ampEg.stage != COL_EG_RELEASE)
+		fail(G_GATE, "short step went to decay, not release", V.ampEg.stage, n);
+	if (V.ampEg.level < 0.99f)
+		fail(G_GATE, "short step cut the attack", V.ampEg.level, 1.0);
+
+	/* a step longer than the attack: decay and sustain hold to the gate's
+	 * end, then release (fill 50 is the same law at half the step) */
+	voice_init(); host_running = 1u; V.sustain = 0u;
+	V.attack = 60u; V.decay = 0u; V.release = 40u; V.sustainLevel = 0.5f;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, (uint32_t)(n + 200u) * 32u, 1u);
+	for (b = 0u; b < n + 100u; b++)
+		block();
+	if (V.ampEg.stage != COL_EG_SUSTAIN && V.ampEg.stage != COL_EG_DECAY)
+		fail(G_GATE, "long step ended early", V.ampEg.stage, b);
+	for (b = 0u; b < 101u; b++)
+		block();
+	if (V.ampEg.stage != COL_EG_RELEASE && V.ampEg.stage != COL_EG_IDLE)
+		fail(G_GATE, "long step did not release at its end", V.ampEg.stage, b);
+
+	/* sustain holds past a short gate while the transport runs */
+	voice_init(); host_running = 1u; V.sustain = 1u;
+	V.attack = 0u; V.decay = 0u; V.sustainLevel = 0.5f;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 64u, 1u);
+	for (b = 0u; b < 50u; b++)
+		block();
+	if (V.ampEg.stage == COL_EG_RELEASE || V.ampEg.stage == COL_EG_IDLE)
+		fail(G_GATE, "sustain did not hold past the gate", V.ampEg.stage, b);
+
+	/* the filter attack is cut by the gate, never before the amp attack ends */
+	voice_init(); host_running = 1u; V.sustain = 0u;
+	V.attack = 60u; V.decay = 0u; V.release = 40u; V.sustainLevel = 0.5f;
+	V.fAttack = 60u; V.fRelease = 40u; V.fSustain = 0.5f;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 32u, 1u);
+	block();
+	if (V.ampEg.stage == COL_EG_ATTACK && V.fltEg.stage != COL_EG_ATTACK)
+		fail(G_GATE, "filter released before the amp attack ended", V.fltEg.stage, 1);
+	for (b = 0u; b < n + 2u; b++)
+		block();
+	if (V.ampEg.stage != COL_EG_RELEASE)
+		fail(G_GATE, "amp did not release after the gate", V.ampEg.stage, n);
+	if (V.fltEg.stage != COL_EG_RELEASE && V.fltEg.stage != COL_EG_IDLE)
+		fail(G_GATE, "filter did not release with the amp", V.fltEg.stage, V.ampEg.stage);
+	(void)g;
+}
+
+/* CO-RETRIG (S096 P3 C1): a retrigger in release restarts the attack from
+ * the current level, for all three envelopes. */
+static void test_retrig(void)
+{
+	unsigned b;
+	float a, f, p;
+
+	voice_init(); host_running = 1u; V.sustain = 0u;
+	V.attack = 20u; V.decay = 40u; V.release = 40u; V.sustainLevel = 0.6f;
+	V.fAttack = 20u; V.fDecay = 40u; V.fRelease = 40u; V.fSustain = 0.6f;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	for (b = 0u; b < 20000u; b++) {
+		block();
+		if (V.ampEg.stage == COL_EG_RELEASE && V.ampEg.level > 0.1f)
+			break;
+	}
+	a = V.ampEg.level; f = V.fltEg.level; p = V.pitchEg.level;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	if (V.ampEg.stage != COL_EG_ATTACK || V.ampEg.level < a - 1e-6f)
+		fail(G_RETRIG, "amp attack did not restart from its level", V.ampEg.level, a);
+	if (V.fltEg.stage != COL_EG_ATTACK || V.fltEg.level < f - 1e-6f)
+		fail(G_RETRIG, "filter attack did not restart from its level", V.fltEg.level, f);
+	if (V.pitchEg.stage != COL_EG_ATTACK || V.pitchEg.level < p - 1e-6f)
+		fail(G_RETRIG, "pitch attack did not restart from its level", V.pitchEg.level, p);
+}
+
+/* CO-ROLLGATE (S096 P3 C1, plan §2.2): roll hits inside the window keep the
+ * gate; the window's end releases; a carry renews the gate. */
+static void test_rollgate(void)
+{
+	int32_t g;
+	unsigned b;
+
+	voice_init(); host_running = 0u; V.sustain = 0u; V.attack = 0u;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 1000u, 1u);
+	if (V.gateLeft != 1000)
+		fail(G_ROLLGATE, "first hit did not open the gate", V.gateLeft, 1000);
+	for (b = 0u; b < 3u; b++) {
+		const int32_t before = V.gateLeft;
+
+		block();
+		if (V.gateLeft > before - 32 || V.gateLeft < before - 32)
+			fail(G_ROLLGATE, "one block did not consume one block", V.gateLeft, before);
+		g = V.gateLeft;
+		Colloid_triggerVoice(&V, 0u, 100u, 63u, 9999u, 0u);
+		if (V.gateLeft != g)
+			fail(G_ROLLGATE, "a roll retrigger reset the gate", V.gateLeft, g);
+	}
+	Colloid_gateRelease(&V, 0u);
+	if (V.gateLeft != 0)
+		fail(G_ROLLGATE, "the window end did not release", V.gateLeft, 0);
+	Colloid_gateRenew(&V, 2000u);
+	if (V.gateLeft != 2000)
+		fail(G_ROLLGATE, "a carry did not renew the gate", V.gateLeft, 2000);
+}
+
+/* CO-CHANGE (S096 P3 C1, plan §2.1 rule 6): the Scene/track change release
+ * decision, and the paraphonic hold. */
+static void test_change(void)
+{
+	unsigned b;
+
+	voice_init(); host_running = 1u; V.sustain = 1u;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	Colloid_changeArm(&V);
+	Colloid_changeDecide(&V);
+	if (V.gateLeft != 0 || !V.susBreak || V.changeArm)
+		fail(G_CHANGE, "a change without a trigger did not release", V.gateLeft, V.susBreak);
+	for (b = 0u; b < 4000u && V.ampEg.stage == COL_EG_ATTACK; b++)
+		block();
+	if (V.ampEg.stage != COL_EG_RELEASE && V.ampEg.stage != COL_EG_IDLE)
+		fail(G_CHANGE, "a forced release did not stop the sustain", V.ampEg.stage, 0);
+
+	/* a drained sus = on keeps the note */
+	voice_init(); host_running = 1u; V.sustain = 1u;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	Colloid_changeArm(&V);
+	Colloid_noteSustainWrite(&V, 1u);
+	Colloid_changeDecide(&V);
+	if (V.gateLeft == 0 || V.susBreak || V.changeArm)
+		fail(G_CHANGE, "sus-on step did not continue the note", V.gateLeft, V.susSeen);
+
+	/* a trigger in the new Scene continues */
+	voice_init(); host_running = 1u; V.sustain = 1u;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	Colloid_changeArm(&V);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	Colloid_changeDecide(&V);
+	if (V.gateLeft == 0 || V.changeArm)
+		fail(G_CHANGE, "a trigger did not continue the note", V.gateLeft, V.changeArm);
+
+	/* held MIDI keys keep the note across the change and hold sus with the
+	 * transport stopped */
+	voice_init(); host_running = 1u; V.sustain = 1u;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	Colloid_setMidiHold(&V, 1u);
+	Colloid_changeArm(&V);
+	Colloid_changeDecide(&V);
+	if (V.gateLeft == 0)
+		fail(G_CHANGE, "held MIDI keys did not keep the note", V.gateLeft, 0);
+	host_running = 0u;
+	for (b = 0u; b < 400u; b++)
+		block();
+	if (V.ampEg.stage == COL_EG_RELEASE || V.ampEg.stage == COL_EG_IDLE)
+		fail(G_CHANGE, "midiHold did not sustain a stopped transport", V.ampEg.stage, 0);
+}
+
+/* CO-PENV (S096 P3 C2a, plan §3.3): the offset law, its sign and depth, and
+ * the gate; pam 63 (the default) leaves the pitch bit-identical. */
+static void test_penv(void)
+{
+	static const uint8_t pam[4] = { 0u, 63u, 64u, 126u };
+	double ref;
+	float lvl;
+	unsigned b, i;
+
+	/* a reference run: pam 63 = no offset */
+	host_running = 1u;
+	voice_init(); V.sustain = 0u; V.attack = 0u; V.pAttack = 0u;
+	V.pDecay = 0u; V.pSustain = 1.0f; V.detune = 0.0f; V.slew = 0u;
+	V.pAmount = 63.0f / 127.0f;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	for (b = 0u; b < 10u; b++)
+		block();
+	ref = (double)V.inc[0];
+	lvl = V.pitchEg.level;
+	if (lvl < 0.99f)
+		fail(G_PENV, "the pitch envelope did not attack", lvl, 1.0);
+
+	for (i = 0u; i < 4u; i++) {
+		const double off = ((double)pam[i] - 63.0) / 63.0 * 2.0 * (double)lvl;
+		const double want = ref * exp2(off);
+
+		voice_init(); V.sustain = 0u; V.attack = 0u; V.pAttack = 0u;
+		V.pDecay = 0u; V.pSustain = 1.0f; V.detune = 0.0f; V.slew = 0u;
+		V.pAmount = (float)pam[i] / 127.0f;
+		Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+		for (b = 0u; b < 10u; b++)
+			block();
+		if (fabs((double)V.inc[0] / want - 1.0) > 2e-5)
+			fail(G_PENV, "pam offset law", V.inc[0], want);
+	}
+
+	/* the extremes are +-24 semitones (x4 / x4^-1) at level 1 */
+	if (lvl > 0.99f) {
+		voice_init(); V.sustain = 0u; V.attack = 0u; V.pAttack = 0u;
+		V.pDecay = 0u; V.pSustain = 1.0f; V.detune = 0.0f; V.slew = 0u;
+		V.pAmount = 126.0f / 127.0f;
+		Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+		for (b = 0u; b < 10u; b++)
+			block();
+		if (fabs((double)V.inc[0] / ref - 4.0) > 1e-4)
+			fail(G_PENV, "+24 semitones is not x4", V.inc[0], ref);
+	}
+
+	/* the gate: a short step releases the pitch envelope with the amp */
+	voice_init(); V.sustain = 0u; V.attack = 0u; V.pAttack = 0u;
+	V.pDecay = 0u; V.pRelease = 40u; V.detune = 0.0f;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 32u, 1u);
+	for (b = 0u; b < 200u; b++)
+		block();
+	if (V.pitchEg.stage != COL_EG_RELEASE && V.pitchEg.stage != COL_EG_IDLE)
+		fail(G_PENV, "the gate did not release the pitch envelope", V.pitchEg.stage, 0);
+}
+
+/* CO-NOISE (S096 P3 C2b, plan §3.4): level 0 is bit-identical, the level and
+ * pan laws, the tone/width corners and the mono route. */
+static int16_t noise_ref[50][BLK];
+
+static void install_table(unsigned frames);   /* defined with test_wtb() */
+
+static void test_noise(void)
+{
+	unsigned b, i;
+	int differ;
+	float gL, gR;
+
+	/* level 0: the output does not depend on tone, width or pan */
+	host_rng = 0x13579BDFu;
+	voice_init(); host_running = 1u; V.nLevel = 0u;
+	V.nTone = 0u; V.nWidth = 0u; V.nPan = 0u;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	for (b = 0u; b < 50u; b++) {
+		block();
+		for (i = 0u; i < BLK; i++)
+			noise_ref[b][i] = L[i];
+	}
+	host_rng = 0x13579BDFu;
+	voice_init(); host_running = 1u; V.nLevel = 0u;
+	V.nTone = 127u; V.nWidth = 0u; V.nPan = 127u;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	for (b = 0u; b < 50u; b++) {
+		block();
+		for (i = 0u; i < BLK; i++)
+			if (L[i] != noise_ref[b][i]) {
+				fail(G_NOISE, "level 0 is not bit-identical", L[i], noise_ref[b][i]);
+				b = 50u;
+				break;
+			}
+	}
+
+	/* the level changes the output */
+	host_rng = 0x13579BDFu;
+	voice_init(); host_running = 1u; V.nLevel = 127u;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	differ = 0;
+	for (b = 0u; b < 50u; b++) {
+		block();
+		for (i = 0u; i < BLK; i++)
+			if (L[i] != noise_ref[b][i])
+				differ = 1;
+	}
+	if (!differ)
+		fail(G_NOISE, "level 127 changed nothing", 0, 0);
+
+	/*
+	 * S096 P3 assessment F7: the noise is audible at full level and its gain
+	 * is COL_HEADROOM x the drive gain, whatever the oscillator count, the
+	 * table or the pwm stack. The first form scaled it by the stack's
+	 * norm x sqrt(N) (a second 1/32768): the difference from level 0 was a
+	 * fraction of one output step.
+	 */
+	{
+		double acc = 0.0;
+		unsigned cnt = 0u;
+
+		host_rng = 0x13579BDFu;
+		voice_init(); host_running = 1u; V.nLevel = 127u;
+		Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+		for (b = 0u; b < 50u; b++) {
+			block();
+			if (b < 10u)
+				continue;          /* past the attack */
+			for (i = 0u; i < BLK; i++) {
+				const double d = (double)L[i] - (double)noise_ref[b][i];
+
+				acc += d * d;
+				cnt++;
+			}
+		}
+		if (sqrt(acc / (double)cnt) < 1000.0)
+			fail(G_NOISE, "level 127 noise is not audible (RMS difference)",
+			     sqrt(acc / (double)cnt), 1000.0);
+	}
+	voice_init(); host_running = 1u; V.nLevel = 127u; V.nPan = 63u;
+	block();
+	if (fabsf(V.nGL * 32768.0f - 0.5f) > 1e-4f || fabsf(V.nGR * 32768.0f - 0.5f) > 1e-4f)
+		fail(G_NOISE, "noise gain at drv 0 is not COL_HEADROOM", V.nGL * 32768.0f, V.nGR * 32768.0f);
+	V.drive = 1.0f;
+	block();
+	if (fabsf(V.nGL * 32768.0f - 8.0f) > 1e-2f)
+		fail(G_NOISE, "noise gain does not follow the drive (x16)", V.nGL * 32768.0f, 8.0f);
+	V.drive = 0.0f;
+	install_table(0u);
+	Colloid_setOscType(&V, COL_TYP_WTB);
+	block();
+	if (fabsf(V.nGL * 32768.0f - 0.5f) > 1e-4f)
+		fail(G_NOISE, "noise silent under wtb with no table", V.nGL * 32768.0f, 0.5f);
+	Colloid_setOscType(&V, COL_TYP_WAV);
+
+	/* the tone and width corners, once slewed */
+	voice_init(); host_running = 1u; V.nLevel = 127u;
+	V.nTone = 63u; V.nWidth = 127u;
+	block();
+	for (b = 0u; b < 200u; b++)
+		block();
+	if (fabsf(V.nHSt) > 0.1f || fabsf(V.nLSt - COL_CUT_ST_MAX) > 0.1f)
+		fail(G_NOISE, "tone 0 / width 127 corners", V.nHSt, V.nLSt);
+	/* form B: width 127 has no make-up (nlv 127, centre pan, drv 0: 0.5) */
+	if (fabsf(V.nGL * 32768.0f - 0.5f) > 1e-4f || fabsf(V.nGR * 32768.0f - 0.5f) > 1e-4f)
+		fail(G_NOISE, "width 127 make-up is not 1", V.nGL * 32768.0f, V.nGR * 32768.0f);
+	V.nTone = 126u; V.nWidth = 127u;
+	for (b = 0u; b < 200u; b++)
+		block();
+	if (fabsf(V.nHSt - COL_CUT_ST_MAX) > 0.1f)
+		fail(G_NOISE, "tone +1 HP corner", V.nHSt, COL_CUT_ST_MAX);
+	V.nTone = 0u; V.nWidth = 127u;
+	for (b = 0u; b < 200u; b++)
+		block();
+	if (fabsf(V.nLSt) > 0.1f)
+		fail(G_NOISE, "tone -1 LP corner", V.nLSt, 0.0f);
+	/* width 0 closes both corners on the centre; the width make-up keeps
+	 * it audible (user 2026-11-17: width 0 is not "off"): x6.07 */
+	V.nTone = 63u; V.nWidth = 0u;
+	for (b = 0u; b < 400u; b++)
+		block();
+	if (fabsf(V.nHSt - COL_NOISE_ST_CENTRE) > 0.5f ||
+	    fabsf(V.nLSt - COL_NOISE_ST_CENTRE) > 0.5f)
+		fail(G_NOISE, "width 0 centre", V.nHSt, V.nLSt);
+	if (fabsf(V.nGL * 32768.0f - 0.5f * (1.0f + COL_NOISE_MAKEUP_W)) > 1e-3f)
+		fail(G_NOISE, "width 0 make-up", V.nGL * 32768.0f, 0.5f * (1.0f + COL_NOISE_MAKEUP_W));
+	/* width 64: the law 1 + 5.07 (1 - w)^2 */
+	V.nWidth = 64u;
+	block();
+	{
+		const float nw = 1.0f - 64.0f / 127.0f;
+		const float want = 0.5f * (1.0f + COL_NOISE_MAKEUP_W * nw * nw);
+
+		if (fabsf(V.nGL * 32768.0f - want) > 1e-3f)
+			fail(G_NOISE, "width 64 make-up", V.nGL * 32768.0f, want);
+	}
+	/*
+	 * Note tracking (user 2026-11-17): 85 % at width 0, none at width 127.
+	 * The test voice plays C3 (coa 48, note 63: the reference). An octave up
+	 * moves a width-0 band by 0.85 x 12 = 10.2 semitones; at width 127 the
+	 * corners do not move.
+	 */
+	V.nWidth = 0u;
+	V.note = 75u;
+	for (b = 0u; b < 400u; b++)
+		block();
+	if (fabsf(V.nHSt - (COL_NOISE_ST_CENTRE + 10.2f)) > 0.5f ||
+	    fabsf(V.nLSt - (COL_NOISE_ST_CENTRE + 10.2f)) > 0.5f)
+		fail(G_NOISE, "width 0 tracks the note by 85 %", V.nHSt, V.nLSt);
+	V.nWidth = 127u;
+	for (b = 0u; b < 400u; b++)
+		block();
+	if (fabsf(V.nHSt) > 0.1f || fabsf(V.nLSt - COL_CUT_ST_MAX) > 0.1f)
+		fail(G_NOISE, "width 127 does not track", V.nHSt, V.nLSt);
+	V.note = 63u;
+
+	/* the pan law (one pan rule: stored 63 = centre) */
+	voice_init(); host_running = 1u; V.nLevel = 127u; V.nPan = 0u;
+	V.nTone = 63u; V.nWidth = 127u;
+	block();
+	gL = V.nGL; gR = V.nGR;
+	if (gR != 0.0f || gL <= 0.0f)
+		fail(G_NOISE, "pan 0 is not full left", gL, gR);
+	V.nPan = 127u;
+	block();
+	if (V.nGL != 0.0f || V.nGR <= 0.0f)
+		fail(G_NOISE, "pan 127 is not full right", V.nGL, V.nGR);
+
+	/* the mono route: L == R with the noise on */
+	voice_init(); host_running = 1u; V.nLevel = 127u;
+	V.route = 1u + COL_FT_LP; V.nTone = 40u; V.nWidth = 60u;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	for (b = 0u; b < 100u; b++) {
+		block();
+		for (i = 0u; i < BLK; i++)
+			if (L[i] != V.right[i]) {
+				fail(G_NOISE, "mono noise L != R", L[i], V.right[i]);
+				b = 100u;
+				break;
+			}
+	}
 }
 
 static void test_amp(void)
@@ -525,7 +947,7 @@ static void test_amp(void)
 	 * whole stack), so the bound tests the ramp whatever the start phases
 	 * (they are random: CO-RND) */
 	V.osc.waveform = COL_WAVE_SIN;
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	for (b = 0u; b < 400u; b++) {
 		const float before = V.ampEg.level;
 		block();
@@ -546,7 +968,7 @@ static void test_svf(void)
 	unsigned b, i;
 	uint32_t s = 99u;
 	voice_init(); host_running = 1u;
-	Colloid_triggerVoice(&V, 0u, 127u, 63u);
+	Colloid_triggerVoice(&V, 0u, 127u, 63u, 5514u, 1u);
 	for (b = 0u; b < 20000u; b++) {
 		const float t1A = V.svfA.t1, t2A = V.svfA.t2, t3A = V.svfA.t3;
 		if ((b % 7u) == 0u) {
@@ -563,7 +985,7 @@ static void test_svf(void)
 			V.vcaDrive = (uint8_t)(golden_rand(&s) & 127u);
 			V.tone = (uint8_t)(golden_rand(&s) & 127u);
 		}
-		if ((b % 300u) == 0u) Colloid_triggerVoice(&V, 0u, 127u, (uint8_t)(40u + (golden_rand(&s) % 50u)));
+		if ((b % 300u) == 0u) Colloid_triggerVoice(&V, 0u, 127u, (uint8_t)(40u + (golden_rand(&s) % 50u)), 5514u, 1u);
 		block();
 		if (V.svfA.a1 != t1A || V.svfA.a2 != t2A || V.svfA.a3 != t3A) fail(G_SVF, "ramp start != last target", V.svfA.a1, t1A);
 		if (!isfinite(V.svfA.ic1) || !isfinite(V.svfA.ic2) || !isfinite(V.svfB.ic1) || !isfinite(V.svfB.ic2) ||
@@ -639,7 +1061,7 @@ static void test_ser(void)
 	voice_init(); host_running = 1u;
 	V.route = 1u + COL_FT_LP; V.spread = 1.0f; V.motion = 1.0f;
 	V.osc.midiFreq = (uint16_t)((84u << 8) | 63u);
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	for (b = 0u; b < 100u; b++) {
 		block();
 		for (i = 0u; i < BLK; i++)
@@ -655,7 +1077,7 @@ static void test_route(void)
 	V.spread = 0.0f; V.motion = 0.0f;   /* no side signal */
 	V.route = COL_RTE_STR; V.res = 0.6f; V.fAmount = 100.0f / 127.0f; V.drive = 0.5f;
 	V.cut = 0.4f;   /* below the envelope's reach of the ceiling (115.7 st) */
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	for (b = 0u; b < 50u; b++) {
 		block();
 		if (V.svfA.t1 != V.svfB.t1 || V.svfA.t2 != V.svfB.t2 || V.svfA.k != V.svfB.k)
@@ -697,7 +1119,7 @@ static void test_post(void)
 		host_rng = 0x2468ACEu;   /* the same start phases and draws each run */
 		voice_init(); host_running = 1u;
 		V.vcaDrive = 0u; V.tone = 127u; V.res = 0.8f;
-		Colloid_triggerVoice(&V, 0u, 127u, 63u);
+		Colloid_triggerVoice(&V, 0u, 127u, 63u, 5514u, 1u);
 		for (blk = 0u; blk < 50u; blk++) {
 			/* a large state (float step about 2 near 3e7): only an exact
 			 * open tone (o + 0 x (tz - o)) leaves the output unchanged */
@@ -713,7 +1135,7 @@ static void test_post(void)
 	host_rng = 0x2468ACEu;
 	voice_init(); host_running = 1u;
 	V.vcaDrive = 127u; V.tone = 127u; V.res = 0.8f;
-	Colloid_triggerVoice(&V, 0u, 127u, 63u);
+	Colloid_triggerVoice(&V, 0u, 127u, 63u, 5514u, 1u);
 	for (b = 0u; b < 50u; b++) {
 		block();
 		if (!isfinite(V.toneZL) || !isfinite(V.toneZR)) { fail(G_POST, "state not finite", V.toneZL, V.toneZR); break; }
@@ -732,7 +1154,7 @@ static void check_pwm_form(uint8_t form)
 	voice_init(); host_running = 1u;
 	Colloid_setOscType(&V, COL_TYP_PWM);
 	V.osc.waveform = form; V.osc.position = 40u; V.posSpread = 0.6f;
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	block();
 	Colloid_calcVoiceAsync(&V);
 	memcpy(ph, V.phase, sizeof(ph));
@@ -769,7 +1191,7 @@ static void test_pwm_voice(void)
 	Colloid_setOscType(&V, COL_TYP_PWM);
 	V.osc.position = 0u; V.posSpread = 1.0f;
 	for (b = 0u; b < 20u; b++) {
-		Colloid_triggerVoice(&V, 0u, 100u, 63u);
+		Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 		for (i = 0u; i < COL_OSC_MAX; i++)
 			if (V.pwPos[i] > 127u) fail(G_PWM, "width outside 0..127", V.pwPos[i], 127);
 	}
@@ -777,7 +1199,7 @@ static void test_pwm_voice(void)
 	Colloid_setOscType(&V, COL_TYP_PWM);
 	V.osc.waveform = COL_PWM_REC;
 	V.osc.position = 0u; V.posSpread = 0.0f;
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	block();
 	for (i = 0u; i < COL_PWM_COUNT; i++)
 		if (V.pwD[i] != oscPwmDRec[0]) fail(G_PWM, "pos 0 width", V.pwD[i], oscPwmDRec[0]);
@@ -822,7 +1244,7 @@ static void test_wtb(void)
 	voice_init(); host_running = 1u;
 	Colloid_setOscType(&V, COL_TYP_WTB);
 	V.osc.waveform = 0u; V.osc.position = 127u; V.posSpread = 0.0f;
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	block();
 	if (V.osc.sampleCacheSize != 8u) fail(G_WTB, "frames bound", V.osc.sampleCacheSize, 8);
 	for (i = 0u; i < COL_OSC_MAX; i++)
@@ -833,19 +1255,231 @@ static void test_wtb(void)
 		if (V.row[i] != V.osc.sampleCacheData + 7u * WAVETABLE_ROW_POINTS) fail(G_WTB, "frame not latched", i, 0);
 	/* psp 1: frames spread, all inside the table */
 	V.posSpread = 1.0f;
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	for (i = 0u; i < COL_OSC_MAX; i++)
 		if (V.frame[i] >= 8u) fail(G_WTB, "frame outside", V.frame[i], 8);
 	/* an empty catalogue: silence */
 	install_table(0u);
 	voice_init(); host_running = 1u;
 	Colloid_setOscType(&V, COL_TYP_WTB);
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	for (b = 0u; b < 50u; b++) {
 		block();
 		for (i = 0u; i < BLK; i++)
 			if (L[i] != 0 || V.right[i] != 0) { fail(G_WTB, "empty catalogue not silent", L[i], V.right[i]); b = 50u; break; }
 	}
+}
+
+/* CO-SCAN (S096 P3 C2c, plan §3.6): the two-frame blend law, the fold, the
+ * F = 1 frame and the wtb <-> wts landing. */
+static int32_t ref_scan(const int16_t *row, uint32_t ph, uint32_t g)
+{
+	const int32_t a = ref_read(row, ph);
+	const int32_t b = ref_read(row + 1024, ph);
+
+	return a + (int32_t)(((int64_t)(b - a) * (int32_t)(g >> 16)) >> 15);
+}
+
+static void test_scan(void)
+{
+	/* each row is a two-frame table: frame A then frame B 2,048 B on */
+	static int16_t pairA[2048], pairB[2048];
+	int32_t MS[2 * BLK];             /* the 64-word bus: mid then side */
+	int32_t *const M = MS, *const S = MS + BLK;
+	uint32_t p[2], inc[2], g[2];
+	uint32_t p0[2];
+	int32_t dg[2];
+	const int16_t *rows[2];
+	unsigned b, i, n;
+
+	for (i = 0u; i < 1024u; i++) {
+		pairA[i] = (int16_t)(24000.0 * sin(6.283185307 * i / 1024.0));
+		pairA[i + 1024u] = (int16_t)(-20000.0 * cos(6.283185307 * i / 512.0));
+		pairB[i] = (int16_t)(18000.0 * cos(6.283185307 * i / 256.0));
+		pairB[i + 1024u] = (int16_t)(-14000.0 * sin(6.283185307 * i / 128.0));
+	}
+	/* the loop's own law: two adjacent frames, g gliding in Q31 */
+	rows[0] = pairA; rows[1] = pairB;
+	p[0] = 0x01234567u; p[1] = 0x89ABCDEFu;
+	p0[0] = p[0]; p0[1] = p[1];
+	inc[0] = 0x01000000u; inc[1] = 0x00A00000u;
+	g[0] = 0x10000000u; g[1] = 0x70000000u;
+	dg[0] = 0x04000000; dg[1] = -0x02000000;
+	col_scanPairStore(rows, p, inc, g, dg, 0x1234ABCDu, MS);
+	for (n = 0u; n < BLK; n++) {
+		int32_t m = 0, s = 0;
+		for (i = 0u; i < 2u; i++) {
+			const uint32_t gg = g[i] + (uint32_t)n * (uint32_t)dg[i];
+			const int32_t v = ref_scan(rows[i], p0[i] + n * inc[i], gg);
+
+			m += v;
+			s += ref_side(v, (int16_t)((i & 1u) ? (0x1234ABCDu >> 16)
+			                                    : (0x1234ABCDu & 0xFFFFu)));
+		}
+		if (M[n] != m) fail(G_SCAN, "scan mid bus", M[n], m);
+		if (S[n] != s) fail(G_SCAN, "scan side bus", S[n], s);
+	}
+	if (p[0] != 0x01234567u + BLK * inc[0] || p[1] != 0x89ABCDEFu + BLK * inc[1])
+		fail(G_SCAN, "scan phase advance", p[0], 0);
+
+	/* the voice under wts: the position lands on pos's frame */
+	install_table(8u);
+	voice_init(); host_running = 1u;
+	Colloid_setOscType(&V, COL_TYP_WTS);
+	V.osc.waveform = 0u; V.osc.position = 0u; V.posSpread = 0.0f;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	block();
+	for (i = 0u; i < COL_SCAN_COUNT; i++) {
+		if (V.frame[i] != 0u || V.pwD[i] != 0u) fail(G_SCAN, "pos 0 did not land", V.frame[i], V.pwD[i]);
+		if (V.row[i] != V.osc.sampleCacheData) fail(G_SCAN, "pos 0 row", i, 0);
+	}
+	/* pos 127 lands on the top frame, represented as F-2 + full B */
+	V.osc.position = 127u;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	block();
+	for (i = 0u; i < COL_SCAN_COUNT; i++) {
+		if (V.frame[i] != 6u || V.pwD[i] != 32768u)
+			fail(G_SCAN, "pos 127 top frame", V.frame[i] | (V.pwD[i] << 8), 6u | (32768u << 8));
+	}
+	/* the fold keeps every frame inside the table at psp 1 */
+	V.posSpread = 1.0f;
+	for (b = 0u; b < 200u; b++) {
+		block();
+		for (i = 0u; i < COL_SCAN_COUNT; i++) {
+			if (V.frame[i] >= 7u) fail(G_SCAN, "frame outside the table", V.frame[i], 7);
+			if (V.pwD[i] > 32768u) fail(G_SCAN, "blend outside Q15", V.pwD[i], 32768);
+		}
+	}
+	/* the position moves at most one frame per block after a landing */
+	V.posSpread = 0.0f;
+	V.osc.position = 0u;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	block();
+	for (b = 0u; b < 200u; b++) {
+		static int32_t prev[COL_OSC_MAX];
+		if (b == 0u)
+			for (i = 0u; i < COL_SCAN_COUNT; i++)
+				prev[i] = (int32_t)V.frame[i] * 32768 + V.pwD[i];
+		V.osc.position = (uint8_t)((b & 1u) ? 127u : 0u);
+		block();
+		for (i = 0u; i < COL_SCAN_COUNT; i++) {
+			const int32_t pos = (int32_t)V.frame[i] * 32768 + V.pwD[i];
+
+			if (pos - prev[i] > 2 * 32768 || prev[i] - pos > 2 * 32768)
+				fail(G_SCAN, "position jumped more than two frames", pos, prev[i]);
+			prev[i] = pos;
+		}
+	}
+	/*
+	 * S096 P3 assessment F2: a scan sweep is continuous and travels both
+	 * ways. Each block must start exactly where the last one ended (the
+	 * absolute position frame x 32768 + pwD0 equals the previous frame x
+	 * 32768 + pwD), move at most one frame, and blend inside its own cell
+	 * (0 <= pwD0, pwD <= 32768); an ascent from frame 0 reaches the top
+	 * frame and a descent from the top reaches frame 0. The first form
+	 * jumped one frame at every upward crossing and stalled on the first
+	 * boundary going down.
+	 */
+	V.posSpread = 0.0f;
+	V.osc.position = 0u;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	block();
+	{
+		static int32_t endPos[COL_OSC_MAX];
+		unsigned dir;
+
+		for (i = 0u; i < COL_SCAN_COUNT; i++)
+			endPos[i] = (int32_t)V.frame[i] * 32768 + V.pwD[i];
+		for (dir = 0u; dir < 2u; dir++) {
+			V.osc.position = dir ? 0u : 127u;
+			for (b = 0u; b < 12u; b++) {
+				block();
+				for (i = 0u; i < COL_SCAN_COUNT; i++) {
+					const int32_t s0 = (int32_t)V.frame[i] * 32768 + V.pwD0[i];
+					const int32_t e0 = (int32_t)V.frame[i] * 32768 + V.pwD[i];
+
+					if (s0 != endPos[i])
+						fail(G_SCAN, "a block does not start where the last ended", s0, endPos[i]);
+					if (V.pwD0[i] > 32768u || V.pwD[i] > 32768u)
+						fail(G_SCAN, "a blend outside its cell", V.pwD0[i], V.pwD[i]);
+					if (e0 - s0 > 32768 || s0 - e0 > 32768)
+						fail(G_SCAN, "more than one frame in a block", e0, s0);
+					endPos[i] = e0;
+				}
+			}
+			for (i = 0u; i < COL_SCAN_COUNT; i++) {
+				const int32_t want = dir ? 0 : 7 * 32768;
+
+				if (endPos[i] != want)
+					fail(G_SCAN, dir ? "the descent did not reach frame 0"
+					                 : "the ascent did not reach the top frame",
+					     endPos[i], want);
+			}
+		}
+	}
+
+	/*
+	 * S096 P3 (user report 2026-11-17): the wts spread is continuous in psp.
+	 * On the 8-frame table psp 10 already spreads the oscillators (the
+	 * truncated form gave k x F / 2 = 0.58 -> 0: none below psp ~20), and
+	 * one psp step moves every landed position by less than a frame (the
+	 * truncated form jumped in whole frames).
+	 */
+	{
+		int32_t posA[COL_OSC_MAX], posB[COL_OSC_MAX];
+		unsigned spread = 0u, step;
+
+		V.osc.position = 64u;
+		V.posSpread = 10.0f / 127.0f;
+		Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+		block();
+		for (i = 0u; i < COL_SCAN_COUNT; i++) {
+			posA[i] = (int32_t)V.frame[i] * 32768 + V.pwD[i];
+			if (posA[i] != posA[0])
+				spread = 1u;
+		}
+		if (!spread)
+			fail(G_SCAN, "psp 10 does not spread the scan (truncated spread)", posA[0], 0);
+		for (step = 30u; step < 34u; step++) {
+			V.posSpread = (float)step / 127.0f;
+			V.oscLive = 0u;          /* land: compare the targets */
+			block();
+			for (i = 0u; i < COL_SCAN_COUNT; i++)
+				posB[i] = (int32_t)V.frame[i] * 32768 + V.pwD[i];
+			V.posSpread = (float)(step + 1u) / 127.0f;
+			V.oscLive = 0u;
+			block();
+			for (i = 0u; i < COL_SCAN_COUNT; i++) {
+				const int32_t now = (int32_t)V.frame[i] * 32768 + V.pwD[i];
+
+				if (now - posB[i] >= 32768 || posB[i] - now >= 32768)
+					fail(G_SCAN, "one psp step moves a target a whole frame", now, posB[i]);
+			}
+		}
+		V.posSpread = 0.0f;
+	}
+
+	/* F = 1 plays frame 0 exactly (g = 0: the second read is weighted out) */
+	install_table(2u);
+	voice_init(); host_running = 1u;
+	Colloid_setOscType(&V, COL_TYP_WTS);
+	V.osc.waveform = 0u; V.osc.position = 90u; V.posSpread = 1.0f;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	block();                       /* bind the two-frame table first */
+	V.osc.sampleCacheSize = 1u;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	block();
+	for (i = 0u; i < COL_SCAN_COUNT; i++) {
+		if (V.frame[i] != 0u || V.pwD[i] != 0u)
+			fail(G_SCAN, "F = 1 is not frame 0", V.frame[i], V.pwD[i]);
+	}
+	/* wtb <-> wts keeps the bound table and lands the positions */
+	Colloid_setOscType(&V, COL_TYP_WTB);
+	if (V.scan != 0u || V.osc.oscType != OSC_TYPE_WTB)
+		fail(G_SCAN, "wts -> wtb did not clear the scan flag", V.scan, 0);
+	Colloid_setOscType(&V, COL_TYP_WTS);
+	if (V.scan != 1u || V.oscLive != 0u)
+		fail(G_SCAN, "wtb -> wts did not land the positions", V.scan, V.oscLive);
 }
 
 /*
@@ -922,7 +1556,7 @@ static void test_rnd(void)
 	unsigned a, b;
 	host_rng_stuck = 1;
 	voice_init();
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	for (a = 0u; a < COL_OSC_MAX; a++)
 		for (b = a + 1u; b < COL_OSC_MAX; b++) {
 			if (V.rnd[a] == V.rnd[b]) fail(G_RND, "trigger draws equal", a, b);
@@ -957,7 +1591,7 @@ static void test_join(void)
 	Colloid_setOscType(&V, COL_TYP_PWM);
 	V.detune = 0.0f; V.slew = 0u; V.posSpread = 0.6f;
 	V.osc.waveform = COL_PWM_SAW; V.osc.position = 0u;
-	Colloid_triggerVoice(&V, 0u, 100u, 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	block(); block();
 	if (V.oscLive != COL_PWM_COUNT) fail(G_JOIN, "Saw count", V.oscLive, COL_PWM_COUNT);
 	V.osc.waveform = COL_PWM_SIN;
@@ -965,7 +1599,7 @@ static void test_join(void)
 	if (V.oscLive != COL_PWM_WARP_COUNT) fail(G_JOIN, "Sin count", V.oscLive, COL_PWM_WARP_COUNT);
 	/* an octave up, slowly; the trigger snaps every width, so pos moves after it */
 	V.slew = 120u;
-	Colloid_triggerVoice(&V, 0u, 100u, 75u);
+	Colloid_triggerVoice(&V, 0u, 100u, 75u, 5514u, 1u);
 	V.osc.position = 127u;
 	/* S096 P2 F5: oscillator 0's settled pitch (6 was the first idle one
 	 * while Saw rendered 8 and Sin 6; both render 6 now) */
@@ -1023,7 +1657,7 @@ static float pwg_run(uint8_t form, int mode)
 	V.spread = 0.0f; V.motion = 0.0f; V.detune = 58.0f / 127.0f;
 	V.filtType = COL_FT_OFF; V.route = COL_RTE_STR; V.cut = 1.0f;
 	V.fAmount = 63.0f / 127.0f;
-	Colloid_triggerVoice(&V, 0u, 127u, 31u);
+	Colloid_triggerVoice(&V, 0u, 127u, 31u, 5514u, 1u);
 	for (b = 0u; b < 2800u; b++) {
 		if (mode == 1)
 			V.osc.position = (uint8_t)(64.0f + 63.0f * sinf(2.0f * 3.14159265f * 0.4f * (float)b / 1378.4f));
@@ -1070,6 +1704,12 @@ int main(void)
 	test_intervals();
 	test_slew();
 	test_eg();
+	test_gate();
+	test_retrig();
+	test_rollgate();
+	test_change();
+	test_penv();
+	test_noise();
 	test_amp();
 	test_svf();
 	test_ser();
@@ -1077,6 +1717,7 @@ int main(void)
 	test_post();
 	test_pwm_voice();
 	test_wtb();
+	test_scan();
 	test_mixer();
 	test_rnd();
 	test_join();

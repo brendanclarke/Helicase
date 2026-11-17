@@ -58,15 +58,18 @@
 #define MIDI_NOTEMAP_NOTE_OFF       128u
 
 /*
- * One Scene's note-map inputs (stack only, 15 B).
+ * One Scene's note-map inputs (stack only, 16 B; S096 P3: + wide).
  * global: G 0..16 (0 off). channel[t]: 0 unassigned (`glb`), 1..16, or
  * MIDI_NOTEMAP_CHANNEL_OFF (`off`). note[t]: 0 unassigned (`on`), 1..127
  * root (MIDI note 0 cannot be a root), or MIDI_NOTEMAP_NOTE_OFF (`off`).
+ * wide: bit t set when track t takes 4 notes per pitch (a Tetrakt track,
+ * MidiNoteModes.c midiNoteMode_wideTracks()); the map stays type-blind.
  */
 typedef struct {
 	uint8_t global;
 	uint8_t channel[MIDI_NOTEMAP_TRACKS];
 	uint8_t note[MIDI_NOTEMAP_TRACKS];
+	uint8_t wide;
 } midiNoteMap_settings_t;
 
 /* Effective channel of track t: own channel, else G; 0 = none (also for a
@@ -80,20 +83,23 @@ uint8_t midiNoteMap_tracksOnChannel(const midiNoteMap_settings_t *s,
                                     uint8_t channel);
 /*
  * Receive: (channel 1..16, note 0..127) -> track and internal note.
- * Output: 1 with *track and *internal set, 0 when unmapped (the caller then
- * does not consume the note).
+ * Output: 1 with *track, *internal and *sub set, 0 when unmapped (the caller
+ * then does not consume the note). sub is the note's place within a wide
+ * track's group of four (0..3; always 0 on an ordinary track).
  */
 uint8_t midiNoteMap_resolve(const midiNoteMap_settings_t *s, uint8_t channel,
-                            uint8_t note, uint8_t *track, uint8_t *internal);
+                            uint8_t note, uint8_t *track, uint8_t *internal,
+                            uint8_t *sub);
 /*
  * Transmit: (track, internal note) -> (channel, note) such that resolve()
- * returns the same track and internal note. Output: 0 when no such note
+ * returns the same track, internal note and sub. Output: 0 when no such note
  * exists (stripe pitch other than default, below the default pitch, past
  * the range end, a tie loser, no channel, note `off`): nothing is sent
  * (S083 Q4).
  */
 uint8_t midiNoteMap_inverse(const midiNoteMap_settings_t *s, uint8_t track,
-                            uint8_t internal, uint8_t *channel, uint8_t *note);
+                            uint8_t internal, uint8_t sub, uint8_t *channel,
+                            uint8_t *note);
 
 #ifndef MIDI_NOTEMAP_HOST_TEST
 /* Fill *out from Scene `scene_index`'s track settings and G (firmware). */

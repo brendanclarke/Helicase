@@ -22,6 +22,8 @@ What:       reads the descriptor rows of Core/DSP/Instruments/Colloid/
             overdrive 0; LFO and velocity off: the LFO voices `self` (the
             writer's own-slot token), the target selectors 255
             (INSTRUMENT_TARGET_TOKEN_OFF). S095 P3: the rows in page order.
+            S096 P3: pitch envelope 0/40/0/40 with pam 63 (none); noise 0,
+            tone 63, width 127, pan 63.
 Why:        Instrument Load only lists files, and a slot's type only changes
             by loading one (S093 P4 F1), so the card image carries a first
             Colloid. Every key is written: a missing key loads 0
@@ -70,6 +72,12 @@ INIT = {
     "velo_mod_amount": "0", "velo_mod_dest": "255",
     "lfo_target_voice": "self", "lfo_target_param": "255",
     "lfo_target_voice_2": "self", "lfo_target_param_2": "255",
+    # S096 P3: the pitch envelope, its amount, the noise
+    "col_penv_attack": "0", "col_penv_decay": "40",
+    "col_penv_sustain_level": "0", "col_penv_release": "40",
+    "col_penv_amount": "63",
+    "col_noise_level": "0", "col_noise_tone": "63",
+    "col_noise_width": "127", "col_noise_pan": "63",
 }
 
 def rows():

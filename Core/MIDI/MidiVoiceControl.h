@@ -75,6 +75,11 @@ void voiceControl_noteOn(uint8_t voice, uint8_t note, uint8_t vel);
 /* Enqueue a voice trigger without requesting an automation reset (S081 §5.8).
 ** Serves roll retriggers 2+; see voiceControl_noteOnNoReset() in the .c file. */
 void voiceControl_noteOnNoReset(uint8_t voice, uint8_t note, uint8_t vel);
+/* Enqueue a layer trigger with a Tetrakt mask (S096 P3 T1): no drop of the
+** voice's queued triggers; the pending-reset bit is set as for a first hit.
+** See the full contract in MidiVoiceControl.c. */
+void voiceControl_noteOnLayers(uint8_t voice, uint8_t note, uint8_t vel,
+                               uint8_t layers);
 /* Request an automation reset for a voice with no trigger (S081 §5.8): a roll
 ** renewal carried across a step boundary. See voiceControl_resetOnly() in the
 ** .c file. */

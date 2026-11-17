@@ -309,7 +309,7 @@ Local agent verification:
 
 - Repeated focused `git diff --check` on touched files passed.
 - `rg` confirmed some private `afatfs.` references were removed from `filesystem.c`.
-- No local compile was possible in the Codex shell because `make` was unavailable.
+- No local compile was possible in the shell because `make` was unavailable.
 
 User/hardware verification:
 
@@ -396,7 +396,7 @@ KNOWN ISSUES INTRODUCED: Branch likely contains committed failed attempts; Kit S
 KNOWN ISSUES RESOLVED: Fake Kit cache publication after save was identified and removed; direct private `afatfs` singleton build error was fixed.
 
 NEXT SESSION RECOMMENDED GOAL: Decide rollback boundary. Either revert Session 037 commits after 8439083, or roll back the full LFN expansion before 8439083 and rebuild from a smaller tested filesystem primitive.
-BLOCKERS: Hardware/user testing says current Kit Save fails. No local `make` is available in Codex shell. Need user decision on rollback vs isolation.
+BLOCKERS: Hardware/user testing says current Kit Save fails. No local `make` is available in shell. Need user decision on rollback vs isolation.
 
 CRITICAL REMINDERS FOR NEXT SESSION:
 - Mark Session 037 as failed. Do not treat its feature work as a working foundation.

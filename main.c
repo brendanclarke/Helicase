@@ -66,6 +66,7 @@
 
 #include "MidiDin.h"
 #include "MidiIn.h"
+#include "MidiNoteModes.h"   /* S096 P3: the note-mode module */
 #include "MidiVoiceControl.h"
 #include "usb_manager.h"
 #include "filesystem.h"
@@ -282,6 +283,8 @@ static void midi_service(void)
 	 * Context: main loop only. Affiliates: midiIn_service().
 	 */
 	midiIn_service();
+	/* S096 P3: the note-mode module's revalidation (MidiNoteModes.c) */
+	midiNoteMode_service();
 }
 
 static uint8_t prevBtn;
@@ -1429,6 +1432,8 @@ boot_filesystem_done:
      * liveRec_init, menu_getActiveVoice, copyClear_init.
      */
     liveRec_init(menu_getActiveVoice());
+    /* S096 P3: the note-mode pools are empty before audio starts. */
+    midiNoteMode_init();
 
     /*
      * Repair the directional VOICE edit masks before the AutoSave settle stage

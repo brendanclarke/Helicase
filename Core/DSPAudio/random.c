@@ -44,7 +44,7 @@
 #define RCC_AHB2ENR (*(volatile uint32_t *)0x40023834UL)  /* F765: offset 0x34 */
 #define RNG_CR      (*(volatile uint32_t *)0x50060800UL)
 #define RNG_SR      (*(volatile uint32_t *)0x50060804UL)
-#define RNG_DR      (*(volatile uint32_t *)0x50060808UL)
+#define RNG_DR      (*(volatile uint32_t *)RNG_DR_ADDR)   /* random.h */
 
 #define RCC_AHB2ENR_RNGEN (1U << 6)
 #define RNG_CR_RNGEN      (1U << 2)

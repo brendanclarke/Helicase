@@ -1,0 +1,57 @@
+# S096 P3 device cycle probe after the Basic-share work (B1-B6) and the wts
+# spread fix (B11) (SD_CARD_COL, 2026-11-17, third run)
+#
+# Source:   SD_CARD_COL/asavetrc.bin, 'p' records after the second run's last
+#           boot: four boots (records 1,043,473 / 1,066,980 / 1,097,493 /
+#           1,098,208, BOOT_SETTLE start), decode_devlogs.py; 2,550 windows of
+#           2,048 blocks (about 1.5 s each). Image: SD_CARD_COL/LXRV2_lxr02.img,
+#           byte-identical to `make img` of the working tree (B1-B6 + B11).
+#           The first boot may have run the B1-B6 image before B11; B11 is a
+#           per-block float multiply in place of an integer one, so the
+#           cycle figures are the same either way.
+# Scene:    Scene0, slots tkt drm alk alk col hat; the Colloid in slot 4,
+#           rte str. Final state (.hcprms1/2, identical): typ 2 (pwm), wave 2
+#           (Saw), psp 114, spr 119, noise level 24, tone 51, width 31, pan 64,
+#           LFO 1 at 127, LFO 2 at 58.
+# Modes:    the trace's dirty records carry no values. Modes are taken from
+#           the order of the osc1_type edits (one encoder step each: wav ->
+#           wtb -> pwm -> wts in boot 0, the reverse steps later), the two
+#           fixed points (boot 0 starts in the second run's final wav Saw;
+#           the run ends in the saved pwm Saw) and each stretch's block-rate
+#           / render signature. Edges +-1 window around each type edit are
+#           left out.
+#
+# Colloid slot 4 (cycles per block, window averages; Basic share 19,620):
+#   mode        windows  block  render  median  p95     min..max         >19,620
+#   wav 10        508    4,503  13,846  18,362  18,701  17,643..19,085   0
+#   wtb 10      1,247    4,436  14,258  18,681  18,877  17,822..19,211   0
+#   pwm 6         208    4,624  14,521  19,136  19,562  18,576..19,766   5
+#   wts 6         574    4,352  14,772  19,124  19,363  17,856..19,705   4
+#
+# Stretches:
+#   wav: boot0 start (Saw, carried) 18,310 (346 w); boot1 18,589 (141 w,
+#        after wave edits); boot3 18,503 (21 w).
+#   wtb: 18,691 / 18,678 / 18,676 (806 w, boot1 end + boots 2-3) / 18,815.
+#   pwm: boot0 18,872 (73 w, wave edits); boot1 19,330 (78 w; its 24-window
+#        part after the wave edits 19,380, max 19,766: the heaviest pwm
+#        form, probably the Sin/Tri phase warp); boot3 19,127; final Saw
+#        19,120 (30 w).
+#   wts: boot0 19,124 (431 w, settings still: 4,350 +-5 block, 14,773 +-3
+#        render); boot1 19,079 (143 w while pos, psp and the table were
+#        edited: 10-window medians 18,566..19,366).
+#
+# The 9 windows above 19,620 (all 1.5 s averages): wts 4 in boot 1, each
+#   within two windows of a psp, pos or table edit; pwm 5 in the boot-1
+#   stretch after the wave edits (19,637..19,766).
+#
+# Against the second run (device_probe_p3_noiseB.txt):
+#   pwm 6   19,962 -> 19,136  (-826)    projected 19,380
+#   wts 6   20,649 -> 19,124  (-1,525)  projected 19,560
+#   wav     21,250 (12) -> 18,362 (10)  (-2,888)  projected 18,320
+#   wtb     21,902 (12) -> 18,681 (10)  (-3,221)  projected 18,870
+#
+# Other slots (medians): tkt 17,887 (max 19,990), drm 13,730, alk 15,897 /
+#   15,644, hat 15,245.
+# Whole mixer: average median 138,745 (88.5 %); per-window maximum block
+#   median 155,379, peak 161,954: 377 of 2,550 windows have a block above
+#   the 156,705-cycle budget (second run: 90.5 %, 430 of 454, peak 165,498).

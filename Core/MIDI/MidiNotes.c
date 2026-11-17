@@ -23,6 +23,8 @@
 #include "SceneData.h"
 #include "timebase.h"
 #include "config.h"
+#include "MidiNoteModes.h"   /* S096 P3: every special note mode */
+#include "MidiLearn.h"       /* S096 P3: note / velocity Learn rows */
 
 /*
  * Arrival age of a message in us (S083 Q6).
@@ -56,18 +58,26 @@ uint8_t midiNotes_handle(const MidiMsg *msg)
 	                       msg->data2 != 0u);
 	uint8_t track;
 	uint8_t internal;
+	uint8_t sub;
 	uint8_t overlay;
+
+	/* S096 P3: note-number and velocity Learn rows apply before the note map,
+	 * so an unmapped note still drives them; the note itself is not consumed. */
+	if (on != 0u)
+		midiLearn_applyNote(channel, msg->data1, msg->data2);
 
 	/*
 	 * Resolve on the active Scene (Scene 17 while it is active), read per
 	 * message (S082 R14). An unmapped note is not consumed.
 	 */
 	midiNoteMap_load(scene_getActiveIndex(), &map);
-	if (!midiNoteMap_resolve(&map, channel, msg->data1, &track, &internal))
+	if (!midiNoteMap_resolve(&map, channel, msg->data1, &track, &internal, &sub))
 		return 0u;
 	if (!on) {
-		/* Note-off ends a MIDI-held roll; single triggers ignore it. */
+		/* Note-off ends a MIDI-held roll; single triggers ignore it.
+		 * S096 P3: the note-mode module also sees it (the paraphonic release). */
 		buttonHandler_overlayMidiNoteOff(track, msg->data1);
+		(void)midiNoteMode_noteOff(track, channel, internal, sub);
 		return 1u;
 	}
 	if (seq_isTrackMuted(track))
@@ -77,31 +87,17 @@ uint8_t midiNotes_handle(const MidiMsg *msg)
 	if (overlay != 0u) {
 		buttonHandler_overlayMidiNoteOn(track, overlay, internal,
 		                                msg->data1,
-		                                midiNotes_ageUs(msg->stamp));
+		                                midiNotes_ageUs(msg->stamp), sub);
 		return 1u;
 	}
 	/*
-	 * Single trigger (N6): one resetting trigger at the note's velocity and
-	 * resolved pitch, through the sequencer's trigger path (trigger jack and
-	 * TX N as for any LXR trigger, C-3), reported to LiveRecord with the
-	 * arrival age. note_is_default: a default-pitch hit records no note
-	 * special (S081 Q12 rule, as for the overlay `def`).
+	 * S096 P3: every resolved note-on that the overlay does not take goes to
+	 * the note-mode module (MidiNoteModes.c), which plays it by the track's
+	 * mode: the S083 single trigger (normal), one Tetrakt layer (layer4) or
+	 * the paraphonic Colloid (para). sub is the note's place in a wide
+	 * track's group of four (MidiNoteMap). Note-offs reach the module too
+	 * (the paraphonic release).
 	 */
-	seq_triggerVoice(track, msg->data2, internal, 1u);
-	{
-		liveRec_trigger_t lr;
-
-		lr.track = track;
-		lr.note = internal;
-		lr.velocity = msg->data2;
-		lr.kind = LIVEREC_HIT_SINGLE;
-		lr.roll = 0u;
-		lr.rhythm = 0u;
-		lr.source = LIVEREC_SRC_MIDI;
-		lr.note_is_default =
-		    (uint8_t)(internal == MIDI_NOTEMAP_ROOT_INTERNAL);
-		lr.age_us = midiNotes_ageUs(msg->stamp);
-		liveRec_triggerIn(&lr);
-	}
-	return 1u;
+	return midiNoteMode_noteOn(track, channel, internal, sub, msg->data1,
+	                           msg->data2, midiNotes_ageUs(msg->stamp));
 }

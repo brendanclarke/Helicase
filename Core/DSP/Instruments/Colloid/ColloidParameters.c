@@ -118,6 +118,8 @@ const uint8_t colloid_instrument_type_flags = COLLOID_INSTRUMENT_TYPE_FLAGS;
  *             rule); from here a later row is appended before
  *             COL_PARAM_COUNT so every stored index stays (the standing
  *             append-only rule).
+ *             S096 P3 appends nine rows (50 -> 59): stored indices 0..49 do
+ *             not move.
  */
 typedef enum {
     /* OSC (page 0) */
@@ -180,6 +182,16 @@ typedef enum {
     COL_PARAM_LFO_TARGET_PARAM,
     COL_PARAM_LFO_TARGET_VOICE_2,
     COL_PARAM_LFO_TARGET_PARAM_2,
+    /* S096 P3 (append-only): the pitch envelope, its amount, the noise */
+    COL_PARAM_PENV_ATTACK,
+    COL_PARAM_PENV_DECAY,
+    COL_PARAM_PENV_SUSTAIN_LEVEL,
+    COL_PARAM_PENV_RELEASE,
+    COL_PARAM_PENV_AMOUNT,
+    COL_PARAM_NOISE_LEVEL,
+    COL_PARAM_NOISE_TONE,
+    COL_PARAM_NOISE_WIDTH,
+    COL_PARAM_NOISE_PAN,
     COL_PARAM_COUNT
 } colloid_param_index_t;
 
@@ -187,6 +199,13 @@ _Static_assert(COLLOID_PARAM_DESCRIPTOR_COUNT == COL_PARAM_COUNT,
                "COLLOID_PARAM_DESCRIPTOR_COUNT must match colloid_param_index_t");
 _Static_assert(COL_PARAM_COUNT <= INSTRUMENT_PARAM_COUNT,
                "Colloid rows must fit the 64-cell Kit image");
+/* S096 P3 (finding D8): the indices MidiNoteModes and InstrumentManager use. */
+_Static_assert(COL_PARAM_OSC1_PITCH_COARSE == COL_IDX_COARSE,
+               "COL_IDX_COARSE must name osc1_pitch_coarse");
+_Static_assert(COL_PARAM_SUSTAIN == COL_IDX_SUSTAIN,
+               "COL_IDX_SUSTAIN must name col_sustain");
+_Static_assert(COL_PARAM_INTERVAL_1 == COL_IDX_INTERVAL_1,
+               "COL_IDX_INTERVAL_1 must name col_interval_1");
 
 /*
  * Colloid parameter descriptors.
@@ -217,9 +236,10 @@ const ParamDescriptor colloid_param_descriptors[] = {
      * helpers key on "osc1_wave" and know the Colloid case
      * (instrumentManager_waveDomainMax(), menu_formatWaveCell()) */
     ROW_MENU("osc1_wave", "Oscilltr", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, osc.waveform, TYPE_UINT8),
-    /* typ: wav / wtb / pwm, the Alkaline's names (C-D20); the writer is
-     * Colloid_setOscType() (IM_SPECIAL_OSC_TYPE's Colloid branch) */
-    ROW_SELECT_ONOFF_SPECIAL("osc1_type", "Oscilltr", "Type", "typ", ONOFF_TAG_ALK_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
+    /* typ: wav / wtb / pwm / wts (S096 P3: the Colloid's own list,
+     * colTypeNames, ONOFF_TAG_COL_TYPE); the writer is Colloid_setOscType()
+     * (IM_SPECIAL_OSC_TYPE's Colloid branch) */
+    ROW_SELECT_ONOFF_SPECIAL("osc1_type", "Oscilltr", "Type", "typ", ONOFF_TAG_COL_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
     /* --- AEG: the amp ADSR (draft §4.1): times are colEgK rows, 1 ms .. 10 s --- */
     ROW("col_attack", "Amp EG", "Attack", "atk", DTYPE_0B127, MOD_0_127, attack, TYPE_UINT8),
     ROW("col_decay", "Amp EG", "Decay", "dec", DTYPE_0B127, MOD_0_127, decay, TYPE_UINT8),
@@ -293,6 +313,34 @@ const ParamDescriptor colloid_param_descriptors[] = {
     ROW_NOBIND("lfo_target_param", "LFO", "DstParam", "ds1", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM),
     ROW_NOBIND("lfo_target_voice_2", "LFO", "DstVoice2", "vo2", DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE_2),
     ROW_NOBIND("lfo_target_param_2", "LFO", "DstParam2", "ds2", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM_2),
+    /*
+     * S096 P3 rows (plan §3.1; decisions Q1, Q7).
+     *
+     * pat pde psl pre: the pitch envelope, colEgK times like the amp's
+     *   (1 ms .. 10 s), the same gate (decay and sustain only while held).
+     * pam: its amount, PM63, 24 / 63 = 0.38 semitone per step at full level
+     *   (decided Q7): 63 none, 0 = -24 semitones, 126 = +24 (127 = +24.4,
+     *   the PM63 top).
+     * nlv: the noise level (0 none: constant cost, the loop still runs).
+     * nto: tone, PM63: up cuts lows (the HP corner rises), down cuts highs
+     *   (the LP corner falls); 63 = the full band at width 127.
+     * nwd: width 127 the band between the corners; down to 0 both corners
+     *   close on their centre, a narrow band (Q ~20).
+     * npn: the noise's place in the stereo field, PM63 (the one pan rule:
+     *   stored 63 = centre).
+     * All are plain IM_SPECIAL_NONE rows (col_* keys classify NONE in
+     * check_special_tags.py), morphable, LFO/velocity targets and
+     * step-automatable (FLAGS_IMAGE).
+     */
+    ROW("col_penv_attack", "Pitch EG", "Attack", "pat", DTYPE_0B127, MOD_0_127, pAttack, TYPE_UINT8),
+    ROW("col_penv_decay", "Pitch EG", "Decay", "pde", DTYPE_0B127, MOD_0_127, pDecay, TYPE_UINT8),
+    ROW("col_penv_sustain_level", "Pitch EG", "SustLvl", "psl", DTYPE_0B127, MOD_0_127, pSustain, TYPE_FLT),
+    ROW("col_penv_release", "Pitch EG", "Release", "pre", DTYPE_0B127, MOD_0_127, pRelease, TYPE_UINT8),
+    ROW("col_penv_amount", "Pitch EG", "Amount", "pam", DTYPE_PM63, MOD_PM63, pAmount, TYPE_FLT),
+    ROW("col_noise_level", "Noise", "Level", "nlv", DTYPE_0B127, MOD_0_127, nLevel, TYPE_UINT8),
+    ROW("col_noise_tone", "Noise", "Tone", "nto", DTYPE_PM63, MOD_PM63, nTone, TYPE_UINT8),
+    ROW("col_noise_width", "Noise", "Width", "nwd", DTYPE_0B127, MOD_0_127, nWidth, TYPE_UINT8),
+    ROW("col_noise_pan", "Noise", "Pan", "npn", DTYPE_PM63, MOD_PM63, nPan, TYPE_UINT8),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -323,14 +371,18 @@ _Static_assert(sizeof(colloid_param_descriptors) / sizeof(colloid_param_descript
  *             the other types (oscillator, amp envelope, modulation, filter,
  *             LFO, mix keep their buttons); the FM and click buttons carry
  *             the Colloid's pitch groups and filter envelope.
+ * S096 P3 (plan §3.1): the second screens are used:
+ *               0 OSC     coa fin pos psp | wav typ pam
+ *               1 AEG     atk dec slv rel | pat pde psl pre
+ *               2 MOD     dst amt sus slw | nlv nto nwd npn
  */
 const instrument_menu_page_t colloid_menu_pages[] = {
     /* 0 OSC */
-    {{ COL_PARAM_OSC1_PITCH_COARSE, COL_PARAM_OSC1_PITCH_FINE, COL_PARAM_OSC1_POSITION, COL_PARAM_POS_SPREAD, COL_PARAM_WAVE, COL_PARAM_OSC1_TYPE, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }},
+    {{ COL_PARAM_OSC1_PITCH_COARSE, COL_PARAM_OSC1_PITCH_FINE, COL_PARAM_OSC1_POSITION, COL_PARAM_POS_SPREAD, COL_PARAM_WAVE, COL_PARAM_OSC1_TYPE, COL_PARAM_PENV_AMOUNT, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }},
     /* 1 AEG */
-    {{ COL_PARAM_ATTACK, COL_PARAM_DECAY, COL_PARAM_SUSTAIN_LEVEL, COL_PARAM_RELEASE, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }},
-    /* 2 MOD: velocity, the sustain switch, the slew */
-    {{ COL_PARAM_VELO_MOD_DEST, COL_PARAM_VELO_MOD_AMOUNT, COL_PARAM_SUSTAIN, COL_PARAM_SLEW, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }},
+    {{ COL_PARAM_ATTACK, COL_PARAM_DECAY, COL_PARAM_SUSTAIN_LEVEL, COL_PARAM_RELEASE, COL_PARAM_PENV_ATTACK, COL_PARAM_PENV_DECAY, COL_PARAM_PENV_SUSTAIN_LEVEL, COL_PARAM_PENV_RELEASE, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }},
+    /* 2 MOD: velocity, the sustain switch, the slew; then the noise */
+    {{ COL_PARAM_VELO_MOD_DEST, COL_PARAM_VELO_MOD_AMOUNT, COL_PARAM_SUSTAIN, COL_PARAM_SLEW, COL_PARAM_NOISE_LEVEL, COL_PARAM_NOISE_TONE, COL_PARAM_NOISE_WIDTH, COL_PARAM_NOISE_PAN, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }},
     /* 3 FM: the intervals and detune, then spread and motion */
     {{ COL_PARAM_INTERVAL_1, COL_PARAM_INTERVAL_2, COL_PARAM_INTERVAL_3, COL_PARAM_DETUNE, COL_PARAM_SPREAD, COL_PARAM_MOTION, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }},
     /* 4 click: the filter envelope, its amount, the filter drive */
@@ -350,6 +402,25 @@ _Static_assert(COLLOID_MENU_PAGE_COUNT ==
                    (sizeof(colloid_menu_pages) / sizeof(colloid_menu_pages[0])),
                "COLLOID_MENU_PAGE_COUNT must match colloid_menu_pages");
 
+/*
+ * Exported row indices and the sus-row test (S096 P3, finding D8).
+ *
+ * What:       COL_IDX_* name the descriptor-local index of the rows the MIDI
+ *             note-mode module writes as transient automation (coa, sus,
+ *             in1..in3) and that InstrumentManager watches (sus); the asserts
+ *             tie them to colloid_param_index_t, which stays file-local.
+ *             colloidParameters_isSustainRow() is 1 for the sus row's
+ *             descriptor, else 0 (any other pointer, NULL included).
+ * Why:        the enum is the storage order (append-only); repeating three
+ *             numbers with asserts is safer than exporting the whole enum.
+ * Accessors:  MidiNoteModes.c (instrumentParam_make(slot, COL_IDX_*));
+ *             instrumentManager_automationWritten().
+ */
+uint8_t colloidParameters_isSustainRow(const ParamDescriptor *descriptor)
+{
+    return (uint8_t)(descriptor == &colloid_param_descriptors[COL_PARAM_SUSTAIN]);
+}
+
 uint8_t colloidParameters_cellInactive(const ColloidVoice *voice,
                                        const ParamDescriptor *descriptor)
 {
@@ -366,6 +437,7 @@ uint8_t colloidParameters_cellInactive(const ColloidVoice *voice,
         return (uint8_t)(voice->osc.oscType == OSC_TYPE_WAV);
     case COL_PARAM_SPREAD:
     case COL_PARAM_MOTION:
+    case COL_PARAM_NOISE_PAN:   /* S096 P3: no pan in a mono route */
         /* a mono route (rte a filter type): positions have no effect (C-D16,
          * S095 P3 F9) */
         return (uint8_t)(voice->route != COL_RTE_STR && voice->route < COL_RTE_COUNT);

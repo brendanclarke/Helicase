@@ -40,6 +40,19 @@
 #define COL_LOOP_P3        COL_S095P3_SECTION __attribute__((noinline, noclone))
 
 /*
+ * Placement of the two wavetable scan loops (S096 P3 C2c, plan §3.5).
+ *
+ * What:       COL_S096P3_SECTION puts col_scanPairStore() and
+ *             col_scanPairAdd() in .itcm.s096p3, which
+ *             STM32F765VIHx_FLASH.ld pins after .itcm.s095p3, so no existing
+ *             ITCM function moves (MEMORY.md ITCM order rule).
+ * Why:        the wts type renders per oscillator per sample; ITCM runs it
+ *             without flash wait states. ≈ 670 B, signed off (plan §8).
+ */
+#define COL_S096P3_SECTION 
+#define COL_LOOP_P96       COL_S096P3_SECTION __attribute__((noinline, noclone))
+
+/*
  * The side-bus multiplies: (s x p) >> 16 with p a signed 16-bit half of
  * posPair (S095 P2).
  *
@@ -377,5 +390,135 @@ COL_LOOP_P3 void col_warpAdd(const int16_t *row, uint32_t *phase, const uint32_t
 		b += (uint32_t)dRb;
 	} while (bm != end);
 	*phase = ph;
+}
+
+/*
+ * The wavetable scan pair loops (S096 P3 C2c, plan §3.5).
+ *
+ * What:       two oscillators per call, as col_oscPairStore/Add, each reading
+ *             TWO adjacent frames of its table at the same phase and blending
+ *             them: per sample
+ *               a = col_read(A, p), b = col_read(A + 1024, p)  (frame A + 1,
+ *                 the next row in memory: the scan folds at the table's ends,
+ *                 so A + 1 always exists, plan §3.5),
+ *               s = a + ((b - a) x (g >> 16)) >> 15,  g += dg,
+ *             where g is the blend in Q31 (0 = all A, 2^31 = all B) gliding
+ *             from the block's start blend to its end blend (dg = (g1 - g0) /
+ *             32). Then busM += s, busS += s x p / 2 (SMLAWB/SMLAWT), as the
+ *             plain pair.
+ * Why:        the brief: a wavetable type that steps through the frames while
+ *             playing and always interpolates them, whatever the platform's
+ *             interpolation setting, with no interpolation slot (S093 P8 rule
+ *             untouched: the blend is this loop's own arithmetic).
+ * Range:      |b - a| <= 65,534 and g >> 16 <= 32,768, so the product is at
+ *             most 2,147,418,112 < 2^31.
+ * Inputs:     row[0..1] (frame A of each), phase[0..1], inc[0..1], g[0..1]
+ *             (Q31 blend at the block's start), dg[0..1] (its step), posPair,
+ *             bus[64]: the mid bus then the side bus in one array (S096 P3
+ *             CPU work, as the warp loops: one pointer, the side at +32
+ *             words, freeing a register; 65 / 67 -> 63 / 64 instructions per
+ *             pair per sample, bit-identical).
+ * Outputs:    busM, busS (store or add); phase advanced by 32 x inc. g is not
+ *             written back: the async recomputes it from the stored fraction.
+ * Cost:       est. 48-56 instructions per pair per sample (plain pair 27/30);
+ *             the count is the P3c gate (≤ 52 for 8 oscillators).
+ * Placement:  .itcm.s096p3, pinned after .itcm.s095p3 in
+ *             STM32F765VIHx_FLASH.ld (no existing function moves); ≈ 670 B
+ *             ITCM, signed off (plan §8).
+ * Accessors:  Colloid_calcVoiceSyncBlock() (typ wts).
+ * Affiliates: col_oscControl() (rows, g, dg), law CO-SCAN.
+ */
+COL_LOOP_P96 void col_scanPairStore(const int16_t *const *row, uint32_t *phase,
+                                    const uint32_t *inc, const uint32_t *g,
+                                    const int32_t *dg, uint32_t posPair,
+                                    int32_t *bus)
+{
+	const int16_t *const r0 = row[0];
+	const int16_t *const r1 = row[1];
+	const uint32_t i0 = inc[0];
+	const uint32_t i1 = inc[1];
+	uint32_t g0 = g[0];
+	uint32_t g1 = g[1];
+	const int32_t d0 = dg[0];
+	const int32_t d1 = dg[1];
+	uint32_t p0 = phase[0];
+	uint32_t p1 = phase[1];
+	uint32_t n;
+
+	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
+		const uint32_t ia0 = p0 >> 22;
+		const uint32_t na0 = (ia0 + 1u) & 0x3FFu;
+		const int32_t f0 = (int32_t)((p0 >> 7) & 0x7FFFu);
+		const uint32_t ia1 = p1 >> 22;
+		const uint32_t na1 = (ia1 + 1u) & 0x3FFu;
+		const int32_t f1 = (int32_t)((p1 >> 7) & 0x7FFFu);
+		const int32_t a0 = r0[ia0];
+		const int32_t b0 = r0[ia0 + 1024u];
+		const int32_t a1 = r1[ia1];
+		const int32_t b1 = r1[ia1 + 1024u];
+		const int32_t aa0 = a0 + (((r0[na0] - a0) * f0) >> 15);
+		const int32_t bb0 = b0 + (((r0[na0 + 1024u] - b0) * f0) >> 15);
+		const int32_t aa1 = a1 + (((r1[na1] - a1) * f1) >> 15);
+		const int32_t bb1 = b1 + (((r1[na1 + 1024u] - b1) * f1) >> 15);
+		const int32_t s0 = aa0 + (((bb0 - aa0) * (int32_t)(g0 >> 16)) >> 15);
+		const int32_t s1 = aa1 + (((bb1 - aa1) * (int32_t)(g1 >> 16)) >> 15);
+
+		bus[n] = s0 + s1;
+		bus[n + OUTPUT_DMA_SIZE] = col_smlawt(s1, posPair, col_smulwb(s0, posPair));
+		p0 += i0;
+		p1 += i1;
+		g0 += (uint32_t)d0;
+		g1 += (uint32_t)d1;
+	}
+	phase[0] = p0;
+	phase[1] = p1;
+}
+
+/* Every further scan pair: adds into both buses (S096 P3 C2c). */
+COL_LOOP_P96 void col_scanPairAdd(const int16_t *const *row, uint32_t *phase,
+                                  const uint32_t *inc, const uint32_t *g,
+                                  const int32_t *dg, uint32_t posPair,
+                                  int32_t *bus)
+{
+	const int16_t *const r0 = row[0];
+	const int16_t *const r1 = row[1];
+	const uint32_t i0 = inc[0];
+	const uint32_t i1 = inc[1];
+	uint32_t g0 = g[0];
+	uint32_t g1 = g[1];
+	const int32_t d0 = dg[0];
+	const int32_t d1 = dg[1];
+	uint32_t p0 = phase[0];
+	uint32_t p1 = phase[1];
+	uint32_t n;
+
+	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
+		const uint32_t ia0 = p0 >> 22;
+		const uint32_t na0 = (ia0 + 1u) & 0x3FFu;
+		const int32_t f0 = (int32_t)((p0 >> 7) & 0x7FFFu);
+		const uint32_t ia1 = p1 >> 22;
+		const uint32_t na1 = (ia1 + 1u) & 0x3FFu;
+		const int32_t f1 = (int32_t)((p1 >> 7) & 0x7FFFu);
+		const int32_t a0 = r0[ia0];
+		const int32_t b0 = r0[ia0 + 1024u];
+		const int32_t a1 = r1[ia1];
+		const int32_t b1 = r1[ia1 + 1024u];
+		const int32_t aa0 = a0 + (((r0[na0] - a0) * f0) >> 15);
+		const int32_t bb0 = b0 + (((r0[na0 + 1024u] - b0) * f0) >> 15);
+		const int32_t aa1 = a1 + (((r1[na1] - a1) * f1) >> 15);
+		const int32_t bb1 = b1 + (((r1[na1 + 1024u] - b1) * f1) >> 15);
+		const int32_t s0 = aa0 + (((bb0 - aa0) * (int32_t)(g0 >> 16)) >> 15);
+		const int32_t s1 = aa1 + (((bb1 - aa1) * (int32_t)(g1 >> 16)) >> 15);
+
+		bus[n] += s0 + s1;
+		bus[n + OUTPUT_DMA_SIZE] = col_smlawt(s1, posPair,
+		                                      col_smlawb(s0, posPair, bus[n + OUTPUT_DMA_SIZE]));
+		p0 += i0;
+		p1 += i1;
+		g0 += (uint32_t)d0;
+		g1 += (uint32_t)d1;
+	}
+	phase[0] = p0;
+	phase[1] = p1;
 }
 

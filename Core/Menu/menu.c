@@ -12640,8 +12640,9 @@ static void menu_formatTransientName(uint8_t value, char *nameDst)
  * What:       returns the 3-character name table for a dtype high-nibble tag:
  *             ONOFF_TAG_VOICE_CHAIN -> voiceChainNames (T+D, WFd);
  *             ONOFF_TAG_ALK_TYPE -> alkTypeNames (wav, wtb; S093 P8); every
- *             other non-zero tag -> oscRunNames (rst, fre, itp), exactly as
- *             before.
+ *             ONOFF_TAG_COL_* -> the Colloid's lists (S095 P2/P3, S096 P3);
+ *             ONOFF_TAG_TKT_LAYERS -> tktLayerNames; every other non-zero
+ *             tag -> oscRunNames (rst, fre, itp), exactly as before.
  *             Entry [0][0] is the count; names start at [1].
  * Why:        one helper keeps display, clamp, automation max and the
  *             step-edit line in agreement for every tag. Its six callers in
@@ -12661,6 +12662,7 @@ static const char (*menu_onoffTagNames(uint8_t tag))[4]
     /* S095 P2: the Colloid's selectors (MenuText.h ONOFF_TAG_COL_*) */
     case ONOFF_TAG_COL_ROUTE:      return colRouteNames;      /* S095 P3 F9 */
     case ONOFF_TAG_COL_FILT_TYPE:  return colFiltTypeNames;
+    case ONOFF_TAG_COL_TYPE:       return colTypeNames;      /* S096 P3 */
     case ONOFF_TAG_TKT_LAYERS:     return tktLayerNames;      /* S096 P1 */
     default:                    return oscRunNames;
     }
@@ -12825,6 +12827,9 @@ _Static_assert((sizeof(colRouteNames) / sizeof(colRouteNames[0])) - 1u == COL_RT
                "colRouteNames must list str and every filter type (S095 P3)");
 _Static_assert((sizeof(colFiltTypeNames) / sizeof(colFiltTypeNames[0])) - 1u == COL_FT_COUNT,
                "colFiltTypeNames must list every filter type");
+/* S096 P3: the Colloid's own typ list is wav, wtb, pwm, wts (COL_TYP_COUNT). */
+_Static_assert((sizeof(colTypeNames) / sizeof(colTypeNames[0])) - 1u == COL_TYP_COUNT,
+               "colTypeNames must list wav, wtb, pwm and wts");
 /* S096 P1: the layer-switch names list every 4-bit mask (TetraktVoice.h). */
 _Static_assert((sizeof(tktLayerNames) / sizeof(tktLayerNames[0])) - 1u == TKT_LAYER_MASK_COUNT,
                "tktLayerNames must list the 16 layer sets");

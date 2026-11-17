@@ -39,7 +39,10 @@
  *             -1 Rec, +1 Saw), posPair, busM[32], busS[32]; the warp loops:
  *             one row, phase, inc, W, ra, rb (the block's start), dW, dRa,
  *             dRb (their steps per sample), pq and bus[64]: the mid bus then
- *             the side bus in one array (S096 P2 F5).
+ *             the side bus in one array (S096 P2 F5); the scan loops:
+ *             row[0..1] (frame A of each), g[0..1] (the Q31 blend at the
+ *             block's start), dg[0..1] (its step) and the same buses
+ *             (S096 P3).
  * Outputs:    busM, busS; phase[0..1] advanced by 32 x inc.
  * Accessors:  Colloid_calcVoiceSyncBlock() (ColloidVoice.c), once per pair
  *             per block.
@@ -74,6 +77,14 @@ void col_warpAdd(const int16_t *row, uint32_t *phase, uint32_t inc,
                  uint32_t wPh, uint32_t ra, uint32_t rb,
                  int32_t dW, int32_t dRa, int32_t dRb, uint32_t pq,
                  int32_t *bus);
+void col_scanPairStore(const int16_t *const *row, uint32_t *phase,
+                       const uint32_t *inc, const uint32_t *g,
+                       const int32_t *dg, uint32_t posPair,
+                       int32_t *bus);
+void col_scanPairAdd(const int16_t *const *row, uint32_t *phase,
+                     const uint32_t *inc, const uint32_t *g,
+                     const int32_t *dg, uint32_t posPair,
+                     int32_t *bus);
 
 #endif /* COLLOIDOSC_H_ */
 

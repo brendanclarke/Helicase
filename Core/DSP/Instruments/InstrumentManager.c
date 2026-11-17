@@ -24,6 +24,7 @@
 #include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* clamps */
 #include "mixer.h"
 #include "modulationNode.h"
+#include "MidiOut.h"             /* S096 P3: a wide track's layer note TX */
 #include "menu.h"
 #include "valueShaper.h"
 #include "config.h"
@@ -285,6 +286,95 @@ _Static_assert(sizeof(InstrumentRuntimeSlot) == INSTRUMENT_RUNTIME_SLOT_BYTES,
 static float instrumentManager_gateFade[INSTRUMENT_SLOT_COUNT];
 static float instrumentManager_gateFadeStep[INSTRUMENT_SLOT_COUNT];
 static volatile uint8_t instrumentManager_gateDuck[INSTRUMENT_SLOT_COUNT];
+
+/*
+ * Per-slot gate release request (S096 P3 C1).
+ *
+ * What:       1 = close the slot's note gate at the next slot async
+ *             (instrumentManager_calcSlotAsync()); 2 = the same with
+ *             susBreak (a forced release). Written by TIM3 (the plain-step
+ *             length window, the roll window end through
+ *             instrumentManager_requestGateDuck()) and the foreground (mute);
+ *             a byte store is atomic on the M7. Only a Colloid slot acts on
+ *             it; any other type clears it unread, so drums and the Alkaline
+ *             are unchanged (decided Q2).
+ * Why:        the length special and a roll's window end are TIM3 events;
+ *             the engine's state belongs to the render context.
+ * RAM:        6 B SRAM1 (plan §8, "release requests").
+ * Affiliates: instrumentManager_requestGateRelease(), Colloid_gateRelease().
+ */
+static volatile uint8_t instrumentManager_gateRelease[INSTRUMENT_SLOT_COUNT];
+
+/*
+ * MIDI Learn delta overlays (S096 P3 C4, plan §5.2; 72 B SRAM1 signed off).
+ *
+ * What: up to four active deltas per slot, each {local, delta, base}. Every
+ * retained write of the slot's parameter `local` (menu edit, Morph sweep,
+ * automation drain, restore; notify_base_change 1) stores its value as the
+ * base and writes clamp(base + delta); a temporary LFO write (notify 0)
+ * writes clamp(value + delta) and leaves the base. So the delta rides on top
+ * of whatever owns the base, and the base keeps its priority rule (automation
+ * wins, R12). A delta change rewrites clamp(base + delta) at once; delta 0
+ * frees the entry and writes the base back (exactly).
+ * Why: the brief: channel pressure adds to the current setting up to the
+ * maximum (or subtracts, or is absolute, from the file), and must not move
+ * the setting itself.
+ * Range: 0..127 (MOD_0_127 / MOD_PM63 rows; selectors refused at Learn and
+ * at parse).
+ * Results: knob 100, pressure + 40 -> 127 (clamped); pressure 0 -> 100.
+ * Context: foreground (MIDI receive, menu, drain, Morph worker).
+ * Accessors: midiLearn_applySource() (set); every writer (apply).
+ * Affiliates: seq_automationHoldsParameter(), morph_interpolation[].
+ */
+typedef struct {
+    uint8_t local;      /* 0xFF free */
+    int8_t delta;
+    uint8_t base;
+} instrumentManager_overlay_t;
+
+static instrumentManager_overlay_t
+    instrumentManager_overlay[INSTRUMENT_SLOT_COUNT][4];
+
+/* writeRuntimeInternal()'s notify argument 2 (S096 P3 assessment F3): the
+ * value already carries the delta (instrumentManager_deltaOverlaySet()); write
+ * it as given and notify nothing. 0 and 1 keep their meaning. */
+#define IM_WRITE_OVERLAY_APPLIED 2u
+
+static void instrumentManager_overlayClearSlot(uint8_t slot);
+
+static void instrumentManager_overlayClearSlot(uint8_t slot)
+{
+    uint8_t i;
+
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    for (i = 0u; i < 4u; i++) {
+        instrumentManager_overlay[slot][i].local = 0xFFu;
+        instrumentManager_overlay[slot][i].delta = 0;
+        instrumentManager_overlay[slot][i].base = 0u;
+    }
+}
+
+static instrumentManager_overlay_t *instrumentManager_overlayFind(uint8_t slot,
+                                                                  uint8_t local)
+{
+    uint8_t i;
+
+    for (i = 0u; i < 4u; i++)
+        if (instrumentManager_overlay[slot][i].local == local)
+            return &instrumentManager_overlay[slot][i];
+    return 0;
+}
+
+static instrumentManager_overlay_t *instrumentManager_overlayAlloc(uint8_t slot)
+{
+    uint8_t i;
+
+    for (i = 0u; i < 4u; i++)
+        if (instrumentManager_overlay[slot][i].local == 0xFFu)
+            return &instrumentManager_overlay[slot][i];
+    return 0;
+}
 
 /* Per-block fade decrement for ROLL_FILL_FADE_MS at the real sample rate. */
 static const float instrumentManager_gateFadeStepRate =
@@ -1739,6 +1829,8 @@ void instrumentManager_runtimeInit(void)
         instrumentManager_gateFade[slot] = 1.0f;
         instrumentManager_gateFadeStep[slot] = 0.0f;
         instrumentManager_gateDuck[slot] = 0u;
+        instrumentManager_gateRelease[slot] = 0u;
+        instrumentManager_overlayClearSlot(slot);
         switch (runtime_slot_type[slot]) {
         case INSTRUMENT_TYPE_DRM:
             Drum_initVoice(instrumentManager_drumRuntime(slot), slot);
@@ -1953,6 +2045,8 @@ void instrumentManager_resetRuntimeSlotFromScene(uint8_t slot,
     instrumentManager_gateFade[slot] = 1.0f;
     instrumentManager_gateFadeStep[slot] = 0.0f;
     instrumentManager_gateDuck[slot] = 0u;
+    instrumentManager_gateRelease[slot] = 0u;
+    instrumentManager_overlayClearSlot(slot);
 }
 
 void instrumentManager_resetRuntimeSlot(uint8_t slot)
@@ -2323,6 +2417,16 @@ void instrumentManager_calcSlotAsync(uint8_t slot)
             instrumentManager_gateFadeStep[slot] = 0.0f;
         }
     }
+    /* S096 P3 C1: a pending gate release closes the Colloid's gate before
+     * its async (other types ignore it, Q2) */
+    if (instrumentManager_gateRelease[slot]) {
+        const uint8_t req = instrumentManager_gateRelease[slot];
+
+        instrumentManager_gateRelease[slot] = 0u;
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_COL)
+            Colloid_gateRelease(instrumentManager_colloidRuntime(slot),
+                                (uint8_t)(req == 2u));
+    }
     switch (instrumentManager_slotType(slot)) {
     case INSTRUMENT_TYPE_DRM:
         Drum_calcVoiceAsync(instrumentManager_drumRuntime(slot), AMP_EG_SYNC);
@@ -2537,7 +2641,8 @@ static void instrumentManager_applySlot6AlternateDecay(uint8_t alternate)
 }
 
 void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
-                                    uint8_t velocity)
+                                    uint8_t velocity, uint8_t reset,
+                                    uint8_t layers)
 {
     uint8_t slot;
     uint8_t alternate_slot6;
@@ -2545,7 +2650,9 @@ void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
     /*
      * Trigger the instrument currently assigned to a visible track.
      *
-     * Inputs: zero-based visible trigger track 0..6, note, and velocity.
+     * Inputs: zero-based visible trigger track 0..6, note, velocity, reset
+     * (the trigger's reset flag) and layers (a Tetrakt layer mask; 0 = the
+     * `lon` row, S096 P3).
      * Output: tracks 0..5 trigger matching storage slots; track 6 triggers
      * slot 6 as the choke/alternate path. Choke instruments receive the
      * alternate selector, while non-Choke slot-6 instruments borrow the hidden
@@ -2601,14 +2708,17 @@ void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
         break;
     case INSTRUMENT_TYPE_COL:
         /*
-         * S095 P2: no step length (C-D8: the sustain switch ends notes). The
+         * S096 P3 C1: the Colloid gets the triggering track's step length
+         * (as the Alkaline) and the trigger's reset flag. A first hit opens a
+         * one-step gate (or the length special's window, closed early by
+         * TIM3's release request); a roll retrigger keeps the gate. The
          * platform part (LFO retrigger, velocity nodes) runs inside
-         * Colloid_triggerVoice() for `slot`; the slot-5 alternate decay
-         * above finds no amp_envelope_decay row and does nothing, so track 7
-         * plays slot 5 as an ordinary hit.
+         * Colloid_triggerVoice() for `slot`; track 7 plays slot 5 with
+         * track 7's own step length.
          */
         Colloid_triggerVoice(instrumentManager_colloidRuntime(slot), slot,
-                             velocity, note);
+                             velocity, note, seq_trackStepSamples(trigger_track),
+                             reset);
         break;
     case INSTRUMENT_TYPE_TKT:
         /*
@@ -2619,8 +2729,18 @@ void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
          * slot 5 as an ordinary hit (plan §11). The layer switch is read
          * here, after this step's automation (voiceControl_processPending()).
          */
+        /*
+         * S096 P3 T1: `layers` (from a MIDI layer note or an overlay repeat)
+         * overrides lon for this trigger only; 0 plays lon (after the step's
+         * automation). The track's MIDI TX happens here, with the mask that
+         * played (one note per layer, decided Q15; finding D3: TIM3's TX ran
+         * before the step's lon was drained).
+         */
         Tetrakt_triggerVoice(instrumentManager_tetraktRuntime(slot), slot,
-                             velocity, note);
+                             velocity, note, layers);
+        midiOut_trackLayers(trigger_track, seq_getTrackPlayedScene(trigger_track),
+                            note, velocity,
+                            layers ? layers : instrumentManager_tetraktRuntime(slot)->layerOn);
         break;
     default:
         break;
@@ -2636,6 +2756,21 @@ void instrumentManager_requestGateDuck(uint8_t trigger_track)
     slot = (trigger_track >= INSTRUMENT_SLOT_COUNT)
         ? (uint8_t)(INSTRUMENT_SLOT_COUNT - 1u)
         : trigger_track;
+
+    /*
+     * S096 P3 C1: a Colloid's roll window end is a note release.
+     *
+     * What:       for a Colloid slot the roll fill boundary (fill < 100)
+     *             sets the release request instead of the 5 ms output duck.
+     * Why:        the duck would cut the release tail the gate now plays
+     *             (plan §2.2). Other types keep the S079 duck.
+     * Context:    TIM3 (seq_processRollTicks()); runtime_slot_type[] is a byte
+     *             read, the request a byte store.
+     */
+    if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_COL) {
+        instrumentManager_gateRelease[slot] = 1u;
+        return;
+    }
     instrumentManager_gateDuck[slot] = 1u;
 }
 
@@ -2644,6 +2779,107 @@ float instrumentManager_gateGain(uint8_t slot)
     if (slot >= INSTRUMENT_SLOT_COUNT)
         return 1.0f;
     return instrumentManager_gateFade[slot];
+}
+
+/*
+ * Gate requests and hooks for engines with a note gate (S096 P3 C1).
+ *
+ * instrumentManager_requestGateRelease(track, brk)
+ *   What:     sets the slot's release request (1, or 2 with brk). Context:
+ *             TIM3 (the plain-step length window) or foreground (mute).
+ *   Affiliates: instrumentManager_calcSlotAsync() (consumer).
+ * instrumentManager_renewGate(track)
+ *   What:     a roll carried into a new step (voiceControl_resetOnly() ->
+ *             the leftover-reset loop of voiceControl_processPending())
+ *             renews the Colloid's gate by one step of the track.
+ * instrumentManager_changeArm(track) / instrumentManager_changeDecide(track)
+ *   What:     the Scene/track change rule (plan §2.1 rule 6): arm when the
+ *             track's played Scene changed, decide after the pass that
+ *             drained and fired the track's first step in the new Scene.
+ *   Accessors: voiceControl_processPending() (masks from seq_takeChangeMasks()).
+ * instrumentManager_automationWritten(slot, descriptor, value)
+ *   What:     told of every value the drain or a ramp writes
+ *             (seq_writeInstrumentAutomation()); a Colloid's sus row with
+ *             value 1 marks susSeen.
+ *   Why:      finding D5: the drain keeps no record of what it wrote; this is
+ *             its single write point.
+ * Inputs:     visible track 0..6 (track 6 -> slot 5) or slot 0..5.
+ * Context:    foreground except requestGateRelease() (any context).
+ * Types:      only INSTRUMENT_TYPE_COL acts; every other type returns.
+ */
+void instrumentManager_requestGateRelease(uint8_t trigger_track, uint8_t brk)
+{
+    uint8_t slot;
+
+    if (trigger_track > INSTRUMENT_SLOT_COUNT)
+        return;
+    slot = (trigger_track >= INSTRUMENT_SLOT_COUNT)
+        ? (uint8_t)(INSTRUMENT_SLOT_COUNT - 1u)
+        : trigger_track;
+    instrumentManager_gateRelease[slot] = (uint8_t)(1u + (brk ? 1u : 0u));
+}
+
+void instrumentManager_renewGate(uint8_t trigger_track)
+{
+    uint8_t slot;
+
+    if (trigger_track > INSTRUMENT_SLOT_COUNT)
+        return;
+    slot = (trigger_track >= INSTRUMENT_SLOT_COUNT)
+        ? (uint8_t)(INSTRUMENT_SLOT_COUNT - 1u)
+        : trigger_track;
+    if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_COL)
+        Colloid_gateRenew(instrumentManager_colloidRuntime(slot),
+                          seq_trackStepSamples(trigger_track));
+}
+
+void instrumentManager_changeArm(uint8_t trigger_track)
+{
+    uint8_t slot;
+
+    if (trigger_track > INSTRUMENT_SLOT_COUNT)
+        return;
+    slot = (trigger_track >= INSTRUMENT_SLOT_COUNT)
+        ? (uint8_t)(INSTRUMENT_SLOT_COUNT - 1u)
+        : trigger_track;
+    if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_COL)
+        Colloid_changeArm(instrumentManager_colloidRuntime(slot));
+}
+
+void instrumentManager_changeDecide(uint8_t trigger_track)
+{
+    uint8_t slot;
+
+    if (trigger_track > INSTRUMENT_SLOT_COUNT)
+        return;
+    slot = (trigger_track >= INSTRUMENT_SLOT_COUNT)
+        ? (uint8_t)(INSTRUMENT_SLOT_COUNT - 1u)
+        : trigger_track;
+    if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_COL)
+        Colloid_changeDecide(instrumentManager_colloidRuntime(slot));
+}
+
+/* The paraphonic hold (S096 P3 C3, plan §4.4): sus holds with the transport
+ * stopped while MIDI keys are down. COL only. */
+void instrumentManager_setMidiHold(uint8_t slot, uint8_t on)
+{
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_COL)
+        Colloid_setMidiHold(instrumentManager_colloidRuntime(slot),
+                            (uint8_t)(on != 0u));
+}
+
+void instrumentManager_automationWritten(uint8_t slot,
+                                         const ParamDescriptor *descriptor,
+                                         instrument_param_value_t value)
+{
+    if (slot >= INSTRUMENT_SLOT_COUNT || !descriptor ||
+        instrumentManager_slotType(slot) != INSTRUMENT_TYPE_COL)
+        return;
+    if (colloidParameters_isSustainRow(descriptor))
+        Colloid_noteSustainWrite(instrumentManager_colloidRuntime(slot),
+                                 (uint8_t)value);
 }
 
 static void instrumentManager_writeParameter(Parameter parameter,
@@ -4535,6 +4771,100 @@ uint8_t instrumentManager_specialTagSelfCheck(void)
 }
 #endif
 
+/* The current runtime byte of one instance-offset row (0 when unreadable). */
+static uint8_t instrumentManager_readRuntimeByte(uint8_t slot,
+                                                 const ParamDescriptor *descriptor)
+{
+    void *instance = instrumentManager_runtimeInstance(slot);
+
+    if (!instance || !descriptor ||
+        descriptor->runtime.kind != INSTRUMENT_BIND_INSTANCE_OFFSET)
+        return 0u;
+    switch (descriptor->runtime.parameter_type) {
+    case TYPE_UINT8:
+        return *((uint8_t *)instance + descriptor->runtime.offset);
+    case TYPE_FLT:
+    case TYPE_SPECIAL_F:
+    case TYPE_SPECIAL_P:
+    case TYPE_SPECIAL_FILTER_F: {
+        const float f = *((float *)((uint8_t *)instance + descriptor->runtime.offset));
+        const float b = f * 127.0f + 0.5f;
+
+        return (uint8_t)((b < 0.0f) ? 0 : ((b > 127.0f) ? 127 : (int)b));
+    }
+    default:
+        return 0u;
+    }
+}
+
+/*
+ * Set or clear one slot's MIDI Learn delta overlay (S096 P3 C4).
+ *
+ * What: delta != 0 takes or keeps the (slot, local) entry, sets its base to
+ * the current Morph-resolved value (or the automation-held runtime value when
+ * seq_automationHoldsParameter() says automation owns it) on first use, and
+ * writes clamp(base + delta) through writeRuntimeInternal() with
+ * IM_WRITE_OVERLAY_APPLIED (written as given, no baseline notification;
+ * S096 P3 assessment F3). delta 0 frees the entry and writes the base back
+ * (a temporary write: the entry is already free, so nothing is added).
+ * Inputs: slot 0..5, local descriptor index, signed delta (0 frees). Output:
+ * the effective value written (0 when the row cannot take an overlay).
+ * Context: foreground. Accessors: midiLearn_applySource().
+ */
+uint8_t instrumentManager_deltaOverlaySet(uint8_t slot, uint8_t local,
+                                          int8_t delta)
+{
+    const instrument_type_t type = instrumentManager_slotType(slot);
+    const instrument_registry_entry_t *reg = instrumentManager_registryEntry(type);
+    const ParamDescriptor *descriptor;
+    const kit_instrument_slot_t *instr;
+    instrumentManager_overlay_t *ov;
+    int16_t eff;
+
+    if (slot >= INSTRUMENT_SLOT_COUNT || !reg || local >= reg->descriptor_count)
+        return 0u;
+    descriptor = &reg->descriptors[local];
+    if (descriptor->runtime.kind != INSTRUMENT_BIND_INSTANCE_OFFSET ||
+        (descriptor->flags & INSTRUMENT_PARAM_FLAG_MODULATABLE) == 0u)
+        return 0u;
+    ov = instrumentManager_overlayFind(slot, local);
+    if (delta == 0) {
+        if (!ov)
+            return instrumentManager_readRuntimeByte(slot, descriptor);
+        eff = ov->base;
+        ov->local = 0xFFu;
+        ov->delta = 0;
+        (void)instrumentManager_writeRuntimeInternal(slot, descriptor,
+                                                     (instrument_param_value_t)eff, 0u);
+        return (uint8_t)eff;
+    }
+    if (!ov) {
+        ov = instrumentManager_overlayAlloc(slot);
+        if (!ov)
+            return instrumentManager_readRuntimeByte(slot, descriptor);
+        ov->local = local;
+        ov->delta = 0;
+        if (seq_automationHoldsParameter(slot, local)) {
+            ov->base = instrumentManager_readRuntimeByte(slot, descriptor);
+        } else {
+            instr = scene_instrumentSlotConst(scene_getActiveIndex(), slot);
+            ov->base = instr ? (uint8_t)instr->parameter_images.morph_interpolation[local]
+                             : instrumentManager_readRuntimeByte(slot, descriptor);
+        }
+    }
+    ov->delta = delta;
+    eff = (int16_t)ov->base + (int16_t)delta;
+    if (eff < 0)
+        eff = 0;
+    if (eff > 127)
+        eff = 127;
+    /* S096 P3 F3: written as given (the delta is already in it) */
+    (void)instrumentManager_writeRuntimeInternal(slot, descriptor,
+                                                 (instrument_param_value_t)eff,
+                                                 IM_WRITE_OVERLAY_APPLIED);
+    return (uint8_t)eff;
+}
+
 static uint8_t instrumentManager_writeRuntimeInternal(
     uint8_t slot, const ParamDescriptor *descriptor,
     instrument_param_value_t value,
@@ -4542,6 +4872,8 @@ static uint8_t instrumentManager_writeRuntimeInternal(
 {
     void *instance;
     Parameter parameter;
+    /* S096 P3 F3: the value before any delta, for the baseline notification */
+    const instrument_param_value_t baseValue = value;
 
     /*
      * Apply one descriptor value to its DSP owner.
@@ -4556,9 +4888,53 @@ static uint8_t instrumentManager_writeRuntimeInternal(
     if (!descriptor)
         return 0u;
 
+    /*
+     * S096 P3 C4: the delta overlay rides on every write of this slot's row.
+     *
+     * What:       notify_base_change 1 (menu, Morph, automation, restore):
+     *             the passed value becomes the overlay's base and the row
+     *             receives clamp(value + delta). 0 (a temporary LFO write):
+     *             the base is kept and the row receives clamp(value + delta),
+     *             so the LFO still moves the parameter under the delta.
+     *             IM_WRITE_OVERLAY_APPLIED (2, from
+     *             instrumentManager_deltaOverlaySet() only): the value already
+     *             holds base + delta; it is written as given and notifies
+     *             nothing. The modulation baseline is always notified with
+     *             the value BEFORE the delta (baseValue), so an LFO centred on
+     *             it never carries the delta twice.
+     * Why:        S096 P3 assessment F3: the first form wrote base + delta for
+     *             a temporary write too, which froze an LFO on the parameter
+     *             while a delta was held, and notified base + delta.
+     */
+    if (slot < INSTRUMENT_SLOT_COUNT && notify_base_change != IM_WRITE_OVERLAY_APPLIED &&
+        descriptor->runtime.kind == INSTRUMENT_BIND_INSTANCE_OFFSET) {
+        const instrument_registry_entry_t *reg =
+            instrumentManager_registryEntry(instrumentManager_slotType(slot));
+
+        if (reg && descriptor >= reg->descriptors &&
+            descriptor < reg->descriptors + reg->descriptor_count) {
+            const uint8_t local = (uint8_t)(descriptor - reg->descriptors);
+            instrumentManager_overlay_t *ov =
+                instrumentManager_overlayFind(slot, local);
+
+            if (ov) {
+                int16_t eff;
+
+                if (notify_base_change)
+                    ov->base = (uint8_t)((value > 127u) ? 127u : value);
+                eff = (int16_t)((value > 127u) ? 127u : value) + (int16_t)ov->delta;
+                if (eff < 0)
+                    eff = 0;
+                if (eff > 127)
+                    eff = 127;
+                value = (instrument_param_value_t)eff;
+            }
+        }
+    }
+
     if (instrumentManager_writeSpecialRuntime(slot, descriptor, value)) {
-        if (notify_base_change)
-            instrumentManager_noteRuntimeValueChanged(slot, descriptor, value);
+        if (notify_base_change == 1u)
+            instrumentManager_noteRuntimeValueChanged(slot, descriptor, baseValue);
         return 1u;
     }
 
@@ -4570,8 +4946,8 @@ static uint8_t instrumentManager_writeRuntimeInternal(
         parameter.ptr = (void *)((uint8_t *)instance + descriptor->runtime.offset);
         parameter.type = descriptor->runtime.parameter_type;
         instrumentManager_writeParameter(parameter, value);
-        if (notify_base_change)
-            instrumentManager_noteRuntimeValueChanged(slot, descriptor, value);
+        if (notify_base_change == 1u)
+            instrumentManager_noteRuntimeValueChanged(slot, descriptor, baseValue);
         return 1u;
 
     case INSTRUMENT_BIND_SLOT_DECIMATION:

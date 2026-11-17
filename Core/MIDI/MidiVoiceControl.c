@@ -64,6 +64,7 @@
 #include "sequencer.h"
 /* S074: bus compressor sidechain intake in voiceControl_triggerNow(). */
 #include "BusCompressor.h"
+#include "MidiNoteModes.h"   /* S096 P3 C3: paraphonic re-assert */
 //#include "LCD_driver.h"
 
 static uint8_t active_voices=0;	// which voices are currently playing a note
@@ -91,6 +92,7 @@ typedef struct {
 	uint8_t voice;
 	uint8_t note;
 	uint8_t vel;
+	uint8_t layers;   /* S096 P3: a Tetrakt layer mask, 0 = the lon row */
 } VoiceTriggerEvent;
 
 #define VOICE_TRIGGER_RING_SIZE 32u
@@ -112,7 +114,8 @@ static void voiceControl_irqRestore(uint32_t primask)
 	__asm volatile ("msr primask, %0" :: "r" (primask) : "memory");
 }
 
-static void voiceControl_enqueueTriggerLocked(uint8_t voice, uint8_t note, uint8_t vel)
+static void voiceControl_enqueueTriggerLocked(uint8_t voice, uint8_t note, uint8_t vel,
+                                              uint8_t layers)
 {
 	uint8_t next = (uint8_t)((voiceTriggerHead + 1u) & VOICE_TRIGGER_RING_MASK);
 
@@ -127,6 +130,7 @@ static void voiceControl_enqueueTriggerLocked(uint8_t voice, uint8_t note, uint8
 	voiceTriggerRing[voiceTriggerHead].voice = voice;
 	voiceTriggerRing[voiceTriggerHead].note = note;
 	voiceTriggerRing[voiceTriggerHead].vel = vel;
+	voiceTriggerRing[voiceTriggerHead].layers = layers;
 	voiceTriggerHead = next;
 }
 
@@ -182,7 +186,9 @@ static void voiceControl_dropPendingLocked(uint8_t voice)
 static uint8_t voiceControl_popPendingBatch(VoiceTriggerEvent *events,
 											 uint8_t *resetFlags,
 											 uint8_t *leftoverOut,
-											 uint8_t *markOut)
+											 uint8_t *markOut,
+											 uint8_t *changeOut,
+											 uint8_t *steppedOut)
 {
 	uint8_t n = 0u;
 	uint32_t primask = voiceControl_irqSave();
@@ -202,6 +208,8 @@ static uint8_t voiceControl_popPendingBatch(VoiceTriggerEvent *events,
 	*leftoverOut = voiceControl_pendingReset;
 	voiceControl_pendingReset = 0u;
 	*markOut = seq_pendingAutomationMark();
+	/* S096 P3 C1: the Scene/track change masks belong to the same step batch. */
+	seq_takeChangeMasks(changeOut, steppedOut);
 	voiceControl_irqRestore(primask);
 	return n;
 }
@@ -240,6 +248,11 @@ static void voiceControl_prepareTrigger(uint8_t voice, uint8_t reset)
 	 */
 	if (reset)
 		seq_restoreAutomatedParameters(voice);
+	/* S096 P3 C3: a slot with held paraphonic keys re-queues its sus /
+	 * intervals / coa before this pass's drain, so a Pattern trigger does not
+	 * undo the live hand (decided Q6). */
+	if (reset)
+		midiNoteMode_prepareTrigger(voice);
 }
 
 /*
@@ -255,9 +268,10 @@ static void voiceControl_prepareTrigger(uint8_t voice, uint8_t reset)
  * Accessors:  voiceControl_processPending().
  * Affiliates: voiceControl_prepareTrigger().
  */
-static void voiceControl_fireTrigger(uint8_t voice, uint8_t note, uint8_t vel)
+static void voiceControl_fireTrigger(uint8_t voice, uint8_t note, uint8_t vel,
+                                     uint8_t reset, uint8_t layers)
 {
-	instrumentManager_triggerTrack(voice, note, vel);
+	instrumentManager_triggerTrack(voice, note, vel, reset, layers);
 
 	/*
 	 * Offer every trigger-funnel event to the S074 sidechain.
@@ -284,7 +298,7 @@ void voiceControl_noteOn(uint8_t voice, uint8_t note, uint8_t vel)
 	primask = voiceControl_irqSave();
 	active_voices |= (1<<voice);
 
-	voiceControl_enqueueTriggerLocked(voice, note, vel);
+	voiceControl_enqueueTriggerLocked(voice, note, vel, 0u);
 	/*
 	 * Live and sequencer first triggers always request a reset (F12, §5.8).
 	 * The bit is set under the queue's existing PRIMASK so that the enqueue
@@ -326,7 +340,38 @@ void voiceControl_noteOnNoReset(uint8_t voice, uint8_t note, uint8_t vel)
 
 	primask = voiceControl_irqSave();
 	active_voices |= (1<<voice);
-	voiceControl_enqueueTriggerLocked(voice, note, vel);
+	voiceControl_enqueueTriggerLocked(voice, note, vel, 0u);
+	voiceControl_irqRestore(primask);
+}
+
+/*
+ * Enqueue a layer trigger (S096 P3 T1, plan §6.2; finding D1).
+ *
+ * What: enqueues {voice, note, vel, layers} and sets the voice's pending-
+ * reset bit, as voiceControl_noteOn(); it is called WITHOUT a preceding
+ * voiceControl_noteOff(), so earlier queued triggers of the same voice stay
+ * and fire in order in the same pass. Only the first popped trigger of the
+ * voice gets the reset (voiceControl_popPendingBatch()'s test-and-clear);
+ * later ones fire without a restore, so a chord's layers all play with the
+ * step's automation.
+ * Why: seq_triggerVoice() drops the voice's queued triggers (noteOff then
+ * noteOn); two layer notes in one 0.73 ms pass would keep only the last.
+ * Inputs: voice 0..6, note, vel, layers (1..15). Context: foreground or
+ * TIM3 (PRIMASK, as noteOn).
+ * Affiliates: seq_triggerVoiceLayers(), instrumentManager_triggerTrack().
+ * RAM: the ring's layers byte, +32 B SRAM1 (plan §8).
+ */
+void voiceControl_noteOnLayers(uint8_t voice, uint8_t note, uint8_t vel,
+                               uint8_t layers)
+{
+	uint32_t primask;
+
+	if (voice >= 7u)
+		return;
+	primask = voiceControl_irqSave();
+	active_voices |= (1 << voice);
+	voiceControl_enqueueTriggerLocked(voice, note, vel, layers);
+	voiceControl_pendingReset |= (uint8_t)(1u << voice);
 	voiceControl_irqRestore(primask);
 }
 //----------------------------------------------------------------
@@ -423,6 +468,19 @@ uint8_t voiceControl_isVoicePlaying(uint8_t voice)
  * Edge:       two triggers of one voice in one pass: both prepares run
  *             before the drain, so the drain's values serve both hits
  *             (last writer wins, as in step order).
+ * S096 P3 C1:
+ *  - fire passes each trigger's reset flag (the Colloid's first hit opens
+ *    a one-step gate; a roll retrigger keeps it);
+ *  - a leftover reset (a roll carried into a new step, voiceControl_resetOnly())
+ *    also renews the voice's gate (instrumentManager_renewGate());
+ *  - the Scene/track change masks are taken with the batch, in the same
+ *    PRIMASK section as the automation mark (seq_takeChangeMasks()), so
+ *    the "stepped" bit and the step's entries drained in this pass belong
+ *    together. Order: arm (changed tracks) -> prepare -> drain -> fire ->
+ *    decide (stepped tracks). A trigger fired in this pass clears the
+ *    Colloid's changeArm, so a step that triggers continues the voice; a
+ *    drained sus = on marks susSeen; otherwise the decide releases it (plan
+ *    §2.1 rule 6).
  * Accessors:  main.c render loop (once per OUTPUT_DMA_SIZE block).
  * Affiliates: seq_pendingAutomationMark(), seq_drainPendingAutomationTo(),
  *             seq_restoreAutomatedParameters(), voiceControl_popPendingBatch().
@@ -433,11 +491,20 @@ void voiceControl_processPending(void)
 	uint8_t resetFlags[VOICE_TRIGGER_RING_SIZE];
 	uint8_t leftover;
 	uint8_t mark;
+	uint8_t change;
+	uint8_t stepped;
 	uint8_t n;
 	uint8_t i;
+	uint8_t t;
 
 	/* Pop the ring and take the automation mark in one masked section. */
-	n = voiceControl_popPendingBatch(batch, resetFlags, &leftover, &mark);
+	n = voiceControl_popPendingBatch(batch, resetFlags, &leftover, &mark,
+	                                 &change, &stepped);
+
+	/* 1b. Arm the Scene/track change decision before this pass's restore. */
+	for (t = 0u; t < 7u; t++)
+		if (change & (uint8_t)(1u << t))
+			instrumentManager_changeArm(t);
 
 	/* 2. Restore state first: popped triggers, then reset-only voices. */
 	for (i = 0u; i < n; i++)
@@ -448,6 +515,12 @@ void voiceControl_processPending(void)
 			voice++;
 		leftover &= (uint8_t)~(1u << voice);
 		seq_restoreAutomatedParameters(voice);
+		/* S096 P3 C1: a carried roll keeps its gate for the new step.
+		 * Assessment F6: only a carry (the track's roll still running);
+		 * a reset bit left by a dropped trigger (mute, Scene change)
+		 * renews nothing. */
+		if (seq_rollRunning(voice))
+			instrumentManager_renewGate(voice);
 	}
 
 	/* 3. Apply this step's own automation before any of its triggers. */
@@ -455,5 +528,11 @@ void voiceControl_processPending(void)
 
 	/* 4. Fire. */
 	for (i = 0u; i < n; i++)
-		voiceControl_fireTrigger(batch[i].voice, batch[i].note, batch[i].vel);
+		voiceControl_fireTrigger(batch[i].voice, batch[i].note, batch[i].vel,
+		                         resetFlags[i], batch[i].layers);
+
+	/* 5. Decide the Scene/track change after the pass fired (plan §2.1 rule 6). */
+	for (t = 0u; t < 7u; t++)
+		if (stepped & (uint8_t)(1u << t))
+			instrumentManager_changeDecide(t);
 }

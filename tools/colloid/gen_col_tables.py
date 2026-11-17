@@ -81,6 +81,9 @@ def voice_define(name):
 
 
 PWM_COUNTS = (voice_define("COL_PWM_COUNT"), voice_define("COL_PWM_WARP_COUNT"))
+# S096 P3: the plain/wtb count (10 since S096 P3) and the wts count must
+# balance too; asserted with the pwm counts in text()
+PWM_COUNTS = PWM_COUNTS + (voice_define("COL_OSC_COUNT"), voice_define("COL_SCAN_COUNT"))
 
 
 def f32(x):

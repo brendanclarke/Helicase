@@ -1,0 +1,34 @@
+# S096 P3 device cycle probe after noise form B + the scan pre-pass
+# (SD_CARD_COL, 2026-11-17, second run)
+#
+# Source:   SD_CARD_COL/asavetrc.bin, 'p' records after the last boot
+#           (record 1,033,568, BOOT_SETTLE start), decode_devlogs.py; 454
+#           windows. Image: SD_CARD_COL/LXRV2_lxr02.img, byte-identical to a
+#           fresh `make all && make img` of the working tree (noise form B,
+#           note tracking, width make-up, folded RNG scale, col_scanControl()).
+# Scene:    the same as device_probe_p3_sdcardcol.txt: slots tkt drm alk alk
+#           col hat; the Colloid in slot 4, rte str, LFO 1 at 127 on pos.
+#           Final state (.hcprms2, generation 2590, the newer): typ 0 (wav),
+#           wave 0 (Saw), noise level 6, width 25, tone 86.
+# Modes:    from the osc1_type edits (AutoSave dirty records, windows 193,
+#           309-312, 359) and each segment's block-rate signature (12
+#           oscillators about 5,000; wts carries the scan pass; pwm neither).
+#
+# Colloid slot 4 (cycles per block, medians; Basic share 19,620):
+#   mode           windows   block  render  total  (min..max)       over
+#   wts 6          8-192     4,638  16,001  20,649 (20,248..21,141) +1,029
+#   pwm 6          196-308   4,513  15,451  19,962 (19,685..20,307)   +342
+#     (parts after the osc1_wave edits: 20,044 / 19,747 / 20,015 / 20,118)
+#   wtb 12         315-358   4,999  16,882  21,902 (21,512..22,329) +2,282
+#   wav Saw 12     360-453   5,056  16,198  21,250 (20,786..21,558) +1,630
+#
+# Against the first run (device_probe_p3_sdcardcol.txt, before form B):
+#   wts 21,202 -> 20,649 (-553); 12-osc (wtb) 22,734..23,377 -> 21,902
+#   (-830..-1,475).
+# Render cycles per instruction (render / host loops x 32): pwm 1.47, wts
+#   1.52, wav 1.65, wtb 1.72.
+# Other slots (medians): tkt 17,865 (max 19,850 first window), drm 13,784,
+#   alk 15,942 / 15,556, hat 15,246.
+# Whole mixer: average median 141,789 (90.5 %); per-window maximum block
+#   median 159,106, peak 165,498: 430 of 454 windows have a block above the
+#   156,705-cycle budget.

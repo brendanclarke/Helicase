@@ -1,0 +1,21 @@
+# S096 P3 host CPU record after the Basic-share work (2026-11-17):
+# COL_OSC_COUNT 10 (wav, wtb), the noise control on alternate blocks, the pwm
+# spread curve only under pwm, one shared VDIV for the stereo overdrive
+# (col_postPair()), the stereo filter coefficients stepped every 8 samples
+# (COL_SUB_BLOCK), the scan pair loops on one 64-word bus.
+#
+# Command: python3 tools/dsp_test/colloid_cpu.py --elf build/lxr02.elf --count 10
+# (colloid_cpu.py now charges a nested filter loop as inner + (outer -
+# inner) / COL_SUB_BLOCK per sample.)
+# Stereo loop col_renderPar: inner 121 + outer 38 per 8 samples (was 135 per
+# sample, 2 VDIV -> 1 VDIV); col_scanPairStore/Add 63 / 64 (were 65 / 67).
+# Previous record: colloid_cpu_noiseB.txt (plain12 422.7, pwm6 408.6, pwmw6
+# 411.7, scan6 419.7; 2 VDIV per sample in the stereo loop).
+plain10-par: loops 272.2 + per block 3340/32 = 376.6
+plain10-ser: loops 246.0 + per block 3322/32 = 349.8
+pwm6-par: loops 323.2 + per block 2607/32 = 404.7
+pwm6-ser: loops 297.0 + per block 2589/32 = 377.9
+pwmw6-par: loops 326.2 + per block 2611/32 = 407.8
+pwmw6-ser: loops 300.0 + per block 2593/32 = 381.0
+scan6-par: loops 316.2 + per block 2923/32 = 407.6
+scan6-ser: loops 290.0 + per block 2905/32 = 380.8

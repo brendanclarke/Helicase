@@ -225,13 +225,17 @@ sequencer: | $(GEN)
 	$(EX) --src $(ROOT)/Core/Sequencer/sequencer.c \
 	  --func seq_drainPendingAutomationTo --func seq_pendingAutomationMark \
 	  --out $(GEN)/sequencer_drain.c
-	$(HOSTCC) $(HOSTFLAGS) modules/sequencer.c -o build/sequencer -lm
+	$(EX) --src $(ROOT)/Core/Sequencer/sequencer.c \
+	  --func seq_lenStart --func seq_rollClearTrack --func seq_processRollTicks \
+	  --out $(GEN)/sequencer_len.c
+	$(HOSTCC) $(HOSTFLAGS) modules/sequencer.c $(ROOT)/Core/Sequencer/StepScale.c \
+	  -o build/sequencer -lm
 	./build/sequencer
 	mkdir -p build/break_seq
 	sed 's/uint8_t i = seq_pending_automation_done;/uint8_t i = 0u;/' \
 	  $(GEN)/sequencer_drain.c > build/break_seq/sequencer_drain.c
 	$(HOSTCC) -Ibuild/break_seq $(HOSTFLAGS) modules/sequencer.c \
-	  -o build/sequencer_break -lm
+	  $(ROOT)/Core/Sequencer/StepScale.c -o build/sequencer_break -lm
 	@if ./build/sequencer_break >/dev/null 2>&1; then \
 	  echo "sequencer_break: FAILED (the cursor-start break was not caught)"; \
 	  exit 1; else echo "sequencer_break: caught (law 2 fails as expected)"; fi
@@ -559,7 +563,7 @@ COL := $(ROOT)/Core/DSP/Instruments/Colloid
 COL_GEN := $(GEN)/ColloidTables.host.h $(GEN)/ColloidTables.host.c \
            $(GEN)/ColloidOsc.host.h $(GEN)/ColloidOsc.host.c \
            $(GEN)/ColloidVoice.host.h $(GEN)/ColloidVoice.host.c
-COL_COUNT ?= 12
+COL_COUNT ?= 10   # S096 P3: COL_OSC_COUNT 10 (was 12)
 colloid: $(GEN)/Oscillator.host.h $(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables.host.c \
 	$(GEN)/oscPwmWarp.host.h | $(GEN)
 	$(EX) --src $(ALK)/AlkalineControl.h --body --out $(GEN)/AlkalineControl.host.h
@@ -598,7 +602,7 @@ colloid: $(GEN)/Oscillator.host.h $(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables
 	  echo "colloid_break_frac: FAILED (a 16-bit fraction not caught)"; exit 1; \
 	else echo "colloid_break_frac: caught (law CO-OSC fails as expected)"; fi
 	mkdir -p build/break_col_sus
-	sed 's/if (!susOn)/if (0)/' \
+	sed 's/if (!held) { e->stage = COL_EG_RELEASE; break; }/if (0) { e->stage = COL_EG_RELEASE; break; }/' \
 	  $(GEN)/ColloidVoice.host.c > build/break_col_sus/ColloidVoice.host.c
 	@grep -q 'if (0)' build/break_col_sus/ColloidVoice.host.c || \
 	  { echo "colloid_break_sus: sed did not apply"; exit 1; }
@@ -761,6 +765,38 @@ colloid: $(GEN)/Oscillator.host.h $(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables
 	@if ./build/colloid_break_sign >/dev/null 2>&1; then \
 	  echo "colloid_break_sign: FAILED (Saw played as Rec not caught)"; exit 1; \
 	else echo "colloid_break_sign: caught (law CO-PWM fails as expected)"; fi
+	@# S096 P3 C1: the amp attack not extending the gate must fail CO-GATE;
+	@# a roll retrigger resetting the gate must fail CO-ROLLGATE.
+	mkdir -p build/break_col_atk build/break_col_roll
+	sed 's/voice->release, held, 1u);/voice->release, held, 0u);/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_atk/ColloidVoice.host.c
+	@grep -q 'voice->release, held, 0u);' build/break_col_atk/ColloidVoice.host.c || \
+	  { echo "colloid_break_atk: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_atk $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_atk -lm
+	@if ./build/colloid_break_atk >/dev/null 2>&1; then \
+	  echo "colloid_break_atk: FAILED (an amp attack cut by the gate not caught)"; exit 1; \
+	else echo "colloid_break_atk: caught (law CO-GATE fails as expected)"; fi
+	sed 's/if (first)/if (1)/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_roll/ColloidVoice.host.c
+	@grep -q 'if (1)' build/break_col_roll/ColloidVoice.host.c || \
+	  { echo "colloid_break_roll: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_roll $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_roll -lm
+	@if ./build/colloid_break_roll >/dev/null 2>&1; then \
+	  echo "colloid_break_roll: FAILED (a roll retrigger resetting the gate not caught)"; exit 1; \
+	else echo "colloid_break_roll: caught (law CO-ROLLGATE fails as expected)"; fi
+	@# S096 P3 C2c: the scan blend without its g step must fail CO-SCAN.
+	mkdir -p build/break_col_scan
+	sed 's/g0 += (uint32_t)d0;/g0 = g0;/' \
+	  $(GEN)/ColloidOsc.host.c > build/break_col_scan/ColloidOsc.host.c
+	@grep -q 'g0 = g0;' build/break_col_scan/ColloidOsc.host.c || \
+	  { echo "colloid_break_scan: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_scan $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_scan -lm
+	@if ./build/colloid_break_scan >/dev/null 2>&1; then \
+	  echo "colloid_break_scan: FAILED (a stepping scan blend not caught)"; exit 1; \
+	else echo "colloid_break_scan: caught (law CO-SCAN fails as expected)"; fi
 
 colloid_tables:
 	cd $(ROOT) && python3 tools/colloid/gen_col_tables.py --check

@@ -445,7 +445,8 @@ void Tetrakt_initVoice(TetraktVoice *voice, const uint8_t slot, int16_t *line)
 }
 
 void Tetrakt_triggerVoice(TetraktVoice *voice, const uint8_t source_slot,
-                          const uint8_t velocity, const uint8_t note)
+                          const uint8_t velocity, const uint8_t note,
+                          const uint8_t layers)
 {
 	const float vel = (float)velocity * (1.0f / 127.0f);
 	uint32_t i;
@@ -466,12 +467,16 @@ void Tetrakt_triggerVoice(TetraktVoice *voice, const uint8_t source_slot,
 	 * Why:        layerOn is read only here: a step lock on it applies to
 	 *             its own step because the automation drain runs before the
 	 *             triggers (voiceControl_processPending()).
+	 * S096 P3: layers != 0 (a MIDI layer note, plan §6.2) replaces layerOn
+	 *             for this trigger; layerOn itself is not written.
 	 */
 	voice->note = note;
 	for (i = 0u; i < TKT_LAYERS; i++) {
 		TktLayer *const L = &voice->layer[i];
 
-		if (!(voice->layerOn & (1u << i)))
+		const uint8_t on = layers ? layers : voice->layerOn;
+
+		if (!(on & (1u << i)))
 			continue;
 		L->pendSample = L->sample;
 		L->pendVel = velocity;

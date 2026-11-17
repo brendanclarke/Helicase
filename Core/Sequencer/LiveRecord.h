@@ -53,7 +53,8 @@ enum {
     LIVEREC_HIT_FLAM_GRACE,
     LIVEREC_HIT_FLAM_MAIN,
     LIVEREC_HIT_ROLL_START,
-    LIVEREC_HIT_ROLL_HIT
+    LIVEREC_HIT_ROLL_HIT,
+    LIVEREC_HIT_AUTO       /* S096 P3: automation only, no trigger written */
 };
 
 /* Trigger sources (S081 §8.9, R2). */
@@ -74,6 +75,12 @@ enum {
  * its arrival-to-processing delay, so placement uses the arrival time (Q6).
  * Panel, overlay repeat and sequencer hits pass 0. Stack only (+3 B per
  * record since S083).
+ * S096 P3 (finding D6): layers is a Tetrakt hit's layer mask (its step gets
+ * lon automation, OR-merged within one pass of the step); autoTarget/
+ * autoValue[autoCount] are automation entries that belong to this hit's
+ * own step on its own track (paraphonic sus / intervals / coa), written at
+ * the hit's placement; kind LIVEREC_HIT_AUTO places them with no trigger.
+ * Stack only (+15 B per record).
  */
 typedef struct {
     uint8_t track;
@@ -85,6 +92,10 @@ typedef struct {
     uint8_t source;
     uint8_t note_is_default;
     uint16_t age_us;
+    uint8_t layers;       /* S096 P3: Tetrakt layer mask of the hit (0 none) */
+    uint8_t autoCount;    /* S096 P3: note-coupled automation entries (0..4) */
+    uint16_t autoTarget[4];
+    uint8_t autoValue[4];
 } liveRec_trigger_t;
 
 /* Lifecycle. */
@@ -123,6 +134,11 @@ void    liveRec_rollRelease(uint8_t track);
 ** global Morph change (never recorded) cannot leak into a pending Morph
 ** write. The global Morph (mrp) has no target and never reaches this call. */
 void    liveRec_paramIn(uint16_t target9, uint8_t source);
+/* Record an explicit value (S096 P3): the first change of `target9` in the
+** playing step becomes `value7` (a MIDI Learn delta's effective value).
+** Returns 1 when written, 0 when live record is off, the target is not
+** owned, or no step is known. Full contract in LiveRecord.c. */
+uint8_t liveRec_paramValueIn(uint16_t target9, uint8_t value7);
 
 /* Erase gestures (buttonHandler / Menu). */
 void    liveRec_eraseParam(uint16_t target9, uint8_t fxLane);

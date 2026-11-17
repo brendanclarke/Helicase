@@ -44,6 +44,9 @@
 
 /* One CC (not CC0/CC32, which MidiProgram owns). Output: 1 = consumed. */
 uint8_t  midiControl_handleCc(const MidiMsg *msg);
+/* Received channel pressure (S096 P3 C4): a waiting Learn takes it, else the
+** pressure rows apply. 1 = consumed. Caller: midiIn_dispatch(). */
+uint8_t  midiControl_handlePressure(const MidiMsg *msg);
 /*
  * 1 when target `id` may be written from `channel` in the active Scene:
  * on G every ID; on a voice channel the IDs of its voices (C2).

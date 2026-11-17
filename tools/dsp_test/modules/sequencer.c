@@ -27,6 +27,7 @@
 
 #define SEQ_PENDING_BUF_COUNT 128u
 #define SEQ_PENDING_TYPE_AUTOMATION_BIT (1u << 10u)
+#define SEQ_PENDING_LIVE_BIT (1u << 11u)   /* S096 P3: no ramp */
 #define SEQ_PENDING_STEP_ID_MASK 0x03FFu
 #define NUM_STEPS 16u
 #define INSTRUMENT_SLOT_COUNT 6u
@@ -142,6 +143,46 @@ uint8_t effects_applyAutomation(uint8_t track, uint8_t local, uint8_t value)
 
 #include "sequencer_drain.c"
 
+/*
+ * S096 P3 C1: the plain-step length window (law SQ-LEN).
+ *
+ * What:       the real seq_lenStart(), seq_rollClearTrack() and
+ *             seq_processRollTicks() over the real StepScale table, with the
+ *             roll engine idle, so the window's countdown and its release
+ *             request are the only live paths.
+ * Why:        the length special (fill) now ends a Colloid's plain step at
+ *             step x fill / 100; a following trigger replaces the window and
+ *             a roll reset clears it.
+ */
+#define NUM_TRACKS 7u
+uint16_t stepScale_ticksQ8(uint8_t cc);   /* Core/Sequencer/StepScale.c */
+static uint8_t seq_rollTickAccum[NUM_TRACKS];
+static uint8_t seq_rollVelPos[NUM_TRACKS];
+static uint16_t seq_rollWindow[NUM_TRACKS];
+static uint8_t seq_rollActive[NUM_TRACKS];
+static uint8_t seq_rollLastRate[NUM_TRACKS];
+static uint8_t seq_rollLastRhythm[NUM_TRACKS];
+static uint8_t seq_rollLastFill[NUM_TRACKS];
+static uint8_t seq_rollStepNote[NUM_TRACKS];
+static uint16_t seq_lenWindow[NUM_TRACKS];
+static uint8_t seq_effectiveTrackScale[NUM_TRACKS];
+#define SEQ_ROLL_RUN 0x01u
+
+static unsigned len_releases;
+static uint8_t len_releaseTrack;
+static uint8_t len_releaseBrk;
+static unsigned len_triggers;
+
+static uint8_t seq_rollPpq(uint8_t rate) { (void)rate; return 0u; }
+static uint8_t seq_rollComputeVelocity(uint8_t track) { (void)track; return 100u; }
+static void seq_triggerVoice(uint8_t track, uint8_t vol, uint8_t note, uint8_t reset)
+{ (void)track; (void)vol; (void)note; (void)reset; len_triggers++; }
+void instrumentManager_requestGateRelease(uint8_t track, uint8_t brk)
+{ len_releases++; len_releaseTrack = track; len_releaseBrk = brk; }
+void instrumentManager_requestGateDuck(uint8_t track) { (void)track; }
+
+#include "sequencer_len.c"
+
 /* --------------------------------------------------------------- helpers -- */
 static void queue_clear(void)
 {
@@ -163,6 +204,58 @@ static void queue_put(uint8_t target, uint8_t value)
 		(uint16_t)((uint16_t)target | ((uint16_t)(value & 0x7fu) << 9u));
 	seq_pending_automation_count = (uint8_t)(i + 1u);
 	seq_pending_automation_drain = 1u;
+}
+
+static void queue_put_live(uint8_t target, uint8_t value)
+{
+	uint8_t i = seq_pending_automation_count;
+
+	seq_pending_automation[i].identity =
+		(uint16_t)(0u | SEQ_PENDING_TYPE_AUTOMATION_BIT | SEQ_PENDING_LIVE_BIT);
+	seq_pending_automation[i].payload =
+		(uint16_t)((uint16_t)target | ((uint16_t)(value & 0x7fu) << 9u));
+	seq_pending_automation_count = (uint8_t)(i + 1u);
+	seq_pending_automation_drain = 1u;
+}
+
+/* SQ-LEN (S096 P3 C1): a plain step's fill window, its end, replacement and
+ * clear. */
+static void test_len(void)
+{
+	unsigned i;
+	const uint16_t half = (uint16_t)(((uint32_t)stepScale_ticksQ8(76u) * 50u +
+	                                  12800u) / 25600u);
+
+	seq_effectiveTrackScale[0] = 76u;
+	len_releases = 0u;
+	seq_lenStart(0u, 50u);
+	expect(seq_lenWindow[0] == half, "SQ-LEN: fill 50 window is step x 50 / 100");
+	for (i = 0u; i < (unsigned)(half - 1u); i++)
+		seq_processRollTicks();
+	expect(len_releases == 0u, "SQ-LEN: no release before the window's end");
+	seq_processRollTicks();
+	expect(len_releases == 1u && len_releaseTrack == 0u && len_releaseBrk == 0u,
+	       "SQ-LEN: one unbroken release request at the window's end");
+	expect(seq_lenWindow[0] == 0u, "SQ-LEN: the window closes");
+
+	/* a following trigger replaces the window */
+	seq_lenStart(0u, 25u);
+	expect(seq_lenWindow[0] ==
+	       (uint16_t)(((uint32_t)stepScale_ticksQ8(76u) * 25u + 12800u) / 25600u),
+	       "SQ-LEN: a following trigger replaces the window");
+	/* a roll reset clears it */
+	seq_rollClearTrack(0u);
+	expect(seq_lenWindow[0] == 0u, "SQ-LEN: seq_rollClearTrack clears the window");
+	/* fill 100: no window; fill 0: one tick */
+	seq_lenStart(0u, 100u);
+	expect(seq_lenWindow[0] == 0u, "SQ-LEN: fill 100 has no window");
+	len_releases = 0u;
+	seq_processRollTicks();
+	expect(len_releases == 0u, "SQ-LEN: fill 100 never releases");
+	seq_lenStart(0u, 0u);
+	expect(seq_lenWindow[0] == 1u, "SQ-LEN: fill 0 is one tick");
+	seq_processRollTicks();
+	expect(len_releases == 1u, "SQ-LEN: fill 0 releases at the next tick");
 }
 
 int main(void)
@@ -206,6 +299,27 @@ int main(void)
 	queue_clear();
 	queue_put(6u, 60u);
 	expect(seq_pendingAutomationMark() == 1u, "mark equals the producer count");
+
+	/* S096 P3 C3: a LIVE entry beyond the mark lands in the same drain;
+	 * an ordinary entry beyond it still waits. */
+	queue_clear();
+	queue_put(7u, 70u);
+	queue_put_live(8u, 80u);
+	seq_drainPendingAutomationTo(1u);
+	expect(applied_n == 2 && applied[0] == 7u && applied[1] == 8u,
+	       "S096 P3: LIVE entry beyond the mark applies now");
+	queue_clear();
+	queue_put(9u, 90u);
+	queue_put_live(10u, 100u);
+	queue_put(11u, 110u);
+	seq_drainPendingAutomationTo(1u);
+	expect(applied_n == 2 && applied[1] == 10u,
+	       "S096 P3: an ordinary entry beyond the mark waits");
+	seq_drainPendingAutomationTo(3u);
+	expect(applied_n == 3 && applied[2] == 11u,
+	       "S096 P3: the waiting entry applies on the next pass");
+
+	test_len();
 
 	printf("sequencer failures: %d\n", failures);
 	return failures ? 1 : 0;

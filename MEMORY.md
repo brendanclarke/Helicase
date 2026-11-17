@@ -3,6 +3,9 @@
 This file is the working memory for Codex/Claude Code/LLM Agent sessions on this project.
 Read it fully at the start of every session before touching any code.
 Do not append session history or resolved-issue narrative to this file; those belong in `knowledge_files/log_archive/`.
+Do not use `.claude` auto-memory. Project context lives in the root `MEMORY.md`. 
+The agent working notes are `knowledge_files/volatile/memory/VOLATILE_MEMORY.md`.
+Never create a file named `MEMORY.md` in any subdirectory.
 
 ## Document edits (user, S093, binding)
 

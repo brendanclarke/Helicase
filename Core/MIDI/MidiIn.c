@@ -109,10 +109,11 @@ uint8_t midiIn_routeMask(void)
 /*
  * MIDI that may act while a Bank load is in flight (S082 P1 D13, D33).
  *
- * What: accepts system realtime (0xF8-0xFF), note on/off, and control change
- * except a Bank Change (CC0 / CC32). Everything else is rejected: program
- * change, pitch bend, polyphonic and channel pressure, MTC quarter frame,
- * song position/select and the other system common messages.
+ * What: accepts system realtime (0xF8-0xFF), note on/off, control change
+ * except a Bank Change (CC0 / CC32), and channel pressure (S096 P3: it acts
+ * like a CC, a performance control). Everything else is rejected: program
+ * change, pitch bend, polyphonic pressure, MTC quarter frame, song
+ * position/select and the other system common messages.
  * Why: D33 drops non-realtime/note/CC input during a load, and D13 drops a
  * Bank Change and program change, which would otherwise start a second load
  * or a Scene change into Scenes that are being written. Clock and transport
@@ -130,6 +131,8 @@ static uint8_t midiIn_acceptedDuringBankLoad(const MidiMsg *msg)
 		return 1u;
 	if (type == NOTE_ON || type == NOTE_OFF)
 		return 1u;
+	if (type == CHANNEL_PRESSURE)
+		return 1u;   /* S096 P3 C4 */
 	if (type == MIDI_CC)
 		return (uint8_t)(msg->data1 != CC_BANK_CHANGE &&
 		                 msg->data1 != CC_BANK_SELECT_LSB);
@@ -203,6 +206,11 @@ static void midiIn_dispatch(const MidiMsg *msg)
 		if (midiIn_rxAllows(MIDI_FILTER_PROGRAM))
 			consumed = midiProgram_programChange(
 			    (uint8_t)((msg->status & 0x0Fu) + 1u), msg->data1);
+		break;
+	case CHANNEL_PRESSURE:
+		/* S096 P3 C4: channel pressure under RXF C (Learn sources) */
+		if (midiIn_rxAllows(MIDI_FILTER_CONTROL))
+			consumed = midiControl_handlePressure(msg);
 		break;
 	default:
 		break;

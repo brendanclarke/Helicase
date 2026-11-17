@@ -38,6 +38,7 @@
 #include "MidiOut.h"
 #include "MidiLearn.h"
 #include "MidiNotes.h"
+#include "MidiNoteModes.h"   /* S096 P3: the overlay's layer mask */
 #include <string.h>
 #include <stdint.h>
 #include "AutosaveTrace.h"
@@ -380,8 +381,10 @@ static uint8_t bh_overlayActive = 0u;
  * table only owns the gesture. Why: S080-S083 timed repeats here with a
  * 1 ms timer from PAR_BPM, off the master clock (S084 P0 F4). MIDI notes on
  * several tracks (and several held VOICE buttons) roll at once (S083 Q5).
- * RAM: 7 x 4 B = 28 B SRAM1 static (S084: -28 B; pos, interval and next
- * removed, rate added). Writers: overlay start, drain, end and
+ * S096 P3: layers is the Tetrakt layer mask of the note (0 = the lon row),
+ * repeated on every hit of the gesture (decided Q16).
+ * RAM: 7 x 5 B = 35 B SRAM1 static (S084: -28 B; pos, interval and next
+ * removed, rate added; S096 P3: +7 B layers). Writers: overlay start, drain, end and
  * re-configure below (all foreground). Affiliates: buttonHandler_tick(),
  * MidiNotes, seq_liveRollStart(), seq_liveTakeHits().
  */
@@ -390,6 +393,7 @@ typedef struct {
 	uint8_t note;
 	uint8_t count;
 	uint8_t rate;
+	uint8_t layers;         /* S096 P3: the Tetrakt layer mask of the note */
 } bh_overlay_track_t;
 
 #define BH_OVERLAY_NOTE_DEFAULT  0x80u
@@ -910,7 +914,8 @@ static void buttonHandler_overlayReport(uint8_t voiceNr, uint8_t note,
                                         uint8_t noteIsDefault,
                                         uint8_t velocity, uint8_t kind,
                                         uint8_t roll, uint8_t rhythm,
-                                        uint8_t source, uint16_t ageUs)
+                                        uint8_t source, uint16_t ageUs,
+                                        uint8_t layers)
 {
     liveRec_trigger_t t;
 
@@ -926,6 +931,8 @@ static void buttonHandler_overlayReport(uint8_t voiceNr, uint8_t note,
     t.source = source;
     t.note_is_default = noteIsDefault;
     t.age_us = ageUs;
+    t.layers = layers;
+    t.autoCount = 0u;
     liveRec_triggerIn(&t);
 }
 
@@ -971,7 +978,7 @@ static void buttonHandler_overlayDrain(uint8_t track)
     if (flamMain) {
         buttonHandler_overlayReport(track, pitch, isDef, BH_OVERLAY_VEL,
                                     LIVEREC_HIT_FLAM_MAIN, 0u, 0u, source,
-                                    (uint16_t)age);
+                                    (uint16_t)age, e->layers);
         e->count = 0u;
         e->heldMidiNote = BH_OVERLAY_NO_MIDI_NOTE;
         return;
@@ -981,7 +988,7 @@ static void buttonHandler_overlayDrain(uint8_t track)
                                     LIVEREC_HIT_ROLL_HIT, e->rate,
                                     buttonHandler_overlayRhythm(
                                         bh_overlayActive),
-                                    source, (uint16_t)age);
+                                    source, (uint16_t)age, e->layers);
 }
 
 /*
@@ -1033,7 +1040,8 @@ static void buttonHandler_overlayDrainAll(void)
  */
 static void buttonHandler_overlayStart(uint8_t track, uint8_t which,
                                        uint8_t note, uint8_t heldMidiNote,
-                                       uint8_t source, uint16_t ageUs)
+                                       uint8_t source, uint16_t ageUs,
+                                       uint8_t layers)
 {
     bh_overlay_track_t *e;
     uint8_t type = (which == 1u) ? parameter_values[PAR_PERF_BTN_LT]
@@ -1056,32 +1064,43 @@ static void buttonHandler_overlayStart(uint8_t track, uint8_t which,
             liveRec_rollRelease(track);
     }
     e->note = note;
+    e->layers = layers;
     if (type < BH_OVERLAY_TYPE_FLAM_FIRST) {
         static const uint8_t singleVel[4] = {127u, 100u, 64u, 32u};
 
-        seq_triggerVoice(track, singleVel[type], pitch, 1);
+        if (layers)
+            seq_triggerVoiceLayers(track, singleVel[type], pitch, layers);
+        else
+            seq_triggerVoice(track, singleVel[type], pitch, 1);
         buttonHandler_overlayReport(track, pitch, isDef, singleVel[type],
-                                    LIVEREC_HIT_SINGLE, 0u, 0u, source, ageUs);
+                                    LIVEREC_HIT_SINGLE, 0u, 0u, source, ageUs,
+                                    layers);
         e->heldMidiNote = BH_OVERLAY_NO_MIDI_NOTE;
         return;
     }
     if (type < BH_OVERLAY_TYPE_ROLL_FIRST) {
-        seq_triggerVoice(track, 64u, pitch, 1);
+        if (layers)
+            seq_triggerVoiceLayers(track, 64u, pitch, layers);
+        else
+            seq_triggerVoice(track, 64u, pitch, 1);
         buttonHandler_overlayReport(track, pitch, isDef, 64u,
                                     LIVEREC_HIT_FLAM_GRACE, 0u, 0u,
-                                    source, ageUs);
-        seq_liveFlamArm(track, pitch, BH_OVERLAY_VEL, BH_FLAM_TICKS);
+                                    source, ageUs, layers);
+        seq_liveFlamArm(track, pitch, BH_OVERLAY_VEL, BH_FLAM_TICKS, layers);
         e->count = 1u;
     } else {
         uint8_t idx = (uint8_t)(type - (BH_OVERLAY_TYPE_ROLL_FIRST - 1u));
         uint8_t rhythm = buttonHandler_overlayRhythm(which);
 
-        seq_triggerVoice(track, BH_OVERLAY_VEL, pitch, 1);
+        if (layers)
+            seq_triggerVoiceLayers(track, BH_OVERLAY_VEL, pitch, layers);
+        else
+            seq_triggerVoice(track, BH_OVERLAY_VEL, pitch, 1);
         buttonHandler_overlayReport(track, pitch, isDef, BH_OVERLAY_VEL,
                                     LIVEREC_HIT_ROLL_START, idx, rhythm,
-                                    source, ageUs);
+                                    source, ageUs, layers);
         seq_liveSetRhythm(rhythm);
-        seq_liveRollStart(track, idx, pitch, BH_OVERLAY_VEL, 1u);
+        seq_liveRollStart(track, idx, pitch, BH_OVERLAY_VEL, 1u, layers);
         e->rate = idx;
         e->count = 0xFFu;
     }
@@ -1112,7 +1131,7 @@ static void buttonHandler_overlayTrigger(uint8_t voiceNr)
     bh_overlayHeldType = (type > BH_OVERLAY_TYPE_MAX) ? 0u : type;
     buttonHandler_overlayStart(voiceNr, bh_overlayActive, note,
                                BH_OVERLAY_NO_MIDI_NOTE,
-                               LIVEREC_SRC_OVERLAY, 0u);
+                               LIVEREC_SRC_OVERLAY, 0u, 0u);
 }
 
 /*
@@ -1247,7 +1266,7 @@ static void buttonHandler_overlayReconfigure(uint8_t which)
         } else {
             /* single/flam -> roll: the hit already played was hit 0. */
             seq_liveRollStart(track, idx, (uint8_t)(e->note & 0x7Fu),
-                              BH_OVERLAY_VEL, 1u);
+                              BH_OVERLAY_VEL, 1u, e->layers);
             e->count = 0xFFu;
         }
         e->rate = idx;
@@ -1356,14 +1375,17 @@ void buttonHandler_setOverlay(uint8_t which)
 
 void buttonHandler_overlayMidiNoteOn(uint8_t track, uint8_t which,
                                      uint8_t internal, uint8_t midiNote,
-                                     uint16_t ageUs)
+                                     uint16_t ageUs, uint8_t sub)
 {
     if (track >= NUM_TRACKS || which == 0u || which > 2u)
         return;
+    /* S096 P3 T1: a MIDI overlay gesture on a Tetrakt track plays the
+     * note's layer (sub), for every hit (decided Q16). */
     buttonHandler_overlayStart(track, which,
                                (uint8_t)(internal & 0x7Fu),
                                (uint8_t)((midiNote & 0x7Fu) + 1u),
-                               LIVEREC_SRC_MIDI, ageUs);
+                               LIVEREC_SRC_MIDI, ageUs,
+                               midiNoteMode_layerMask(track, sub));
 }
 
 void buttonHandler_overlayMidiNoteOff(uint8_t track, uint8_t midiNote)

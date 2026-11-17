@@ -25,9 +25,22 @@ void seq_drainPendingAutomationTo(uint8_t limit)
      * read and queue reset is detected and left for this same drain pass.
      */
     for (;;) {
-        while (i < seq_pending_automation_count && i < limit) {
-            uint16_t identity = seq_pending_automation[i].identity;
+        /*
+         * S096 P3 C3: foreground (LIVE) entries produced by
+         * midiNoteMode_prepareTrigger() are appended after the mark taken
+         * with the trigger pops. They must still land in this pass, after
+         * the restore and before the fires, so a Pattern trigger cannot undo
+         * the live paraphonic hand. The drain therefore consumes contiguous
+         * LIVE entries beyond the mark and stops at the first ordinary
+         * (TIM3) entry there: those belong to triggers not yet popped and
+         * still wait for the next pass (S087 D6).
+         */
+        while (i < seq_pending_automation_count) {
+            const uint16_t identity = seq_pending_automation[i].identity;
             uint16_t packed = seq_pending_automation[i].payload;
+
+            if (i >= limit && (identity & SEQ_PENDING_LIVE_BIT) == 0u)
+                break;
             uint16_t target = (uint16_t)(packed & 0x01FFu);
             /* Automation storage is already in descriptor parameter space;
              * do not apply MIDI-CC-style 7-bit-to-8-bit expansion here. */
@@ -111,7 +124,8 @@ void seq_drainPendingAutomationTo(uint8_t limit)
                             seq_writeInstrumentAutomation(owner_scene, target,
                                                           value);
 
-                        if (descriptor)
+                        if (descriptor &&
+                            (identity & SEQ_PENDING_LIVE_BIT) == 0u)
                             seq_rampStartIfPaired(owner_track, owner_scene,
                                 (uint8_t)((identity & SEQ_PENDING_STEP_ID_MASK) %
                                           NUM_STEPS),

@@ -19,12 +19,13 @@
 #include "InstrumentManager.h"
 #include "ColloidVoice.h"
 
-/* 50 rows (S095 P3): 6 oscillator, 4 amp envelope, sustain and slew, 3
- * intervals with detune, spread and motion, 5 filter envelope with the
- * filter drive, 8 filter (frq res typ rte and four offsets), vol/pan with
- * tone and overdrive, 8 LFO rows, 2 velocity rows, 4 LFO target rows
- * (asserted against colloid_param_index_t in the .c) */
-#define COLLOID_PARAM_DESCRIPTOR_COUNT 50u
+/* 59 rows (S096 P3): the S095 P3 50 (6 oscillator, 4 amp envelope, sustain
+ * and slew, 3 intervals with detune, spread and motion, 5 filter envelope
+ * with the filter drive, 8 filter, vol/pan with tone and overdrive, 8 LFO
+ * rows, 2 velocity rows, 4 LFO target rows) plus the pitch envelope
+ * (pat pde psl pre), its amount (pam) and the noise (nlv nto nwd npn).
+ * Asserted against colloid_param_index_t in the .c. */
+#define COLLOID_PARAM_DESCRIPTOR_COUNT 59u
 /* eight sub-pages: the front-panel SELECT1..8 buttons (menu.c) */
 #define COLLOID_MENU_PAGE_COUNT        8u
 /* Basic (C-D1, user 2026-11-12): any slot, any number per Scene, held to
@@ -37,6 +38,23 @@ extern const instrument_menu_page_t colloid_menu_pages[];
 extern const uint8_t colloid_menu_page_count;
 extern const char colloid_instrument_display_label[];
 extern const uint8_t colloid_instrument_type_flags;
+
+/* S096 P3: descriptor-local indices other modules need (finding D8),
+ * asserted against colloid_param_index_t in ColloidParameters.c. */
+#define COL_IDX_COARSE      0u    /* osc1_pitch_coarse */
+#define COL_IDX_SUSTAIN     10u   /* col_sustain */
+#define COL_IDX_INTERVAL_1  12u   /* col_interval_1; in2 13, in3 14 */
+/*
+ * The sus-row test (S096 P3, finding D8).
+ *
+ * What:       1 for the col_sustain row's descriptor, else 0 (any other
+ *             pointer, NULL included).
+ * Why:        InstrumentManager sees every value the automation drain writes
+ *             and must flag a sus = on write for the Scene-change decision;
+ *             comparing the pointer keeps the check allocation-free.
+ * Accessors:  instrumentManager_automationWritten().
+ */
+uint8_t colloidParameters_isSustainRow(const ParamDescriptor *descriptor);
 
 /*
  * Whether a Colloid cell has no effect in the voice's current mode

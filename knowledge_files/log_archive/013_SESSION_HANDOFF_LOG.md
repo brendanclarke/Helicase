@@ -27,7 +27,6 @@ Produced 15-item prioritised action list in DSP_AUDIT.md (renamed from AUDIT.md 
 
 ### 2. Performance Improvements Implemented
 
-**By Claude:**
 - I-Cache enable (ICIALLU invalidate + SCB->CCR IC bit) — `clocks.c:92-100`
 - D-Cache + MPU configuration — `clocks.c:102-177`:
   - Region 0: All SRAM (0x20000000, 1MB) — Normal, Write-Through, No-Write-Allocate
@@ -36,8 +35,6 @@ Produced 15-item prioritised action list in DSP_AUDIT.md (renamed from AUDIT.md 
 - .dma_nocache NOLOAD section in linker script — `STM32F765VIHx_FLASH.ld:47-55`
 - DMA buffers tagged `__attribute__((section(".dma_nocache")))` — `AudioCodecManager.c:175-176`, `endlessPots.c` adc_dma_buf
 - audioOutBuffer/audioOutBuffer2 placed in DTCM via INDTCMZ — `AudioCodecManager.c:178-179`
-
-**By user (points 1-8, confirmed done before Claude's work):**
 - Various performance items from the audit list
 - -Ofast for DSP source files — `Makefile:119` (`CFLAGS_DSP` substitution) and `Makefile:134-137` (pattern rule for `Core/DSPAudio/*.c`)
 - -flto added to CFLAGS and LDFLAGS

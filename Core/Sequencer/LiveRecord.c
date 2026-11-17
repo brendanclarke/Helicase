@@ -32,6 +32,7 @@
 #include "EffectsManager.h"
 #include "timebase.h"
 #include "InstrumentManager.h"
+#include "TetraktParameters.h"   /* S096 P3: the lon row's index */
 #include "SceneModTargets.h"
 #include "EffectTypes.h"
 #include "PatternTrace.h"
@@ -73,6 +74,18 @@ static uint8_t liveRec_epochValid = 0u;
 static uint8_t liveRec_latch[LIVEREC_TARGET_BYTES];
 static uint8_t liveRec_dirty[LIVEREC_TARGET_BYTES];
 static uint8_t liveRec_erase[LIVEREC_TARGET_BYTES];
+
+/*
+ * The last MIDI layer write per track (S096 P3 T1, plan §6.3; finding D4).
+ *
+ * What: the step and the low 16 bits of the master tick at which a hit's
+ * lon was last written on track t. A later layer hit placed on the same
+ * step less than one step interval later ORs into that step's lon; any other
+ * hit replaces the step's lon (an existing lock from an earlier take).
+ * RAM: 21 B SRAM1. Cleared at every take boundary (liveRec_newTake()).
+ */
+static uint8_t  liveRec_layerStep[NUM_TRACKS];   /* 0xFF none */
+static uint16_t liveRec_layerTick[NUM_TRACKS];
 
 /*
  * Individual Morph values captured at the edit (S081 P3 global Morph fix,
@@ -351,9 +364,13 @@ static uint8_t liveRec_writeStep(uint8_t track, uint8_t step, uint8_t note,
  */
 static void liveRec_newTake(void)
 {
+    uint8_t track;
+
     liveRec_endAllRolls(0u);
     memset(liveRec_latch, 0, sizeof(liveRec_latch));
     memset(liveRec_dirty, 0, sizeof(liveRec_dirty));
+    for (track = 0u; track < NUM_TRACKS; track++)
+        liveRec_layerStep[track] = 0xFFu;
     liveRec_origin = scene_getActiveIndex();
     liveRec_target = seq_getTrackPlayedScene(liveRec_rtk);
 }
@@ -371,6 +388,7 @@ void liveRec_init(uint8_t activeTrack)
     memset(liveRec_dirty, 0, sizeof(liveRec_dirty));
     memset(liveRec_erase, 0, sizeof(liveRec_erase));
     memset(liveRec_roll, 0, sizeof(liveRec_roll));
+    memset(liveRec_layerStep, 0xFF, sizeof(liveRec_layerStep));
 }
 
 /* Position epoch -> end per-step capture state (latches/erase kept). */
@@ -1126,15 +1144,65 @@ uint8_t liveRec_activePatternLocked(void)
  * Affiliates: seq_suppressStepOnce(), seq_cancelPendingTrigger(),
  * patSvc_recordStep().
  */
+/*
+ * S096 P3: a hit's own automation (finding D6).
+ *
+ * What: after the hit's step is written, its note-coupled automation is
+ * written into the same step of the same track (T = P(track)): a Tetrakt
+ * layer mask as the lon entry (OR-merged with the step's lon when this pass
+ * already wrote it, else replacing it), then each of the record's autos.
+ * Why: the brief: a MIDI layer note "temporarily sets the trigger mask
+ * automation for the step so it can be recorded"; paraphonic notes record
+ * sus / intervals / coa at their own step.
+ * Inputs: track, placement step, t (layers, autos).
+ */
+static void liveRec_writeHitAutomation(uint8_t track, uint8_t step,
+                                       const liveRec_trigger_t *t)
+{
+    uint8_t k;
+
+    if (!t)
+        return;
+    if (t->layers != 0u) {
+        const uint8_t slot = (uint8_t)((track >= 6u) ? 5u : track);
+        const uint16_t target = instrumentParam_make(slot, TETRAKT_PARAM_LAYER_ON_INDEX);
+        uint8_t value = t->layers;
+        uint8_t old;
+        seq_track_time_t snap;
+        uint16_t now;
+        uint16_t interval;
+
+        seq_captureTrackTime(track, &snap);
+        now = (uint16_t)snap.elapsedTick;
+        interval = (uint16_t)(snap.interval >> 8);
+        if (interval == 0u)
+            interval = 1u;
+        if (liveRec_layerStep[track] == step &&
+            (uint16_t)(now - liveRec_layerTick[track]) < interval &&
+            pat_findStepAutomation(liveRec_target, track, step, target, &old))
+            value = (uint8_t)(value | old);
+        if (patSvc_writeStepAutomation(liveRec_target, track, step, target, value))
+            menu_automationTargetRecorded(liveRec_target, track, target);
+        liveRec_layerStep[track] = step;
+        liveRec_layerTick[track] = now;
+    }
+    for (k = 0u; k < t->autoCount && k < 4u; k++) {
+        if (patSvc_writeStepAutomation(liveRec_target, track, step,
+                                       t->autoTarget[k], t->autoValue[k]))
+            menu_automationTargetRecorded(liveRec_target, track, t->autoTarget[k]);
+    }
+}
+
 static uint8_t liveRec_commitHit(uint8_t track, const seq_place_t *pl,
                                  uint8_t note, uint8_t noteIsDefault,
                                  uint8_t vel, uint8_t roll, uint8_t rhythm,
-                                 uint8_t setFil)
+                                 uint8_t setFil, const liveRec_trigger_t *t)
 {
     if (!liveRec_writeStep(track, pl->step, note, noteIsDefault, vel,
                            pl->delay, roll, (uint8_t)(roll ? 100u : 0u),
                            (uint8_t)(roll ? rhythm : 0u), setFil))
         return 0u;
+    liveRec_writeHitAutomation(track, pl->step, t);
     if (pl->rel > 0)
         seq_suppressStepOnce(track, pl->step, pl->ahead);
     else if (pl->rel == 0)
@@ -1191,10 +1259,10 @@ static void liveRec_placeFlam(uint8_t track, const seq_track_time_t *snap,
     }
     if (haveGrace && gracePl.step != mainPl->step)
         (void)liveRec_commitHit(track, &gracePl, t->note, t->note_is_default,
-                                liveRec_graceVel, 0u, 0u, setFil);
+                                liveRec_graceVel, 0u, 0u, setFil, t);
     liveRec_graceValid = 0u;
     (void)liveRec_commitHit(track, mainPl, t->note, t->note_is_default,
-                            t->velocity, 0u, 0u, setFil);
+                            t->velocity, 0u, 0u, setFil, t);
 }
 
 /*
@@ -1414,6 +1482,13 @@ void liveRec_triggerIn(const liveRec_trigger_t *t)
         return;
     }
 
+    /* S096 P3: automation-only events (a paraphonic later key, a release, a
+     * Learn delta) place like a hit and write its autos; no trigger. */
+    if (t->kind == LIVEREC_HIT_AUTO) {
+        liveRec_writeHitAutomation(track, pl.step, t);
+        return;
+    }
+
     /*
      * Held rolls: every one is a span, per track (S081 §8.8; S084 P4,
      * user Q7).
@@ -1449,7 +1524,7 @@ void liveRec_triggerIn(const liveRec_trigger_t *t)
         }
         if (t->roll == 0u) {
             (void)liveRec_commitHit(track, &pl, t->note, t->note_is_default,
-                                    t->velocity, 0u, 0u, setFil);
+                                    t->velocity, 0u, 0u, setFil, t);
             return;
         }
         if ((r->flags & LIVEREC_ROLL_HELD) != 0u)
@@ -1467,7 +1542,7 @@ void liveRec_triggerIn(const liveRec_trigger_t *t)
         r->vel = t->velocity;
         r->hits = 0u;
         (void)liveRec_commitHit(track, &pl, t->note, t->note_is_default,
-                                t->velocity, t->roll, t->rhythm, setFil);
+                                t->velocity, t->roll, t->rhythm, setFil, t);
         return;
     }
     if (t->kind == LIVEREC_HIT_FLAM_GRACE) {
@@ -1482,7 +1557,7 @@ void liveRec_triggerIn(const liveRec_trigger_t *t)
         return;
     }
     (void)liveRec_commitHit(track, &pl, t->note, t->note_is_default,
-                            t->velocity, 0u, 0u, setFil);
+                            t->velocity, 0u, 0u, setFil, t);
 }
 
 /*
@@ -1620,6 +1695,65 @@ void liveRec_paramIn(uint16_t target9, uint8_t source)
     if (liveRec_modeState == LIVEREC_MODE_LATCH)
         liveRec_latch[target9 >> 3] |= (uint8_t)(1u << (target9 & 7u));
 #endif
+}
+
+/*
+ * Record a value that is not the menu value (S096 P3; decided Q11).
+ *
+ * What: as liveRec_paramIn() with the first-change rule, but the value
+ * written is `value7` as given (a MIDI Learn delta's effective value, base +
+ * delta), not the stored menu value (which is the base). Only a step that is
+ * playing can take it: with no step known the change is dropped (no captured
+ * value can wait for the next step start; the stored base is not the played
+ * value).
+ * Inputs: target9 (a voice parameter target), value7. Output: 1 when the
+ * value was written (or this step already has it), 0 otherwise.
+ * Accessors: midiLearn_applySource() (delta rows, with live record writing).
+ * Affiliates: liveRec_writeCurrentValue() (the same write rules),
+ * seq_menuOverrideSet() (the caller sets the R12 override).
+ */
+uint8_t liveRec_paramValueIn(uint16_t target9, uint8_t value7)
+{
+    uint8_t bit;
+    uint8_t stepKnown = 0u;
+
+    if (target9 >= LIVEREC_TARGET_BITS)
+        return 0u;
+    if (liveRec_modeState != LIVEREC_MODE_LATCH &&
+        liveRec_modeState != LIVEREC_MODE_OVERDUB)
+        return 0u;
+    if (!liveRec_targetOwned(target9)) {
+        liveRec_drop(2u, liveRec_rtk, (uint8_t)(target9 & 0x7Fu));
+        return 0u;
+    }
+    bit = (uint8_t)(1u << (target9 & 7u));
+    if (liveRec_patternWriting() && !patSvc_replacePending()) {
+        liveRec_syncRing();
+        stepKnown = (uint8_t)((liveRec_prevFlags[liveRec_rtk] &
+                               LIVEREC_PREV_VALID) != 0u);
+    }
+    if (liveRec_dirty[target9 >> 3] & bit)
+        return 1u;                  /* this step already has its value */
+    if (!stepKnown)
+        return 0u;                  /* no step to write; not captured */
+    liveRec_dirty[target9 >> 3] |= bit;
+    {
+        seq_track_time_t now;
+
+        seq_captureTrackTime(liveRec_rtk, &now);
+        if (now.stepIndex < 0)
+            return 0u;
+        if (!patSvc_writeStepAutomation(liveRec_target, liveRec_rtk,
+                                        (uint8_t)now.stepIndex, target9, value7)) {
+            liveRec_drop(4u, liveRec_rtk, (uint8_t)now.stepIndex);
+            return 0u;
+        }
+        menu_automationTargetRecorded(liveRec_target, liveRec_rtk, target9);
+        if (seq_fillActive)
+            patSvc_setStepCondition(liveRec_target, liveRec_rtk,
+                                    (uint8_t)now.stepIndex, 21u);
+    }
+    return 1u;
 }
 
 /*
