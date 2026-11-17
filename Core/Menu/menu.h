@@ -87,6 +87,10 @@ enum PageNames {
     EUKLID_PAGE,
     PATTERN_SETTINGS_PAGE,
     RECORDING_PAGE,
+    /*
+     * Unused since S097: the SOM generator is archived (archive/som/) and no
+     * button opens this page. The id stays so EFFECT_PAGE keeps its value.
+     */
     SOM_PAGE,
     /*
      * Effect page (SHIFT+PERF, Session 072 step 7). Cells are resolved by

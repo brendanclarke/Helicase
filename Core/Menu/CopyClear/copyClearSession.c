@@ -656,7 +656,7 @@ uint8_t copyClear_buttonPressed(uint8_t buttonNr)
         return 0u;     /* MODE modifier only; its LED layer stays (spec §7). */
     if (buttonNr == BUT_MODE1 || buttonNr == BUT_MODE2 ||
         buttonNr == BUT_MODE3 || buttonNr == BUT_MODE4) {
-        /* LOAD/SAVE, MENU and SOM are not reachable during an operation. */
+        /* LOAD/SAVE and MENU are not reachable during an operation. */
         return cc_modeAllowed(cc_modeForButton(buttonNr)) ? 0u : 1u;
     }
     if (buttonNr == BUT_BAR1 || buttonNr == BUT_BAR2) {

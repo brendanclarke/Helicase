@@ -106,6 +106,8 @@ make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build
 │   ├── link_budget.py              ← flash/ITCM/DTCM/arena report after every build
 │   ├── decode_devlogs.py           ← decodes /bootlog.bin and /asavetrc.bin (V/X layouts updated S074)
 │   └── dsp_test/                   ← host DSP test bench (DSP_TEST.md, S073)
+├── archive/
+│   └── som/                        ← SOM generator, not compiled (reference only, S097)
 ├── build/                          ← generated, not in VCS
 ├── knowledge_files/
 │   ├── SESSION_HANDOFF_TEMPLATE.md ← template for writing new session handoff logs
@@ -186,9 +188,7 @@ make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build
     ├── Scene/
     │   ├── Pattern/
     │   │   ├── PatternData.c/h      ← pattern/track/step storage and edit API
-    │   │   ├── EuklidGenerator.c/h  ← pattern generator
-    │   │   ├── SomData.c/h          ← SOM data tables
-    │   │   └── SomGenerator.c/h     ← SOM pattern/performance generator
+    │   │   └── EuklidGenerator.c/h  ← pattern generator
     │   └── Preset/
     │       ├── ParameterArray.h/c   ← supersedes Parameters.h; NUM_PARAMS=275
     │       └── presetManager.c/h    ← typed load/save for kit, morph, pattern, performance, all, globals

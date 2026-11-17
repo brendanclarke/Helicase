@@ -29,7 +29,7 @@
  * midiParser_calcDetune() moves here because MidiParser is deleted and the
  * helper is pure pitch maths (Oscillator.c is its only user).
  * Affiliates: Oscillator.c (frequency, detune), sequencer.c, SceneData.c,
- * filesystem.c, SomGenerator.c, buttonHandler.c, MidiNoteMap.c (63 base).
+ * filesystem.c, buttonHandler.c, MidiNoteMap.c (63 base).
  */
 
 #include <stdint.h>
@@ -37,7 +37,7 @@
 /*
  * Default internal note (unchanged value).
  *
- * Inputs: Sequencer, overlay, preview, SOM and the note map use this when
+ * Inputs: Sequencer, overlay, preview and the note map use this when
  * no pitch offset applies. Output: 63; the oscillator plays its default
  * pitch, and note - 63 is the offset in semitones (Oscillator.c
  * osc_setBaseNote()). S083: a track's MIDI note (`nte`) is no longer a

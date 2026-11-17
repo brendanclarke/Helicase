@@ -140,8 +140,6 @@ SRCS = \
   Core/Bank/Scene/Pattern/PatternData.c \
   Core/Bank/Scene/Pattern/PatternStackService.c \
   Core/Bank/Scene/Pattern/EuklidGenerator.c \
-  Core/Bank/Scene/Pattern/SomGenerator.c \
-  Core/Bank/Scene/Pattern/SomData.c \
 	  Core/Sequencer/sequencer.c \
 	  Core/Sequencer/sequencerTimer.c \
 	  Core/Sequencer/clockSync.c \
@@ -308,8 +306,9 @@ $(BUILD)/Core/DSP/Effects/CrumpBit/CrumpBitEffect.o: Core/DSP/Effects/CrumpBit/C
 # S095 P1: the Space kit's per-frame half (the feed read, the drain envelope)
 # runs with the fast-math policy like CrumpBit. Its init-time half
 # (SpaceKit.c) is an ordinary -O2 source in SRCS: a per-file -Os was tried
-# and has no effect under -flto (the link step re-optimizes at -O2; the image
-# was byte-identical).
+# on it and left the image byte-identical. That does not hold in general:
+# compile-time -Os is kept per function through LTO (S097 P0 §4 A measured
+# -135 KB with -Os on every SRCS file).
 $(BUILD)/Core/DSP/Effects/Space/SpaceKitDsp.o: Core/DSP/Effects/Space/SpaceKitDsp.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@

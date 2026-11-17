@@ -57,7 +57,6 @@
 #include "Autosave.h"
 #include "AutosaveTrace.h"
 #include "EuklidGenerator.h"
-#include "SomGenerator.h"
 #include "menuEffects.h"
 #include "triggerJacks.h"
 #include "MidiIn.h"
@@ -19900,34 +19899,11 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
         midiIn_setGlobalChannel(value);
         break;
 
-    case PAR_POS_X:
-        /*
-         * SOM parameters now call the SOM generator directly. These are
-         * generator controls under Core/Bank/Scene/Pattern, not sequencer transport
-         * messages. Inputs are menu-scaled 0..127 values.
-         */
-        som_setX(value);
-        break;
-
-    case PAR_POS_Y:
-        som_setY(value);
-        break;
-
-    case PAR_FLUX:
-        /*
-         * Flux is stored by SOM as 0.0..1.0, while the menu exposes 0..127.
-         * Menu performs that UI-scale conversion at the direct call site.
-         */
-        som_setFlux((float)value / 127.0f);
-        break;
-
-    case PAR_SOM_FREQ:
-        /*
-         * SOM frequency is per active voice/track, so Menu supplies the active
-         * voice and SOM owns the generator state mutation.
-         */
-        som_setFreq(value, menu_getActiveVoice());
-        break;
+    /*
+     * PAR_POS_X, PAR_POS_Y, PAR_FLUX and PAR_SOM_FREQ have no action: the SOM
+     * generator they drove is archived (S097, archive/som/). The ids stay so
+     * every later PAR_* id keeps its value.
+     */
 
     case PAR_TRACK_LENGTH:
         /*

@@ -51,7 +51,6 @@
 #include "usb_manager.h"
 #include "clockSync.h"
 #include "MidiPitch.h"
-#include "SomGenerator.h"
 #include "triggerJacks.h"
 #include "timebase.h"
 #include "ledHandler.h"
@@ -208,7 +207,7 @@ uint8_t seq_fxTakeEvent(void)
  * (removed), the legacy roll block in seq_advanceTrackStep (removed).
  */
 
-static int16_t seq_stepIndex[NUM_TRACKS]; /**< fixed 0..15 track cursors; -1 before the next trigger */
+static int16_t seq_stepIndex[NUM_TRACKS]; /**< track cursors 0..len-1 (len 1..NUM_STEPS); -1 before the next trigger */
 
 /*
  * Per-track Q8.8 DDA tick accumulator (S078 §2.4.1).
@@ -926,8 +925,6 @@ static uint8_t seq_autoSyncActiveSource = SEQ_EXT_SYNC_OFF;
 static uint32_t seq_autoSyncLastUs = 0;
 uint8_t seq_lastMasterStep[NUM_TRACKS];		//keeps track of the last triggered master sync step of each track
 
-
-static uint8_t seq_SomModeActive = 0;
 
 static uint8_t seq_mutedTracks=0;			/**< indicate which tracks are muted */
 uint8_t seq_running = 0;					/**< 1 if running, 0 if stopped*/
@@ -3319,12 +3316,6 @@ static void seq_advanceTrackStep(uint8_t track)
 			seq_trackRepeatCount[track]++;
 		}
 		break;
-	}
-
-	if (seq_SomModeActive) {
-		if (track == 0u)
-			som_tick(seq_stepIndex[0], seq_mutedTracks);
-		return;
 	}
 
 	{
@@ -5995,8 +5986,7 @@ static void seq_loopProcessTick(void)
 		 * Context: TIM3, before the DDA. Affiliates: seq_recRingPush(),
 		 * liveRec_drainRing(), liveRec_stepEnd() (jump rule).
 		 */
-		if (!seq_SomModeActive &&
-		    (uint32_t)seq_trackAccumulator[track] + 256u <
+		if ((uint32_t)seq_trackAccumulator[track] + 256u <
 		        (uint32_t)stepScale_ticksQ8(seq_effectiveTrackScale[track]))
 			seq_recRingPush(track, seq_stepIndex[track], 0u, 1u);
 	}

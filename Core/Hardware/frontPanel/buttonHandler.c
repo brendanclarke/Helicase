@@ -2092,6 +2092,17 @@ static void handleModeButtons(uint8_t mode)
      */
     if (preset_backgroundBankLoadLocked())
         return;
+    /*
+     * SHIFT+MODE STEP has no action (S097).
+     *
+     * What: the press returns before any mode, page, LED or latched surface
+     * changes. Why: it selected the SOM generator page (mode 0x06); the
+     * generator is archived (archive/som/), and without this return the press
+     * would leave the panel in a mode with no page. Inputs: SHIFT state and
+     * the MODE STEP press. Outputs: none.
+     */
+    if (buttonHandler_getShift() && mode == SELECT_MODE_STEP)
+        return;
     {
         uint8_t next;
 
@@ -2214,10 +2225,6 @@ static void handleModeButtons(uint8_t mode)
         led_clearSequencerLeds();
         led_clearSelectLeds();
         menu_switchPage(EFFECT_PAGE);
-        break;
-
-    case SELECT_MODE_SOM_GEN:
-        menu_switchPage(SOM_PAGE);
         break;
 
     default:
@@ -2955,7 +2962,7 @@ static void processPress(uint8_t buttonNr)
      * What: while live erase is enabled, implements the per-mode table:
      *  - SEQ in VOICE/STEP erases the ACTIVE track's triggers/specials while
      *    held; SEQ in FX erases the FX sequence; SEQ in PERF (Scene buttons),
-     *    Load/Save, global settings and SOM_GEN is consumed with no action;
+     *    Load/Save and global settings is consumed with no action;
      *  - VOICE in VOICE/STEP/PERF/FX erases that whole track while held, and is
      *    consumed elsewhere; except VOICE in PERF while the loop is engaged: it
      *    keeps its looper function (S081 P3 Q4) and falls through to
@@ -2986,7 +2993,7 @@ static void processPress(uint8_t buttonNr)
                 bh_eraseFxSeqMask |= bit;
                 liveRec_eraseFxSeqHeld(1u);
             }
-            /* PERF, LOAD_SAVE, MENU, SOM_GEN: consumed */
+            /* PERF, LOAD_SAVE, MENU: consumed */
             return;
         }
         if (eraseVoice >= 0 &&

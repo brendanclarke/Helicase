@@ -20,7 +20,7 @@
 #define SELECT_MODE_LOAD_SAVE   0x03
 /* SHIFT+PERF selects the Effect page; the retired Euklid mode is compiled out. */
 #define SELECT_MODE_FX          0x05
-#define SELECT_MODE_SOM_GEN     0x06
+/* 0x06 (SHIFT+MODE STEP) was the SOM generator; unused since S097. */
 #define SELECT_MODE_MENU        0x07
 
 /*
