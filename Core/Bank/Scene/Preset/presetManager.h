@@ -236,6 +236,21 @@ uint8_t preset_requestBackgroundBankLoad(uint16_t slot, uint16_t act_mask,
                                          uint16_t empty_mask, uint8_t origin);
 uint8_t preset_backgroundBankLoadRunning(void);
 /*
+ * Background Scene and Pattern Loads (S098 P2).
+ *
+ * The same phases as a Bank load (Scene 17 when a played Scene is replaced
+ * while running, else a direct post). Kinds: PRESET_BG_KIND_BANK (internal,
+ * set by preset_requestBackgroundBankLoad()), PRESET_BG_KIND_SCENE,
+ * PRESET_BG_KIND_PATTERN. Returns 1 when accepted.
+ * preset_backgroundBankLoadRunning()/Locked()/Unlocked() stay Bank-only.
+ * Client: Menu Scene and Pattern Load OK.
+ */
+#define PRESET_BG_KIND_BANK     0u
+#define PRESET_BG_KIND_SCENE    1u
+#define PRESET_BG_KIND_PATTERN  2u
+uint8_t preset_requestBackgroundSceneLoad(uint16_t slot, uint16_t scene_mask,
+                                          uint8_t kind);
+/*
  * Unlocked: phase 5 of a progressive load, the panel is free (S082 P3).
  * Locked: running and not unlocked (S082 P1 R7 drop applies).
  * Accessors: ButtonHandler, Menu, LED owner.
@@ -585,6 +600,25 @@ void    preset_startSingleVoiceApply(uint8_t slot, uint8_t source_scene);
  * replaced it, otherwise only per-track slots playing a loaded Scene (S097 P3).
  */
 void    preset_startLoadApply(uint16_t scene_mask);
+/*
+ * Scene switch, decided per track (S098 P1; user, Q2).
+ *
+ * preset_sceneSwitchKeepMask(target, &effect_same): bit t set when track t
+ *   and its slot are identical in the Scene the track plays and in target
+ *   (tracks 5 and 6 together); *effect_same when the Effect is identical.
+ *   Runs before the switch. DEV: one 'x' trace record.
+ * preset_prepareSceneSwitch(target, keep): carries morph_interpolation[] of
+ *   the kept slots into target and retargets the Morph worker. Runs before
+ *   scene_selectActive(target).
+ * preset_startSceneSwitchApply(keep, effect_same): the voice half after
+ *   seq_selectActivePattern(): changed slots through the Scene worker,
+ *   modulation prepared and rebound only where it touches a change, the
+ *   Effect rebound or activated, mirrors synced.
+ * Client: menu_perfSceneChangeExecute().
+ */
+uint8_t preset_sceneSwitchKeepMask(uint8_t target, uint8_t *effect_same);
+void    preset_prepareSceneSwitch(uint8_t target, uint8_t keep_tracks);
+void    preset_startSceneSwitchApply(uint8_t keep_tracks, uint8_t effect_same);
 /*
  * Resolve one slot's played Scene for per-track playback (S077 P2 §3.5).
  *

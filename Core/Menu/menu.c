@@ -10332,6 +10332,9 @@ void menu_perfModeSceneButtonPressed(uint8_t scene_index)
 
 static void menu_perfSceneChangeExecute(uint8_t scene_index, uint8_t restart)
 {
+    uint8_t keep;
+    uint8_t effect_same;
+
     /* S082 P3 D52: only an available Scene; a direct, deferred or queued
      * change to a Scene the load has not finished is dropped (including one
      * armed before a direct load). */
@@ -10339,6 +10342,23 @@ static void menu_perfSceneChangeExecute(uint8_t scene_index, uint8_t restart)
         !bank_sceneAvailable(scene_index)) {
         return;
     }
+    /*
+     * Decide per track what the switch keeps, then carry the kept slots'
+     * derived state (S098 P1; user, Q2).
+     *
+     * What: preset_sceneSwitchKeepMask() compares each track and its voice
+     * slot in the Scene it plays and in scene_index, and the Effect.
+     * preset_prepareSceneSwitch() copies the kept slots' Morph image into
+     * scene_index and retargets the Morph worker. Both run before any switch
+     * state moves, because they read the outgoing Scenes.
+     * Why: target T1. An instant switch to an identical Scene is inaudible,
+     * whenever it happens. A partly identical Scene changes only what
+     * differs. One procedure serves PERF, MIDI PC, deferred, queued and
+     * chain-fired changes, which all arrive here.
+     * Affiliates: seq_selectActivePattern(), preset_startSceneSwitchApply().
+     */
+    keep = preset_sceneSwitchKeepMask(scene_index, &effect_same);
+    preset_prepareSceneSwitch(scene_index, keep);
     scene_selectActive(scene_index);
     bank_selectActiveSceneForEditMask(scene_index);
     /*
@@ -10350,7 +10370,7 @@ static void menu_perfSceneChangeExecute(uint8_t scene_index, uint8_t restart)
      * scene_mask_voice_edit and is not consulted by PatternData.
      */
     menu_setShownPattern(scene_index);
-    seq_selectActivePattern(scene_index);
+    seq_selectActivePattern(scene_index, keep, effect_same);
     /*
      * S080 F9/G12, P2: an executed switch cancels any pending direct change
      * and any chain fire, but never a user-queued change - only a transport
@@ -10368,10 +10388,19 @@ static void menu_perfSceneChangeExecute(uint8_t scene_index, uint8_t restart)
      * track to the running master clock. Inputs: restart. Outputs:
      * seq_resetToPatternStart(). Affiliates: menu_perfModeSceneButtonPressed(),
      * menu_serviceDeferredSceneChange(), seq_loopRebaseToStart().
+     * S098 P1 (Q1): with pcr on, a switch to an identical Scene still
+     * restarts; the restart is a musical action the user chose.
      */
     if (restart)
         seq_resetToPatternStart();
-    preset_startDrumsetApply();
+    /*
+     * The voice half of the switch (S098 P1): only the changed slots go
+     * through the Scene worker; kept voices continue. With `restart` (pcr,
+     * Q1) the restart above already ran; it moves every cursor but applies
+     * nothing to the kept voices.
+     * Affiliates: preset_startSceneSwitchApply().
+     */
+    preset_startSceneSwitchApply(keep, effect_same);
     /*
      * PERF Scene LEDs only in PERF mode (S083 C-5).
      * What: the SEQ row shows PERF Scene state only while PERF is the mode;
@@ -10512,18 +10541,24 @@ void menu_serviceDeferredSceneChange(void)
 }
 
 /*
- * Owner of both fast-blink slots (S080 P2 Defect 10; S082 P3 W1).
+ * Owner of both fast-blink slots (S080 P2 Defect 10; S082 P3 W1; S098 P2).
  *
- * What: slot QUEUED_SCENE fast-blinks the queued Scene's SEQ LED in PERF;
- * slot BANK_LOAD fast-blinks the Load/Save mode LED (LED_MODE4) while an
- * unlocked background Bank load runs and the panel is not in Load/Save mode.
+ * What: slot QUEUED_SCENE fast-blinks the queued Scene's SEQ LED in PERF.
+ * Slot BANK_LOAD fast-blinks the Load/Save mode LED (LED_MODE4):
+ *  - whenever Scene 17 exists, that is while playback runs from it, in every
+ *    mode, transport running or stopped (S098 T3);
+ *  - while an unlocked background Bank load runs and the panel is not in
+ *    Load/Save mode (S082 P3).
  * Both clear when their condition ends.
  * Why: re-deriving from state on every tick covers every way a queue, a mode
- * change or a load can start or end without call sites in each path; in
- * Load/Save mode the frozen screen shows the load, so the mode LED stays as
- * led_setMode2() set it.
+ * change, a load or a Scene 17 lifetime can start or end, without call sites
+ * in each path. Scene 17 suspends AutoSave (D11) and has no Scene number or
+ * SEQ LED. The flashing mode LED is the one reminder that playback is on the
+ * temporary Scene until the user changes Scene (user, 2026-11-18: "should be
+ * enough to alert the user"). The fast layer sits above the base and blink
+ * states, so led_setMode2() repaints do not hide it.
  * Inputs: seq_queuedSceneTarget(), buttonHandler_getMode(),
- * preset_backgroundBankLoadUnlocked().
+ * preset_backgroundBankLoadUnlocked(), scene_backgroundExists().
  * Outputs: led_setFastBlinkSlot() on change only.
  * Accessors: menu_serviceDeferredSceneChange() (every buttonHandler_tick()).
  * Affiliates: LED_LAYER_FAST, LED_FAST_SLOT_*.
@@ -10539,7 +10574,8 @@ static void menu_syncQueuedSceneLed(void)
         want = (uint8_t)(LED_SEQ1 + target);
     if (led_getFastBlinkSlot(LED_FAST_SLOT_QUEUED_SCENE) != want)
         led_setFastBlinkSlot(LED_FAST_SLOT_QUEUED_SCENE, want);
-    if (preset_backgroundBankLoadUnlocked() && mode != SELECT_MODE_LOAD_SAVE)
+    if (scene_backgroundExists() ||
+        (preset_backgroundBankLoadUnlocked() && mode != SELECT_MODE_LOAD_SAVE))
         want_load = LED_MODE4;
     if (led_getFastBlinkSlot(LED_FAST_SLOT_BANK_LOAD) != want_load)
         led_setFastBlinkSlot(LED_FAST_SLOT_BANK_LOAD, want_load);
@@ -16771,9 +16807,17 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                         commandAccepted = 1u;
                     break;
                 case SAVE_TYPE_SCENE:
-                    if (preset_loadSceneForScenes(
+                    /*
+                     * S098 P2: the Scene Load goes through the background
+                     * request. While the transport runs and a destination
+                     * is played, playback first moves onto Scene 17 (as a
+                     * Bank Load does); otherwise it is posted at once as
+                     * before. A refusal (Preset or a load busy, slot
+                     * missing) is held and replayed like any refused OK.
+                     */
+                    if (preset_requestBackgroundSceneLoad(
                             menu_currentPresetNr[SAVE_TYPE_SCENE],
-                            menu_kitLoadSceneMask)) {
+                            menu_kitLoadSceneMask, PRESET_BG_KIND_SCENE)) {
                         commandAccepted = 1u;
                     }
                     break;
@@ -16811,9 +16855,11 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                     }
                     break; }
                 case SAVE_TYPE_PATTERN:
-                    if (preset_loadPatternForScenes(
+                    /* S098 P2: as the Scene Load above (Scene 17 when a
+                     * played Pattern is replaced while running). */
+                    if (preset_requestBackgroundSceneLoad(
                             menu_currentPresetNr[SAVE_TYPE_PATTERN],
-                            menu_kitLoadSceneMask))
+                            menu_kitLoadSceneMask, PRESET_BG_KIND_PATTERN))
                         commandAccepted = 1u;
                     break;
                 case SAVE_TYPE_GLO:

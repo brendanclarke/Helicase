@@ -1,0 +1,6788 @@
+== DMA1_Stream4_IRQHandler
+ldr r3, [pc, #44] @ (<DMA1_Stream4_IRQHandler+0x30>)
+push {r4, lr}
+ldr r4, [r3, #4]
+lsls r2, r4, #26
+bmi.n <DMA1_Stream4_IRQHandler+0x10>
+lsls r3, r4, #27
+bmi.n <DMA1_Stream4_IRQHandler+0x1e>
+pop {r4, pc}
+movs r2, #32
+movs r0, #1
+str r2, [r3, #12]
+bl <pack_audio_half>
+lsls r3, r4, #27
+bpl.n <DMA1_Stream4_IRQHandler+0xe>
+ldr r3, [pc, #16] @ (<DMA1_Stream4_IRQHandler+0x30>)
+movs r2, #16
+movs r0, #0
+str r2, [r3, #12]
+ldmia.w sp!, {r4, lr}
+b.w <pack_audio_half>
+nop
+.word ADDR
+== DMA1_Stream7_IRQHandler
+ldr r2, [pc, #24] @ (<DMA1_Stream7_IRQHandler+0x1c>)
+ldr r3, [r2, #4]
+lsls r1, r3, #4
+bpl.n <DMA1_Stream7_IRQHandler+0xe>
+mov.w r1, #134217728 @ 0x8000000
+str r1, [r2, #12]
+lsls r3, r3, #5
+bpl.n <DMA1_Stream7_IRQHandler+0x1a>
+ldr r3, [pc, #8] @ (<DMA1_Stream7_IRQHandler+0x1c>)
+mov.w r2, #ADDR @ 0x4000000
+str r2, [r3, #12]
+bx lr
+.word ADDR
+== EXTI4_IRQHandler
+ldr r3, [pc, #44] @ (<EXTI4_IRQHandler+0x30>)
+ldr.w r2, [r3, #3092] @ 0xc14
+lsls r2, r2, #27
+bmi.n <EXTI4_IRQHandler+0xc>
+bx lr
+mov.w r2, #1073741824 @ ADDR
+movs r1, #16
+movs r0, #1
+ldr r2, [r2, #36] @ 0x24
+push {r4}
+ldr r4, [pc, #24] @ (<EXTI4_IRQHandler+0x34>)
+str.w r1, [r3, #3092] @ 0xc14
+movs r1, #0
+str.w r2, [r4, #2824] @ 0xb08
+strb.w r0, [r4, #2828] @ 0xb0c
+ldr.w r4, [sp], #4
+b.w <trigger_pushEvent>
+.word ADDR
+.word ADDR
+== EXTI9_5_IRQHandler
+ldr r3, [pc, #44] @ (<EXTI9_5_IRQHandler+0x30>)
+ldr.w r2, [r3, #3092] @ 0xc14
+lsls r2, r2, #26
+bmi.n <EXTI9_5_IRQHandler+0xc>
+bx lr
+mov.w r2, #1073741824 @ ADDR
+movs r0, #32
+movs r1, #1
+ldr r2, [r2, #36] @ 0x24
+push {r4}
+ldr r4, [pc, #24] @ (<EXTI9_5_IRQHandler+0x34>)
+str.w r0, [r3, #3092] @ 0xc14
+movs r0, #2
+str.w r2, [r4, #2824] @ 0xb08
+strb.w r1, [r4, #2828] @ 0xb0c
+ldr.w r4, [sp], #4
+b.w <trigger_pushEvent>
+.word ADDR
+.word ADDR
+== OTG_FS_IRQHandler
+stmdb sp!, {r4, r5, r6, r7, r8, r9, sl, fp, lr}
+ldr r4, [pc, #652] @ (<OTG_FS_IRQHandler+0x294>)
+sub sp, #28
+ldr r3, [r4, #12]
+ldr r2, [r3, #20]
+lsls r1, r2, #31
+bpl.n <OTG_FS_IRQHandler+0x16>
+add sp, #28
+ldmia.w sp!, {r4, r5, r6, r7, r8, r9, sl, fp, pc}
+ldr r2, [r3, #20]
+ldr r3, [r3, #24]
+ands.w r9, r2, r3
+beq.n <OTG_FS_IRQHandler+0x10>
+tst.w r9, #524288 @ 0x80000
+ubfx sl, r9, #16, #8
+bne.n <OTG_FS_IRQHandler+0x11c>
+tst.w sl, #4
+bne.n <OTG_FS_IRQHandler+0xae>
+tst.w r9, #2
+uxtb.w r5, r9
+beq.n <OTG_FS_IRQHandler+0x40>
+ldr r3, [r4, #12]
+movs r2, #2
+str r2, [r3, #20]
+cmp.w r9, #0
+blt.w <OTG_FS_IRQHandler+0x2f2>
+tst.w r9, #2048 @ 0x800
+ubfx r6, r9, #8, #8
+bne.w <OTG_FS_IRQHandler+0x1be>
+lsls r7, r5, #28
+bpl.n <OTG_FS_IRQHandler+0x68>
+ldr r3, [pc, #572] @ (<OTG_FS_IRQHandler+0x298>)
+ldr r0, [pc, #568] @ (<OTG_FS_IRQHandler+0x294>)
+ldr.w r3, [r3, #156] @ 0x9c
+blx r3
+ldr r3, [r4, #12]
+movs r2, #8
+str r2, [r3, #20]
+lsls r1, r5, #27
+bmi.w <OTG_FS_IRQHandler+0x2a4>
+lsls r2, r6, #27
+bmi.w <OTG_FS_IRQHandler+0x21a>
+lsls r3, r6, #26
+bmi.n <OTG_FS_IRQHandler+0x172>
+tst.w sl, #16
+beq.n <OTG_FS_IRQHandler+0x90>
+ldr r3, [pc, #536] @ (<OTG_FS_IRQHandler+0x298>)
+ldr r0, [pc, #528] @ (<OTG_FS_IRQHandler+0x294>)
+ldr.w r3, [r3, #172] @ 0xac
+blx r3
+mov.w r2, #1048576 @ 0x100000
+ldr r3, [r4, #12]
+str r2, [r3, #20]
+tst.w sl, #32
+beq.n <OTG_FS_IRQHandler+0x10>
+ldr r3, [pc, #512] @ (<OTG_FS_IRQHandler+0x298>)
+ldr r0, [pc, #504] @ (<OTG_FS_IRQHandler+0x294>)
+ldr.w r3, [r3, #176] @ 0xb0
+blx r3
+mov.w r2, #2097152 @ 0x200000
+ldr r3, [r4, #12]
+str r2, [r3, #20]
+add sp, #28
+ldmia.w sp!, {r4, r5, r6, r7, r8, r9, sl, fp, pc}
+ldr r3, [r4, #16]
+ldr r6, [r3, #24]
+ldr r3, [r3, #28]
+ands r6, r3
+uxth r6, r6
+cmp r6, #0
+beq.n <OTG_FS_IRQHandler+0x30>
+ldr r5, [pc, #468] @ (<OTG_FS_IRQHandler+0x294>)
+movs r7, #0
+str.w r9, [sp, #12]
+mov r9, sl
+add.w fp, r5, #24
+lsls r3, r6, #31
+bpl.w <OTG_FS_IRQHandler+0x324>
+ldr r2, [r4, #16]
+ldr.w lr, [fp]
+ldr r1, [r2, #16]
+ldr r3, [r2, #52] @ 0x34
+lsrs r3, r7
+lsls r3, r3, #7
+uxtb r3, r3
+orrs r3, r1
+ldr.w r1, [lr, #8]
+ands r3, r1
+tst.w r3, #1
+uxtb r1, r3
+bne.w <OTG_FS_IRQHandler+0x338>
+lsls r2, r1, #28
+bmi.w <OTG_FS_IRQHandler+0x330>
+lsls r2, r1, #27
+bpl.w <OTG_FS_IRQHandler+0x3e8>
+movs r3, #16
+str.w r3, [lr, #8]
+lsrs r6, r6, #1
+add.w r7, r7, #1
+add.w r5, r5, #40 @ 0x28
+add.w fp, fp, #4
+bne.n <OTG_FS_IRQHandler+0xca>
+mov sl, r9
+ldr.w r9, [sp, #12]
+b.n <OTG_FS_IRQHandler+0x30>
+ldr r3, [r4, #16]
+ldr r5, [r3, #24]
+ldr r3, [r3, #28]
+ands r5, r3
+lsrs r5, r5, #16
+beq.n <OTG_FS_IRQHandler+0x2a>
+add.w r6, r4, #84 @ 0x54
+mov fp, r4
+movs r7, #0
+ldr.w r8, [pc, #356] @ <OTG_FS_IRQHandler+0x298>
+lsls r2, r5, #31
+bmi.n <OTG_FS_IRQHandler+0x146>
+lsrs r5, r5, #1
+adds r7, #1
+adds r6, #4
+add.w fp, fp, #40 @ 0x28
+lsls r2, r5, #31
+bpl.n <OTG_FS_IRQHandler+0x138>
+ldr r1, [r6, #0]
+ldr r2, [r4, #16]
+ldr r3, [r1, #8]
+ldr r2, [r2, #20]
+ands r3, r2
+uxtb r2, r3
+lsls r3, r3, #31
+bmi.w <OTG_FS_IRQHandler+0x382>
+lsls r3, r2, #30
+bpl.w <OTG_FS_IRQHandler+0x3d2>
+movs r3, #2
+str r3, [r1, #8]
+lsrs r5, r5, #1
+beq.w <OTG_FS_IRQHandler+0x2a>
+adds r7, #1
+adds r6, #4
+add.w fp, fp, #40 @ 0x28
+b.n <OTG_FS_IRQHandler+0x134>
+ldr r3, [r4, #16]
+ldr r1, [r4, #24]
+ldr r2, [r3, #8]
+ubfx r2, r2, #1, #2
+cmp r2, #2
+ldr r2, [r1, #0]
+ite eq
+moveq r0, #3
+movne r0, #0
+bfi r2, r0, #0, #11
+str r2, [r1, #0]
+ldr r1, [r3, #4]
+ldr r2, [r4, #12]
+orr.w r1, r1, #256 @ 0x100
+str r1, [r3, #4]
+ldr r1, [r2, #12]
+ldr r0, [r3, #8]
+tst.w r0, #6
+ubfx r3, r0, #1, #2
+beq.w <OTG_FS_IRQHandler+0x402>
+movs r3, #1
+movs r0, #64 @ 0x40
+movs r5, #5
+bfi r1, r5, #10, #4
+strb r3, [r4, #2]
+mov.w r3, #8192 @ 0x2000
+strh r0, [r4, #4]
+str r1, [r2, #12]
+str r3, [r2, #20]
+b.n <OTG_FS_IRQHandler+0x78>
+movs r3, #0
+ldr r0, [pc, #208] @ (<OTG_FS_IRQHandler+0x294>)
+strb.w r3, [sp, #23]
+ldrb.w r3, [r4, #274] @ 0x112
+strb.w r3, [sp, #23]
+ldr r3, [pc, #200] @ (<OTG_FS_IRQHandler+0x298>)
+ldr.w r3, [r3, #164] @ 0xa4
+blx r3
+ldr r3, [r4, #16]
+mov.w r2, #2048 @ 0x800
+ldr r1, [r3, #8]
+ldr r3, [r4, #12]
+str r2, [r3, #20]
+ldrb r3, [r4, #10]
+cmp r3, #0
+beq.w <OTG_FS_IRQHandler+0x54>
+lsls r3, r1, #31
+bpl.w <OTG_FS_IRQHandler+0x54>
+ldrb.w r3, [r4, #277] @ 0x115
+cmp r3, #1
+bne.w <OTG_FS_IRQHandler+0x54>
+ldrb.w r3, [sp, #23]
+cmp r3, #3
+bne.w <OTG_FS_IRQHandler+0x54>
+ldr.w r3, [r4, #268] @ 0x10c
+ldr r2, [r3, #0]
+orr.w r2, r2, #1
+str r2, [r3, #0]
+ldr r2, [r3, #0]
+orr.w r2, r2, #3
+str r2, [r3, #0]
+b.n <OTG_FS_IRQHandler+0x54>
+ldr r2, [r4, #16]
+mov.w r8, #0
+ldr r3, [r2, #4]
+mov r0, r8
+mov r7, r8
+bic.w r3, r3, #1
+str r3, [r2, #4]
+bl <USB_OTG_FlushTxFifo.constprop.0.isra.0>
+ldrb r5, [r4, #1]
+cbz r5, <OTG_FS_IRQHandler+0x24a>
+ldr r3, [pc, #100] @ (<OTG_FS_IRQHandler+0x29c>)
+movs r2, #255 @ 0xff
+add.w r5, r3, r5, lsl #2
+ldr.w r1, [r3, #4]!
+str r2, [r1, #8]
+cmp r5, r3
+ldr r1, [r3, #60] @ 0x3c
+str r2, [r1, #8]
+bne.n <OTG_FS_IRQHandler+0x23c>
+movs r3, #11
+mov.w r2, #4294967295 @ ADDR
+bfi r8, r3, #0, #8
+bfi r7, r3, #0, #8
+ldr r3, [r4, #16]
+str r2, [r3, #24]
+mov.w r2, #65537 @ 0x10001
+str r2, [r3, #28]
+str.w r8, [r3, #20]
+str r7, [r3, #16]
+ldr r2, [r3, #0]
+bic.w r2, r2, #2032 @ 0x7f0
+str r2, [r3, #0]
+ldr r2, [pc, #44] @ (<OTG_FS_IRQHandler+0x2a0>)
+ldr r3, [r4, #84] @ 0x54
+str r2, [r3, #16]
+ldrb r2, [r4, #3]
+cmp r2, #1
+beq.w <OTG_FS_IRQHandler+0x3f4>
+ldr r3, [r4, #12]
+mov.w r2, #4096 @ 0x1000
+ldr r0, [pc, #12] @ (<OTG_FS_IRQHandler+0x294>)
+str r2, [r3, #20]
+ldr r3, [pc, #12] @ (<OTG_FS_IRQHandler+0x298>)
+ldr.w r3, [r3, #160] @ 0xa0
+blx r3
+b.n <OTG_FS_IRQHandler+0x74>
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+ldr r3, [r4, #12]
+ldr r2, [r3, #24]
+bic.w r2, r2, #16
+str r2, [r3, #24]
+ldr r2, [r3, #32]
+ubfx r0, r2, #17, #4
+and.w r1, r2, #15
+cmp r0, #2
+beq.w <OTG_FS_IRQHandler+0x40a>
+cmp r0, #6
+bne.n <OTG_FS_IRQHandler+0x2e8>
+add.w r1, r1, r1, lsl #2
+ubfx r2, r2, #4, #11
+ldr.w r5, [r4, #208] @ 0xd0
+add.w r1, r4, r1, lsl #3
+ldr.w r0, [r1, #908] @ 0x38c
+add r0, r2
+ldr r2, [r5, #0]
+str.w r2, [r4, #1484] @ 0x5cc
+ldr r2, [r5, #0]
+str.w r0, [r1, #908] @ 0x38c
+str.w r2, [r4, #1488] @ 0x5d0
+ldr r2, [r3, #24]
+orr.w r2, r2, #16
+str r2, [r3, #24]
+b.n <OTG_FS_IRQHandler+0x6e>
+ldrb r3, [r4, #10]
+cbz r3, <OTG_FS_IRQHandler+0x306>
+ldr.w r2, [r4, #268] @ 0x10c
+ldr r3, [r2, #0]
+bic.w r1, r3, #3
+bfi r3, r1, #0, #8
+str r3, [r2, #0]
+ldr r2, [r4, #16]
+ldr r3, [pc, #540] @ (<OTG_FS_IRQHandler+0x528>)
+ldr r0, [pc, #544] @ (<OTG_FS_IRQHandler+0x52c>)
+ldr.w r1, [r3, #168] @ 0xa8
+ldr r3, [r2, #4]
+bic.w r3, r3, #1
+str r3, [r2, #4]
+blx r1
+ldr r3, [r4, #12]
+mov.w r2, #2147483648 @ ADDR
+str r2, [r3, #20]
+b.n <OTG_FS_IRQHandler+0x48>
+adds r7, #1
+lsrs r6, r6, #1
+adds r5, #40 @ 0x28
+add.w fp, fp, #4
+b.n <OTG_FS_IRQHandler+0xca>
+movs r3, #8
+str.w r3, [lr, #8]
+b.n <OTG_FS_IRQHandler+0x104>
+movs r0, #1
+ldr r3, [r2, #52] @ 0x34
+lsl.w r1, r0, r7
+bic.w r3, r3, r1
+uxtb r1, r7
+str r3, [r2, #52] @ 0x34
+ldr r3, [pc, #476] @ (<OTG_FS_IRQHandler+0x528>)
+str.w r0, [lr, #8]
+ldr.w r3, [r3, #148] @ 0x94
+ldr r0, [pc, #472] @ (<OTG_FS_IRQHandler+0x52c>)
+blx r3
+ldrb r3, [r4, #3]
+cmp r3, #1
+bne.w <OTG_FS_IRQHandler+0x104>
+cmp r7, #0
+bne.w <OTG_FS_IRQHandler+0x104>
+ldrb.w r3, [r4, #273] @ 0x111
+cmp r3, #4
+bne.w <OTG_FS_IRQHandler+0x104>
+ldr r3, [r4, #84] @ 0x54
+ldr r2, [pc, #444] @ (<OTG_FS_IRQHandler+0x530>)
+str r2, [r3, #16]
+ldr r2, [pc, #444] @ (<OTG_FS_IRQHandler+0x534>)
+str r2, [r3, #20]
+ldr r2, [r3, #0]
+mov.w r2, #2147516416 @ ADDR
+str r2, [r3, #0]
+b.n <OTG_FS_IRQHandler+0x104>
+movs r3, #1
+str r3, [r1, #8]
+ldrb r3, [r4, #3]
+cmp r3, #1
+bne.n <OTG_FS_IRQHandler+0x39c>
+ldr r2, [r1, #16]
+ldr.w r3, [fp, #892] @ 0x37c
+ubfx r2, r2, #0, #19
+subs r3, r3, r2
+str.w r3, [fp, #908] @ 0x38c
+ldr.w r3, [r8, #144] @ 0x90
+uxtb r1, r7
+mov r0, r4
+blx r3
+ldrb r3, [r4, #3]
+cmp r3, #1
+bne.w <OTG_FS_IRQHandler+0x162>
+cmp r7, #0
+bne.w <OTG_FS_IRQHandler+0x162>
+ldrb.w r3, [r4, #273] @ 0x111
+cmp r3, #5
+bne.w <OTG_FS_IRQHandler+0x162>
+ldr r3, [r4, #84] @ 0x54
+ldr r2, [pc, #364] @ (<OTG_FS_IRQHandler+0x530>)
+str r2, [r3, #16]
+ldr r2, [pc, #364] @ (<OTG_FS_IRQHandler+0x534>)
+str r2, [r3, #20]
+ldr r2, [r3, #0]
+mov.w r2, #2147516416 @ ADDR
+str r2, [r3, #0]
+b.n <OTG_FS_IRQHandler+0x162>
+lsls r2, r2, #28
+bpl.w <OTG_FS_IRQHandler+0x162>
+ldr.w r3, [r8, #152] @ 0x98
+mov r0, r4
+blx r3
+movs r2, #8
+ldr r3, [r6, #0]
+str r2, [r3, #8]
+b.n <OTG_FS_IRQHandler+0x162>
+lsls r2, r1, #25
+bpl.n <OTG_FS_IRQHandler+0x462>
+movs r3, #64 @ 0x40
+str.w r3, [lr, #8]
+b.n <OTG_FS_IRQHandler+0x104>
+ldr r2, [pc, #316] @ (<OTG_FS_IRQHandler+0x534>)
+str r2, [r3, #20]
+mov.w r2, #2147516416 @ ADDR
+ldr r1, [r3, #0]
+str r2, [r3, #0]
+b.n <OTG_FS_IRQHandler+0x27e>
+mov.w r0, #512 @ 0x200
+movs r5, #9
+b.n <OTG_FS_IRQHandler+0x1ac>
+movw r0, #32752 @ 0x7ff0
+tst r0, r2
+beq.w <OTG_FS_IRQHandler+0x2e8>
+ubfx r2, r2, #4, #11
+add.w r0, r1, r1, lsl #2
+mov.w r8, r1, lsl #2
+ldr.w lr, [r4, #208] @ 0xd0
+add.w ip, r2, #3
+add.w r0, r4, r0, lsl #3
+movs.w ip, ip, asr #2
+ldr.w r9, [r0, #896] @ 0x380
+beq.n <OTG_FS_IRQHandler+0x448>
+mov r5, r9
+movs r0, #0
+adds r0, #1
+ldr.w r7, [lr]
+cmp ip, r0
+str.w r7, [r5], #4
+bne.n <OTG_FS_IRQHandler+0x43a>
+add r1, r8
+add.w r0, r9, r2
+add.w r1, r4, r1, lsl #3
+str.w r0, [r1, #896] @ 0x380
+ldr.w r0, [r1, #908] @ 0x38c
+add r0, r2
+str.w r0, [r1, #908] @ 0x38c
+b.n <OTG_FS_IRQHandler+0x2e8>
+lsls r1, r1, #30
+bpl.n <OTG_FS_IRQHandler+0x46e>
+movs r3, #2
+str.w r3, [lr, #8]
+b.n <OTG_FS_IRQHandler+0x104>
+lsls r2, r3, #24
+bpl.w <OTG_FS_IRQHandler+0x104>
+ldr.w r2, [r5, #292] @ 0x124
+ldr.w r1, [lr, #24]
+ldrd r8, r3, [r5, #304] @ 0x130
+uxth r1, r1
+sub.w r0, r8, r3
+cmp r2, r0
+it cs
+movcs r2, r0
+adds r2, #3
+cmp.w r1, r2, lsr #2
+bls.n <OTG_FS_IRQHandler+0x506>
+mov r0, r8
+ldrb.w sl, [r4, #3]
+mov r8, r6
+str.w r9, [sp, #4]
+str r7, [sp, #8]
+cmp r0, r3
+bls.n <OTG_FS_IRQHandler+0x500>
+subs r1, r0, r3
+ldr.w r2, [r5, #292] @ 0x124
+ldr.w ip, [r5, #296] @ 0x128
+cmp r1, r2
+it cs
+movcs r1, r2
+add.w r9, r1, #3
+mov.w r9, r9, lsr #2
+cmp.w sl, #0
+bne.n <OTG_FS_IRQHandler+0x4e4>
+uxth r7, r1
+ldr.w r6, [fp, #184] @ 0xb8
+adds r7, #3
+asrs r7, r7, #2
+beq.n <OTG_FS_IRQHandler+0x4e4>
+mov r2, ip
+mov r3, sl
+adds r3, #1
+ldr.w r0, [r2], #4
+cmp r7, r3
+str r0, [r6, #0]
+bne.n <OTG_FS_IRQHandler+0x4d4>
+ldrd r0, r3, [r5, #304] @ 0x130
+add r3, r1
+add.w r2, ip, r1
+cmp r0, r3
+str.w r2, [r5, #296] @ 0x128
+str.w r3, [r5, #308] @ 0x134
+bls.n <OTG_FS_IRQHandler+0x50e>
+ldr.w r2, [lr, #24]
+uxth r2, r2
+cmp r2, r9
+bhi.n <OTG_FS_IRQHandler+0x4a2>
+ldrd r9, r7, [sp, #4]
+mov r6, r8
+movs r3, #128 @ 0x80
+str.w r3, [lr, #8]
+b.n <OTG_FS_IRQHandler+0x104>
+ldrb.w r3, [r5, #284] @ 0x11c
+movs r2, #1
+ldr r1, [r4, #16]
+mov r6, r8
+lsls r2, r3
+ldr r3, [r1, #52] @ 0x34
+bic.w r3, r3, r2
+ldrd r9, r7, [sp, #4]
+str r3, [r1, #52] @ 0x34
+b.n <OTG_FS_IRQHandler+0x506>
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+== TIM1_CC_IRQHandler
+mvn.w r1, #24
+ldr r2, [pc, #168] @ (<TIM1_CC_IRQHandler+0xb0>)
+ldr r3, [pc, #172] @ (<TIM1_CC_IRQHandler+0xb4>)
+str r1, [r2, #16]
+ldr r3, [r3, #16]
+tst.w r3, #8192 @ 0x2000
+ite ne
+movne r1, #3
+moveq r1, #0
+lsls r0, r3, #17
+ldr r0, [pc, #156] @ (<TIM1_CC_IRQHandler+0xb8>)
+it mi
+eormi.w r1, r1, #1
+ldrb r2, [r0, #0]
+subs r2, r2, r1
+uxtb r3, r2
+lsls r2, r2, #31
+bpl.n <TIM1_CC_IRQHandler+0x82>
+and.w r3, r3, #2
+ldr r2, [pc, #140] @ (<TIM1_CC_IRQHandler+0xbc>)
+push {r4, r5}
+subs r3, #1
+strb r1, [r0, #0]
+ldrb r0, [r2, #0]
+uxtb r1, r3
+cbnz r0, <TIM1_CC_IRQHandler+0x84>
+ldr r0, [pc, #128] @ (<TIM1_CC_IRQHandler+0xc0>)
+ldr r4, [pc, #132] @ (<TIM1_CC_IRQHandler+0xc4>)
+strb r3, [r2, #0]
+ldrb r2, [r0, #0]
+ldr r5, [pc, #128] @ (<TIM1_CC_IRQHandler+0xc8>)
+sxtab r2, r1, r2
+ldr r1, [pc, #128] @ (<TIM1_CC_IRQHandler+0xcc>)
+sxtb r2, r2
+strb r2, [r0, #0]
+ldr r0, [pc, #124] @ (<TIM1_CC_IRQHandler+0xd0>)
+ldrb r2, [r1, #0]
+ldrh r0, [r0, #0]
+uxtb r2, r2
+uxth r0, r0
+strh.w r0, [r5, r2, lsl #1]
+ldrb r2, [r1, #0]
+ldr r0, [pc, #112] @ (<TIM1_CC_IRQHandler+0xd4>)
+uxtb r2, r2
+strb r3, [r0, r2]
+ldrb r3, [r1, #0]
+adds r3, #1
+and.w r3, r3, #7
+strb r3, [r1, #0]
+ldrb r3, [r4, #0]
+cmp r3, #7
+bhi.n <TIM1_CC_IRQHandler+0x7e>
+ldrb r3, [r4, #0]
+adds r3, #1
+uxtb r3, r3
+strb r3, [r4, #0]
+pop {r4, r5}
+bx lr
+bx lr
+ldrb r0, [r2, #0]
+sxtb r0, r0
+cmp r0, r3
+ldr r0, [pc, #52] @ (<TIM1_CC_IRQHandler+0xc0>)
+beq.n <TIM1_CC_IRQHandler+0xaa>
+ldrb r4, [r0, #0]
+sxtb r4, r4
+adds r4, #3
+blt.n <TIM1_CC_IRQHandler+0xa2>
+ldrb r4, [r0, #0]
+sxtb r4, r4
+cmp r4, #3
+bgt.n <TIM1_CC_IRQHandler+0xa2>
+movs r4, #0
+strb r4, [r0, #0]
+ldr r4, [pc, #32] @ (<TIM1_CC_IRQHandler+0xc4>)
+movs r5, #0
+strb r5, [r4, #0]
+b.n <TIM1_CC_IRQHandler+0x40>
+ldr r4, [pc, #24] @ (<TIM1_CC_IRQHandler+0xc4>)
+b.n <TIM1_CC_IRQHandler+0x40>
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+== TIM3_IRQHandler
+mov.w r3, #1073741824 @ ADDR
+ldr.w r2, [r3, #1040] @ 0x410
+lsls r1, r2, #31
+bmi.n <TIM3_IRQHandler+0xe>
+bx lr
+movs r2, #0
+stmdb sp!, {r4, r5, r6, r7, r8, r9, sl, fp, lr}
+movs r4, #32
+sub sp, #28
+ldr r5, [pc, #732] @ (<TIM3_IRQHandler+0x2f8>)
+ldr.w fp, [pc, #828] @ <TIM3_IRQHandler+0x358>
+ldr.w sl, [pc, #828] @ <TIM3_IRQHandler+0x35c>
+ldr.w r9, [pc, #828] @ <TIM3_IRQHandler+0x360>
+str.w r2, [r3, #1040] @ 0x410
+b.n <TIM3_IRQHandler+0xa8>
+ldrb r3, [r5, #0]
+add r6, sp, #24
+add.w r3, sl, r3, lsl #3
+ldmia.w r3, {r0, r1}
+ldrb r3, [r5, #0]
+mov r7, r1
+adds r3, #1
+and.w r3, r3, #31
+stmdb r6, {r0, r1}
+strb r3, [r5, #0]
+ldrb.w r6, [sp, #16]
+ldrb.w r8, [sp, #17]
+msr PRIMASK, r2
+sub.w r2, r8, #1
+movs r3, #0
+add r0, sp, #8
+strb.w r6, [sp, #8]
+clz r2, r2
+str.w r3, [sp, #9]
+strb.w r3, [sp, #13]
+lsrs r2, r2, #5
+ldrb.w r3, [sp, #11]
+bfi r3, r2, #0, #1
+strb.w r3, [sp, #11]
+bl <midiOut_forward>
+ldrb.w r3, [r9, #1]
+lsls r2, r3, #30
+bpl.n <TIM3_IRQHandler+0xa0>
+ldr r3, [pc, #628] @ (<TIM3_IRQHandler+0x2fc>)
+ldrb r0, [r3, #0]
+cmp r0, #2
+beq.w <TIM3_IRQHandler+0x1c2>
+cmp r0, #4
+beq.n <TIM3_IRQHandler+0x182>
+cmp r0, #1
+bne.n <TIM3_IRQHandler+0xa0>
+cmp.w r8, #1
+beq.w <TIM3_IRQHandler+0x5fa>
+subs r4, #1
+ands.w r4, r4, #255 @ 0xff
+beq.n <TIM3_IRQHandler+0xbc>
+mrs r2, PRIMASK
+cpsid i
+ldrb r1, [r5, #0]
+ldrb.w r3, [fp]
+cmp r1, r3
+bne.n <TIM3_IRQHandler+0x2c>
+msr PRIMASK, r2
+movs r4, #16
+ldr.w r8, [pc, #676] @ <TIM3_IRQHandler+0x364>
+ldr r5, [pc, #572] @ (<TIM3_IRQHandler+0x300>)
+ldr.w fp, [pc, #672] @ <TIM3_IRQHandler+0x368>
+add.w r6, sp, r4
+ldr.w r9, [pc, #668] @ <TIM3_IRQHandler+0x36c>
+ldr r7, [pc, #552] @ (<TIM3_IRQHandler+0x2fc>)
+b.n <TIM3_IRQHandler+0x10a>
+ldrb r3, [r5, #0]
+add.w r3, r9, r3, lsl #3
+ldmia.w r3, {r0, r1}
+ldrb r3, [r5, #0]
+adds r3, #1
+and.w r3, r3, #15
+stmia.w r6, {r0, r1}
+strb r3, [r5, #0]
+ldrb.w sl, [sp, #16]
+ldr r1, [sp, #20]
+msr PRIMASK, ip
+cmp.w sl, #1
+beq.n <TIM3_IRQHandler+0x148>
+cmp.w sl, #2
+beq.n <TIM3_IRQHandler+0x1f4>
+subs r4, #1
+ands.w r4, r4, #255 @ 0xff
+beq.n <TIM3_IRQHandler+0x11e>
+mrs ip, PRIMASK
+cpsid i
+ldrb r2, [r5, #0]
+ldrb.w r3, [fp]
+cmp r2, r3
+bne.n <TIM3_IRQHandler+0xd4>
+msr PRIMASK, ip
+ldr r2, [pc, #484] @ (<TIM3_IRQHandler+0x304>)
+ldr.w r3, [r8]
+ldr r2, [r2, #0]
+ldr r1, [pc, #480] @ (<TIM3_IRQHandler+0x308>)
+subs r3, r3, r2
+vldr s14, [r1]
+vmov s15, r3
+vcvt.f32.u32 s15, s15
+vcmpe.f32 s15, s14
+vmrs APSR_nzcv, fpscr
+bge.w <TIM3_IRQHandler+0x530>
+add sp, #28
+ldmia.w sp!, {r4, r5, r6, r7, r8, r9, sl, fp, pc}
+ldrb r3, [r7, #0]
+subs r3, #3
+cmp r3, #1
+bhi.n <TIM3_IRQHandler+0x102>
+movs r0, #3
+str r1, [sp, #4]
+bl <seq_noteExtSyncActivity>
+ldr r3, [pc, #432] @ (<TIM3_IRQHandler+0x30c>)
+ldr r1, [sp, #4]
+ldrb r2, [r3, #0]
+cmp r2, #0
+bne.n <TIM3_IRQHandler+0x244>
+strb.w sl, [r3]
+ldr r3, [pc, #424] @ (<TIM3_IRQHandler+0x310>)
+str.w r1, [r3, #304] @ 0x130
+ldr r3, [pc, #420] @ (<TIM3_IRQHandler+0x314>)
+ldrb r3, [r3, #0]
+cmp r3, #0
+beq.n <TIM3_IRQHandler+0x102>
+ldr r3, [pc, #416] @ (<TIM3_IRQHandler+0x318>)
+ldrb r0, [r3, #4]
+add.w r0, r0, r0, lsl #1
+bl <seq_extClockTicks.lto_priv.0>
+b.n <TIM3_IRQHandler+0x102>
+ldr r3, [pc, #408] @ (<TIM3_IRQHandler+0x31c>)
+ldrb r3, [r3, #0]
+cbz r3, <TIM3_IRQHandler+0x194>
+ldr r3, [pc, #404] @ (<TIM3_IRQHandler+0x320>)
+ldr r2, [pc, #408] @ (<TIM3_IRQHandler+0x324>)
+ldr r3, [r3, #0]
+subs r3, r7, r3
+cmp r3, r2
+bls.n <TIM3_IRQHandler+0xa0>
+cmp.w r8, #0
+beq.w <TIM3_IRQHandler+0x5e6>
+cmp.w r8, #1
+bne.w <TIM3_IRQHandler+0xa0>
+ldr r3, [pc, #384] @ (<TIM3_IRQHandler+0x328>)
+ldrb r3, [r3, #0]
+cbz r3, <TIM3_IRQHandler+0x1b8>
+ldr r3, [pc, #384] @ (<TIM3_IRQHandler+0x32c>)
+ldr r2, [pc, #372] @ (<TIM3_IRQHandler+0x324>)
+ldr r3, [r3, #0]
+subs r3, r7, r3
+cmp r3, r2
+bls.w <TIM3_IRQHandler+0xa0>
+mov r1, r7
+movs r0, #1
+bl <seq_noteExtSyncActivity>
+b.n <TIM3_IRQHandler+0x1d0>
+cmp.w r8, #0
+bne.w <TIM3_IRQHandler+0xa0>
+mov r1, r7
+bl <seq_noteExtSyncActivity>
+subs r6, #248 @ 0xf8
+cmp r6, #4
+bhi.w <TIM3_IRQHandler+0xa0>
+add r3, pc, #4 @ (adr r3, <TIM3_IRQHandler+0x1e0>)
+ldr.w pc, [r3, r6, lsl #2]
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+ldrb r3, [r7, #0]
+subs r3, #3
+cmp r3, #1
+bhi.n <TIM3_IRQHandler+0x102>
+movs r0, #3
+mov.w sl, #0
+bl <seq_noteExtSyncActivity>
+ldr r3, [pc, #260] @ (<TIM3_IRQHandler+0x30c>)
+strb.w sl, [r3]
+ldr r3, [pc, #288] @ (<TIM3_IRQHandler+0x330>)
+strb.w sl, [r3]
+ldr r3, [pc, #288] @ (<TIM3_IRQHandler+0x334>)
+strb.w sl, [r3]
+bl <seq_setStepIndexToStart.lto_priv.0>
+ldr r3, [pc, #280] @ (<TIM3_IRQHandler+0x338>)
+movs r2, #1
+str.w sl, [r3]
+ldr r3, [pc, #276] @ (<TIM3_IRQHandler+0x33c>)
+strh.w sl, [r3]
+ldr r3, [pc, #276] @ (<TIM3_IRQHandler+0x340>)
+strb r2, [r3, #0]
+ldr r3, [pc, #276] @ (<TIM3_IRQHandler+0x344>)
+ldr r2, [pc, #212] @ (<TIM3_IRQHandler+0x308>)
+strb.w sl, [r3]
+movs r3, #0
+str r3, [r2, #0]
+ldr.w r3, [r8]
+ldr r2, [pc, #196] @ (<TIM3_IRQHandler+0x304>)
+str r3, [r2, #0]
+b.n <TIM3_IRQHandler+0x102>
+ldr r2, [pc, #200] @ (<TIM3_IRQHandler+0x310>)
+ldr.w r3, [r2, #304] @ 0x130
+str.w r1, [r2, #304] @ 0x130
+subs r3, r1, r3
+cmp r3, #199 @ 0xc7
+bls.n <TIM3_IRQHandler+0x16c>
+vmov s15, r3
+ldr r3, [pc, #188] @ (<TIM3_IRQHandler+0x318>)
+vldr s10, [pc, #236] @ <TIM3_IRQHandler+0x348>
+vmov.f32 s12, #112 @ ADDR 1.0
+ldrb r3, [r3, #4]
+vcvt.f32.u32 s15, s15
+vldr s11, [pc, #224] @ <TIM3_IRQHandler+0x34c>
+vmov s13, r3
+vcvt.f32.u32 s13, s13
+vdiv.f32 s14, s10, s13
+vmul.f32 s15, s14, s15
+vdiv.f32 s14, s11, s15
+vcmpe.f32 s14, s12
+vmrs APSR_nzcv, fpscr
+bmi.n <TIM3_IRQHandler+0x2b8>
+vldr s15, [pc, #196] @ <TIM3_IRQHandler+0x350>
+vmov.f32 s13, #96 @ ADDR 0.5
+vcmpe.f32 s14, s15
+vmrs APSR_nzcv, fpscr
+vselgt.f32 s15, s15, s14
+vadd.f32 s15, s15, s13
+vcvt.u32.f32 s15, s15
+vmov r3, s15
+uxth.w sl, r3
+cmp.w sl, #1
+it cc
+movcc.w sl, #1
+ldr r3, [pc, #152] @ (<TIM3_IRQHandler+0x354>)
+str r4, [sp, #4]
+strh.w sl, [r3]
+movs r3, #0
+mov r4, r3
+uxtb r0, r4
+bl <instrumentManager_runtimeLfo.lto_priv.0>
+mov sl, r0
+cbz r0, <TIM3_IRQHandler+0x2dc>
+ldrb r0, [r0, #20]
+vldr s0, [sl, #24]
+bl <lfo_calcPhaseInc>
+str.w r0, [sl, #4]
+adds r4, #1
+cmp r4, #6
+bne.n <TIM3_IRQHandler+0x2c4>
+ldr r4, [sp, #4]
+b.n <TIM3_IRQHandler+0x16c>
+movs r1, #0
+mov r0, r1
+bl <seq_setRunningEx>
+ldr r3, [pc, #32] @ (<TIM3_IRQHandler+0x310>)
+movs r2, #0
+strb.w r2, [r3, #260] @ 0x104
+b.n <TIM3_IRQHandler+0xa0>
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+movs r3, #0
+ldr.w r8, [pc, #780] @ <TIM3_IRQHandler+0x680>
+ldr r6, [pc, #700] @ (<TIM3_IRQHandler+0x634>)
+strb.w r3, [r6, #301] @ 0x12d
+ldrb.w r3, [r8]
+cmp r3, #0
+bne.n <TIM3_IRQHandler+0x3fe>
+ldr r1, [pc, #688] @ (<TIM3_IRQHandler+0x638>)
+mov.w ip, #255 @ 0xff
+ldr r2, [pc, #688] @ (<TIM3_IRQHandler+0x63c>)
+mov r7, r3
+strb r3, [r2, #0]
+ldrb r2, [r1, #0]
+adds r2, #1
+uxtb r2, r2
+strb r2, [r1, #0]
+ldr r1, [pc, #676] @ (<TIM3_IRQHandler+0x640>)
+ldr r2, [pc, #680] @ (<TIM3_IRQHandler+0x644>)
+ldr r1, [r1, #0]
+str r1, [sp, #4]
+mrs r1, PRIMASK
+cpsid i
+add.w r0, r2, r3, lsl #2
+strb.w ip, [r2, r3, lsl #2]
+strb r7, [r0, #1]
+msr PRIMASK, r1
+adds r3, #1
+cmp r3, #7
+bne.n <TIM3_IRQHandler+0x3a0>
+ldr r2, [pc, #652] @ (<TIM3_IRQHandler+0x648>)
+movs r1, #1
+ldr r3, [pc, #652] @ (<TIM3_IRQHandler+0x64c>)
+strb r1, [r2, #0]
+ldr r1, [pc, #652] @ (<TIM3_IRQHandler+0x650>)
+ldr r0, [pc, #652] @ (<TIM3_IRQHandler+0x654>)
+strb r7, [r1, #0]
+ldr r1, [pc, #652] @ (<TIM3_IRQHandler+0x658>)
+str r7, [r3, #0]
+strb r7, [r1, #0]
+ldr r1, [pc, #652] @ (<TIM3_IRQHandler+0x65c>)
+strh r7, [r0, #0]
+strb r7, [r1, #0]
+ldr r1, [pc, #648] @ (<TIM3_IRQHandler+0x660>)
+strb r7, [r1, #0]
+ldr r1, [pc, #648] @ (<TIM3_IRQHandler+0x664>)
+strb r7, [r1, #0]
+ldr r1, [pc, #648] @ (<TIM3_IRQHandler+0x668>)
+strb r7, [r1, #0]
+bl <seq_setStepIndexToStart.lto_priv.0>
+ldr r1, [sp, #4]
+ldr r2, [pc, #608] @ (<TIM3_IRQHandler+0x648>)
+ldr r0, [pc, #616] @ (<TIM3_IRQHandler+0x654>)
+ldr r3, [pc, #608] @ (<TIM3_IRQHandler+0x64c>)
+cmp r1, #0
+bne.w <TIM3_IRQHandler+0x61e>
+movs r3, #0
+ldr r2, [pc, #584] @ (<TIM3_IRQHandler+0x640>)
+str r3, [r2, #0]
+movs r3, #1
+strb.w r3, [r8]
+mov.w r3, #1073741824 @ ADDR
+ldr r3, [r3, #36] @ 0x24
+str.w r3, [r6, #264] @ 0x108
+movs r3, #0
+strb.w r3, [r6, #260] @ 0x104
+b.n <TIM3_IRQHandler+0xa0>
+movs r7, #0
+ldr r6, [pc, #544] @ (<TIM3_IRQHandler+0x634>)
+movs r0, #1
+mov r1, r7
+strb.w r7, [r6, #301] @ 0x12d
+bl <seq_setRunningEx>
+mov.w r3, #1073741824 @ ADDR
+strb.w r7, [r6, #260] @ 0x104
+ldr r3, [r3, #36] @ 0x24
+str.w r3, [r6, #264] @ 0x108
+b.n <TIM3_IRQHandler+0xa0>
+ldr r6, [pc, #512] @ (<TIM3_IRQHandler+0x634>)
+ldrb.w r3, [r6, #260] @ 0x104
+cmp r3, #0
+bne.n <TIM3_IRQHandler+0x510>
+movs r3, #1
+ldr r1, [pc, #556] @ (<TIM3_IRQHandler+0x66c>)
+str.w r7, [r6, #264] @ 0x108
+strb.w r3, [r6, #260] @ 0x104
+ldrh r3, [r1, #0]
+cmp r3, #0
+bne.w <TIM3_IRQHandler+0x604>
+vldr s15, [pc, #544] @ <TIM3_IRQHandler+0x670>
+movs r2, #1
+movs r3, #0
+vstr s15, [r6, #268] @ 0x10c
+vstr s15, [r6, #272] @ 0x110
+vstr s15, [r6, #276] @ 0x114
+vstr s15, [r6, #280] @ 0x118
+vstr s15, [r6, #284] @ 0x11c
+vstr s15, [r6, #288] @ 0x120
+vstr s15, [r6, #292] @ 0x124
+vstr s15, [r6, #296] @ 0x128
+add.w r3, r6, r3, lsl #2
+strb.w r2, [r6, #300] @ 0x12c
+vstr s15, [r3, #268] @ 0x10c
+ldr r3, [pc, #496] @ (<TIM3_IRQHandler+0x674>)
+vldr s15, [pc, #496] @ <TIM3_IRQHandler+0x678>
+add.w r2, r3, #32
+vldmia r3!, {s14}
+cmp r2, r3
+vadd.f32 s15, s15, s14
+bne.n <TIM3_IRQHandler+0x48c>
+vmov.f32 s12, #64 @ ADDR 0.125
+vldr s13, [pc, #476] @ <TIM3_IRQHandler+0x67c>
+vmov.f32 s14, #56 @ ADDR 24.0
+vmul.f32 s15, s15, s12
+vmul.f32 s15, s15, s14
+vdiv.f32 s14, s13, s15
+vcmpe.f32 s14, #0.0
+vmrs APSR_nzcv, fpscr
+ble.w <TIM3_IRQHandler+0x5e2>
+vcvt.u32.f32 s14, s14
+vmov r3, s14
+uxth r3, r3
+cmp r3, #1
+it cc
+movcc r3, #1
+mov.w r8, #0
+strh r3, [r1, #0]
+uxtb.w r0, r8
+bl <instrumentManager_runtimeLfo.lto_priv.0>
+mov r7, r0
+cbz r0, <TIM3_IRQHandler+0x4ea>
+ldrb r0, [r0, #20]
+vldr s0, [r7, #24]
+bl <lfo_calcPhaseInc>
+str r0, [r7, #4]
+add.w r8, r8, #1
+cmp.w r8, #6
+bne.n <TIM3_IRQHandler+0x4d2>
+ldrb.w r3, [r6, #301] @ 0x12d
+adds r3, #1
+strb.w r3, [r6, #301] @ 0x12d
+ldr r3, [pc, #384] @ (<TIM3_IRQHandler+0x680>)
+ldrb r3, [r3, #0]
+cmp r3, #0
+beq.w <TIM3_IRQHandler+0xa0>
+movs r0, #4
+bl <seq_extClockTicks.lto_priv.0>
+b.n <TIM3_IRQHandler+0xa0>
+ldr.w r3, [r6, #264] @ 0x108
+ldr r1, [pc, #340] @ (<TIM3_IRQHandler+0x66c>)
+subs r3, r7, r3
+str.w r7, [r6, #264] @ 0x108
+vmov s15, r3
+ldrb.w r3, [r6, #300] @ 0x12c
+adds r2, r3, #1
+vcvt.f32.u32 s15, s15
+and.w r2, r2, #7
+b.n <TIM3_IRQHandler+0x476>
+ldr.w r3, [r8]
+vmov.f32 s13, #16 @ ADDR 4.0
+vldr s11, [pc, #328] @ <TIM3_IRQHandler+0x684>
+subs r3, r3, r2
+ldr r4, [pc, #328] @ (<TIM3_IRQHandler+0x688>)
+vmov s15, r3
+ldr r3, [pc, #292] @ (<TIM3_IRQHandler+0x66c>)
+ldrb r2, [r4, #0]
+ldrh r1, [r3, #0]
+movw r3, #60000 @ 0xea60
+vcvt.f32.u32 s15, s15
+cmp r2, #4
+udiv r3, r3, r1
+vsub.f32 s15, s15, s14
+vmov s14, r3
+ldr r3, [pc, #296] @ (<TIM3_IRQHandler+0x68c>)
+vcvt.f32.s32 s14, s14
+ldr r1, [pc, #296] @ (<TIM3_IRQHandler+0x690>)
+vdiv.f32 s12, s14, s11
+vfnms.f32 s15, s12, s13
+vstr s15, [r3]
+ldr.w r3, [r8]
+str r3, [r1, #0]
+beq.w <TIM3_IRQHandler+0x6a8>
+cmp r2, #0
+beq.w <TIM3_IRQHandler+0x6d2>
+ldr r5, [pc, #248] @ (<TIM3_IRQHandler+0x680>)
+ldrb r3, [r5, #0]
+cmp r3, #0
+beq.n <TIM3_IRQHandler+0x5fe>
+ldr r2, [pc, #172] @ (<TIM3_IRQHandler+0x63c>)
+ldrb r3, [r2, #0]
+cmp r3, #0
+beq.w <TIM3_IRQHandler+0x142>
+ldrb r3, [r2, #0]
+ldr r0, [pc, #248] @ (<TIM3_IRQHandler+0x694>)
+subs r3, #1
+uxtb r3, r3
+strb r3, [r2, #0]
+mov.w r3, #1073741824 @ ADDR
+ldr r2, [pc, #240] @ (<TIM3_IRQHandler+0x698>)
+ldr r1, [r3, #36] @ 0x24
+ldr r3, [r2, #0]
+subs r3, r1, r3
+str r3, [r0, #0]
+str r1, [r2, #0]
+bl <seq_processLiveTicks.lto_priv.0>
+ldrb r3, [r5, #0]
+cbz r3, <TIM3_IRQHandler+0x5bc>
+bl <seq_processSchedulerTick.part.0.lto_priv.0>
+ldrb r3, [r4, #0]
+cmp r3, #4
+beq.w <TIM3_IRQHandler+0x6fa>
+cmp r3, #0
+bne.w <TIM3_IRQHandler+0x142>
+ldr r4, [pc, #132] @ (<TIM3_IRQHandler+0x650>)
+ldrb r3, [r4, #0]
+cmp r3, #0
+beq.w <TIM3_IRQHandler+0x72c>
+adds r3, #1
+uxtb r3, r3
+cmp r3, #3
+it hi
+movhi r3, #0
+strb r3, [r4, #0]
+b.n <TIM3_IRQHandler+0x142>
+movs r3, #1
+b.n <TIM3_IRQHandler+0x4cc>
+ldr r3, [pc, #180] @ (<TIM3_IRQHandler+0x69c>)
+movs r2, #1
+mov r1, r7
+movs r0, #2
+str r7, [r3, #0]
+ldr r3, [pc, #172] @ (<TIM3_IRQHandler+0x6a0>)
+strb r2, [r3, #0]
+bl <seq_noteExtSyncActivity>
+b.n <TIM3_IRQHandler+0x1d0>
+mov r0, r8
+b.n <TIM3_IRQHandler+0x1ca>
+bl <seq_processLiveTicks.lto_priv.0>
+b.n <TIM3_IRQHandler+0x5bc>
+vmov s15, r3
+vldr s12, [pc, #112] @ <TIM3_IRQHandler+0x67c>
+vmov.f32 s14, #56 @ ADDR 24.0
+vcvt.f32.s32 s15, s15
+vdiv.f32 s13, s12, s15
+vdiv.f32 s15, s13, s14
+b.n <TIM3_IRQHandler+0x452>
+strb r7, [r2, #0]
+subs r2, r1, #1
+str r2, [r3, #0]
+ldr r3, [pc, #124] @ (<TIM3_IRQHandler+0x6a4>)
+umull r2, r3, r3, r2
+lsrs r3, r3, #4
+strh r3, [r0, #0]
+bl <seq_realignActivePatternToMasterClock>
+b.n <TIM3_IRQHandler+0x3f2>
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+ldr r3, [pc, #188] @ (<TIM3_IRQHandler+0x768>)
+ldrb r2, [r3, #0]
+cbz r2, <TIM3_IRQHandler+0x6d2>
+mov.w r2, #1073741824 @ ADDR
+ldr r1, [pc, #184] @ (<TIM3_IRQHandler+0x76c>)
+ldr r2, [r2, #36] @ 0x24
+ldr r1, [r1, #0]
+subs r2, r2, r1
+ldr r1, [pc, #180] @ (<TIM3_IRQHandler+0x770>)
+cmp r2, r1
+bls.n <TIM3_IRQHandler+0x742>
+movs r2, #0
+strb r2, [r3, #0]
+movs r3, #0
+ldr r2, [pc, #172] @ (<TIM3_IRQHandler+0x774>)
+str r3, [r2, #0]
+ldr.w r3, [r8]
+ldr r2, [pc, #168] @ (<TIM3_IRQHandler+0x778>)
+str r3, [r2, #0]
+ldr r3, [pc, #168] @ (<TIM3_IRQHandler+0x77c>)
+movs r1, #0
+ldr r2, [pc, #168] @ (<TIM3_IRQHandler+0x780>)
+strb r1, [r3, #0]
+mov.w r3, #1073741824 @ ADDR
+ldr r0, [pc, #164] @ (<TIM3_IRQHandler+0x784>)
+ldr r1, [r3, #36] @ 0x24
+ldr r3, [r2, #0]
+subs r3, r1, r3
+str r3, [r0, #0]
+str r1, [r2, #0]
+bl <seq_processLiveTicks.lto_priv.0>
+ldr r3, [pc, #152] @ (<TIM3_IRQHandler+0x788>)
+ldrb r3, [r3, #0]
+cmp r3, #0
+bne.w <TIM3_IRQHandler+0x5b8>
+b.n <TIM3_IRQHandler+0x5bc>
+ldr r3, [pc, #108] @ (<TIM3_IRQHandler+0x768>)
+ldrb r2, [r3, #0]
+cmp r2, #0
+beq.w <TIM3_IRQHandler+0x5ca>
+mov.w r2, #1073741824 @ ADDR
+ldr r1, [pc, #96] @ (<TIM3_IRQHandler+0x76c>)
+ldr r2, [r2, #36] @ 0x24
+ldr r1, [r1, #0]
+subs r2, r2, r1
+ldr r1, [pc, #92] @ (<TIM3_IRQHandler+0x770>)
+cmp r2, r1
+bls.w <TIM3_IRQHandler+0x142>
+movs r1, #0
+ldr.w r2, [r8]
+strb r1, [r3, #0]
+movs r3, #0
+ldr r1, [pc, #84] @ (<TIM3_IRQHandler+0x778>)
+str r2, [r1, #0]
+ldr r2, [pc, #76] @ (<TIM3_IRQHandler+0x774>)
+str r3, [r2, #0]
+b.n <TIM3_IRQHandler+0x5ca>
+ldr r2, [pc, #92] @ (<TIM3_IRQHandler+0x78c>)
+str.w r3, [sp, #17]
+strb.w r3, [sp, #21]
+ldrb r3, [r2, #1]
+lsls r3, r3, #26
+bmi.n <TIM3_IRQHandler+0x756>
+movs r3, #1
+strb r3, [r4, #0]
+b.n <TIM3_IRQHandler+0x142>
+ldr r5, [pc, #68] @ (<TIM3_IRQHandler+0x788>)
+ldrb r2, [r5, #0]
+cmp r2, #0
+beq.w <TIM3_IRQHandler+0x5fe>
+ldr r2, [pc, #44] @ (<TIM3_IRQHandler+0x77c>)
+ldrb r1, [r2, #0]
+cmp r1, #0
+beq.n <TIM3_IRQHandler+0x6fc>
+b.n <TIM3_IRQHandler+0x596>
+movs r3, #248 @ 0xf8
+movs r1, #3
+add r0, sp, #16
+strb.w r3, [sp, #16]
+bl <midiOut_sendMsg>
+ldrb r3, [r4, #0]
+b.n <TIM3_IRQHandler+0x5d4>
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+== TIM6_DAC_IRQHandler
+ldr r2, [pc, #64] @ (<TIM6_DAC_IRQHandler+0x44>)
+movs r0, #0
+ldr r3, [pc, #64] @ (<TIM6_DAC_IRQHandler+0x48>)
+ldr r1, [pc, #68] @ (<TIM6_DAC_IRQHandler+0x4c>)
+str r0, [r3, #16]
+ldrh.w r3, [r2, #576] @ 0x240
+adds r3, #1
+uxth r3, r3
+strh.w r3, [r2, #576] @ 0x240
+ldrh.w r3, [r1, #2830] @ 0xb0e
+adds r3, #1
+uxth r3, r3
+strh.w r3, [r1, #2830] @ 0xb0e
+ldrh.w r3, [r2, #576] @ 0x240
+lsls r3, r3, #31
+bmi.n <TIM6_DAC_IRQHandler+0x32>
+ldrb.w r3, [r1, #2832] @ 0xb10
+cmp r3, #1
+bls.n <TIM6_DAC_IRQHandler+0x34>
+bx lr
+ldrb.w r3, [r1, #2832] @ 0xb10
+adds r3, #1
+uxtb r3, r3
+strb.w r3, [r1, #2832] @ 0xb10
+bx lr
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+== TIM7_IRQHandler
+ldr r3, [pc, #444] @ (<TIM7_IRQHandler+0x1c0>)
+movs r0, #0
+ldr r1, [pc, #444] @ (<TIM7_IRQHandler+0x1c4>)
+push {r4}
+ldrb.w r2, [r3, #2833] @ 0xb11
+str.w r0, [r1, #1040] @ 0x410
+cmp r2, #5
+bhi.w <TIM7_IRQHandler+0x1a4>
+tbh [pc, r2, lsl #1]
+.short 0x0012
+.word ADDR
+.word ADDR
+.short 0x0006
+ldrb.w r2, [r3, #2837] @ 0xb15
+subs r2, #1
+uxtb r2, r2
+strb.w r2, [r3, #2837] @ 0xb15
+cbnz r2, <TIM7_IRQHandler+0x38>
+strb.w r2, [r3, #2833] @ 0xb11
+ldr.w r4, [sp], #4
+bx lr
+ldr r1, [pc, #392] @ (<TIM7_IRQHandler+0x1c8>)
+ldrb.w r0, [r1, #161] @ 0xa1
+ldrb.w r2, [r1, #162] @ 0xa2
+cmp r0, r2
+beq.w <TIM7_IRQHandler+0x1b0>
+ldrb.w r2, [r1, #162] @ 0xa2
+and.w r2, r2, #127 @ 0x7f
+add.w r2, r2, r2, lsl #1
+add r2, r1
+ldrb.w r4, [r2, #164] @ 0xa4
+ldrb.w r0, [r2, #165] @ 0xa5
+ldrb.w r2, [r2, #166] @ 0xa6
+strb.w r4, [r3, #2834] @ 0xb12
+strb.w r0, [r3, #2835] @ 0xb13
+strb.w r2, [r3, #2836] @ 0xb14
+dmb sy
+ldrb.w r2, [r1, #162] @ 0xa2
+ldrb.w r0, [r3, #2834] @ 0xb12
+adds r2, #1
+uxtb r2, r2
+strb.w r2, [r1, #162] @ 0xa2
+ldr r2, [pc, #320] @ (<TIM7_IRQHandler+0x1cc>)
+cmp r0, #0
+beq.w <TIM7_IRQHandler+0x1a8>
+mov.w r1, #4096 @ 0x1000
+str r1, [r2, #24]
+mov.w r0, #8388608 @ 0x800000
+ldr r1, [pc, #304] @ (<TIM7_IRQHandler+0x1cc>)
+mov.w r4, #ADDR @ 0x1000000
+mov.w r2, #ADDR @ 0x2000000
+str r0, [r1, #24]
+str r4, [r1, #24]
+mov.w r4, #ADDR @ 0x4000000
+str r2, [r1, #24]
+ldrb.w r2, [r3, #2835] @ 0xb13
+str r4, [r1, #24]
+lsls r4, r2, #27
+it mi
+movmi r0, #128 @ 0x80
+lsls r4, r2, #26
+str r0, [r1, #24]
+ite mi
+movmi.w r0, #256 @ 0x100
+movpl.w r0, #ADDR @ 0x1000000
+ldr r1, [pc, #256] @ (<TIM7_IRQHandler+0x1cc>)
+str r0, [r1, #24]
+lsls r0, r2, #25
+ldr r1, [pc, #252] @ (<TIM7_IRQHandler+0x1cc>)
+ite mi
+movmi.w r0, #512 @ 0x200
+movpl.w r0, #ADDR @ 0x2000000
+lsrs r2, r2, #7
+ldr r2, [pc, #236] @ (<TIM7_IRQHandler+0x1cc>)
+str r0, [r1, #24]
+mov.w r0, #2048 @ 0x800
+ite ne
+movne.w r1, #1024 @ 0x400
+moveq.w r1, #ADDR @ 0x4000000
+str r1, [r2, #24]
+movs r2, #1
+ldr r1, [pc, #216] @ (<TIM7_IRQHandler+0x1cc>)
+str r0, [r1, #24]
+strb.w r2, [r3, #2833] @ 0xb11
+ldr.w r4, [sp], #4
+bx lr
+ldr r1, [pc, #200] @ (<TIM7_IRQHandler+0x1cc>)
+mov.w r0, #134217728 @ 0x8000000
+movs r2, #2
+str r0, [r1, #24]
+strb.w r2, [r3, #2833] @ 0xb11
+ldr.w r4, [sp], #4
+bx lr
+mov.w r0, #8388608 @ 0x800000
+ldr r2, [pc, #176] @ (<TIM7_IRQHandler+0x1cc>)
+mov.w r4, #ADDR @ 0x1000000
+mov.w r1, #ADDR @ 0x2000000
+str r0, [r2, #24]
+str r4, [r2, #24]
+mov.w r4, #ADDR @ 0x4000000
+str r1, [r2, #24]
+ldrb.w r1, [r3, #2835] @ 0xb13
+str r4, [r2, #24]
+lsls r4, r1, #31
+it mi
+movmi r0, #128 @ 0x80
+lsls r4, r1, #30
+str r0, [r2, #24]
+ite mi
+movmi.w r0, #256 @ 0x100
+movpl.w r0, #ADDR @ 0x1000000
+ldr r2, [pc, #132] @ (<TIM7_IRQHandler+0x1cc>)
+str r0, [r2, #24]
+lsls r0, r1, #29
+ldr r2, [pc, #124] @ (<TIM7_IRQHandler+0x1cc>)
+ite mi
+movmi.w r0, #512 @ 0x200
+movpl.w r0, #ADDR @ 0x2000000
+lsls r1, r1, #28
+str r0, [r2, #24]
+mov.w r0, #2048 @ 0x800
+ldr r2, [pc, #104] @ (<TIM7_IRQHandler+0x1cc>)
+ite mi
+movmi.w r1, #1024 @ 0x400
+movpl.w r1, #ADDR @ 0x4000000
+str r1, [r2, #24]
+movs r2, #3
+ldr r1, [pc, #88] @ (<TIM7_IRQHandler+0x1cc>)
+str r0, [r1, #24]
+strb.w r2, [r3, #2833] @ 0xb11
+ldr.w r4, [sp], #4
+bx lr
+ldrb.w ip, [r3, #2836] @ 0xb14
+movs r2, #5
+ldr r1, [pc, #68] @ (<TIM7_IRQHandler+0x1cc>)
+mov.w r0, #134217728 @ 0x8000000
+cmp.w ip, #0
+str r0, [r1, #24]
+strb.w r2, [r3, #2833] @ 0xb11
+ite eq
+moveq r2, #1
+movne r2, #10
+strb.w r2, [r3, #2837] @ 0xb15
+ldr.w r4, [sp], #4
+bx lr
+movs r2, #0
+b.n <TIM7_IRQHandler+0x34>
+mov.w r1, #268435456 @ ADDR
+str r1, [r2, #24]
+b.n <TIM7_IRQHandler+0x96>
+movs r3, #0
+ldr r2, [pc, #16] @ (<TIM7_IRQHandler+0x1c4>)
+strb.w r3, [r1, #160] @ 0xa0
+str.w r3, [r2, #1024] @ 0x400
+b.n <TIM7_IRQHandler+0x38>
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+== USART3_IRQHandler
+mov.w r3, #1073758208 @ ADDR
+push {r4, lr}
+ldr.w r4, [r3, #2076] @ 0x81c
+tst.w r4, #14
+beq.n <USART3_IRQHandler+0x1a>
+movs r2, #14
+str.w r2, [r3, #2080] @ 0x820
+ldr.w r4, [r3, #2076] @ 0x81c
+lsls r2, r4, #26
+bmi.n <USART3_IRQHandler+0x54>
+lsls r3, r4, #24
+bmi.n <USART3_IRQHandler+0x24>
+pop {r4, pc}
+ldr r3, [pc, #160] @ (<USART3_IRQHandler+0xc8>)
+ldrb.w r1, [r3, #64] @ 0x40
+ldrb.w r2, [r3, #65] @ 0x41
+cmp r1, r2
+beq.n <USART3_IRQHandler+0xa8>
+ldrb.w r2, [r3, #64] @ 0x40
+mov.w r0, #1073758208 @ ADDR
+uxtb r2, r2
+ldrb r1, [r3, r2]
+ldrb.w r2, [r3, #64] @ 0x40
+uxtb r1, r1
+adds r2, #1
+and.w r2, r2, #63 @ 0x3f
+strb.w r2, [r3, #64] @ 0x40
+str.w r1, [r0, #2088] @ 0x828
+pop {r4, pc}
+mov.w r2, #1073741824 @ ADDR
+mov.w r3, #1073758208 @ ADDR
+ldr r2, [r2, #36] @ 0x24
+ldr.w r0, [r3, #2084] @ 0x824
+uxtb r0, r0
+cmp r0, #248 @ 0xf8
+beq.n <USART3_IRQHandler+0x70>
+adds r3, r0, #6
+uxtb r3, r3
+cmp r3, #2
+bhi.n <USART3_IRQHandler+0x78>
+movs r1, #0
+bl <midiTransport_push>
+b.n <USART3_IRQHandler+0x1e>
+ldr r3, [pc, #80] @ (<USART3_IRQHandler+0xcc>)
+uxth r2, r2
+ldrb.w r1, [r3, #65] @ 0x41
+add.w r1, r3, r1, lsl #1
+strh.w r2, [r1, #66] @ 0x42
+ldrb.w r2, [r3, #65] @ 0x41
+ldrb.w r1, [r3, #64] @ 0x40
+adds r2, #1
+and.w r2, r2, #63 @ 0x3f
+cmp r2, r1
+beq.n <USART3_IRQHandler+0x1e>
+ldrb.w r1, [r3, #65] @ 0x41
+uxtb r1, r1
+strb r0, [r3, r1]
+strb.w r2, [r3, #65] @ 0x41
+b.n <USART3_IRQHandler+0x1e>
+ldr r3, [pc, #36] @ (<USART3_IRQHandler+0xd0>)
+ldrb.w r1, [r3, #64] @ 0x40
+ldrb.w r2, [r3, #65] @ 0x41
+cmp r1, r2
+bne.n <USART3_IRQHandler+0x32>
+mov.w r2, #1073758208 @ ADDR
+ldr.w r3, [r2, #2048] @ 0x800
+bic.w r3, r3, #128 @ 0x80
+str.w r3, [r2, #2048] @ 0x800
+pop {r4, pc}
+.word ADDR
+.word ADDR
+.word ADDR
+== audio_check_and_render.part.0
+ldr r3, [pc, #488] @ (<audio_check_and_render.part.0+0x1ec>)
+ldrb r3, [r3, #13]
+cmp r3, #2
+beq.w <audio_check_and_render.part.0+0xf24>
+stmdb sp!, {r4, r5, r6, r7, r8, r9, sl, fp, lr}
+mov.w r8, #1
+vpush {d8}
+vldr s16, [pc, #472] @ <audio_check_and_render.part.0+0x1f0>
+sub sp, #252 @ 0xfc
+ldr r3, [pc, #460] @ (<audio_check_and_render.part.0+0x1ec>)
+movs r1, #0
+ldrb.w r2, [r3, #2880] @ 0xb40
+str r1, [sp, #20]
+add.w r2, r2, r2, lsl #1
+ldr r1, [pc, #456] @ (<audio_check_and_render.part.0+0x1f4>)
+ldrb.w r3, [r3, #2880] @ 0xb40
+add.w r2, r1, r2, lsl #8
+add.w r3, r3, r3, lsl #1
+str r2, [sp, #32]
+add.w r2, r1, #1536 @ 0x600
+add.w r3, r2, r3, lsl #8
+str r3, [sp, #28]
+mrs r1, PRIMASK
+cpsid i
+ldr r2, [pc, #416] @ (<audio_check_and_render.part.0+0x1ec>)
+movs r4, #0
+ldrb.w r3, [r2, #2881] @ 0xb41
+ldrb.w r0, [r2, #2882] @ 0xb42
+ldrb.w r5, [r2, #2883] @ 0xb43
+cmp r3, r0
+beq.n <audio_check_and_render.part.0+0x9e>
+addw r6, r2, #2884 @ 0xb44
+ldr.w r7, [r6, r3, lsl #2]
+add.w ip, sp, r4, lsl #2
+adds r3, #1
+uxtb r2, r7
+str.w r7, [ip, #120] @ 0x78
+and.w r3, r3, #31
+asr.w r7, r5, r2
+lsl.w r2, r8, r2
+cmp r3, r0
+bic.w r5, r5, r2
+and.w r2, r7, #1
+add.w r7, sp, r4
+add.w r4, r4, #1
+strb.w r2, [r7, #88] @ 0x58
+uxtb r4, r4
+bne.n <audio_check_and_render.part.0+0x62>
+ldr r2, [pc, #336] @ (<audio_check_and_render.part.0+0x1ec>)
+strb.w r3, [r2, #2881] @ 0xb41
+ldr r2, [pc, #332] @ (<audio_check_and_render.part.0+0x1ec>)
+movs r6, #0
+ldrb.w r3, [r2, #3012] @ 0xbc4
+strb.w r6, [r2, #2883] @ 0xb43
+uxtb r3, r3
+str r3, [sp, #12]
+mrs r3, PRIMASK
+cpsid i
+ldrb.w r7, [r2, #3013] @ 0xbc5
+mov r0, r2
+ldrb.w r2, [r2, #3014] @ 0xbc6
+uxtb r7, r7
+strb.w r6, [r0, #3013] @ 0xbc5
+uxtb r2, r2
+strb.w r6, [r0, #3014] @ 0xbc6
+str r2, [sp, #24]
+msr PRIMASK, r3
+msr PRIMASK, r1
+b.n <audio_check_and_render.part.0+0xdc>
+adds r6, #1
+cmp r6, #7
+beq.n <audio_check_and_render.part.0+0x10c>
+lsl.w r3, r8, r6
+tst r7, r3
+beq.n <audio_check_and_render.part.0+0xd6>
+uxtb r3, r6
+ldr r2, [pc, #260] @ (<audio_check_and_render.part.0+0x1ec>)
+cmp r3, #5
+it cs
+movcs r3, #5
+add r2, r3
+ldrb.w r2, [r2, #2596] @ 0xa24
+cmp r2, #5
+bne.n <audio_check_and_render.part.0+0xd6>
+ldr r2, [pc, #252] @ (<audio_check_and_render.part.0+0x1f8>)
+mov.w r0, #1264 @ 0x4f0
+adds r6, #1
+mla r0, r0, r3, r2
+bl <Colloid_changeArm>
+cmp r6, #7
+bne.n <audio_check_and_render.part.0+0xdc>
+cmp r4, #0
+beq.n <audio_check_and_render.part.0+0x1a6>
+add r6, sp, #88 @ 0x58
+mov.w sl, #1
+add r7, sp, #120 @ 0x78
+mov.w r9, #388 @ 0x184
+str r5, [sp, #16]
+b.n <audio_check_and_render.part.0+0x12a>
+cmp r4, sl
+add.w r3, sl, #1
+beq.n <audio_check_and_render.part.0+0x1a4>
+mov sl, r3
+add.w r3, r7, sl, lsl #2
+ldrb.w r5, [r6], #1
+ldrb.w fp, [r3, #-4]
+mov r0, fp
+bl <preset_applyDeferredSceneSlotForTrigger>
+cmp r5, #0
+beq.n <audio_check_and_render.part.0+0x120>
+cmp.w fp, #6
+ite ls
+movls r5, #0
+movhi r5, #1
+cmp r5, #0
+bne.n <audio_check_and_render.part.0+0x120>
+mov r0, fp
+bl <seq_restoreAutomatedParameters.part.0>
+mov r1, fp
+mov r2, r5
+ldr r3, [pc, #160] @ (<audio_check_and_render.part.0+0x1fc>)
+cmp r1, #5
+it cs
+movcs r1, #5
+lsl.w ip, r8, r1
+b.n <audio_check_and_render.part.0+0x170>
+adds r2, #1
+add.w r3, r3, #388 @ 0x184
+cmp r2, #6
+beq.n <audio_check_and_render.part.0+0x120>
+ldrb r0, [r3, #0]
+cmp r0, #0
+beq.n <audio_check_and_render.part.0+0x166>
+ldrb r0, [r3, #2]
+tst.w r0, ip
+beq.n <audio_check_and_render.part.0+0x166>
+ldr r3, [pc, #108] @ (<audio_check_and_render.part.0+0x1ec>)
+mla r3, r9, r2, r3
+ldrb.w r0, [r3, #3016] @ 0xbc8
+cmp r0, #2
+bne.n <audio_check_and_render.part.0+0x120>
+ldrb.w r3, [r3, #3019] @ 0xbcb
+cmp r3, #0
+beq.n <audio_check_and_render.part.0+0x120>
+uxtb r2, r2
+mov r0, fp
+bl <midiNoteMode_queueState.lto_priv.0>
+cmp r4, sl
+add.w r3, sl, #1
+bne.n <audio_check_and_render.part.0+0x128>
+ldr r5, [sp, #16]
+cmp r5, #0
+beq.n <audio_check_and_render.part.0+0x270>
+lsls r0, r5, #31
+bpl.n <audio_check_and_render.part.0+0x1cc>
+movs r6, #0
+and.w r5, r5, #254 @ 0xfe
+mov r7, r6
+mov r0, r6
+bl <seq_restoreAutomatedParameters.part.0>
+ldr r3, [pc, #64] @ (<audio_check_and_render.part.0+0x200>)
+add r7, r3
+ldrb.w r3, [r7, #1000] @ 0x3e8
+lsls r3, r3, #31
+bmi.n <audio_check_and_render.part.0+0x204>
+cmp r5, #0
+beq.n <audio_check_and_render.part.0+0x270>
+movs r6, #0
+adds r6, #1
+uxtb r6, r6
+lsl.w r3, r8, r6
+mov r7, r6
+tst r3, r5
+uxtb r2, r3
+beq.n <audio_check_and_render.part.0+0x1ce>
+cmp r6, #6
+bic.w r5, r5, r2
+bls.n <audio_check_and_render.part.0+0x1b6>
+cmp r5, #0
+bne.n <audio_check_and_render.part.0+0x1cc>
+b.n <audio_check_and_render.part.0+0x270>
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+cmp r6, #5
+ldr r3, [pc, #740] @ (<audio_check_and_render.part.0+0x4ec>)
+it cs
+movcs r6, #5
+add r3, r6
+ldrb.w r3, [r3, #2596] @ 0xa24
+cmp r3, #5
+bne.n <audio_check_and_render.part.0+0x1a6>
+ldr r3, [pc, #728] @ (<audio_check_and_render.part.0+0x4f0>)
+mov.w r0, #1264 @ 0x4f0
+ldrsb.w lr, [r7, #1008] @ 0x3f0
+ldrh r2, [r3, #2]
+mov.w r3, #24576 @ 0x6000
+ldr r1, [pc, #716] @ (<audio_check_and_render.part.0+0x4f4>)
+cmp r2, #1
+ldrb.w ip, [r7, #1008] @ 0x3f0
+mla r9, r0, r6, r1
+it cc
+movcc r2, #1
+cmp.w lr, #0
+umull r2, r3, r2, r3
+mov.w r0, r2, lsr #1
+mov.w r1, r3, lsr #1
+blt.w <audio_check_and_render.part.0+0xd38>
+ldr r7, [pc, #684] @ (<audio_check_and_render.part.0+0x4f8>)
+ldr r6, [pc, #684] @ (<audio_check_and_render.part.0+0x4fc>)
+add.w r7, r7, ip, lsl #1
+ldrh.w r7, [r7, #92] @ 0x5c
+umlal r0, r1, r7, r6
+cmp r0, r2
+sbcs.w r7, r1, r3
+bcs.w <audio_check_and_render.part.0+0xd2e>
+movs r1, #1
+mov r0, r9
+bl <Colloid_gateRenew>
+cmp r5, #0
+bne.n <audio_check_and_render.part.0+0x1aa>
+ldr r2, [pc, #652] @ (<audio_check_and_render.part.0+0x500>)
+ldrb.w r3, [r2, #1015] @ 0x3f7
+uxtb.w r9, r3
+ldrb.w r3, [r2, #1016] @ 0x3f8
+cmp r3, #0
+bne.w <audio_check_and_render.part.0+0xb12>
+bl <seq_rampConsumeSteps.lto_priv.0>
+ldr r3, [pc, #628] @ (<audio_check_and_render.part.0+0x500>)
+ldrb.w r3, [r3, #1052] @ 0x41c
+cmp r3, #0
+beq.w <audio_check_and_render.part.0+0x3cc>
+ldr r3, [pc, #596] @ (<audio_check_and_render.part.0+0x4ec>)
+ldrb.w r3, [r3, #3012] @ 0xbc4
+cmp r9, r3
+bcs.n <audio_check_and_render.part.0+0x392>
+ldr r3, [pc, #608] @ (<audio_check_and_render.part.0+0x500>)
+add.w r3, r3, r9, lsl #2
+ldrh.w fp, [r3, #1056] @ 0x420
+ldrh.w r5, [r3, #1058] @ 0x422
+ldr r3, [sp, #12]
+uxth.w fp, fp
+uxth r5, r5
+cmp r3, r9
+bhi.n <audio_check_and_render.part.0+0x2be>
+tst.w fp, #2048 @ 0x800
+beq.n <audio_check_and_render.part.0+0x392>
+ubfx r7, fp, #7, #3
+ubfx r6, r5, #0, #9
+ldr r3, [pc, #568] @ (<audio_check_and_render.part.0+0x500>)
+cmp r7, #7
+mov sl, r7
+beq.n <audio_check_and_render.part.0+0x3b0>
+add r3, r7
+ldrb.w r3, [r3, #1572] @ 0x624
+ldr r2, [pc, #552] @ (<audio_check_and_render.part.0+0x500>)
+add.w r9, r9, #1
+ldr.w r2, [r2, #1580] @ 0x62c
+uxtb.w r9, r9
+cbz r2, <audio_check_and_render.part.0+0x2f4>
+lsrs r1, r6, #3
+ldrb r1, [r2, r1]
+and.w r2, r5, #7
+lsl.w r2, r8, r2
+tst r1, r2
+bne.n <audio_check_and_render.part.0+0x294>
+ldr r1, [pc, #520] @ (<audio_check_and_render.part.0+0x500>)
+ldr.w r2, [r1, #1584] @ 0x630
+cbz r2, <audio_check_and_render.part.0+0x306>
+ldrb.w r1, [r1, #1588] @ 0x634
+cmp r1, sl
+beq.w <audio_check_and_render.part.0+0x886>
+tst.w fp, #1024 @ 0x400
+beq.n <audio_check_and_render.part.0+0x294>
+lsrs r2, r5, #9
+cmp.w r6, #384 @ 0x180
+mov r5, r2
+bcs.w <audio_check_and_render.part.0+0xa06>
+mov r0, r3
+movs r2, #1
+mov r1, r6
+str r3, [sp, #16]
+bl <instrumentManager_targetValid>
+ldr r3, [sp, #16]
+cmp r0, #0
+beq.n <audio_check_and_render.part.0+0x294>
+lsrs r2, r6, #6
+ldr r1, [pc, #468] @ (<audio_check_and_render.part.0+0x504>)
+add.w r1, r1, r2, lsl #3
+and.w r2, r6, #63 @ 0x3f
+ldrd r1, r0, [r1, #-8]
+rsb ip, r2, #32
+lsrs r1, r2
+subs r2, #32
+lsl.w ip, r0, ip
+lsr.w r2, r0, r2
+orr.w r1, r1, ip
+orrs r1, r2
+lsls r1, r1, #31
+bmi.n <audio_check_and_render.part.0+0x294>
+mov r1, r6
+mov r2, r5
+mov r0, r3
+bl <seq_writeInstrumentAutomation.lto_priv.0>
+mov r1, r0
+cmp r0, #0
+beq.n <audio_check_and_render.part.0+0x294>
+tst.w fp, #2048 @ 0x800
+ldr r3, [sp, #16]
+bne.n <audio_check_and_render.part.0+0x294>
+cmp r7, #7
+beq.n <audio_check_and_render.part.0+0x294>
+ldr r2, [pc, #396] @ (<audio_check_and_render.part.0+0x500>)
+add r2, r7
+ldrb.w r0, [r2, #1572] @ 0x624
+cmp r0, #15
+bls.w <audio_check_and_render.part.0+0xea4>
+cmp r0, #16
+bne.n <audio_check_and_render.part.0+0x294>
+ldr r2, [pc, #360] @ (<audio_check_and_render.part.0+0x4ec>)
+ldrb.w r2, [r2, #2652] @ 0xa5c
+cmp r2, #0
+beq.n <audio_check_and_render.part.0+0x294>
+ldr r2, [pc, #376] @ (<audio_check_and_render.part.0+0x508>)
+b.w <audio_check_and_render.part.0+0xeae>
+mrs r2, PRIMASK
+cpsid i
+ldr r3, [pc, #336] @ (<audio_check_and_render.part.0+0x4ec>)
+ldrb.w r3, [r3, #3012] @ 0xbc4
+cmp r9, r3
+bcs.n <audio_check_and_render.part.0+0x3b6>
+ldr r3, [sp, #12]
+cmp r3, r9
+bls.w <audio_check_and_render.part.0+0xb44>
+msr PRIMASK, r2
+b.n <audio_check_and_render.part.0+0x294>
+ldrb.w r3, [r3, #1568] @ 0x620
+b.n <audio_check_and_render.part.0+0x2d4>
+movs r3, #0
+ldr r1, [pc, #304] @ (<audio_check_and_render.part.0+0x4ec>)
+strb.w r3, [r1, #3012] @ 0xbc4
+ldr r1, [pc, #320] @ (<audio_check_and_render.part.0+0x500>)
+strb.w r3, [r1, #1052] @ 0x41c
+strb.w r3, [r1, #1015] @ 0x3f7
+msr PRIMASK, r2
+cmp r4, #0
+beq.w <audio_check_and_render.part.0+0x4e4>
+add.w fp, sp, #120 @ 0x78
+add.w r9, sp, #88 @ 0x58
+add.w sl, fp, r4, lsl #2
+ldrb.w r4, [fp]
+ldrb.w r6, [fp, #2]
+cmp r4, #6
+bhi.n <audio_check_and_render.part.0+0x4c4>
+ldrb.w r3, [r9]
+cmp r4, #5
+mov r5, r4
+ldrb.w r7, [fp, #1]
+it cs
+movcs r5, #5
+str r3, [sp, #16]
+cmp r4, #4
+ldrb.w r3, [fp, #3]
+str r3, [sp, #12]
+bhi.w <audio_check_and_render.part.0+0x75e>
+ldr r2, [pc, #256] @ (<audio_check_and_render.part.0+0x50c>)
+mov.w r1, #1065353216 @ ADDR
+ldr r3, [pc, #220] @ (<audio_check_and_render.part.0+0x4ec>)
+add.w r2, r2, r5, lsl #2
+add r3, r5
+str r1, [r2, #0]
+ldr r2, [pc, #244] @ (<audio_check_and_render.part.0+0x510>)
+ldrb.w r3, [r3, #2596] @ 0xa24
+add.w r2, r2, r5, lsl #2
+vstr s16, [r2]
+cmp r3, #6
+bhi.n <audio_check_and_render.part.0+0x4c4>
+tbh [pc, r3, lsl #1]
+.short 0x018d
+.word ADDR
+.word ADDR
+.word ADDR
+ldr r3, [sp, #12]
+mov r1, r5
+ldr r0, [pc, #176] @ (<audio_check_and_render.part.0+0x4f4>)
+mov r2, r6
+str r3, [sp, #0]
+mov.w r3, #1264 @ 0x4f0
+mla r0, r3, r5, r0
+mov r3, r7
+str r0, [sp, #16]
+bl <Tetrakt_triggerVoice>
+ldr r2, [pc, #168] @ (<audio_check_and_render.part.0+0x500>)
+adds r3, r2, r4
+ldrb.w r5, [r3, #1572] @ 0x624
+ldr r3, [sp, #12]
+cbnz r3, <audio_check_and_render.part.0+0x46a>
+ldr r0, [sp, #16]
+ldrb.w r3, [r0, #1050] @ 0x41a
+str r3, [sp, #12]
+mov r0, r5
+add r1, sp, #72 @ 0x48
+bl <midiNoteMap_load.part.0>
+lsl.w r3, r8, r4
+ldrb.w r2, [sp, #87] @ 0x57
+tst r2, r3
+beq.w <audio_check_and_render.part.0+0xc0e>
+add.w r3, sp, #57 @ 0x39
+mov r2, r7
+mov r1, r4
+add r0, sp, #72 @ 0x48
+str r3, [sp, #4]
+add r3, sp, #56 @ 0x38
+str r3, [sp, #0]
+movs r3, #0
+bl <midiNoteMap_inverse>
+cmp r0, #0
+beq.w <audio_check_and_render.part.0+0xc50>
+mrs r3, PRIMASK
+cpsid i
+mov r0, r4
+str r3, [sp, #36] @ 0x24
+bl <midiOut_trackNoteOffLocked.lto_priv.0>
+ldrb.w r1, [sp, #56] @ 0x38
+subs r2, r1, #1
+uxtb r2, r2
+cmp r2, #15
+bhi.n <audio_check_and_render.part.0+0x4be>
+ldr r3, [sp, #12]
+cmp r3, #0
+bne.w <audio_check_and_render.part.0+0xc68>
+ldr r3, [sp, #36] @ 0x24
+msr PRIMASK, r3
+mov r1, r6
+mov r0, r4
+bl <busComp_sidechainTrigger>
+add.w r0, r4, #8
+add.w fp, fp, #4
+add.w r9, r9, #1
+uxtb r0, r0
+bl <led_pulseLed>
+cmp fp, sl
+bne.w <audio_check_and_render.part.0+0x3de>
+movs r4, #0
+ldr r5, [sp, #24]
+b.n <audio_check_and_render.part.0+0x51a>
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+adds r4, #1
+cmp r4, #7
+beq.n <audio_check_and_render.part.0+0x54a>
+lsl.w r3, r8, r4
+tst r5, r3
+beq.n <audio_check_and_render.part.0+0x514>
+uxtb r3, r4
+ldr r2, [pc, #772] @ (<audio_check_and_render.part.0+0x82c>)
+cmp r3, #5
+it cs
+movcs r3, #5
+add r2, r3
+ldrb.w r2, [r2, #2596] @ 0xa24
+cmp r2, #5
+bne.n <audio_check_and_render.part.0+0x514>
+ldr r2, [pc, #760] @ (<audio_check_and_render.part.0+0x830>)
+mov.w r0, #1264 @ 0x4f0
+adds r4, #1
+mla r0, r0, r3, r2
+bl <Colloid_changeDecide>
+cmp r4, #7
+bne.n <audio_check_and_render.part.0+0x51a>
+bl <seq_rampConsumeSteps.lto_priv.0>
+ldr r2, [pc, #740] @ (<audio_check_and_render.part.0+0x834>)
+ldrb.w r3, [r2, #2811] @ 0xafb
+adds r3, #1
+uxtb r3, r3
+cmp r3, #2
+bhi.w <audio_check_and_render.part.0+0x8a8>
+strb.w r3, [r2, #2811] @ 0xafb
+mrs r4, BASEPRI
+movs r3, #96 @ 0x60
+msr BASEPRI, r3
+dsb sy
+isb sy
+ldr r2, [sp, #28]
+ldr r5, [sp, #20]
+adds r1, r2, r5
+ldr r2, [sp, #32]
+adds r0, r2, r5
+bl <mixer_calcNextSampleBlock>
+msr BASEPRI, r4
+dsb sy
+isb sy
+add.w r3, r5, #256 @ 0x100
+cmp.w r3, #768 @ 0x300
+str r3, [sp, #20]
+bne.w <audio_check_and_render.part.0+0x44>
+mrs r1, PRIMASK
+cpsid i
+ldr r0, [pc, #648] @ (<audio_check_and_render.part.0+0x82c>)
+ldr r3, [pc, #656] @ (<audio_check_and_render.part.0+0x838>)
+ldr r3, [r3, #4]
+ldr r2, [r0, #0]
+str r3, [r0, #0]
+subs r3, r3, r2
+ldr r2, [r0, #4]
+add r2, r3
+str r2, [r0, #4]
+ldrb r2, [r0, #13]
+cmp r2, #1
+bhi.n <audio_check_and_render.part.0+0x5c0>
+ldr r2, [r0, #8]
+add r3, r2
+str r3, [r0, #8]
+ldr r0, [pc, #616] @ (<audio_check_and_render.part.0+0x82c>)
+ldrb r3, [r0, #13]
+cmp r3, #1
+bhi.n <audio_check_and_render.part.0+0x5f8>
+ldr r4, [pc, #616] @ (<audio_check_and_render.part.0+0x834>)
+ldrb.w r3, [r4, #2812] @ 0xafc
+ldrb.w r2, [r0, #2880] @ 0xb40
+add r3, r0
+uxtb r2, r2
+strb r2, [r3, #16]
+ldrb.w r3, [r4, #2812] @ 0xafc
+eor.w r3, r3, #1
+strb.w r3, [r4, #2812] @ 0xafc
+ldrb.w r3, [r0, #2880] @ 0xb40
+eor.w r3, r3, #1
+strb.w r3, [r0, #2880] @ 0xb40
+ldrb r3, [r0, #13]
+adds r3, #1
+uxtb r3, r3
+strb r3, [r0, #13]
+msr PRIMASK, r1
+ldr r2, [pc, #564] @ (<audio_check_and_render.part.0+0x834>)
+ldr.w r3, [r2, #2816] @ 0xb00
+adds r3, #1
+str.w r3, [r2, #2816] @ 0xb00
+ldr r3, [pc, #544] @ (<audio_check_and_render.part.0+0x82c>)
+ldrb r3, [r3, #13]
+cmp r3, #2
+bne.w <audio_check_and_render.part.0+0x1c>
+add sp, #252 @ 0xfc
+vpop {d8}
+ldmia.w sp!, {r4, r5, r6, r7, r8, r9, sl, fp, pc}
+ldr r3, [pc, #540] @ (<audio_check_and_render.part.0+0x83c>)
+mov.w ip, #1264 @ 0x4f0
+ldr r0, [pc, #524] @ (<audio_check_and_render.part.0+0x830>)
+ldrh r2, [r3, #2]
+ldr r3, [pc, #524] @ (<audio_check_and_render.part.0+0x834>)
+mla r0, ip, r5, r0
+cmp r2, #1
+add.w r1, r3, r4
+mov.w r3, #24576 @ 0x6000
+it cc
+movcc r2, #1
+str r0, [sp, #36] @ 0x24
+ldrsb.w ip, [r1, #1008] @ 0x3f0
+umull r2, r3, r2, r3
+ldrb.w lr, [r1, #1008] @ 0x3f0
+cmp.w ip, #0
+mov.w r0, r2, lsr #1
+str r3, [sp, #12]
+mov.w r1, r3, lsr #1
+blt.w <audio_check_and_render.part.0+0xbe2>
+ldr.w ip, [pc, #528] @ <audio_check_and_render.part.0+0x86c>
+ldr r3, [pc, #480] @ (<audio_check_and_render.part.0+0x840>)
+add.w ip, ip, lr, lsl #1
+ldrh.w ip, [ip, #92] @ 0x5c
+umlal r0, r1, ip, r3
+ldr r3, [sp, #12]
+cmp r0, r2
+sbcs.w ip, r1, r3
+bcs.w <audio_check_and_render.part.0+0xbf4>
+movs r0, #1
+ldr r3, [sp, #16]
+mov r1, r5
+mov r2, r6
+strd r0, r3, [sp]
+mov r3, r7
+ldr r0, [sp, #36] @ 0x24
+bl <Colloid_triggerVoice>
+b.n <audio_check_and_render.part.0+0x4c4>
+ldr r3, [pc, #428] @ (<audio_check_and_render.part.0+0x83c>)
+mov.w ip, #1264 @ 0x4f0
+ldr r0, [pc, #408] @ (<audio_check_and_render.part.0+0x830>)
+ldrh r2, [r3, #2]
+ldr r3, [pc, #408] @ (<audio_check_and_render.part.0+0x834>)
+mla r0, ip, r5, r0
+cmp r2, #1
+add.w r1, r3, r4
+mov.w r3, #24576 @ 0x6000
+it cc
+movcc r2, #1
+str r0, [sp, #16]
+ldrsb.w ip, [r1, #1008] @ 0x3f0
+umull r2, r3, r2, r3
+ldrb.w lr, [r1, #1008] @ 0x3f0
+cmp.w ip, #0
+mov.w r0, r2, lsr #1
+str r3, [sp, #12]
+mov.w r1, r3, lsr #1
+blt.w <audio_check_and_render.part.0+0xbd0>
+ldr.w ip, [pc, #412] @ <audio_check_and_render.part.0+0x86c>
+ldr r3, [pc, #364] @ (<audio_check_and_render.part.0+0x840>)
+add.w ip, ip, lr, lsl #1
+ldrh.w ip, [ip, #92] @ 0x5c
+umlal r0, r1, ip, r3
+ldr r3, [sp, #12]
+cmp r0, r2
+sbcs.w ip, r1, r3
+bcs.w <audio_check_and_render.part.0+0xbfa>
+movs r0, #1
+str r0, [sp, #0]
+mov r3, r7
+mov r1, r5
+ldr r0, [sp, #16]
+mov r2, r6
+bl <Alkaline_triggerVoice>
+b.n <audio_check_and_render.part.0+0x4c4>
+ldr r3, [pc, #304] @ (<audio_check_and_render.part.0+0x830>)
+mov.w r0, #1264 @ 0x4f0
+mov r1, r5
+mov r2, r6
+mla r0, r0, r5, r3
+sub.w r3, r4, #6
+str r7, [sp, #0]
+clz r3, r3
+lsrs r3, r3, #5
+bl <HiHat_triggerVoice.part.0>
+b.n <audio_check_and_render.part.0+0x4c4>
+ldr r2, [pc, #272] @ (<audio_check_and_render.part.0+0x830>)
+mov.w r0, #1264 @ 0x4f0
+mov r3, r7
+mov r1, r5
+mla r0, r0, r5, r2
+mov r2, r6
+bl <Cymbal_triggerVoice.part.0>
+b.n <audio_check_and_render.part.0+0x4c4>
+ldr r2, [pc, #252] @ (<audio_check_and_render.part.0+0x830>)
+mov.w r0, #1264 @ 0x4f0
+mov r3, r7
+mov r1, r5
+mla r0, r0, r5, r2
+mov r2, r6
+bl <Snare_triggerVoice.part.0>
+b.n <audio_check_and_render.part.0+0x4c4>
+ldr r2, [pc, #228] @ (<audio_check_and_render.part.0+0x830>)
+mov.w r0, #1264 @ 0x4f0
+mov r3, r7
+mov r1, r5
+mla r0, r0, r5, r2
+mov r2, r6
+bl <Drum_triggerVoice.part.0>
+b.n <audio_check_and_render.part.0+0x4c4>
+ldr r3, [pc, #204] @ (<audio_check_and_render.part.0+0x82c>)
+ldrb.w r2, [r3, #2520] @ 0x9d8
+cmp r2, #16
+beq.w <audio_check_and_render.part.0+0x89a>
+cmp r2, #15
+bhi.w <audio_check_and_render.part.0+0x408>
+mov.w r1, #1656 @ 0x678
+ldr r3, [pc, #204] @ (<audio_check_and_render.part.0+0x844>)
+mla r3, r1, r2, r3
+movs r2, #255 @ 0xff
+ldrb.w r0, [r3, #1463] @ 0x5b7
+ldr r1, [pc, #196] @ (<audio_check_and_render.part.0+0x848>)
+strb.w r2, [sp, #72] @ 0x48
+movs r2, #0
+ldrb.w ip, [r1]
+adds r1, #40 @ 0x28
+cmp ip, r0
+beq.n <audio_check_and_render.part.0+0x870>
+adds r2, #1
+cmp r2, #7
+bne.n <audio_check_and_render.part.0+0x788>
+add r2, sp, #72 @ 0x48
+ldr r1, [pc, #176] @ (<audio_check_and_render.part.0+0x84c>)
+str r3, [sp, #36] @ 0x24
+bl <instrumentManager_descriptorIndexByKey>
+cmp r0, #0
+beq.w <audio_check_and_render.part.0+0x408>
+ldr r3, [pc, #128] @ (<audio_check_and_render.part.0+0x82c>)
+ldrb.w r2, [r3, #2601] @ 0xa29
+ldr r3, [sp, #36] @ 0x24
+cmp r2, #3
+bhi.w <audio_check_and_render.part.0+0x408>
+tbb [pc, r2]
+.short 0x022b
+.short 0x3436
+ldr r2, [pc, #144] @ (<audio_check_and_render.part.0+0x850>)
+cmp r4, #6
+bne.n <audio_check_and_render.part.0+0x816>
+ldr r0, [pc, #108] @ (<audio_check_and_render.part.0+0x834>)
+ldrb.w r1, [r0, #2708] @ 0xa94
+cmp r1, #0
+beq.w <audio_check_and_render.part.0+0xc00>
+ldrb.w r3, [r0, #2709] @ 0xa95
+cmp r3, #127 @ 0x7f
+vmov.f32 s14, #112 @ ADDR 1.0
+vldr s12, [pc, #120] @ <audio_check_and_render.part.0+0x854>
+it cs
+movcs r3, #127 @ 0x7f
+vldr s11, [pc, #116] @ <audio_check_and_render.part.0+0x858>
+vldr s13, [pc, #116] @ <audio_check_and_render.part.0+0x85c>
+vmov s15, r3
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s12
+vmov.f32 s12, s14
+vfma.f32 s12, s15, s11
+vmul.f32 s15, s15, s13
+vdiv.f32 s13, s15, s12
+vsub.f32 s14, s14, s13
+vstr s14, [r2, #4]
+b.n <audio_check_and_render.part.0+0x408>
+cmp r4, #6
+ldr r2, [pc, #76] @ (<audio_check_and_render.part.0+0x860>)
+beq.n <audio_check_and_render.part.0+0x7c4>
+ldrb.w r1, [sp, #72] @ 0x48
+add r3, r1
+ldrb.w r3, [r3, #1592] @ 0x638
+b.n <audio_check_and_render.part.0+0x7d4>
+ldr r2, [pc, #64] @ (<audio_check_and_render.part.0+0x864>)
+b.n <audio_check_and_render.part.0+0x7c0>
+ldr r2, [pc, #64] @ (<audio_check_and_render.part.0+0x868>)
+b.n <audio_check_and_render.part.0+0x7c0>
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+add.w r2, r2, r2, lsl #2
+ldr r1, [pc, #728] @ (<audio_check_and_render.part.0+0xb50>)
+add.w r2, r1, r2, lsl #3
+ldrb.w r2, [r2, #1696] @ 0x6a0
+lsls r2, r2, #29
+bmi.w <audio_check_and_render.part.0+0x408>
+b.n <audio_check_and_render.part.0+0x798>
+lsrs r1, r6, #3
+ldrb r1, [r2, r1]
+and.w r2, r5, #7
+lsl.w r2, r8, r2
+tst r1, r2
+beq.w <audio_check_and_render.part.0+0x306>
+b.n <audio_check_and_render.part.0+0x294>
+ldrb.w r3, [r3, #2652] @ 0xa5c
+cmp r3, #0
+beq.w <audio_check_and_render.part.0+0x408>
+ldr r3, [pc, #684] @ (<audio_check_and_render.part.0+0xb54>)
+b.n <audio_check_and_render.part.0+0x77a>
+movs r3, #0
+ldr r2, [pc, #684] @ (<audio_check_and_render.part.0+0xb58>)
+ldr r4, [pc, #684] @ (<audio_check_and_render.part.0+0xb5c>)
+strb.w r3, [r2, #2811] @ 0xafb
+bl <seq_rampNowQ4.lto_priv.0>
+add.w r5, r4, #640 @ 0x280
+sub.w r9, r4, #68 @ 0x44
+ldr r7, [pc, #672] @ (<audio_check_and_render.part.0+0xb60>)
+str r0, [sp, #12]
+b.n <audio_check_and_render.part.0+0x8d6>
+cmp.w fp, #16
+beq.n <audio_check_and_render.part.0+0x9ba>
+movs r3, #0
+strh r3, [r4, #0]
+adds r4, #10
+cmp r4, r5
+beq.w <audio_check_and_render.part.0+0x562>
+ldrh r3, [r4, #0]
+cmp r3, #0
+beq.n <audio_check_and_render.part.0+0x8ce>
+subs r3, #1
+ubfx sl, r3, #0, #9
+uxth r1, r3
+ubfx r3, r3, #9, #7
+cmp.w sl, #384 @ 0x180
+ite cc
+movcc.w r0, sl, lsr #6
+movcs r0, #255 @ 0xff
+cmp r3, #6
+bhi.n <audio_check_and_render.part.0+0x8ca>
+ldr r2, [pc, #604] @ (<audio_check_and_render.part.0+0xb58>)
+add r2, r3
+ldrb.w fp, [r2, #1572] @ 0x624
+cmp.w fp, #15
+bhi.n <audio_check_and_render.part.0+0x8c4>
+movw r2, #10528 @ 0x2920
+mla r2, r2, fp, r7
+add.w r2, r2, #8192 @ 0x2000
+ldrb.w r2, [r2, #2333] @ 0x91d
+asrs r2, r3
+lsls r2, r2, #31
+bpl.n <audio_check_and_render.part.0+0x8ca>
+ldr r2, [pc, #568] @ (<audio_check_and_render.part.0+0xb58>)
+ldr.w r2, [r2, #1580] @ 0x62c
+cbz r2, <audio_check_and_render.part.0+0x93a>
+mov.w ip, sl, lsr #3
+ldrb.w ip, [r2, ip]
+and.w r2, r1, #7
+lsl.w r2, r8, r2
+tst.w ip, r2
+bne.n <audio_check_and_render.part.0+0x8ca>
+ldr r2, [pc, #540] @ (<audio_check_and_render.part.0+0xb58>)
+mov r6, r2
+ldr.w r2, [r2, #1584] @ 0x630
+cbz r2, <audio_check_and_render.part.0+0x94c>
+ldrb.w ip, [r6, #1588] @ 0x634
+cmp ip, r3
+beq.n <audio_check_and_render.part.0+0x9f2>
+cmp r0, #5
+bhi.n <audio_check_and_render.part.0+0x97a>
+cmp.w sl, #384 @ 0x180
+bcs.n <audio_check_and_render.part.0+0x97a>
+and.w r3, sl, #63 @ 0x3f
+add.w r0, r9, r0, lsl #3
+ldrd r2, r1, [r0, #-8]
+rsb r0, r3, #32
+lsrs r2, r3
+subs r3, #32
+lsl.w r0, r1, r0
+lsr.w r3, r1, r3
+orrs r2, r0
+orrs r2, r3
+lsls r3, r2, #31
+bmi.n <audio_check_and_render.part.0+0x8ca>
+movs r2, #1
+mov r1, sl
+mov r0, fp
+bl <instrumentManager_targetValid>
+cmp r0, #0
+beq.n <audio_check_and_render.part.0+0x8ca>
+ldrh r3, [r4, #6]
+ldr r1, [sp, #12]
+ldrh r2, [r4, #8]
+subs r2, r2, r3
+subs r3, r1, r3
+sxth.w ip, r3
+sxth r0, r2
+uxth r1, r2
+bic.w r2, ip, ip, asr #31
+uxth r3, r3
+cmp r0, r2
+bgt.n <audio_check_and_render.part.0+0x9c8>
+ldrb r2, [r4, #3]
+strb r2, [r4, #2]
+ldrb r3, [r4, #4]
+cmp r3, r2
+beq.n <audio_check_and_render.part.0+0x8ce>
+mov r1, sl
+mov r0, fp
+strb r2, [r4, #4]
+bl <seq_writeInstrumentAutomation.lto_priv.0>
+b.n <audio_check_and_render.part.0+0x8ce>
+ldr r2, [pc, #424] @ (<audio_check_and_render.part.0+0xb64>)
+ldrb.w r2, [r2, #2652] @ 0xa5c
+cmp r2, #0
+beq.n <audio_check_and_render.part.0+0x8ca>
+ldr r2, [pc, #416] @ (<audio_check_and_render.part.0+0xb68>)
+b.n <audio_check_and_render.part.0+0x90e>
+cmp.w ip, #0
+ldrb r2, [r4, #2]
+ble.n <audio_check_and_render.part.0+0x9a8>
+ldrb.w ip, [r4, #3]
+asrs r0, r0, #1
+sub.w ip, ip, r2
+mul.w r3, r3, ip
+cmp r3, #0
+blt.w <audio_check_and_render.part.0+0xb78>
+add r3, r0
+udiv r3, r3, r1
+uxtb r3, r3
+add r3, r2
+uxtb r2, r3
+b.n <audio_check_and_render.part.0+0x9a8>
+and.w r3, r1, #7
+mov.w r1, sl, lsr #3
+lsl.w r3, r8, r3
+ldrb r2, [r2, r1]
+tst r2, r3
+beq.n <audio_check_and_render.part.0+0x94c>
+b.n <audio_check_and_render.part.0+0x8ca>
+sub.w r0, r6, #384 @ 0x180
+uxth r3, r0
+cmp r3, #41 @ 0x29
+bls.w <audio_check_and_render.part.0+0xb84>
+sub.w r3, r6, #448 @ 0x1c0
+cmp r3, #63 @ 0x3f
+bhi.w <audio_check_and_render.part.0+0x294>
+ldr r3, [pc, #312] @ (<audio_check_and_render.part.0+0xb58>)
+mov r2, r3
+ldrb.w r3, [r3, #2784] @ 0xae0
+cbz r3, <audio_check_and_render.part.0+0xa6e>
+cmp r7, #7
+beq.w <audio_check_and_render.part.0+0x294>
+mov r3, r2
+add r7, r2
+ldrb.w r1, [r3, #1568] @ 0x620
+ldrb.w r2, [r7, #1572] @ 0x624
+cmp r1, #16
+beq.w <audio_check_and_render.part.0+0xe66>
+cmp r1, #15
+bhi.w <audio_check_and_render.part.0+0x294>
+mov.w r0, #1656 @ 0x678
+ldr r3, [pc, #288] @ (<audio_check_and_render.part.0+0xb6c>)
+cmp r2, #16
+mla r3, r0, r1, r3
+beq.w <audio_check_and_render.part.0+0xe58>
+cmp r2, #15
+bhi.w <audio_check_and_render.part.0+0x294>
+mov.w r0, #1656 @ 0x678
+ldr r1, [pc, #268] @ (<audio_check_and_render.part.0+0xb6c>)
+mla r2, r0, r2, r1
+ldrb r1, [r3, #0]
+ldrb r3, [r2, #0]
+cmp r1, r3
+bne.w <audio_check_and_render.part.0+0x294>
+adds r6, #64 @ 0x40
+ldr r3, [pc, #240] @ (<audio_check_and_render.part.0+0xb64>)
+uxtb r6, r6
+ldrb.w r7, [r3, #2672] @ 0xa70
+mov r1, r6
+mov r0, r7
+bl <effects_paramAutomatable>
+cmp r0, #0
+beq.w <audio_check_and_render.part.0+0x294>
+cmp r7, #4
+bhi.w <audio_check_and_render.part.0+0x294>
+ldr r3, [pc, #192] @ (<audio_check_and_render.part.0+0xb50>)
+add.w r3, r3, r7, lsl #6
+ldrb.w r2, [r3, #1376] @ 0x560
+cmp r2, r6
+bls.w <audio_check_and_render.part.0+0x294>
+ldr.w r7, [r3, #1372] @ 0x55c
+rsb r3, r6, r6, lsl #3
+adds.w r7, r7, r3, lsl #2
+beq.w <audio_check_and_render.part.0+0x294>
+ldrb r3, [r7, #22]
+lsls r1, r3, #31
+bpl.n <audio_check_and_render.part.0+0xaba>
+mov r0, r5
+ldr r3, [r7, #24]
+blx r3
+mov r5, r0
+ldrb r3, [r7, #21]
+cmp r3, r5
+it cs
+movcs r3, r5
+uxtb r5, r3
+ldrb r3, [r7, #11]
+cbz r3, <audio_check_and_render.part.0+0xad0>
+ldrb r3, [r7, #9]
+cmp r5, r3
+it cc
+movcc r5, r3
+movs r3, #1
+sub.w r2, r6, #32
+rsb r1, r6, #32
+lsl.w r0, r3, r6
+lsl.w r2, r3, r2
+lsr.w r1, r3, r1
+ldr r3, [pc, #124] @ (<audio_check_and_render.part.0+0xb64>)
+orrs r2, r1
+add r3, r6
+ldr r1, [pc, #128] @ (<audio_check_and_render.part.0+0xb70>)
+strb.w r5, [r3, #2768] @ 0xad0
+ldr r3, [r1, #0]
+orrs r3, r0
+str r3, [r1, #0]
+ldr r3, [r1, #4]
+orrs r3, r2
+str r3, [r1, #4]
+ldr r3, [r1, #8]
+bic.w r3, r3, r0
+str r3, [r1, #8]
+ldr r3, [r1, #12]
+bic.w r3, r3, r2
+str r3, [r1, #12]
+b.w <audio_check_and_render.part.0+0x294>
+mrs r3, PRIMASK
+cpsid i
+movs r1, #0
+strb.w r1, [r2, #1016] @ 0x3f8
+msr PRIMASK, r3
+ldr r3, [pc, #64] @ (<audio_check_and_render.part.0+0xb64>)
+movs r6, #0
+movs r7, #0
+movs r2, #32
+strh.w r1, [r3, #2869] @ 0xb35
+add.w r3, r3, #2752 @ 0xac0
+ldr r0, [pc, #64] @ (<audio_check_and_render.part.0+0xb74>)
+strd r6, r7, [r3]
+strd r6, r7, [r3, #8]
+bl <memset>
+b.w <audio_check_and_render.part.0+0x284>
+ldr r3, [pc, #16] @ (<audio_check_and_render.part.0+0xb58>)
+strb.w r9, [r3, #1015] @ 0x3f7
+msr PRIMASK, r2
+b.n <audio_check_and_render.part.0+0x3cc>
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+subs r3, r0, r3
+udiv r3, r3, r1
+negs r3, r3
+uxtb r3, r3
+b.n <audio_check_and_render.part.0+0x9ec>
+ldr r7, [pc, #768] @ (<audio_check_and_render.part.0+0xe88>)
+add.w r1, r0, r0, lsl #1
+lsls r3, r0, #1
+add.w r1, r7, r1, lsl #3
+ldrh.w ip, [r1, #354] @ 0x162
+ldrb.w r1, [r1, #350] @ 0x15e
+cmp r2, ip
+bls.n <audio_check_and_render.part.0+0xc1c>
+uxtb.w r5, ip
+cmp r1, #8
+bhi.w <audio_check_and_render.part.0+0x294>
+add r2, pc, #4 @ (adr r2, <audio_check_and_render.part.0+0xbac>)
+ldr.w pc, [r2, r1, lsl #2]
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+ldr.w ip, [pc, #704] @ <audio_check_and_render.part.0+0xe94>
+adds.w r0, r0, ip
+adc.w r1, r1, #3
+bl <__aeabi_uldivmod>
+b.n <audio_check_and_render.part.0+0x6ec>
+ldr.w ip, [pc, #688] @ <audio_check_and_render.part.0+0xe94>
+adds.w r0, r0, ip
+adc.w r1, r1, #3
+bl <__aeabi_uldivmod>
+b.n <audio_check_and_render.part.0+0x67a>
+bl <__aeabi_uldivmod>
+b.n <audio_check_and_render.part.0+0x67a>
+bl <__aeabi_uldivmod>
+b.n <audio_check_and_render.part.0+0x6ec>
+ldr r0, [pc, #648] @ (<audio_check_and_render.part.0+0xe8c>)
+ldrb.w r1, [r0, #2785] @ 0xae1
+cbz r1, <audio_check_and_render.part.0+0xc62>
+ldrb.w r3, [r0, #2786] @ 0xae2
+b.n <audio_check_and_render.part.0+0x7d4>
+mov r2, r7
+mov r1, r5
+mov r3, r6
+mov r0, r4
+bl <midiOut_trackTrigger>
+b.n <audio_check_and_render.part.0+0x4c4>
+cmp r1, #8
+bhi.w <audio_check_and_render.part.0+0x294>
+addw ip, pc, #8
+ldr.w pc, [ip, r1, lsl #2]
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+mrs r5, PRIMASK
+cpsid i
+mov r0, r4
+bl <midiOut_trackNoteOffLocked.lto_priv.0>
+msr PRIMASK, r5
+b.n <audio_check_and_render.part.0+0x4c4>
+ldrb.w r3, [r3, #496] @ 0x1f0
+b.n <audio_check_and_render.part.0+0x7d4>
+ldr r3, [pc, #548] @ (<audio_check_and_render.part.0+0xe90>)
+ldrb r3, [r3, #5]
+lsls r0, r3, #27
+bpl.w <audio_check_and_render.part.0+0x4be>
+movs r5, #0
+str.w r9, [sp, #48] @ 0x30
+str.w sl, [sp, #52] @ 0x34
+mov sl, r1
+mov r9, r5
+strd r7, fp, [sp, #40] @ 0x28
+mov fp, r2
+movs r3, #1
+add.w lr, sp, #58 @ 0x3a
+ldr r2, [sp, #40] @ 0x28
+mov r1, r4
+lsl.w ip, r3, r5
+movs r3, #0
+add r0, sp, #72 @ 0x48
+uxtb.w r7, ip
+str r3, [sp, #64] @ 0x40
+strh.w r3, [sp, #68] @ 0x44
+uxtb r3, r5
+str r7, [sp, #16]
+ldr r7, [sp, #12]
+tst.w ip, r7
+beq.n <audio_check_and_render.part.0+0xcfa>
+add.w r7, sp, #59 @ 0x3b
+str.w lr, [sp]
+str r7, [sp, #4]
+bl <midiNoteMap_inverse>
+cbz r0, <audio_check_and_render.part.0+0xcfa>
+ldrb.w r3, [sp, #58] @ 0x3a
+cmp r3, sl
+bne.n <audio_check_and_render.part.0+0xcfa>
+ldrb.w r3, [sp, #67] @ 0x43
+movs r2, #2
+movs r1, #3
+add r0, sp, #64 @ 0x40
+bfi r3, r2, #2, #2
+strb.w r3, [sp, #67] @ 0x43
+orn r3, fp, #111 @ 0x6f
+strb.w r3, [sp, #64] @ 0x40
+ldrb.w r3, [sp, #59] @ 0x3b
+strb.w r3, [sp, #65] @ 0x41
+and.w r3, r6, #127 @ 0x7f
+strb.w r3, [sp, #66] @ 0x42
+bl <midiOut_sendMsg>
+ldr r3, [sp, #16]
+orr.w r9, r9, r3
+adds r5, #1
+cmp r5, #4
+bne.n <audio_check_and_render.part.0+0xc86>
+mov r3, r9
+mov r1, sl
+ldr.w sl, [sp, #52] @ 0x34
+ldrd fp, r9, [sp, #44] @ 0x2c
+cmp r3, #0
+beq.w <audio_check_and_render.part.0+0x4be>
+ldrb.w r0, [sp, #57] @ 0x39
+ldr r2, [pc, #372] @ (<audio_check_and_render.part.0+0xe8c>)
+orn r0, r0, #127 @ 0x7f
+add r2, r4
+strb.w r0, [r2, #2788] @ 0xae4
+strb.w r1, [r2, #2796] @ 0xaec
+strb.w r3, [r2, #2804] @ 0xaf4
+b.w <audio_check_and_render.part.0+0x4be>
+bl <__aeabi_uldivmod>
+mov r1, r0
+b.w <audio_check_and_render.part.0+0x266>
+ldr r7, [pc, #344] @ (<audio_check_and_render.part.0+0xe94>)
+adds r0, r0, r7
+adc.w r1, r1, #3
+bl <__aeabi_uldivmod>
+mov r1, r0
+b.w <audio_check_and_render.part.0+0x266>
+add r3, r0
+add.w r3, r7, r3, lsl #3
+ldrb.w r3, [r3, #351] @ 0x15f
+cmp r3, #6
+bhi.w <audio_check_and_render.part.0+0x294>
+movs r2, #1
+cmp r1, #6
+lsl.w r2, r2, r3
+uxtb r2, r2
+beq.w <audio_check_and_render.part.0+0xf0c>
+cmp r1, #7
+beq.w <audio_check_and_render.part.0+0xf26>
+ldr r1, [pc, #284] @ (<audio_check_and_render.part.0+0xe8c>)
+add r3, r1
+strb.w r5, [r3, #2750] @ 0xabe
+strb.w r5, [r3, #2772] @ 0xad4
+ldrb.w r3, [r1, #2762] @ 0xaca
+orrs r3, r2
+strb.w r3, [r1, #2762] @ 0xaca
+b.n <audio_check_and_render.part.0+0xd9c>
+lsls r3, r5, #1
+uxtb r3, r3
+ldr r2, [pc, #268] @ (<audio_check_and_render.part.0+0xe98>)
+strb.w r3, [r2, #2868] @ 0xb34
+movs r3, #1
+strb.w r3, [r2, #2869] @ 0xb35
+movs r3, #0
+strb.w r3, [r2, #2870] @ 0xb36
+sub.w r3, r6, #128 @ 0x80
+ldr r1, [pc, #232] @ (<audio_check_and_render.part.0+0xe8c>)
+uxtb r3, r3
+ldr.w r2, [r1, #2780] @ 0xadc
+lsl.w r3, r8, r3
+orrs r3, r2
+str.w r3, [r1, #2780] @ 0xadc
+b.w <audio_check_and_render.part.0+0x294>
+add r3, r0
+add.w r3, r7, r3, lsl #3
+ldrb.w r3, [r3, #351] @ 0x15f
+cmp r3, #5
+bhi.n <audio_check_and_render.part.0+0xd9c>
+ldr r2, [pc, #196] @ (<audio_check_and_render.part.0+0xe8c>)
+add.w r3, r2, r3, lsl #1
+movs r2, #1
+strb.w r5, [r3, #2725] @ 0xaa5
+strb.w r2, [r3, #2724] @ 0xaa4
+b.n <audio_check_and_render.part.0+0xd9c>
+add r3, r0
+add.w r3, r7, r3, lsl #3
+ldrb.w r3, [r3, #351] @ 0x15f
+cmp r3, #5
+bhi.n <audio_check_and_render.part.0+0xd9c>
+cmp r5, #6
+ldr r2, [pc, #164] @ (<audio_check_and_render.part.0+0xe8c>)
+ldr r1, [pc, #176] @ (<audio_check_and_render.part.0+0xe9c>)
+add.w r2, r2, r3, lsl #1
+it cs
+movcs r5, #0
+add r3, r1
+strb.w r5, [r2, #2713] @ 0xa99
+strb.w r5, [r3, #3336] @ 0xd08
+movs r3, #1
+strb.w r3, [r2, #2712] @ 0xa98
+b.n <audio_check_and_render.part.0+0xd9c>
+ldr r2, [pc, #132] @ (<audio_check_and_render.part.0+0xe8c>)
+movs r3, #1
+strb.w r5, [r2, #2709] @ 0xa95
+strb.w r3, [r2, #2708] @ 0xa94
+b.n <audio_check_and_render.part.0+0xd9c>
+lsls r2, r5, #1
+uxtb r2, r2
+add r3, r0
+add.w r3, r7, r3, lsl #3
+ldrb.w r1, [r3, #351] @ 0x15f
+ldr r3, [pc, #104] @ (<audio_check_and_render.part.0+0xe8c>)
+cmp r1, #5
+add r3, r1
+strb.w r2, [r3, #2367] @ 0x93f
+bhi.n <audio_check_and_render.part.0+0xd9c>
+ldr r3, [pc, #104] @ (<audio_check_and_render.part.0+0xe98>)
+ldrb.w r0, [r3, #2520] @ 0x9d8
+cmp r0, #16
+beq.n <audio_check_and_render.part.0+0xf00>
+cmp r0, #15
+bhi.n <audio_check_and_render.part.0+0xd9c>
+ldr r3, [pc, #80] @ (<audio_check_and_render.part.0+0xe8c>)
+add.w r3, r3, r1, lsl #1
+strb.w r2, [r3, #2697] @ 0xa89
+movs r2, #1
+strb.w r2, [r3, #2696] @ 0xa88
+bl <presetMorph_requestVoice>
+b.n <audio_check_and_render.part.0+0xd9c>
+cmp r2, #127 @ 0x7f
+bne.n <audio_check_and_render.part.0+0xe12>
+movs r2, #255 @ 0xff
+b.n <audio_check_and_render.part.0+0xe16>
+ldr r2, [pc, #60] @ (<audio_check_and_render.part.0+0xe98>)
+ldrb.w r2, [r2, #2652] @ 0xa5c
+cmp r2, #0
+beq.w <audio_check_and_render.part.0+0x294>
+b.n <audio_check_and_render.part.0+0xe7a>
+ldr r3, [pc, #48] @ (<audio_check_and_render.part.0+0xe98>)
+ldrb.w r3, [r3, #2652] @ 0xa5c
+cmp r3, #0
+beq.w <audio_check_and_render.part.0+0x294>
+cmp r2, #16
+ldr r3, [pc, #40] @ (<audio_check_and_render.part.0+0xea0>)
+bne.w <audio_check_and_render.part.0+0xa54>
+ldr r2, [pc, #36] @ (<audio_check_and_render.part.0+0xea0>)
+b.n <audio_check_and_render.part.0+0xa64>
+cmp r2, #127 @ 0x7f
+bne.n <audio_check_and_render.part.0+0xd86>
+movs r3, #255 @ 0xff
+b.n <audio_check_and_render.part.0+0xd8a>
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+movw ip, #10528 @ 0x2920
+ldr r2, [pc, #376] @ (<audio_check_and_render.part.0+0x1024>)
+mla r2, ip, r0, r2
+add.w r2, r2, #8192 @ 0x2000
+ldrb.w r2, [r2, #2333] @ 0x91d
+asrs r2, r7
+lsls r2, r2, #31
+bpl.w <audio_check_and_render.part.0+0x294>
+ldrb r2, [r1, #8]
+lsls r0, r2, #29
+bpl.w <audio_check_and_render.part.0+0x294>
+ldrb r1, [r1, #7]
+movw r2, #49203 @ 0xc033
+and.w r1, r1, #15
+lsrs r2, r1
+lsls r1, r2, #31
+bpl.w <audio_check_and_render.part.0+0x294>
+mrs r1, PRIMASK
+cpsid i
+ldr r2, [pc, #328] @ (<audio_check_and_render.part.0+0x1028>)
+and.w lr, fp, #127 @ 0x7f
+add.w ip, r2, r7, lsl #2
+ldr.w r2, [ip, #1640] @ 0x668
+and.w r0, r2, #127 @ 0x7f
+str r2, [sp, #60] @ 0x3c
+uxtb r2, r2
+cmp lr, r0
+beq.n <audio_check_and_render.part.0+0xf3e>
+msr PRIMASK, r1
+b.w <audio_check_and_render.part.0+0x294>
+ldrb.w r3, [r3, #2652] @ 0xa5c
+cmp r3, #0
+beq.w <audio_check_and_render.part.0+0xd9c>
+b.n <audio_check_and_render.part.0+0xe3a>
+ldr r1, [pc, #280] @ (<audio_check_and_render.part.0+0x1028>)
+add r3, r1
+strb.w r5, [r3, #2736] @ 0xab0
+strb.w r5, [r3, #2764] @ 0xacc
+ldrb.w r3, [r1, #2760] @ 0xac8
+orrs r3, r2
+strb.w r3, [r1, #2760] @ 0xac8
+b.n <audio_check_and_render.part.0+0xd9c>
+bx lr
+ldr r1, [pc, #256] @ (<audio_check_and_render.part.0+0x1028>)
+add r3, r1
+strb.w r5, [r3, #2743] @ 0xab7
+strb.w r5, [r3, #1008] @ 0x3f0
+ldrb.w r3, [r1, #2761] @ 0xac9
+orrs r3, r2
+strb.w r3, [r1, #2761] @ 0xac9
+b.n <audio_check_and_render.part.0+0xd9c>
+lsls r2, r2, #24
+ldrb.w r0, [sp, #61] @ 0x3d
+ldrh.w fp, [sp, #62] @ 0x3e
+bmi.n <audio_check_and_render.part.0+0xfda>
+msr PRIMASK, r1
+cmp r0, #0
+beq.w <audio_check_and_render.part.0+0x294>
+subs r2, r0, #1
+mov r0, r3
+add r3, sp, #72 @ 0x48
+mov r1, sl
+uxtb r2, r2
+str r3, [sp, #0]
+mov r3, r6
+bl <pat_findStepAutomation>
+cmp r0, #0
+beq.w <audio_check_and_render.part.0+0x294>
+bl <seq_rampNowQ4.lto_priv.0>
+sub.w r3, fp, r0
+mov r2, r0
+sxth r3, r3
+cmp r3, #0
+ble.w <audio_check_and_render.part.0+0x294>
+orr.w r6, r6, r7, lsl #9
+movs r3, #64 @ 0x40
+ldr r1, [pc, #164] @ (<audio_check_and_render.part.0+0x102c>)
+adds r7, r6, #1
+movs r6, #0
+mov r0, r6
+b.n <audio_check_and_render.part.0+0xf9e>
+cmp.w lr, #0
+bne.n <audio_check_and_render.part.0+0xf9a>
+cmp r3, #64 @ 0x40
+it eq
+moveq r3, ip
+cmp r0, #64 @ 0x40
+beq.n <audio_check_and_render.part.0+0x100e>
+ldrh.w lr, [r1, r6, lsl #1]
+uxtb.w ip, r0
+adds r6, #5
+adds r0, #1
+cmp r7, lr
+bne.n <audio_check_and_render.part.0+0xf8e>
+mov r3, ip
+add.w r3, r3, r3, lsl #2
+ldr r1, [pc, #112] @ (<audio_check_and_render.part.0+0x1028>)
+add.w r3, r1, r3, lsl #1
+strh.w r2, [r3, #1674] @ 0x68a
+ldrb.w r2, [sp, #72] @ 0x48
+strh.w r7, [r3, #1668] @ 0x684
+strh.w fp, [r3, #1676] @ 0x68c
+strb.w r5, [r3, #1670] @ 0x686
+strb.w r5, [r3, #1672] @ 0x688
+strb.w r2, [r3, #1671] @ 0x687
+b.w <audio_check_and_render.part.0+0x294>
+strb.w lr, [ip, #1640] @ 0x668
+msr PRIMASK, r1
+movs r2, #0
+ldr r1, [pc, #68] @ (<audio_check_and_render.part.0+0x102c>)
+ldrh.w lr, [r1, r2, lsl #1]
+add.w ip, lr, #4294967295 @ ADDR
+cmp.w lr, #0
+beq.n <audio_check_and_render.part.0+0x1004>
+ubfx ip, ip, #9, #8
+cmp sl, ip
+bne.n <audio_check_and_render.part.0+0x1004>
+mov.w ip, #0
+strh.w ip, [r1, r2, lsl #1]
+adds r2, #5
+cmp.w r2, #320 @ 0x140
+bne.n <audio_check_and_render.part.0+0xfe6>
+b.n <audio_check_and_render.part.0+0xf4e>
+cmp r3, #64 @ 0x40
+bne.n <audio_check_and_render.part.0+0xfb0>
+ldr r2, [pc, #20] @ (<audio_check_and_render.part.0+0x1028>)
+ldrh.w r3, [r2, #2308] @ 0x904
+adds r3, #1
+strh.w r3, [r2, #2308] @ 0x904
+b.w <audio_check_and_render.part.0+0x294>
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+== mixer_calcNextSampleBlock
+stmdb sp!, {r4, r5, r6, r7, r8, r9, sl, fp, lr}
+vpush {d8-d11}
+sub sp, #196 @ 0xc4
+mov sl, r0
+bl <mixer_probeBegin>
+ldr r3, [pc, #696] @ (<mixer_calcNextSampleBlock+0x2cc>)
+mov fp, r1
+ldrb r3, [r3, #0]
+cmp r3, #3
+bhi.w <mixer_calcNextSampleBlock+0x3030>
+tbh [pc, r3, lsl #1]
+.word ADDR
+.word ADDR
+ldr r1, [pc, #676] @ (<mixer_calcNextSampleBlock+0x2d0>)
+ldrb.w r3, [r1, #518] @ 0x206
+ldr r2, [pc, #668] @ (<mixer_calcNextSampleBlock+0x2cc>)
+ldrb r2, [r2, #1]
+cmp r2, #3
+bhi.n <mixer_calcNextSampleBlock+0x4a>
+tbh [pc, r2, lsl #1]
+.short 0x04bc
+.word ADDR
+.short 0x0004
+ldrb.w r2, [r1, #1782] @ 0x6f6
+add r3, r2
+uxtb r3, r3
+ldr r2, [pc, #640] @ (<mixer_calcNextSampleBlock+0x2cc>)
+ldrb r2, [r2, #2]
+cmp r2, #3
+bhi.n <mixer_calcNextSampleBlock+0x66>
+tbh [pc, r2, lsl #1]
+.short 0x049c
+.word ADDR
+.short 0x0004
+ldrb.w r2, [r1, #3046] @ 0xbe6
+add r3, r2
+uxtb r3, r3
+ldr r2, [pc, #612] @ (<mixer_calcNextSampleBlock+0x2cc>)
+ldrb r2, [r2, #3]
+cmp r2, #3
+bhi.n <mixer_calcNextSampleBlock+0x84>
+tbh [pc, r2, lsl #1]
+.short 0x047a
+.word ADDR
+.short 0x0004
+ldr r2, [pc, #600] @ (<mixer_calcNextSampleBlock+0x2d4>)
+ldrb.w r2, [r2, #214] @ 0xd6
+add r3, r2
+uxtb r3, r3
+ldr r2, [pc, #580] @ (<mixer_calcNextSampleBlock+0x2cc>)
+ldrb r2, [r2, #4]
+cmp r2, #3
+bhi.n <mixer_calcNextSampleBlock+0xa2>
+tbh [pc, r2, lsl #1]
+.word ADDR
+.word ADDR
+ldr r2, [pc, #568] @ (<mixer_calcNextSampleBlock+0x2d4>)
+ldrb.w r2, [r2, #1478] @ 0x5c6
+add r3, r2
+uxtb r3, r3
+ldr r2, [pc, #552] @ (<mixer_calcNextSampleBlock+0x2cc>)
+ldrb r2, [r2, #5]
+cmp r2, #3
+bhi.n <mixer_calcNextSampleBlock+0xc0>
+tbh [pc, r2, lsl #1]
+.short 0x0432
+.word ADDR
+.short 0x0004
+ldr r2, [pc, #540] @ (<mixer_calcNextSampleBlock+0x2d4>)
+ldrb.w r2, [r2, #2742] @ 0xab6
+add r3, r2
+uxtb r3, r3
+ldr r2, [pc, #532] @ (<mixer_calcNextSampleBlock+0x2d8>)
+str r2, [sp, #56] @ 0x38
+strb.w r3, [r2, #340] @ 0x154
+bl <modNode_resetTargets>
+ldr r0, [pc, #524] @ (<mixer_calcNextSampleBlock+0x2dc>)
+add.w r4, r0, #264 @ 0x108
+vldr s0, [r0, #12]
+movs r1, #0
+bl <modNode_updateValuePolarity>
+adds r0, #44 @ 0x2c
+cmp r4, r0
+bne.n <mixer_calcNextSampleBlock+0xd2>
+mov r4, r1
+uxtb r5, r4
+mov r0, r5
+bl <instrumentManager_runtimeLfo.lto_priv.0>
+mov r1, r5
+cbz r0, <mixer_calcNextSampleBlock+0xf4>
+bl <lfo_dispatchNextValue>
+adds r4, #1
+cmp r4, #6
+bne.n <mixer_calcNextSampleBlock+0xe4>
+ldr r0, [pc, #484] @ (<mixer_calcNextSampleBlock+0x2e0>)
+ldr r7, [pc, #460] @ (<mixer_calcNextSampleBlock+0x2cc>)
+bl <mixer_probeAdd.lto_priv.0>
+sub.w r5, r0, #48 @ 0x30
+ldr.w r8, [pc, #456] @ <mixer_calcNextSampleBlock+0x2d0>
+adds r6, r7, #6
+mov r0, r5
+mov r4, r8
+ldrb.w r3, [r7], #1
+cmp r3, #3
+bhi.n <mixer_calcNextSampleBlock+0x17e>
+tbh [pc, r3, lsl #1]
+.word ADDR
+.word ADDR
+vldr s14, [r4, #240] @ 0xf0
+vmov.f32 s11, #0 @ ADDR 2.0
+vmov.f32 s13, #148 @ ADDR -5.0
+vldr s10, [pc, #476] @ <mixer_calcNextSampleBlock+0x310>
+vcvt.f64.f32 d7, s14
+ldrb.w r3, [r4, #482] @ 0x1e2
+vmov.f32 s12, #46 @ ADDR 15.0
+vldr d4, [pc, #384] @ <mixer_calcNextSampleBlock+0x2c4>
+vmul.f64 d7, d7, d4
+vcvt.f32.f64 s14, d7
+vmul.f32 s15, s14, s14
+vmul.f32 s14, s14, s10
+vfma.f32 s13, s15, s11
+vsub.f32 s15, s15, s12
+vmul.f32 s15, s14, s15
+vdiv.f32 s14, s15, s13
+cmp r3, #0
+beq.w <mixer_calcNextSampleBlock+0x2be>
+vldr s15, [r4, #244] @ 0xf4
+vldr s13, [pc, #372] @ <mixer_calcNextSampleBlock+0x2e4>
+vsub.f32 s14, s14, s15
+vfma.f32 s15, s14, s13
+vstr s15, [r4, #244] @ 0xf4
+bl <mixer_probeAdd.lto_priv.0>
+cmp r6, r7
+add.w r0, r0, #4
+add.w r4, r4, #1264 @ 0x4f0
+bne.n <mixer_calcNextSampleBlock+0x110>
+movs r4, #0
+uxtb r0, r4
+adds r4, #1
+bl <instrumentManager_calcSlotAsync>
+mov r0, r5
+bl <mixer_probeAdd.lto_priv.0>
+cmp r4, #6
+add.w r5, r5, #4
+bne.n <mixer_calcNextSampleBlock+0x190>
+bl <effects_service>
+ldr r0, [pc, #316] @ (<mixer_calcNextSampleBlock+0x2e8>)
+bl <mixer_probeAdd.lto_priv.0>
+ldr r4, [pc, #312] @ (<mixer_calcNextSampleBlock+0x2ec>)
+add r3, sp, #92 @ 0x5c
+adds r5, r4, #6
+mov r6, r3
+str r3, [sp, #24]
+ldrb.w r0, [r4], #1
+bl <mixer_checkOutJackAvailable>
+strb.w r0, [r6], #1
+cmp r5, r4
+bne.n <mixer_calcNextSampleBlock+0x1ba>
+mov.w r2, #256 @ 0x100
+movs r1, #0
+mov r0, sl
+bl <memset>
+mov.w r2, #256 @ 0x100
+movs r1, #0
+mov r0, fp
+bl <memset>
+ldr r3, [pc, #268] @ (<mixer_calcNextSampleBlock+0x2f0>)
+ldrb r3, [r3, #0]
+str r3, [sp, #68] @ 0x44
+ldr r3, [pc, #264] @ (<mixer_calcNextSampleBlock+0x2f4>)
+ldrb r2, [r3, #0]
+ldrb.w r0, [r3, #72] @ 0x48
+cmp r2, #4
+bhi.w <mixer_calcNextSampleBlock+0x174a>
+ldr r3, [pc, #256] @ (<mixer_calcNextSampleBlock+0x2f8>)
+add.w r3, r3, r2, lsl #6
+ldrb r4, [r3, #12]
+str r4, [sp, #48] @ 0x30
+bl <mixer_checkOutJackAvailable>
+mov r3, r4
+str r0, [sp, #72] @ 0x48
+cmp r4, #0
+bne.w <mixer_calcNextSampleBlock+0x172e>
+ldr r3, [sp, #48] @ 0x30
+strd r3, r3, [sp, #60] @ 0x3c
+ldr r3, [pc, #228] @ (<mixer_calcNextSampleBlock+0x2fc>)
+add.w r2, fp, #4
+ldr r1, [pc, #228] @ (<mixer_calcNextSampleBlock+0x300>)
+add.w r9, sl, #4
+str r3, [sp, #28]
+movs r7, #0
+str r1, [sp, #20]
+add.w r1, r3, #64 @ 0x40
+str.w fp, [sp, #52] @ 0x34
+mov r6, r9
+str r1, [sp, #32]
+add.w r1, r3, #24
+adds r3, #48 @ 0x30
+vldr s17, [pc, #200] @ <mixer_calcNextSampleBlock+0x304>
+vldr s16, [pc, #200] @ <mixer_calcNextSampleBlock+0x308>
+mov fp, r2
+mov r4, r3
+str r2, [sp, #76] @ 0x4c
+str r1, [sp, #36] @ 0x24
+uxtb r3, r7
+str r3, [sp, #16]
+bl <mixer_probeAdd.constprop.1>
+lsls r2, r7, #2
+ldr r3, [pc, #120] @ (<mixer_calcNextSampleBlock+0x2cc>)
+str r2, [sp, #40] @ 0x28
+ldr r2, [pc, #180] @ (<mixer_calcNextSampleBlock+0x30c>)
+ldrb r3, [r3, r7]
+add.w r2, r2, r7, lsl #2
+str r2, [sp, #44] @ 0x2c
+cmp r3, #6
+bhi.w <mixer_calcNextSampleBlock+0x301c>
+tbh [pc, r3, lsl #1]
+.short 0x0345
+.word ADDR
+.word ADDR
+.word ADDR
+vldr s14, [r4, #240] @ 0xf0
+vmov.f32 s11, #0 @ ADDR 2.0
+vmov.f32 s13, #148 @ ADDR -5.0
+vldr s10, [pc, #136] @ <mixer_calcNextSampleBlock+0x310>
+vcvt.f64.f32 d7, s14
+ldrb.w r3, [r4, #469] @ 0x1d5
+vmov.f32 s12, #46 @ ADDR 15.0
+vldr d4, [pc, #44] @ <mixer_calcNextSampleBlock+0x2c4>
+vmul.f64 d7, d7, d4
+vcvt.f32.f64 s14, d7
+vmul.f32 s15, s14, s14
+vmul.f32 s14, s14, s10
+vfma.f32 s13, s15, s11
+vsub.f32 s15, s15, s12
+vmul.f32 s15, s14, s15
+vdiv.f32 s14, s15, s13
+cmp r3, #0
+bne.w <mixer_calcNextSampleBlock+0x16a>
+vstr s14, [r4, #244] @ 0xf4
+b.n <mixer_calcNextSampleBlock+0x17e>
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+vldr s14, [r4, #496] @ 0x1f0
+vmov.f32 s11, #0 @ ADDR 2.0
+vmov.f32 s13, #148 @ ADDR -5.0
+vldr s10, [pc, #-20] @ <mixer_calcNextSampleBlock+0x310>
+vcvt.f64.f32 d7, s14
+ldrb.w r3, [r4, #569] @ 0x239
+vmov.f32 s12, #46 @ ADDR 15.0
+vldr d4, [pc, #560] @ <mixer_calcNextSampleBlock+0x564>
+vmul.f64 d7, d7, d4
+vcvt.f32.f64 s14, d7
+vmul.f32 s15, s14, s14
+vmul.f32 s14, s14, s10
+vfma.f32 s13, s15, s11
+vsub.f32 s15, s15, s12
+vmul.f32 s15, s15, s14
+vdiv.f32 s14, s15, s13
+cmp r3, #0
+beq.w <mixer_calcNextSampleBlock+0x1700>
+vldr s15, [r4, #500] @ 0x1f4
+vldr s13, [pc, #524] @ <mixer_calcNextSampleBlock+0x56c>
+vsub.f32 s14, s14, s15
+vfma.f32 s15, s14, s13
+vstr s15, [r4, #500] @ 0x1f4
+b.n <mixer_calcNextSampleBlock+0x17e>
+vldr s14, [r4, #172] @ 0xac
+vmov.f32 s11, #0 @ ADDR 2.0
+vmov.f32 s13, #148 @ ADDR -5.0
+vldr s10, [pc, #496] @ <mixer_calcNextSampleBlock+0x570>
+vcvt.f64.f32 d7, s14
+ldrb.w r3, [r4, #417] @ 0x1a1
+vmov.f32 s12, #46 @ ADDR 15.0
+vldr d4, [pc, #468] @ <mixer_calcNextSampleBlock+0x564>
+vmul.f64 d7, d7, d4
+vcvt.f32.f64 s14, d7
+vmul.f32 s15, s14, s14
+vmul.f32 s14, s14, s10
+vfma.f32 s13, s15, s11
+vsub.f32 s15, s15, s12
+vmul.f32 s15, s15, s14
+vdiv.f32 s14, s15, s13
+cmp r3, #0
+beq.w <mixer_calcNextSampleBlock+0x1708>
+vldr s15, [r4, #176] @ 0xb0
+vldr s13, [pc, #432] @ <mixer_calcNextSampleBlock+0x56c>
+vsub.f32 s14, s14, s15
+vfma.f32 s15, s14, s13
+vstr s15, [r4, #176] @ 0xb0
+b.n <mixer_calcNextSampleBlock+0x17e>
+mov r0, r8
+movs r2, #32
+add r1, sp, #128 @ 0x80
+bl <Tetrakt_calcVoiceSyncBlock>
+ldr r0, [sp, #44] @ 0x2c
+bl <mixer_probeAdd.lto_priv.0>
+ldr r3, [pc, #404] @ (<mixer_calcNextSampleBlock+0x574>)
+ldrb.w r9, [r3, r7]
+cmp.w r9, #3
+bhi.n <mixer_calcNextSampleBlock+0x438>
+ldr r2, [sp, #40] @ 0x28
+vmov.f32 s14, #112 @ ADDR 1.0
+ldr r3, [pc, #392] @ (<mixer_calcNextSampleBlock+0x578>)
+add.w r1, sp, #190 @ 0xbe
+add r3, r2
+vldr s13, [r3]
+ldr r3, [pc, #384] @ (<mixer_calcNextSampleBlock+0x57c>)
+adds r0, r3, r2
+add.w r3, sp, #126 @ 0x7e
+vldr s15, [r0]
+vadd.f32 s15, s15, s13
+vcmpe.f32 s15, s14
+vmrs APSR_nzcv, fpscr
+blt.w <mixer_calcNextSampleBlock+0x1046>
+ldrsh.w r2, [r3, #2]
+vsub.f32 s15, s15, s14
+strh r2, [r4, #0]
+strh.w r2, [r3, #2]!
+cmp r1, r3
+bne.n <mixer_calcNextSampleBlock+0x406>
+vstr s15, [r0]
+ldr r0, [pc, #336] @ (<mixer_calcNextSampleBlock+0x580>)
+bl <mixer_probeAdd.lto_priv.0>
+ldr r3, [pc, #320] @ (<mixer_calcNextSampleBlock+0x574>)
+ldrb.w r9, [r3, r7]
+ldr r3, [sp, #40] @ 0x28
+ldr r2, [pc, #328] @ (<mixer_calcNextSampleBlock+0x584>)
+add r3, r2
+vldr s20, [r3]
+ldr r3, [pc, #324] @ (<mixer_calcNextSampleBlock+0x588>)
+vcmpe.f32 s20, #0.0
+ldrb r3, [r3, r7]
+vmrs APSR_nzcv, fpscr
+bls.n <mixer_calcNextSampleBlock+0x470>
+vmov.f32 s15, #112 @ ADDR 1.0
+vcmpe.f32 s20, s15
+vmrs APSR_nzcv, fpscr
+bge.n <mixer_calcNextSampleBlock+0x470>
+ldr r2, [sp, #36] @ 0x24
+vldr s15, [r2]
+vsub.f32 s14, s20, s15
+vfma.f32 s15, s14, s17
+vmov.f32 s20, s15
+str r3, [sp, #40] @ 0x28
+ldr r3, [sp, #36] @ 0x24
+ldr r0, [sp, #16]
+vstmia r3!, {s20}
+str r3, [sp, #36] @ 0x24
+bl <instrumentManager_runtimeVolume>
+ldr r2, [sp, #20]
+vmov.f32 s22, s0
+ldr r3, [sp, #40] @ 0x28
+ldrb r0, [r2, #0]
+cmp r0, #0
+bne.w <mixer_calcNextSampleBlock+0x1058>
+cmp r3, #16
+beq.w <mixer_calcNextSampleBlock+0x16d2>
+cmp r3, #15
+bhi.w <mixer_calcNextSampleBlock+0x16e0>
+mov.w r2, #1656 @ 0x678
+ldr r1, [pc, #232] @ (<mixer_calcNextSampleBlock+0x58c>)
+mla r1, r2, r3, r1
+add r1, r7
+ldrsb.w r2, [r1, #13]
+ldrb r5, [r1, #13]
+cmp r2, #0
+blt.w <mixer_calcNextSampleBlock+0x1710>
+ldrsb.w r2, [r1, #19]
+cmp r2, #0
+ldrb r2, [r1, #19]
+it lt
+movlt r2, #0
+cmp r5, r2
+beq.n <mixer_calcNextSampleBlock+0x4ec>
+ldr r1, [sp, #16]
+mov r0, r3
+str r2, [sp, #44] @ 0x2c
+str r3, [sp, #40] @ 0x28
+bl <presetMorph_getResolvedVoiceAmount>
+ldr r2, [sp, #44] @ 0x2c
+ldr r3, [sp, #40] @ 0x28
+smulbb r1, r2, r0
+rsb r2, r0, #255 @ 0xff
+smlabb r2, r2, r5, r1
+ldr r1, [pc, #172] @ (<mixer_calcNextSampleBlock+0x590>)
+adds r2, #127 @ 0x7f
+umull r1, r2, r1, r2
+ubfx r2, r2, #7, #8
+vmov s15, r2
+cmp r3, #16
+vcvt.f32.u32 s21, s15
+vmul.f32 s21, s21, s16
+vmul.f32 s19, s20, s21
+beq.w <mixer_calcNextSampleBlock+0x10ac>
+mov.w r2, #1656 @ 0x678
+ldr r1, [pc, #132] @ (<mixer_calcNextSampleBlock+0x58c>)
+mla r1, r2, r3, r1
+add r1, r7
+ldrb r3, [r1, #25]
+vmul.f32 s18, s20, s22
+cmp r3, #3
+vmov.f32 s15, s18
+bhi.w <mixer_calcNextSampleBlock+0x1078>
+cmp r3, #1
+beq.w <mixer_calcNextSampleBlock+0x145e>
+cmp r3, #2
+beq.w <mixer_calcNextSampleBlock+0x16ea>
+cmp r3, #3
+bne.n <mixer_calcNextSampleBlock+0x53a>
+vmov.f32 s0, s20
+bl <adc_sliderGainMirrored>
+vmul.f32 s19, s0, s21
+ldr r0, [sp, #16]
+bl <instrumentManager_gateGain>
+vmul.f32 s18, s0, s18
+vmul.f32 s19, s0, s19
+cmp.w r9, #6
+bhi.w <mixer_calcNextSampleBlock+0x3010>
+tbh [pc, r9, lsl #1]
+.word ADDR
+.word ADDR
+.word ADDR
+.short 0x0129
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+ldrb.w r2, [r8, #228] @ 0xe4
+ldr r3, [pc, #644] @ (<mixer_calcNextSampleBlock+0x820>)
+rsb r1, r2, #127 @ 0x7f
+add.w r2, r3, r2, lsl #2
+add.w r3, r3, r1, lsl #2
+vldr s21, [r2]
+vldr s20, [r3]
+ldr r0, [sp, #16]
+bl <instrumentManager_slotRight>
+ldr r3, [sp, #48] @ 0x30
+mov r2, r0
+cmp r0, #0
+beq.w <mixer_calcNextSampleBlock+0x10c0>
+cmp r3, #0
+beq.w <mixer_calcNextSampleBlock+0x1080>
+vcmpe.f32 s19, #0.0
+ldr r3, [sp, #32]
+vldr s5, [r3]
+vmrs APSR_nzcv, fpscr
+bgt.n <mixer_calcNextSampleBlock+0x5e0>
+vcmpe.f32 s5, #0.0
+vmrs APSR_nzcv, fpscr
+ble.w <mixer_calcNextSampleBlock+0x1080>
+ldr r3, [sp, #28]
+vmov.f32 s4, s19
+ldr r0, [sp, #24]
+vmov.f32 s2, s18
+vldr s3, [r3]
+vmov.f32 s1, s21
+ldr r3, [sp, #52] @ 0x34
+vmov.f32 s0, s20
+str.w fp, [sp, #12]
+add r1, sp, #128 @ 0x80
+str.w sl, [sp]
+strd r6, r3, [sp, #4]
+ldr r3, [sp, #60] @ 0x3c
+ldrb r0, [r0, #0]
+bl <mixer_addVoiceStereoToOutputAndFx>
+ldr r3, [sp, #28]
+adds r7, #1
+add.w r8, r8, #1264 @ 0x4f0
+adds r4, #2
+vstmia r3!, {s18}
+str r3, [sp, #28]
+ldr r3, [sp, #32]
+vstmia r3!, {s19}
+str r3, [sp, #32]
+bl <mixer_probeAdd.constprop.0>
+ldr r3, [sp, #24]
+cmp r7, #6
+add.w r3, r3, #1
+str r3, [sp, #24]
+ldr r3, [sp, #20]
+add.w r3, r3, #2
+str r3, [sp, #20]
+bne.w <mixer_calcNextSampleBlock+0x248>
+mov r9, r6
+ldrd r3, fp, [sp, #48] @ 0x30
+cmp r3, #0
+beq.w <mixer_calcNextSampleBlock+0x16f2>
+ldr r2, [sp, #64] @ 0x40
+and.w r4, r3, #8
+ldr r5, [pc, #460] @ (<mixer_calcNextSampleBlock+0x824>)
+ubfx r0, r3, #3, #1
+cmp r2, #0
+ldr r2, [pc, #456] @ (<mixer_calcNextSampleBlock+0x828>)
+vldr s14, [pc, #460] @ <mixer_calcNextSampleBlock+0x82c>
+mov r3, r5
+vldr s16, [r2, #76] @ 0x4c
+it eq
+moveq r7, #1
+ldrb.w r6, [r2, #73] @ 0x49
+add.w r2, r5, #128 @ 0x80
+it ne
+movne r7, #2
+str r5, [sp, #56] @ 0x38
+mov r1, r2
+vldr s15, [r3]
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s14
+vstmia r3!, {s15}
+cmp r3, r1
+vldr s15, [r2]
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s14
+vstmia r2!, {s15}
+bne.n <mixer_calcNextSampleBlock+0x67c>
+ldr r3, [sp, #64] @ 0x40
+cbnz r3, <mixer_calcNextSampleBlock+0x6b0>
+cbz r0, <mixer_calcNextSampleBlock+0x6b0>
+movs r2, #128 @ 0x80
+movs r1, #0
+ldr r0, [pc, #388] @ (<mixer_calcNextSampleBlock+0x830>)
+bl <memset>
+ldr r3, [pc, #384] @ (<mixer_calcNextSampleBlock+0x834>)
+movs r2, #0
+str r2, [sp, #104] @ 0x68
+ldr r2, [r3, #0]
+str r2, [sp, #100] @ 0x64
+ldrb r2, [r3, #23]
+cmp r2, #255 @ 0xff
+bne.w <mixer_calcNextSampleBlock+0x2f2e>
+ldrb r2, [r3, #22]
+cmp r2, #255 @ 0xff
+bne.w <mixer_calcNextSampleBlock+0x2f2a>
+ldrb r2, [r3, #21]
+cmp r2, #255 @ 0xff
+bne.w <mixer_calcNextSampleBlock+0x2f18>
+ldrb r2, [r3, #20]
+cmp r2, #255 @ 0xff
+bne.w <mixer_calcNextSampleBlock+0x2f32>
+ldrb r2, [r3, #19]
+cmp r2, #255 @ 0xff
+bne.w <mixer_calcNextSampleBlock+0x2f36>
+ldrb r2, [r3, #18]
+cmp r2, #255 @ 0xff
+bne.w <mixer_calcNextSampleBlock+0x2f3e>
+ldrb r2, [r3, #17]
+cmp r2, #255 @ 0xff
+bne.w <mixer_calcNextSampleBlock+0x2f3a>
+ldrb r2, [r3, #16]
+cmp r2, #255 @ 0xff
+bne.w <mixer_calcNextSampleBlock+0x2f4a>
+ldrb r2, [r3, #15]
+cmp r2, #255 @ 0xff
+bne.w <mixer_calcNextSampleBlock+0x2f46>
+ldrb r2, [r3, #14]
+cmp r2, #255 @ 0xff
+bne.w <mixer_calcNextSampleBlock+0x2f42>
+ldrb r2, [r3, #13]
+cmp r2, #255 @ 0xff
+bne.w <mixer_calcNextSampleBlock+0x2f4e>
+ldrb r2, [r3, #12]
+cmp r2, #255 @ 0xff
+bne.w <mixer_calcNextSampleBlock+0x2f52>
+ldr r3, [r3, #4]
+str r3, [sp, #108] @ 0x6c
+add r0, sp, #112 @ 0x70
+ldr r3, [sp, #56] @ 0x38
+strb.w r7, [sp, #121] @ 0x79
+str r3, [sp, #112] @ 0x70
+ldr r3, [sp, #48] @ 0x30
+ands.w r3, r3, #10
+it ne
+ldrne r3, [pc, #252] @ (<mixer_calcNextSampleBlock+0x830>)
+str r3, [sp, #116] @ 0x74
+movs r3, #32
+strb.w r3, [sp, #120] @ 0x78
+add r3, sp, #100 @ 0x64
+str r3, [sp, #124] @ 0x7c
+bl <effects_process.constprop.0>
+bl <effects_returnGain>
+cmp r4, #0
+beq.w <mixer_calcNextSampleBlock+0x1924>
+cmp r6, #63 @ 0x3f
+bls.w <mixer_calcNextSampleBlock+0x1ad8>
+rsb r3, r6, #127 @ 0x7f
+vldr s14, [pc, #224] @ <mixer_calcNextSampleBlock+0x838>
+vmov.f32 s8, #112 @ ADDR 1.0
+vmov s15, r3
+vmul.f32 s14, s16, s14
+vcvt.f32.u32 s15, s15
+vmul.f32 s15, s15, s14
+vmul.f32 s16, s16, s0
+ldr r4, [pc, #188] @ (<mixer_calcNextSampleBlock+0x830>)
+vmul.f32 s14, s0, s15
+vmul.f32 s8, s16, s8
+ldr r3, [sp, #56] @ 0x38
+ldr r2, [sp, #72] @ 0x48
+vldr s11, [r3, #368] @ 0x170
+vldr s5, [r3, #372] @ 0x174
+vsub.f32 s13, s14, s11
+vsub.f32 s6, s8, s5
+cmp r2, #5
+bhi.w <mixer_calcNextSampleBlock+0xfa8>
+tbh [pc, r2, lsl #1]
+.short 0x044c
+.word ADDR
+.word ADDR
+.short 0x03c6
+ldrb.w r2, [r8, #1052] @ 0x41c
+b.n <mixer_calcNextSampleBlock+0x598>
+ldrb.w r2, [r8, #152] @ 0x98
+b.n <mixer_calcNextSampleBlock+0x598>
+ldrb.w r2, [r8, #156] @ 0x9c
+b.n <mixer_calcNextSampleBlock+0x598>
+ldrb.w r2, [r8, #1107] @ 0x453
+b.n <mixer_calcNextSampleBlock+0x598>
+ldrb.w r2, [r8, #516] @ 0x204
+b.n <mixer_calcNextSampleBlock+0x598>
+mov r0, r8
+movs r2, #32
+add r1, sp, #128 @ 0x80
+bl <Colloid_calcVoiceSyncBlock>
+ldr r0, [sp, #44] @ 0x2c
+bl <mixer_probeAdd.lto_priv.0>
+b.n <mixer_calcNextSampleBlock+0x3dc>
+mov r0, r8
+add r1, sp, #128 @ 0x80
+bl <Alkaline_calcVoiceSyncBlock.constprop.0>
+ldr r0, [sp, #44] @ 0x2c
+bl <mixer_probeAdd.lto_priv.0>
+b.n <mixer_calcNextSampleBlock+0x3dc>
+ldrb.w r3, [r8, #88] @ 0x58
+vldr s0, [r8, #216] @ 0xd8
+cmp r3, #4
+bhi.w <mixer_calcNextSampleBlock+0x3002>
+tbh [pc, r3, lsl #1]
+.word ADDR
+.word ADDR
+.short 0x01ea
+ldrb.w r3, [r8, #88] @ 0x58
+vldr s0, [r8, #216] @ 0xd8
+cmp r3, #4
+bhi.w <mixer_calcNextSampleBlock+0x2f74>
+tbh [pc, r3, lsl #1]
+.word ADDR
+.word ADDR
+.short 0x021d
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+ldrd ip, r0, [r8, #76] @ 0x4c
+add.w r9, sp, #126 @ 0x7e
+vldr s14, [pc, #-16] @ <mixer_calcNextSampleBlock+0x83c>
+add.w r2, ip, r0
+add.w lr, sp, #190 @ 0xbe
+mov r1, r9
+mov r3, r2
+cmp r0, r3
+str.w r3, [r8, #80] @ 0x50
+mov r0, r2
+bhi.n <mixer_calcNextSampleBlock+0x890>
+ldrsh.w r5, [r8, #72] @ 0x48
+add r3, ip
+vmov s15, r5
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s14
+vcvt.s32.f32 s15, s15
+vmov r5, s15
+strh.w r5, [r1, #2]!
+cmp r1, lr
+beq.n <mixer_calcNextSampleBlock+0x8bc>
+add r2, ip
+cmp r0, r3
+str.w r3, [r8, #80] @ 0x50
+mov r0, r2
+bls.n <mixer_calcNextSampleBlock+0x862>
+ldr r0, [pc, #848] @ (<mixer_calcNextSampleBlock+0xbe4>)
+add r3, ip
+ldr.w r0, [r0, #2056] @ 0x808
+sxth r0, r0
+vmov s15, r0
+strh.w r0, [r8, #72] @ 0x48
+mov r0, r2
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s14
+vcvt.s32.f32 s15, s15
+vmov r5, s15
+strh.w r5, [r1, #2]!
+cmp lr, r1
+bne.n <mixer_calcNextSampleBlock+0x884>
+add r2, sp, #128 @ 0x80
+ldrb.w r1, [r8, #144] @ 0x90
+add.w r0, r8, #172 @ 0xac
+bl <SVF_calcBlockZDF.constprop.0>
+ldrb.w r3, [r8, #419] @ 0x1a3
+cmp r3, #1
+beq.w <mixer_calcNextSampleBlock+0x18ac>
+ldrb.w r2, [r8, #360] @ 0x168
+subs r3, r2, #2
+cmp r3, #11
+bls.w <mixer_calcNextSampleBlock+0x1774>
+cmp r2, #1
+bls.w <mixer_calcNextSampleBlock+0x2962>
+ldr r1, [pc, #768] @ (<mixer_calcNextSampleBlock+0xbe8>)
+add.w r0, r8, #348 @ 0x15c
+bl <transient_calcUserBlock.constprop.0>
+b.w <mixer_calcNextSampleBlock+0x1802>
+mov r0, r8
+add r1, sp, #128 @ 0x80
+bl <Drum_calcVoiceSyncBlock.part.0.constprop.0>
+ldr r0, [sp, #44] @ 0x2c
+bl <mixer_probeAdd.lto_priv.0>
+b.n <mixer_calcNextSampleBlock+0x3dc>
+ldr r2, [pc, #740] @ (<mixer_calcNextSampleBlock+0xbec>)
+ldrb.w r2, [r2, #2726] @ 0xaa6
+add r3, r2
+uxtb r3, r3
+b.w <mixer_calcNextSampleBlock+0xc0>
+ldr r2, [pc, #728] @ (<mixer_calcNextSampleBlock+0xbec>)
+ldrb.w r2, [r2, #2826] @ 0xb0a
+add r3, r2
+uxtb r3, r3
+b.w <mixer_calcNextSampleBlock+0xc0>
+ldr r2, [pc, #712] @ (<mixer_calcNextSampleBlock+0xbec>)
+ldrb.w r2, [r2, #2674] @ 0xa72
+add r3, r2
+uxtb r3, r3
+b.w <mixer_calcNextSampleBlock+0xc0>
+ldr r2, [pc, #700] @ (<mixer_calcNextSampleBlock+0xbec>)
+ldrb.w r2, [r2, #1462] @ 0x5b6
+add r3, r2
+uxtb r3, r3
+b.w <mixer_calcNextSampleBlock+0xa2>
+ldr r2, [pc, #684] @ (<mixer_calcNextSampleBlock+0xbec>)
+ldrb.w r2, [r2, #1562] @ 0x61a
+add r3, r2
+uxtb r3, r3
+b.w <mixer_calcNextSampleBlock+0xa2>
+ldr r2, [pc, #672] @ (<mixer_calcNextSampleBlock+0xbec>)
+ldrb.w r2, [r2, #1410] @ 0x582
+add r3, r2
+uxtb r3, r3
+b.w <mixer_calcNextSampleBlock+0xa2>
+ldr r2, [pc, #656] @ (<mixer_calcNextSampleBlock+0xbec>)
+ldrb.w r2, [r2, #198] @ 0xc6
+add r3, r2
+uxtb r3, r3
+b.w <mixer_calcNextSampleBlock+0x84>
+ldr r2, [pc, #644] @ (<mixer_calcNextSampleBlock+0xbec>)
+ldrb.w r2, [r2, #298] @ 0x12a
+add r3, r2
+uxtb r3, r3
+b.w <mixer_calcNextSampleBlock+0x84>
+ldr r2, [pc, #628] @ (<mixer_calcNextSampleBlock+0xbec>)
+ldrb.w r2, [r2, #146] @ 0x92
+add r3, r2
+uxtb r3, r3
+b.w <mixer_calcNextSampleBlock+0x84>
+ldrb.w r2, [r1, #3030] @ 0xbd6
+add r3, r2
+uxtb r3, r3
+b.w <mixer_calcNextSampleBlock+0x66>
+ldrb.w r2, [r1, #3130] @ 0xc3a
+add r3, r2
+uxtb r3, r3
+b.w <mixer_calcNextSampleBlock+0x66>
+ldrb.w r2, [r1, #2978] @ 0xba2
+add r3, r2
+uxtb r3, r3
+b.w <mixer_calcNextSampleBlock+0x66>
+ldrb.w r2, [r1, #1766] @ 0x6e6
+add r3, r2
+uxtb r3, r3
+b.w <mixer_calcNextSampleBlock+0x4a>
+ldrb.w r2, [r1, #1866] @ 0x74a
+add r3, r2
+uxtb r3, r3
+b.w <mixer_calcNextSampleBlock+0x4a>
+ldrb.w r2, [r1, #1714] @ 0x6b2
+add r3, r2
+uxtb r3, r3
+b.w <mixer_calcNextSampleBlock+0x4a>
+ldr r1, [pc, #548] @ (<mixer_calcNextSampleBlock+0xbf0>)
+ldrb.w r3, [r1, #602] @ 0x25a
+b.w <mixer_calcNextSampleBlock+0x2e>
+ldr r1, [pc, #536] @ (<mixer_calcNextSampleBlock+0xbf0>)
+ldrb.w r3, [r1, #450] @ 0x1c2
+b.w <mixer_calcNextSampleBlock+0x2e>
+ldr r1, [pc, #528] @ (<mixer_calcNextSampleBlock+0xbf0>)
+ldrb.w r3, [r1, #502] @ 0x1f6
+b.w <mixer_calcNextSampleBlock+0x2e>
+ldr r3, [pc, #520] @ (<mixer_calcNextSampleBlock+0xbf4>)
+ldr.w r0, [r8, #80] @ 0x50
+ldrb.w r2, [r8, #89] @ 0x59
+ldr r1, [pc, #516] @ (<mixer_calcNextSampleBlock+0xbf8>)
+add.w ip, r3, r2, lsl #11
+vldr s12, [pc, #512] @ <mixer_calcNextSampleBlock+0xbfc>
+ldr.w lr, [r8, #76] @ 0x4c
+mov r3, r0
+add.w r9, r1, #64 @ 0x40
+lsrs r5, r3, #22
+ubfx r2, r3, #0, #22
+add r3, lr
+vmov s13, r2
+adds r2, r5, #1
+ldrsh.w r5, [ip, r5, lsl #1]
+ubfx r2, r2, #0, #10
+vcvt.f32.s32 s13, s13
+vmov s15, r5
+ldrsh.w r2, [ip, r2, lsl #1]
+vmul.f32 s13, s13, s12
+subs r2, r2, r5
+vcvt.f32.s32 s15, s15
+vmov s14, r2
+vcvt.f32.s32 s14, s14
+vfma.f32 s15, s13, s14
+vrintz.f32 s15, s15
+vmul.f32 s15, s0, s15
+vcvt.s32.f32 s15, s15
+vmov r2, s15
+strh.w r2, [r1, #2]!
+cmp r9, r1
+bne.n <mixer_calcNextSampleBlock+0xa06>
+add.w r0, r0, lr, lsl #5
+str.w r0, [r8, #80] @ 0x50
+ldrb.w r3, [r8, #160] @ 0xa0
+vldr s0, [r8, #220] @ 0xdc
+cmp r3, #4
+bhi.w <mixer_calcNextSampleBlock+0x2f66>
+tbh [pc, r3, lsl #1]
+.word ADDR
+.word ADDR
+.short 0x0a56
+ldr r3, [pc, #388] @ (<mixer_calcNextSampleBlock+0xc00>)
+ldr.w r0, [r8, #80] @ 0x50
+ldrb.w r2, [r8, #89] @ 0x59
+ldr r1, [pc, #368] @ (<mixer_calcNextSampleBlock+0xbf8>)
+add.w ip, r3, r2, lsl #11
+vldr s12, [pc, #368] @ <mixer_calcNextSampleBlock+0xbfc>
+ldr.w lr, [r8, #76] @ 0x4c
+mov r3, r0
+add.w r9, r1, #64 @ 0x40
+lsrs r5, r3, #22
+ubfx r2, r3, #0, #22
+add r3, lr
+vmov s13, r2
+adds r2, r5, #1
+ldrsh.w r5, [ip, r5, lsl #1]
+ubfx r2, r2, #0, #10
+vcvt.f32.s32 s13, s13
+vmov s15, r5
+ldrsh.w r2, [ip, r2, lsl #1]
+vmul.f32 s13, s13, s12
+subs r2, r2, r5
+vcvt.f32.s32 s15, s15
+vmov s14, r2
+vcvt.f32.s32 s14, s14
+vfma.f32 s15, s13, s14
+vrintz.f32 s15, s15
+vmul.f32 s15, s0, s15
+vcvt.s32.f32 s15, s15
+vmov r2, s15
+strh.w r2, [r1, #2]!
+cmp r9, r1
+bne.n <mixer_calcNextSampleBlock+0xa98>
+b.n <mixer_calcNextSampleBlock+0xa56>
+ldr r3, [pc, #280] @ (<mixer_calcNextSampleBlock+0xc04>)
+ldr.w r0, [r8, #80] @ 0x50
+ldrb.w r2, [r8, #89] @ 0x59
+ldr r1, [pc, #256] @ (<mixer_calcNextSampleBlock+0xbf8>)
+add.w ip, r3, r2, lsl #11
+vldr s12, [pc, #256] @ <mixer_calcNextSampleBlock+0xbfc>
+ldr.w lr, [r8, #76] @ 0x4c
+mov r3, r0
+add.w r9, r1, #64 @ 0x40
+lsrs r5, r3, #22
+ubfx r2, r3, #0, #22
+add r3, lr
+vmov s13, r2
+adds r2, r5, #1
+ldrsh.w r5, [ip, r5, lsl #1]
+ubfx r2, r2, #0, #10
+vcvt.f32.s32 s13, s13
+vmov s15, r5
+ldrsh.w r2, [ip, r2, lsl #1]
+vmul.f32 s13, s13, s12
+subs r2, r2, r5
+vcvt.f32.s32 s15, s15
+vmov s14, r2
+vcvt.f32.s32 s14, s14
+vfma.f32 s15, s13, s14
+vrintz.f32 s15, s15
+vmul.f32 s15, s0, s15
+vcvt.s32.f32 s15, s15
+vmov r2, s15
+strh.w r2, [r1, #2]!
+cmp r9, r1
+bne.n <mixer_calcNextSampleBlock+0xb08>
+b.n <mixer_calcNextSampleBlock+0xa56>
+ldr.w r0, [r8, #80] @ 0x50
+ldr r1, [pc, #152] @ (<mixer_calcNextSampleBlock+0xbf8>)
+vldr s12, [pc, #152] @ <mixer_calcNextSampleBlock+0xbfc>
+mov r2, r0
+ldr.w lr, [r8, #76] @ 0x4c
+add.w r9, r1, #64 @ 0x40
+ldr r3, [pc, #152] @ (<mixer_calcNextSampleBlock+0xc08>)
+mov.w ip, r2, lsr #22
+ubfx r5, r2, #0, #22
+add r2, lr
+vmov s13, r5
+add.w r5, ip, #1
+ldrsh.w ip, [r3, ip, lsl #1]
+ldrsh.w r5, [r3, r5, lsl #1]
+vcvt.f32.s32 s13, s13
+vmov s15, ip
+sub.w r5, r5, ip
+vmul.f32 s13, s13, s12
+vmov s14, r5
+vcvt.f32.s32 s15, s15
+vcvt.f32.s32 s14, s14
+vfma.f32 s15, s13, s14
+vrintz.f32 s15, s15
+vmul.f32 s15, s0, s15
+vcvt.s32.f32 s15, s15
+vmov r5, s15
+strh.w r5, [r1, #2]!
+cmp r9, r1
+bne.n <mixer_calcNextSampleBlock+0xb70>
+add.w r3, r0, lr, lsl #5
+str.w r3, [r8, #80] @ 0x50
+b.n <mixer_calcNextSampleBlock+0xa5e>
+ldr.w r3, [r8, #80] @ 0x50
+ldr r2, [pc, #36] @ (<mixer_calcNextSampleBlock+0xbf8>)
+ldr.w r0, [r8, #76] @ 0x4c
+mov r1, r3
+ldr.w r9, [pc, #8] @ <mixer_calcNextSampleBlock+0xbe4>
+add.w lr, r2, #64 @ 0x40
+b.n <mixer_calcNextSampleBlock+0xc2e>
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+ldrsh.w r5, [r8, #72] @ 0x48
+vmov s15, r5
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s0
+vcvt.s32.f32 s15, s15
+vmov r5, s15
+strh.w r5, [r2, #2]!
+cmp lr, r2
+beq.w <mixer_calcNextSampleBlock+0xa5e>
+add r3, r0
+cmp r3, r1
+str.w r3, [r8, #80] @ 0x50
+add r1, r0
+bcs.n <mixer_calcNextSampleBlock+0xc0c>
+ldr.w r5, [r9, #2056] @ 0x808
+sxth r5, r5
+vmov s15, r5
+strh.w r5, [r8, #72] @ 0x48
+vcvt.f32.s32 s15, s15
+b.n <mixer_calcNextSampleBlock+0xc18>
+ldrd ip, r0, [r8, #76] @ 0x4c
+ldr r2, [pc, #904] @ (<mixer_calcNextSampleBlock+0xfdc>)
+add.w r1, ip, r0
+ldr.w r9, [pc, #940] @ <mixer_calcNextSampleBlock+0x1008>
+add.w lr, r2, #64 @ 0x40
+mov r3, r1
+b.n <mixer_calcNextSampleBlock+0xc88>
+ldrsh.w r0, [r8, #72] @ 0x48
+vmov s15, r0
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s0
+mov r0, r1
+vcvt.s32.f32 s15, s15
+vmov r5, s15
+strh.w r5, [r2, #2]!
+cmp lr, r2
+beq.n <mixer_calcNextSampleBlock+0xd1c>
+add r1, ip
+cmp r0, r3
+str.w r3, [r8, #80] @ 0x50
+add r3, ip
+bls.n <mixer_calcNextSampleBlock+0xc64>
+ldr.w r0, [r9, #2056] @ 0x808
+sxth r0, r0
+vmov s15, r0
+strh.w r0, [r8, #72] @ 0x48
+vcvt.f32.s32 s15, s15
+b.n <mixer_calcNextSampleBlock+0xc70>
+ldr r3, [pc, #824] @ (<mixer_calcNextSampleBlock+0xfe0>)
+ldr.w r0, [r8, #80] @ 0x50
+ldrb.w r2, [r8, #89] @ 0x59
+ldr r1, [pc, #808] @ (<mixer_calcNextSampleBlock+0xfdc>)
+add.w ip, r3, r2, lsl #11
+vldr s12, [pc, #812] @ <mixer_calcNextSampleBlock+0xfe4>
+ldr.w lr, [r8, #76] @ 0x4c
+mov r3, r0
+add.w r9, r1, #64 @ 0x40
+lsrs r5, r3, #22
+ubfx r2, r3, #0, #22
+add r3, lr
+vmov s13, r2
+adds r2, r5, #1
+ldrsh.w r5, [ip, r5, lsl #1]
+ubfx r2, r2, #0, #10
+vcvt.f32.s32 s13, s13
+vmov s15, r5
+ldrsh.w r2, [ip, r2, lsl #1]
+vmul.f32 s13, s13, s12
+subs r2, r2, r5
+vcvt.f32.s32 s15, s15
+vmov s14, r2
+vcvt.f32.s32 s14, s14
+vfma.f32 s15, s13, s14
+vrintz.f32 s15, s15
+vmul.f32 s15, s0, s15
+vcvt.s32.f32 s15, s15
+vmov r2, s15
+strh.w r2, [r1, #2]!
+cmp r9, r1
+bne.n <mixer_calcNextSampleBlock+0xcc4>
+add.w r0, r0, lr, lsl #5
+str.w r0, [r8, #80] @ 0x50
+ldrb.w r3, [r8, #160] @ 0xa0
+vldr s0, [r8, #220] @ 0xdc
+cmp r3, #4
+bhi.w <mixer_calcNextSampleBlock+0x2f82>
+tbh [pc, r3, lsl #1]
+.short 0x0c35
+.word ADDR
+.word ADDR
+ldr r3, [pc, #684] @ (<mixer_calcNextSampleBlock+0xfe8>)
+ldr.w r0, [r8, #80] @ 0x50
+ldrb.w r2, [r8, #89] @ 0x59
+ldr r1, [pc, #664] @ (<mixer_calcNextSampleBlock+0xfdc>)
+add.w ip, r3, r2, lsl #11
+vldr s12, [pc, #664] @ <mixer_calcNextSampleBlock+0xfe4>
+ldr.w lr, [r8, #76] @ 0x4c
+mov r3, r0
+add.w r9, r1, #64 @ 0x40
+lsrs r5, r3, #22
+ubfx r2, r3, #0, #22
+add r3, lr
+vmov s13, r2
+adds r2, r5, #1
+ldrsh.w r5, [ip, r5, lsl #1]
+ubfx r2, r2, #0, #10
+vcvt.f32.s32 s13, s13
+vmov s15, r5
+ldrsh.w r2, [ip, r2, lsl #1]
+vmul.f32 s13, s13, s12
+subs r2, r2, r5
+vcvt.f32.s32 s15, s15
+vmov s14, r2
+vcvt.f32.s32 s14, s14
+vfma.f32 s15, s13, s14
+vrintz.f32 s15, s15
+vmul.f32 s15, s0, s15
+vcvt.s32.f32 s15, s15
+vmov r2, s15
+strh.w r2, [r1, #2]!
+cmp r9, r1
+bne.n <mixer_calcNextSampleBlock+0xd56>
+b.n <mixer_calcNextSampleBlock+0xd14>
+ldr r3, [pc, #576] @ (<mixer_calcNextSampleBlock+0xfec>)
+ldr.w r0, [r8, #80] @ 0x50
+ldrb.w r2, [r8, #89] @ 0x59
+ldr r1, [pc, #552] @ (<mixer_calcNextSampleBlock+0xfdc>)
+add.w ip, r3, r2, lsl #11
+vldr s12, [pc, #552] @ <mixer_calcNextSampleBlock+0xfe4>
+ldr.w lr, [r8, #76] @ 0x4c
+mov r3, r0
+add.w r9, r1, #64 @ 0x40
+lsrs r5, r3, #22
+ubfx r2, r3, #0, #22
+add r3, lr
+vmov s13, r2
+adds r2, r5, #1
+ldrsh.w r5, [ip, r5, lsl #1]
+ubfx r2, r2, #0, #10
+vcvt.f32.s32 s13, s13
+vmov s15, r5
+ldrsh.w r2, [ip, r2, lsl #1]
+vmul.f32 s13, s13, s12
+subs r2, r2, r5
+vcvt.f32.s32 s15, s15
+vmov s14, r2
+vcvt.f32.s32 s14, s14
+vfma.f32 s15, s13, s14
+vrintz.f32 s15, s15
+vmul.f32 s15, s0, s15
+vcvt.s32.f32 s15, s15
+vmov r2, s15
+strh.w r2, [r1, #2]!
+cmp r9, r1
+bne.n <mixer_calcNextSampleBlock+0xdc6>
+b.n <mixer_calcNextSampleBlock+0xd14>
+ldr.w r0, [r8, #80] @ 0x50
+ldr r1, [pc, #444] @ (<mixer_calcNextSampleBlock+0xfdc>)
+vldr s12, [pc, #452] @ <mixer_calcNextSampleBlock+0xfe4>
+mov r2, r0
+ldr.w lr, [r8, #76] @ 0x4c
+add.w r9, r1, #64 @ 0x40
+ldr r3, [pc, #448] @ (<mixer_calcNextSampleBlock+0xff0>)
+mov.w ip, r2, lsr #22
+ubfx r5, r2, #0, #22
+add r2, lr
+vmov s13, r5
+add.w r5, ip, #1
+ldrsh.w ip, [r3, ip, lsl #1]
+ldrsh.w r5, [r3, r5, lsl #1]
+vcvt.f32.s32 s13, s13
+vmov s15, ip
+sub.w r5, r5, ip
+vmul.f32 s13, s13, s12
+vmov s14, r5
+vcvt.f32.s32 s15, s15
+vcvt.f32.s32 s14, s14
+vfma.f32 s15, s13, s14
+vrintz.f32 s15, s15
+vmul.f32 s15, s0, s15
+vcvt.s32.f32 s15, s15
+vmov r5, s15
+strh.w r5, [r1, #2]!
+cmp r9, r1
+bne.n <mixer_calcNextSampleBlock+0xe2e>
+add.w r3, r0, lr, lsl #5
+str.w r3, [r8, #80] @ 0x50
+b.n <mixer_calcNextSampleBlock+0xd1c>
+vldr s15, [pc, #384] @ <mixer_calcNextSampleBlock+0x100c>
+mov r1, sl
+vmul.f32 s4, s13, s15
+vmul.f32 s6, s6, s15
+vldr s7, [pc, #344] @ <mixer_calcNextSampleBlock+0xff4>
+mov r0, r4
+vldr s9, [pc, #344] @ <mixer_calcNextSampleBlock+0xff8>
+movs r2, #0
+vldr s10, [pc, #340] @ <mixer_calcNextSampleBlock+0xffc>
+b.n <mixer_calcNextSampleBlock+0xed4>
+vldmia r0!, {s15}
+vmul.f32 s15, s3, s15
+vmaxnm.f32 s15, s15, s7
+vminnm.f32 s15, s15, s9
+vmul.f32 s15, s15, s10
+vcvt.s32.f32 s15, s15
+vmov r6, s15
+qadd r3, r3, r6
+str.w r3, [r9, r2, lsl #3]
+adds r2, #1
+cmp r2, #32
+beq.n <mixer_calcNextSampleBlock+0xf9e>
+uxtb r6, r2
+vldmia r5!, {s12}
+vmov.f32 s3, s5
+ldr.w r3, [r1, r2, lsl #3]
+vmov s15, r6
+vcvt.f32.u32 s13, s15
+vmov.f32 s15, s11
+vfma.f32 s3, s13, s6
+vfma.f32 s15, s4, s13
+vmul.f32 s15, s15, s12
+vmaxnm.f32 s15, s15, s7
+vminnm.f32 s15, s15, s9
+vmul.f32 s15, s15, s10
+vcvt.s32.f32 s15, s15
+vmov r6, s15
+qadd r3, r3, r6
+str.w r3, [r1, r2, lsl #3]
+ldr.w r3, [r9, r2, lsl #3]
+cmp r4, #0
+bne.n <mixer_calcNextSampleBlock+0xeaa>
+vmul.f32 s15, s3, s12
+adds r0, #4
+b.n <mixer_calcNextSampleBlock+0xeb2>
+vldr s15, [pc, #228] @ <mixer_calcNextSampleBlock+0x100c>
+vmul.f32 s13, s13, s15
+vmul.f32 s6, s6, s15
+cmp r4, #0
+beq.w <mixer_calcNextSampleBlock+0x1c18>
+vmov.f32 s2, #96 @ ADDR 0.5
+vldr s3, [pc, #180] @ <mixer_calcNextSampleBlock+0xff4>
+vldr s4, [pc, #180] @ <mixer_calcNextSampleBlock+0xff8>
+movs r3, #0
+vldr s7, [pc, #180] @ <mixer_calcNextSampleBlock+0xffc>
+uxtb r1, r3
+vmov.f32 s9, s5
+vldmia r4!, {s15}
+vmov s12, r1
+vldmia r5!, {s10}
+ldr.w r2, [r9, r3, lsl #3]
+vcvt.f32.u32 s1, s12
+vmov.f32 s12, s11
+vfma.f32 s9, s6, s1
+vfma.f32 s12, s13, s1
+vmul.f32 s15, s15, s9
+vfma.f32 s15, s10, s12
+vmul.f32 s15, s15, s2
+vmaxnm.f32 s15, s15, s3
+vminnm.f32 s15, s15, s4
+vmul.f32 s15, s15, s7
+vcvt.s32.f32 s15, s15
+vmov r1, s15
+qadd r2, r2, r1
+str.w r2, [r9, r3, lsl #3]
+adds r3, #1
+cmp r3, #32
+bne.n <mixer_calcNextSampleBlock+0xf4a>
+ldr r3, [sp, #56] @ 0x38
+vstr s14, [r3, #368] @ 0x170
+vstr s8, [r3, #372] @ 0x174
+ldr r0, [pc, #84] @ (<mixer_calcNextSampleBlock+0x1000>)
+bl <mixer_probeAdd.lto_priv.0>
+ldr r2, [sp, #68] @ 0x44
+mov r1, sl
+mov r0, fp
+bl <busComp_processBlock>
+ldr r0, [pc, #72] @ (<mixer_calcNextSampleBlock+0x1004>)
+bl <mixer_probeAdd.lto_priv.0>
+bl <mixer_probeEnd>
+add sp, #196 @ 0xc4
+vpop {d8-d11}
+ldmia.w sp!, {r4, r5, r6, r7, r8, r9, sl, fp, pc}
+vldr s15, [pc, #60] @ <mixer_calcNextSampleBlock+0x100c>
+mov r9, sl
+vmul.f32 s13, s13, s15
+vmul.f32 s6, s6, s15
+b.n <mixer_calcNextSampleBlock+0xf32>
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+vldr s15, [pc, #-8] @ <mixer_calcNextSampleBlock+0x100c>
+mov r9, fp
+vmul.f32 s13, s13, s15
+vmul.f32 s6, s6, s15
+b.n <mixer_calcNextSampleBlock+0xf32>
+vldr s15, [pc, #-24] @ <mixer_calcNextSampleBlock+0x100c>
+ldr.w r9, [sp, #76] @ 0x4c
+vmul.f32 s13, s13, s15
+vmul.f32 s6, s6, s15
+b.n <mixer_calcNextSampleBlock+0xf32>
+vldr s15, [pc, #-40] @ <mixer_calcNextSampleBlock+0x100c>
+mov r1, fp
+ldr.w r9, [sp, #76] @ 0x4c
+vmul.f32 s4, s13, s15
+vmul.f32 s6, s6, s15
+b.n <mixer_calcNextSampleBlock+0xe98>
+ldrsh.w r2, [r4]
+strh.w r2, [r3, #2]!
+cmp r3, r1
+bne.w <mixer_calcNextSampleBlock+0x406>
+b.w <mixer_calcNextSampleBlock+0x428>
+ldrb r2, [r2, #1]
+cmp r3, #16
+vmov s21, r2
+vcvt.f32.u32 s21, s21
+vmul.f32 s21, s21, s16
+vmul.f32 s19, s20, s21
+beq.n <mixer_calcNextSampleBlock+0x10ac>
+cmp r3, #15
+bls.w <mixer_calcNextSampleBlock+0x502>
+vmul.f32 s15, s20, s22
+vmov.f32 s18, s15
+b.w <mixer_calcNextSampleBlock+0x53a>
+ldr r3, [sp, #28]
+vmov.f32 s2, s18
+ldr r0, [sp, #24]
+vmov.f32 s1, s21
+vldr s3, [r3]
+vmov.f32 s0, s20
+ldr r3, [sp, #52] @ 0x34
+add r1, sp, #128 @ 0x80
+str.w fp, [sp, #8]
+strd r6, r3, [sp]
+mov r3, sl
+ldrb r0, [r0, #0]
+bl <mixer_addVoiceStereoToOutput>
+b.w <mixer_calcNextSampleBlock+0x610>
+ldr.w ip, [pc, #768] @ <mixer_calcNextSampleBlock+0x13b0>
+ldrb.w r3, [ip]
+cmp r3, #0
+beq.n <mixer_calcNextSampleBlock+0x1074>
+ldr r1, [pc, #748] @ (<mixer_calcNextSampleBlock+0x13a8>)
+add r1, r7
+b.w <mixer_calcNextSampleBlock+0x50e>
+cmp r3, #0
+beq.w <mixer_calcNextSampleBlock+0x1466>
+vcmpe.f32 s19, #0.0
+ldr r3, [sp, #32]
+vldr s14, [r3]
+vmrs APSR_nzcv, fpscr
+bgt.n <mixer_calcNextSampleBlock+0x10e2>
+vcmpe.f32 s14, #0.0
+vmrs APSR_nzcv, fpscr
+ble.w <mixer_calcNextSampleBlock+0x1466>
+ldr r3, [sp, #28]
+vsub.f32 s13, s19, s14
+vldr s12, [pc, #712] @ <mixer_calcNextSampleBlock+0x13b4>
+vldr s11, [r3]
+ldr r3, [sp, #24]
+vmul.f32 s13, s13, s12
+vsub.f32 s15, s18, s11
+ldrb r3, [r3, #0]
+cmp r3, #5
+bhi.w <mixer_calcNextSampleBlock+0x2fb0>
+tbh [pc, r3, lsl #1]
+.short 0x015b
+.word ADDR
+.word ADDR
+.short 0x0006
+vldr s12, [pc, #672] @ <mixer_calcNextSampleBlock+0x13b4>
+ldr r3, [sp, #64] @ 0x40
+vmul.f32 s15, s15, s12
+vldr s8, [pc, #664] @ <mixer_calcNextSampleBlock+0x13b8>
+cmp r3, #0
+bne.w <mixer_calcNextSampleBlock+0x1d18>
+add.w r0, sp, #126 @ 0x7e
+ldr r1, [pc, #640] @ (<mixer_calcNextSampleBlock+0x13ac>)
+uxtb r2, r3
+vmov.f32 s9, s11
+vmov.f32 s10, s14
+vmov s12, r2
+ldrsh.w r2, [r0, #2]!
+vcvt.f32.u32 s12, s12
+vfma.f32 s9, s15, s12
+vfma.f32 s10, s12, s13
+vmov s12, r2
+ldr.w r2, [r1, #4]!
+vcvt.f32.s32 s12, s12
+vmul.f32 s12, s12, s8
+vmul.f32 s10, s12, s10
+vmul.f32 s12, s12, s9
+vcvt.s32.f32 s10, s10
+vcvt.s32.f32 s12, s12
+vmov r5, s10
+qadd r2, r2, r5
+vmov r5, s12
+str r2, [r1, #0]
+ldr.w r2, [r6, r3, lsl #3]
+qadd r2, r2, r5
+str.w r2, [r6, r3, lsl #3]
+adds r3, #1
+cmp r3, #32
+bne.n <mixer_calcNextSampleBlock+0x112c>
+b.w <mixer_calcNextSampleBlock+0x610>
+vldr s12, [pc, #548] @ <mixer_calcNextSampleBlock+0x13b4>
+ldr r3, [sp, #64] @ 0x40
+vmul.f32 s15, s15, s12
+vldr s8, [pc, #540] @ <mixer_calcNextSampleBlock+0x13b8>
+cmp r3, #0
+bne.w <mixer_calcNextSampleBlock+0x1b08>
+add.w r0, sp, #126 @ 0x7e
+ldr r1, [pc, #516] @ (<mixer_calcNextSampleBlock+0x13ac>)
+uxtb r2, r3
+vmov.f32 s9, s11
+vmov.f32 s10, s14
+vmov s12, r2
+ldrsh.w r2, [r0, #2]!
+vcvt.f32.u32 s12, s12
+vfma.f32 s9, s15, s12
+vfma.f32 s10, s12, s13
+vmov s12, r2
+ldr.w r2, [r1, #4]!
+vcvt.f32.s32 s12, s12
+vmul.f32 s12, s12, s8
+vmul.f32 s10, s12, s10
+vmul.f32 s12, s12, s9
+vcvt.s32.f32 s10, s10
+vcvt.s32.f32 s12, s12
+vmov r5, s10
+qadd r2, r2, r5
+vmov r5, s12
+str r2, [r1, #0]
+ldr.w r2, [sl, r3, lsl #3]
+qadd r2, r2, r5
+str.w r2, [sl, r3, lsl #3]
+adds r3, #1
+cmp r3, #32
+bne.n <mixer_calcNextSampleBlock+0x11a8>
+b.w <mixer_calcNextSampleBlock+0x610>
+vldr s12, [pc, #424] @ <mixer_calcNextSampleBlock+0x13b4>
+ldr r3, [sp, #64] @ 0x40
+vmul.f32 s15, s15, s12
+vldr s8, [pc, #416] @ <mixer_calcNextSampleBlock+0x13b8>
+cmp r3, #0
+bne.w <mixer_calcNextSampleBlock+0x1b90>
+add.w r0, sp, #126 @ 0x7e
+ldr r1, [pc, #392] @ (<mixer_calcNextSampleBlock+0x13ac>)
+uxtb r2, r3
+vmov.f32 s10, s11
+vmov.f32 s9, s14
+vmov s12, r2
+ldrsh.w r2, [r0, #2]!
+vcvt.f32.u32 s12, s12
+vfma.f32 s10, s15, s12
+vfma.f32 s9, s12, s13
+vmov s12, r2
+ldr.w r2, [r1, #4]!
+vcvt.f32.s32 s12, s12
+vmul.f32 s12, s12, s8
+vmul.f32 s9, s9, s12
+vmul.f32 s12, s10, s12
+vcvt.s32.f32 s9, s9
+vcvt.s32.f32 s12, s12
+vmov r5, s9
+qadd r2, r2, r5
+vmov r5, s12
+str r2, [r1, #0]
+ldr.w r2, [fp, r3, lsl #3]
+qadd r2, r2, r5
+str.w r2, [fp, r3, lsl #3]
+adds r3, #1
+cmp r3, #32
+bne.n <mixer_calcNextSampleBlock+0x1224>
+b.w <mixer_calcNextSampleBlock+0x610>
+vldr s12, [pc, #300] @ <mixer_calcNextSampleBlock+0x13b4>
+ldr r3, [sp, #64] @ 0x40
+vmul.f32 s15, s15, s12
+vldr s8, [pc, #292] @ <mixer_calcNextSampleBlock+0x13b8>
+cmp r3, #0
+bne.w <mixer_calcNextSampleBlock+0x1da0>
+add.w r0, sp, #126 @ 0x7e
+ldr r1, [pc, #268] @ (<mixer_calcNextSampleBlock+0x13ac>)
+ldr r5, [sp, #52] @ 0x34
+uxtb r2, r3
+vmov.f32 s9, s11
+vmov.f32 s10, s14
+vmov s12, r2
+ldrsh.w r2, [r0, #2]!
+vcvt.f32.u32 s12, s12
+vfma.f32 s9, s15, s12
+vfma.f32 s10, s12, s13
+vmov s12, r2
+ldr.w r2, [r1, #4]!
+vcvt.f32.s32 s12, s12
+vmul.f32 s12, s12, s8
+vmul.f32 s10, s12, s10
+vmul.f32 s12, s12, s9
+vcvt.s32.f32 s10, s10
+vcvt.s32.f32 s12, s12
+vmov ip, s10
+qadd r2, r2, ip
+vmov ip, s12
+str r2, [r1, #0]
+ldr.w r2, [r5, r3, lsl #3]
+qadd r2, r2, ip
+str.w r2, [r5, r3, lsl #3]
+adds r3, #1
+cmp r3, #32
+bne.n <mixer_calcNextSampleBlock+0x12a2>
+b.w <mixer_calcNextSampleBlock+0x610>
+vldr s12, [pc, #172] @ <mixer_calcNextSampleBlock+0x13b4>
+ldr r2, [sp, #64] @ 0x40
+vmul.f32 s12, s15, s12
+cmp r2, #0
+bne.w <mixer_calcNextSampleBlock+0x1e44>
+vldr s8, [pc, #160] @ <mixer_calcNextSampleBlock+0x13b8>
+add.w r3, sl, #12
+add.w lr, sp, #126 @ 0x7e
+ldr.w ip, [pc, #136] @ <mixer_calcNextSampleBlock+0x13ac>
+uxtb r1, r2
+vmov.f32 s15, s11
+vmov.f32 s9, s14
+adds r2, #1
+vmov s10, r1
+ldrsh.w r1, [lr, #2]!
+adds r3, #8
+cmp r2, #32
+vcvt.f32.u32 s10, s10
+vfma.f32 s9, s10, s13
+vfma.f32 s15, s12, s10
+vmov s10, r1
+ldr.w r1, [ip, #4]!
+vcvt.f32.s32 s10, s10
+vmul.f32 s10, s10, s8
+vmul.f32 s15, s10, s15
+vmul.f32 s10, s10, s9
+vrintz.f32 s15, s15
+vmul.f32 s9, s20, s15
+vmul.f32 s15, s21, s15
+vcvt.s32.f32 s10, s10
+vcvt.s32.f32 s9, s9
+vcvt.s32.f32 s15, s15
+vmov r0, s10
+vmov r5, s9
+qadd r1, r1, r0
+str.w r1, [ip]
+ldrd r0, r1, [r3, #-20]
+qadd r0, r0, r5
+str.w r0, [r3, #-20]
+vmov r0, s15
+qadd r1, r1, r0
+str.w r1, [r3, #-16]
+bne.n <mixer_calcNextSampleBlock+0x1324>
+b.w <mixer_calcNextSampleBlock+0x610>
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+vldr s12, [pc, #-12] @ <mixer_calcNextSampleBlock+0x13b4>
+ldr r2, [sp, #64] @ 0x40
+vmul.f32 s15, s15, s12
+cmp r2, #0
+bne.w <mixer_calcNextSampleBlock+0x1c68>
+ldr r3, [sp, #52] @ 0x34
+add.w lr, sp, #126 @ 0x7e
+vldr s8, [pc, #-28] @ <mixer_calcNextSampleBlock+0x13b8>
+adds r3, #12
+ldr.w ip, [pc, #912] @ <mixer_calcNextSampleBlock+0x176c>
+uxtb r1, r2
+vmov.f32 s12, s11
+vmov.f32 s9, s14
+adds r2, #1
+vmov s10, r1
+ldrsh.w r1, [lr, #2]!
+adds r3, #8
+cmp r2, #32
+vcvt.f32.u32 s10, s10
+vfma.f32 s9, s10, s13
+vfma.f32 s12, s15, s10
+vmov s10, r1
+ldr.w r1, [ip, #4]!
+vcvt.f32.s32 s10, s10
+vmul.f32 s10, s10, s8
+vmul.f32 s12, s10, s12
+vmul.f32 s10, s10, s9
+vrintz.f32 s12, s12
+vmul.f32 s9, s20, s12
+vmul.f32 s12, s21, s12
+vcvt.s32.f32 s10, s10
+vcvt.s32.f32 s9, s9
+vcvt.s32.f32 s12, s12
+vmov r0, s10
+vmov r5, s9
+qadd r1, r1, r0
+str.w r1, [ip]
+ldrd r0, r1, [r3, #-20]
+qadd r0, r0, r5
+str.w r0, [r3, #-20]
+vmov r0, s12
+qadd r1, r1, r0
+str.w r1, [r3, #-16]
+bne.n <mixer_calcNextSampleBlock+0x13dc>
+b.w <mixer_calcNextSampleBlock+0x610>
+vmov.f32 s19, s21
+b.w <mixer_calcNextSampleBlock+0x53a>
+ldr r3, [sp, #28]
+vldr s14, [r3]
+ldr r3, [sp, #24]
+vsub.f32 s13, s18, s14
+ldrb r3, [r3, #0]
+cmp r3, #5
+bhi.w <mixer_calcNextSampleBlock+0x610>
+tbb [pc, r3]
+.short 0xb0ed
+.word ADDR
+vldr s15, [pc, #724] @ <mixer_calcNextSampleBlock+0x175c>
+add.w r1, sp, #126 @ 0x7e
+vldr s11, [pc, #720] @ <mixer_calcNextSampleBlock+0x1760>
+movs r3, #0
+vmul.f32 s13, s13, s15
+uxtb r2, r3
+vmov.f32 s12, s14
+vmov s15, r2
+ldrsh.w r2, [r1, #2]!
+vcvt.f32.u32 s15, s15
+vfma.f32 s12, s13, s15
+vmov s15, r2
+ldr.w r2, [r6, r3, lsl #3]
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s11
+vmul.f32 s15, s15, s12
+vcvt.s32.f32 s15, s15
+vmov r0, s15
+qadd r2, r2, r0
+str.w r2, [r6, r3, lsl #3]
+adds r3, #1
+cmp r3, #32
+bne.n <mixer_calcNextSampleBlock+0x1496>
+b.w <mixer_calcNextSampleBlock+0x610>
+vldr s15, [pc, #640] @ <mixer_calcNextSampleBlock+0x175c>
+add.w r1, sp, #126 @ 0x7e
+vldr s11, [pc, #636] @ <mixer_calcNextSampleBlock+0x1760>
+movs r3, #0
+vmul.f32 s13, s13, s15
+uxtb r2, r3
+vmov.f32 s12, s14
+vmov s15, r2
+ldrsh.w r2, [r1, #2]!
+vcvt.f32.u32 s15, s15
+vfma.f32 s12, s13, s15
+vmov s15, r2
+ldr.w r2, [sl, r3, lsl #3]
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s11
+vmul.f32 s15, s15, s12
+vcvt.s32.f32 s15, s15
+vmov r0, s15
+qadd r2, r2, r0
+str.w r2, [sl, r3, lsl #3]
+adds r3, #1
+cmp r3, #32
+bne.n <mixer_calcNextSampleBlock+0x14ec>
+b.w <mixer_calcNextSampleBlock+0x610>
+vldr s15, [pc, #552] @ <mixer_calcNextSampleBlock+0x175c>
+add.w r1, sp, #126 @ 0x7e
+vldr s11, [pc, #548] @ <mixer_calcNextSampleBlock+0x1760>
+movs r3, #0
+vmul.f32 s13, s13, s15
+uxtb r2, r3
+vmov.f32 s12, s14
+vmov s15, r2
+ldrsh.w r2, [r1, #2]!
+vcvt.f32.u32 s15, s15
+vfma.f32 s12, s13, s15
+vmov s15, r2
+ldr.w r2, [fp, r3, lsl #3]
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s11
+vmul.f32 s15, s15, s12
+vcvt.s32.f32 s15, s15
+vmov r0, s15
+qadd r2, r2, r0
+str.w r2, [fp, r3, lsl #3]
+adds r3, #1
+cmp r3, #32
+bne.n <mixer_calcNextSampleBlock+0x1542>
+b.w <mixer_calcNextSampleBlock+0x610>
+vldr s15, [pc, #468] @ <mixer_calcNextSampleBlock+0x175c>
+add.w r1, sp, #126 @ 0x7e
+vldr s11, [pc, #464] @ <mixer_calcNextSampleBlock+0x1760>
+movs r3, #0
+vmul.f32 s13, s13, s15
+ldr r0, [sp, #52] @ 0x34
+uxtb r2, r3
+vmov.f32 s12, s14
+vmov s15, r2
+ldrsh.w r2, [r1, #2]!
+vcvt.f32.u32 s15, s15
+vfma.f32 s12, s13, s15
+vmov s15, r2
+ldr.w r2, [r0, r3, lsl #3]
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s11
+vmul.f32 s15, s15, s12
+vcvt.s32.f32 s15, s15
+vmov r5, s15
+qadd r2, r2, r5
+str.w r2, [r0, r3, lsl #3]
+adds r3, #1
+cmp r3, #32
+bne.n <mixer_calcNextSampleBlock+0x159a>
+b.w <mixer_calcNextSampleBlock+0x610>
+vldr s15, [pc, #380] @ <mixer_calcNextSampleBlock+0x175c>
+add.w r3, sl, #8
+vldr s11, [pc, #376] @ <mixer_calcNextSampleBlock+0x1760>
+add.w r0, sp, #126 @ 0x7e
+vmul.f32 s13, s13, s15
+movs r2, #0
+uxtb r1, r2
+vmov.f32 s12, s14
+adds r2, #1
+vmov s15, r1
+ldrsh.w r1, [r0, #2]!
+cmp r2, #32
+vcvt.f32.u32 s15, s15
+vfma.f32 s12, s13, s15
+vmov s15, r1
+vcvt.f32.s32 s15, s15
+ldrd r5, r1, [r3, #-8]
+vmul.f32 s15, s15, s11
+add.w r3, r3, #8
+vmul.f32 s15, s15, s12
+vrintz.f32 s15, s15
+vmul.f32 s12, s15, s20
+vmul.f32 s15, s15, s21
+vcvt.s32.f32 s12, s12
+vcvt.s32.f32 s15, s15
+vmov ip, s12
+qadd r5, r5, ip
+str.w r5, [r3, #-16]
+vmov r5, s15
+qadd r1, r1, r5
+str.w r1, [r3, #-12]
+bne.n <mixer_calcNextSampleBlock+0x15f4>
+b.w <mixer_calcNextSampleBlock+0x610>
+vldr s15, [pc, #256] @ <mixer_calcNextSampleBlock+0x175c>
+add.w r0, sp, #126 @ 0x7e
+ldr r3, [sp, #52] @ 0x34
+movs r2, #0
+vmul.f32 s13, s13, s15
+vldr s11, [pc, #244] @ <mixer_calcNextSampleBlock+0x1760>
+adds r3, #8
+uxtb r1, r2
+vmov.f32 s12, s14
+adds r2, #1
+vmov s15, r1
+ldrsh.w r1, [r0, #2]!
+cmp r2, #32
+vcvt.f32.u32 s15, s15
+vfma.f32 s12, s13, s15
+vmov s15, r1
+vcvt.f32.s32 s15, s15
+ldrd r5, r1, [r3, #-8]
+vmul.f32 s15, s15, s11
+add.w r3, r3, #8
+vmul.f32 s15, s15, s12
+vrintz.f32 s15, s15
+vmul.f32 s12, s15, s20
+vmul.f32 s15, s15, s21
+vcvt.s32.f32 s12, s12
+vcvt.s32.f32 s15, s15
+vmov ip, s12
+qadd r5, r5, ip
+str.w r5, [r3, #-16]
+vmov r5, s15
+qadd r1, r1, r5
+str.w r1, [r3, #-12]
+bne.n <mixer_calcNextSampleBlock+0x166e>
+b.w <mixer_calcNextSampleBlock+0x610>
+ldr.w ip, [pc, #156] @ <mixer_calcNextSampleBlock+0x1770>
+ldrb.w r2, [ip]
+cmp r2, #0
+bne.w <mixer_calcNextSampleBlock+0x1a90>
+vmul.f32 s15, s20, s22
+vldr s19, [pc, #124] @ <mixer_calcNextSampleBlock+0x1764>
+b.n <mixer_calcNextSampleBlock+0x1078>
+vmov.f32 s18, s22
+b.w <mixer_calcNextSampleBlock+0x53a>
+movs r3, #0
+ldr r2, [sp, #56] @ 0x38
+str.w r3, [r2, #368] @ 0x170
+str.w r3, [r2, #372] @ 0x174
+b.n <mixer_calcNextSampleBlock+0xfa8>
+vstr s14, [r4, #500] @ 0x1f4
+b.w <mixer_calcNextSampleBlock+0x17e>
+vstr s14, [r4, #176] @ 0xb0
+b.w <mixer_calcNextSampleBlock+0x17e>
+ldrsb.w ip, [r1, #19]
+ldrb r2, [r1, #19]
+cmp.w ip, #0
+ble.n <mixer_calcNextSampleBlock+0x1722>
+mov r5, r0
+b.w <mixer_calcNextSampleBlock+0x4c4>
+vldr s19, [pc, #64] @ <mixer_calcNextSampleBlock+0x1764>
+vmov.f32 s21, s19
+b.w <mixer_calcNextSampleBlock+0x50e>
+and.w r4, r4, #2
+ubfx r3, r3, #1, #1
+mov.w r2, #256 @ 0x100
+movs r1, #0
+ldr r0, [pc, #40] @ (<mixer_calcNextSampleBlock+0x1768>)
+str r4, [sp, #64] @ 0x40
+str r3, [sp, #60] @ 0x3c
+bl <memset>
+b.w <mixer_calcNextSampleBlock+0x214>
+bl <mixer_checkOutJackAvailable>
+movs r3, #0
+str r0, [sp, #72] @ 0x48
+str r3, [sp, #48] @ 0x30
+strd r3, r3, [sp, #60] @ 0x3c
+b.w <mixer_calcNextSampleBlock+0x214>
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+movw r0, #2205 @ 0x89d
+ldr r1, [pc, #808] @ (<mixer_calcNextSampleBlock+0x1aa4>)
+vldr s12, [r8, #356] @ 0x164
+mla r3, r0, r3, r1
+vldr s15, [pc, #804] @ <mixer_calcNextSampleBlock+0x1aa8>
+ldr r2, [pc, #804] @ (<mixer_calcNextSampleBlock+0x1aac>)
+movw r0, #2204 @ 0x89c
+str r3, [sp, #80] @ 0x50
+mov r3, sl
+vmul.f32 s12, s12, s15
+mov sl, r9
+vldr s11, [r8, #364] @ 0x16c
+mov r9, r6
+ldr.w lr, [r8, #352] @ 0x160
+mov r6, r4
+add.w ip, r2, #64 @ 0x40
+ldr r5, [pc, #776] @ (<mixer_calcNextSampleBlock+0x1ab0>)
+mov r4, r3
+vmov s15, lr
+cmp.w r0, lr, lsr #20
+mov.w r1, lr, lsr #20
+mov.w r3, #0
+vcvt.f32.u32 s13, s15
+bcc.n <mixer_calcNextSampleBlock+0x17e4>
+ldr r3, [sp, #80] @ 0x50
+cmp lr, r5
+ldrsb r3, [r3, r1]
+it ls
+vaddls.f32 s13, s13, s12
+lsls r3, r3, #8
+vmov s14, r3
+vcvt.f32.s32 s14, s14
+vmul.f32 s14, s14, s11
+vcvt.s32.f32 s14, s14
+vmov r3, s14
+sxth r3, r3
+vcvt.u32.f32 s15, s13
+strh.w r3, [r2, #2]!
+cmp ip, r2
+vmov lr, s15
+bne.n <mixer_calcNextSampleBlock+0x17aa>
+mov r3, r4
+mov r4, r6
+mov r6, r9
+mov r9, sl
+mov sl, r3
+vstr s15, [r8, #352] @ 0x160
+ldr r1, [pc, #688] @ (<mixer_calcNextSampleBlock+0x1ab4>)
+ldr r0, [sp, #136] @ 0x88
+ldr r5, [r1, #96] @ 0x60
+ldrd r2, r3, [sp, #128] @ 0x80
+qadd16 r2, r2, r5
+str r2, [sp, #128] @ 0x80
+ldr r2, [r1, #100] @ 0x64
+qadd16 r3, r3, r2
+ldr r2, [sp, #140] @ 0x8c
+str r3, [sp, #132] @ 0x84
+ldr r3, [r1, #104] @ 0x68
+qadd16 r0, r0, r3
+ldr r3, [r1, #108] @ 0x6c
+str r0, [sp, #136] @ 0x88
+qadd16 r3, r2, r3
+ldr r2, [sp, #144] @ 0x90
+str r3, [sp, #140] @ 0x8c
+ldr r3, [r1, #112] @ 0x70
+qadd16 r3, r2, r3
+ldr r2, [sp, #148] @ 0x94
+str r3, [sp, #144] @ 0x90
+ldr r3, [r1, #116] @ 0x74
+qadd16 r3, r2, r3
+ldr r2, [sp, #152] @ 0x98
+str r3, [sp, #148] @ 0x94
+ldr r3, [r1, #120] @ 0x78
+qadd16 r3, r2, r3
+ldr r2, [sp, #156] @ 0x9c
+str r3, [sp, #152] @ 0x98
+ldr r3, [r1, #124] @ 0x7c
+qadd16 r3, r2, r3
+ldr r2, [sp, #160] @ 0xa0
+str r3, [sp, #156] @ 0x9c
+ldr.w r3, [r1, #128] @ 0x80
+qadd16 r3, r2, r3
+ldr r2, [sp, #164] @ 0xa4
+str r3, [sp, #160] @ 0xa0
+ldr.w r3, [r1, #132] @ 0x84
+qadd16 r3, r2, r3
+ldr.w r2, [r1, #136] @ 0x88
+str r3, [sp, #164] @ 0xa4
+ldr r3, [sp, #168] @ 0xa8
+qadd16 r3, r3, r2
+str r3, [sp, #168] @ 0xa8
+ldrd r2, r3, [sp, #172] @ 0xac
+ldrd r0, r5, [r1, #140] @ 0x8c
+qadd16 r2, r2, r0
+qadd16 r3, r3, r5
+ldr r0, [sp, #180] @ 0xb4
+strd r2, r3, [sp, #172] @ 0xac
+ldrd r2, r3, [r1, #148] @ 0x94
+qadd16 r2, r0, r2
+ldr r0, [sp, #184] @ 0xb8
+qadd16 r3, r0, r3
+strd r2, r3, [sp, #180] @ 0xb4
+ldr r2, [sp, #188] @ 0xbc
+ldr.w r3, [r1, #156] @ 0x9c
+qadd16 r3, r2, r3
+str r3, [sp, #188] @ 0xbc
+ldrb.w r3, [r8, #34] @ 0x22
+subs r3, #1
+cmp r3, #3
+bls.w <mixer_calcNextSampleBlock+0x1f12>
+ldrb.w r3, [r8, #18]
+ldrb.w r2, [r8, #19]
+and.w r3, r3, #127 @ 0x7f
+subs r3, r3, r2
+adds r3, #64 @ 0x40
+and.w r3, r3, #127 @ 0x7f
+subs r3, #64 @ 0x40
+add r2, r3
+and.w r2, r2, #127 @ 0x7f
+strb.w r2, [r8, #19]
+ldrb.w r2, [r8, #16]
+cmp r2, #3
+iteet hi
+movhi r3, #0
+sxtbls r2, r3
+lslls r3, r3, #20
+movhi r2, r3
+strb.w r2, [r8, #33] @ 0x21
+ldr.w r2, [r8, #4]
+add r2, r3
+str.w r2, [r8, #4]
+ldrb.w r3, [r8, #34] @ 0x22
+vmov.f32 s0, #112 @ ADDR 1.0
+vldr s15, [r8, #156] @ 0x9c
+subs r3, #1
+vsub.f32 s0, s0, s15
+cmp r3, #3
+bhi.n <mixer_calcNextSampleBlock+0x194e>
+ldrb.w r3, [r8, #51] @ 0x33
+subs r3, #1
+cmp r3, #3
+bhi.w <mixer_calcNextSampleBlock+0x2fa2>
+tbh [pc, r3, lsl #1]
+.word ADDR
+.word ADDR
+ldr r3, [pc, #400] @ (<mixer_calcNextSampleBlock+0x1ab8>)
+rsb r2, r6, #127 @ 0x7f
+add.w r6, r3, r6, lsl #2
+add.w r3, r3, r2, lsl #2
+vldr s8, [r6]
+vldr s15, [r3]
+vmul.f32 s8, s16, s8
+vmul.f32 s16, s16, s15
+vmul.f32 s8, s0, s8
+vmul.f32 s14, s0, s16
+b.w <mixer_calcNextSampleBlock+0x77c>
+ldr r1, [pc, #364] @ (<mixer_calcNextSampleBlock+0x1abc>)
+mov r0, r8
+bl <__calcNextOscSampleBlock.constprop.4_veneer>
+ldrb.w r3, [r8, #34] @ 0x22
+subs r2, r3, #1
+cmp r2, #3
+bls.w <mixer_calcNextSampleBlock+0x1ef4>
+ldr.w r3, [r8, #4]
+ldrsb.w r2, [r8, #33] @ 0x21
+sub.w r3, r3, r2, lsl #20
+str.w r3, [r8, #4]
+movs r3, #0
+strb.w r3, [r8, #33] @ 0x21
+ldrb.w r3, [r8, #450] @ 0x1c2
+cmp r3, #0
+bne.w <mixer_calcNextSampleBlock+0x1afc>
+ldrb.w r3, [r8, #419] @ 0x1a3
+cmp r3, #1
+bne.n <mixer_calcNextSampleBlock+0x19bc>
+vmov.f32 s13, #110 @ ADDR 0.9375000
+vldr s14, [r8, #156] @ 0x9c
+vmov.f32 s15, #112 @ ADDR 1.0
+add.w r0, r8, #348 @ 0x15c
+add.w r1, r8, #412 @ 0x19c
+movs r3, #32
+vcmpe.f32 s14, s13
+ldr r2, [pc, #276] @ (<mixer_calcNextSampleBlock+0x1abc>)
+vsub.f32 s1, s15, s14
+vmrs APSR_nzcv, fpscr
+ite mi
+vdivmi.f32 s0, s15, s1
+vmovpl.f32 s0, #48 @ ADDR 16.0
+bl <voiceFold_process>
+ldrb.w r3, [r8, #416] @ 0x1a0
+vldr s14, [r8, #400] @ 0x190
+cbz r3, <mixer_calcNextSampleBlock+0x19ce>
+vldr s15, [r8, #160] @ 0xa0
+vmul.f32 s14, s14, s15
+ldrb.w r3, [r8, #418] @ 0x1a2
+cmp r3, #0
+beq.n <mixer_calcNextSampleBlock+0x1a86>
+vldr s11, [r8, #420] @ 0x1a4
+vldr s15, [pc, #228] @ <mixer_calcNextSampleBlock+0x1ac0>
+vsub.f32 s12, s14, s11
+vmul.f32 s12, s12, s15
+vmov.f32 s5, #112 @ ADDR 1.0
+vldr s6, [r8, #156] @ 0x9c
+vldr s7, [r8, #408] @ 0x198
+movs r2, #0
+vldr s8, [r8, #404] @ 0x194
+vldr s9, [pc, #200] @ <mixer_calcNextSampleBlock+0x1ac4>
+vldr s10, [pc, #200] @ <mixer_calcNextSampleBlock+0x1ac8>
+ldr r1, [pc, #168] @ (<mixer_calcNextSampleBlock+0x1aac>)
+ldrsh.w r3, [r9, #2]!
+ldrsh.w r0, [r1, #2]!
+vmov s15, r3
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s6
+vcvt.s32.f32 s15, s15
+vmov r3, s15
+sxtah r3, r0, r3
+ssat r3, #16, r3
+vmov s15, r2
+sxth r3, r3
+vmov.f32 s4, s11
+adds r2, #1
+vcvt.f32.s32 s13, s15
+vmov s15, r3
+cmp r2, #32
+vcvt.f32.s32 s15, s15
+vfma.f32 s4, s13, s12
+vmov.f32 s13, s5
+vmul.f32 s15, s15, s9
+vmul.f32 s15, s15, s4
+vabs.f32 s4, s15
+vmul.f32 s15, s15, s7
+vfma.f32 s13, s8, s4
+vdiv.f32 s4, s15, s13
+vmul.f32 s15, s4, s10
+vcvt.s32.f32 s15, s15
+vmov r3, s15
+strh.w r3, [r9]
+bne.n <mixer_calcNextSampleBlock+0x1a02>
+movs r3, #0
+ldr r0, [sp, #44] @ 0x2c
+vstr s14, [r8, #420] @ 0x1a4
+strb.w r3, [r8, #418] @ 0x1a2
+bl <mixer_probeAdd.lto_priv.0>
+b.w <mixer_calcNextSampleBlock+0x3dc>
+vmov.f32 s11, s14
+vldr s12, [pc, #64] @ <mixer_calcNextSampleBlock+0x1acc>
+b.n <mixer_calcNextSampleBlock+0x19e6>
+ldr r1, [pc, #60] @ (<mixer_calcNextSampleBlock+0x1ad0>)
+ldrsb r2, [r1, r7]
+ldrb r5, [r1, r7]
+cmp r2, #0
+blt.w <mixer_calcNextSampleBlock+0x2eaa>
+subs r1, #13
+add r1, r7
+b.w <mixer_calcNextSampleBlock+0x4b4>
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+ittet ne
+vmovne s15, r6
+vldrne s14, [pc, #-12] @ <mixer_calcNextSampleBlock+0x1ad4>
+vmoveq.f32 s8, #112 @ ADDR 1.0
+vcvtne.f32.u32 s8, s15
+itee eq
+vmoveq.f32 s15, s16
+vmovne.f32 s15, s16
+vmulne.f32 s8, s8, s14
+b.w <mixer_calcNextSampleBlock+0x76e>
+ldr r1, [pc, #812] @ (<mixer_calcNextSampleBlock+0x1e2c>)
+add.w r0, r8, #424 @ 0x1a8
+bl <oscSection_renderOldCarrier.constprop.0>
+b.n <mixer_calcNextSampleBlock+0x1982>
+ldr r1, [pc, #804] @ (<mixer_calcNextSampleBlock+0x1e30>)
+add.w ip, sp, #126 @ 0x7e
+movs r3, #0
+add.w r0, r1, #128 @ 0x80
+uxtb r2, r3
+vmov.f32 s10, s14
+vmov.f32 s9, s11
+vmov s12, r2
+ldrsh.w r2, [ip, #2]!
+vcvt.f32.u32 s12, s12
+vfma.f32 s9, s15, s12
+vfma.f32 s10, s12, s13
+vmov s12, r2
+ldr.w r2, [r1, #4]!
+vcvt.f32.s32 s12, s12
+vmul.f32 s12, s12, s8
+vmul.f32 s10, s12, s10
+vmul.f32 s12, s12, s9
+vmul.f32 s9, s10, s20
+vmul.f32 s10, s10, s21
+vcvt.s32.f32 s12, s12
+vcvt.s32.f32 s9, s9
+vcvt.s32.f32 s10, s10
+vmov r5, s9
+qadd r2, r2, r5
+str r2, [r1, #0]
+vmov r5, s10
+ldr.w r2, [r0, #4]!
+qadd r2, r2, r5
+vmov r5, s12
+str r2, [r0, #0]
+ldr.w r2, [sl, r3, lsl #3]
+qadd r2, r2, r5
+str.w r2, [sl, r3, lsl #3]
+adds r3, #1
+cmp r3, #32
+bne.n <mixer_calcNextSampleBlock+0x1b14>
+b.w <mixer_calcNextSampleBlock+0x610>
+ldr r1, [pc, #668] @ (<mixer_calcNextSampleBlock+0x1e30>)
+add.w ip, sp, #126 @ 0x7e
+movs r3, #0
+add.w r0, r1, #128 @ 0x80
+uxtb r2, r3
+vmov.f32 s12, s14
+vmov.f32 s9, s11
+vmov s10, r2
+ldrsh.w r2, [ip, #2]!
+vcvt.f32.u32 s10, s10
+vfma.f32 s9, s15, s10
+vfma.f32 s12, s10, s13
+vmov s10, r2
+ldr.w r2, [r1, #4]!
+vcvt.f32.s32 s10, s10
+vmul.f32 s10, s10, s8
+vmul.f32 s12, s12, s10
+vmul.f32 s10, s9, s10
+vmul.f32 s9, s12, s20
+vmul.f32 s12, s12, s21
+vcvt.s32.f32 s10, s10
+vcvt.s32.f32 s9, s9
+vcvt.s32.f32 s12, s12
+vmov r5, s9
+qadd r2, r2, r5
+str r2, [r1, #0]
+vmov r5, s12
+ldr.w r2, [r0, #4]!
+qadd r2, r2, r5
+vmov r5, s10
+str r2, [r0, #0]
+ldr.w r2, [fp, r3, lsl #3]
+qadd r2, r2, r5
+str.w r2, [fp, r3, lsl #3]
+adds r3, #1
+cmp r3, #32
+bne.n <mixer_calcNextSampleBlock+0x1b9c>
+b.w <mixer_calcNextSampleBlock+0x610>
+vldr s6, [pc, #536] @ <mixer_calcNextSampleBlock+0x1e34>
+vldr s7, [pc, #536] @ <mixer_calcNextSampleBlock+0x1e38>
+vldr s9, [pc, #536] @ <mixer_calcNextSampleBlock+0x1e3c>
+uxtb r3, r4
+vmov.f32 s10, s11
+vldmia r5!, {s15}
+vmov s12, r3
+ldr.w r3, [r9, r4, lsl #3]
+vcvt.f32.u32 s12, s12
+vfma.f32 s10, s13, s12
+vmul.f32 s15, s15, s10
+vmaxnm.f32 s15, s15, s6
+vminnm.f32 s15, s15, s7
+vmul.f32 s15, s15, s9
+vcvt.s32.f32 s15, s15
+vmov r2, s15
+qadd r3, r3, r2
+str.w r3, [r9, r4, lsl #3]
+adds r4, #1
+cmp r4, #32
+bne.n <mixer_calcNextSampleBlock+0x1c24>
+b.w <mixer_calcNextSampleBlock+0xf9e>
+ldr.w ip, [pc, #452] @ <mixer_calcNextSampleBlock+0x1e30>
+add.w r9, sp, #126 @ 0x7e
+ldr r3, [sp, #52] @ 0x34
+movs r2, #0
+vldr s7, [pc, #456] @ <mixer_calcNextSampleBlock+0x1e40>
+add.w lr, ip, #128 @ 0x80
+adds r3, #8
+uxtb r1, r2
+vmov.f32 s10, s14
+vmov.f32 s12, s11
+adds r2, #1
+vmov s9, r1
+ldrsh.w r1, [r9, #2]!
+adds r3, #8
+cmp r2, #32
+vcvt.f32.u32 s9, s9
+vfma.f32 s10, s9, s13
+vfma.f32 s12, s9, s15
+vmov s9, r1
+ldr.w r1, [ip, #4]!
+vcvt.f32.s32 s9, s9
+vmul.f32 s9, s9, s7
+vmul.f32 s10, s10, s9
+vmul.f32 s12, s12, s9
+vmul.f32 s8, s10, s20
+vrintz.f32 s12, s12
+vmul.f32 s10, s10, s21
+vmul.f32 s9, s12, s20
+vmul.f32 s12, s12, s21
+vcvt.s32.f32 s8, s8
+vcvt.s32.f32 s10, s10
+vcvt.s32.f32 s9, s9
+vcvt.s32.f32 s12, s12
+vmov r0, s8
+qadd r1, r1, r0
+str.w r1, [ip]
+vmov r5, s10
+ldr.w r0, [lr, #4]!
+vmov r1, s9
+qadd r0, r0, r5
+str.w r0, [lr]
+ldrd r5, r0, [r3, #-16]
+qadd r1, r5, r1
+vmov r5, s12
+qadd r0, r0, r5
+strd r1, r0, [r3, #-16]
+bne.n <mixer_calcNextSampleBlock+0x1c7e>
+b.w <mixer_calcNextSampleBlock+0x610>
+ldr r1, [pc, #276] @ (<mixer_calcNextSampleBlock+0x1e30>)
+add.w ip, sp, #126 @ 0x7e
+movs r3, #0
+add.w r0, r1, #128 @ 0x80
+uxtb r2, r3
+vmov.f32 s10, s14
+vmov.f32 s9, s11
+vmov s12, r2
+ldrsh.w r2, [ip, #2]!
+vcvt.f32.u32 s12, s12
+vfma.f32 s9, s15, s12
+vfma.f32 s10, s12, s13
+vmov s12, r2
+ldr.w r2, [r1, #4]!
+vcvt.f32.s32 s12, s12
+vmul.f32 s12, s12, s8
+vmul.f32 s10, s12, s10
+vmul.f32 s12, s12, s9
+vmul.f32 s9, s10, s20
+vmul.f32 s10, s10, s21
+vcvt.s32.f32 s12, s12
+vcvt.s32.f32 s9, s9
+vcvt.s32.f32 s10, s10
+vmov r5, s9
+qadd r2, r2, r5
+str r2, [r1, #0]
+vmov r5, s10
+ldr.w r2, [r0, #4]!
+qadd r2, r2, r5
+vmov r5, s12
+str r2, [r0, #0]
+ldr.w r2, [r6, r3, lsl #3]
+qadd r2, r2, r5
+str.w r2, [r6, r3, lsl #3]
+adds r3, #1
+cmp r3, #32
+bne.n <mixer_calcNextSampleBlock+0x1d24>
+b.w <mixer_calcNextSampleBlock+0x610>
+ldr r1, [pc, #140] @ (<mixer_calcNextSampleBlock+0x1e30>)
+add.w ip, sp, #126 @ 0x7e
+movs r3, #0
+ldr r5, [sp, #52] @ 0x34
+add.w r0, r1, #128 @ 0x80
+uxtb r2, r3
+vmov.f32 s12, s14
+vmov.f32 s9, s11
+vmov s10, r2
+ldrsh.w r2, [ip, #2]!
+vcvt.f32.u32 s10, s10
+vfma.f32 s9, s15, s10
+vfma.f32 s12, s10, s13
+vmov s10, r2
+ldr.w r2, [r1, #4]!
+vcvt.f32.s32 s10, s10
+vmul.f32 s10, s10, s8
+vmul.f32 s12, s12, s10
+vmul.f32 s10, s9, s10
+vmul.f32 s9, s12, s20
+vmul.f32 s12, s12, s21
+vcvt.s32.f32 s10, s10
+vcvt.s32.f32 s9, s9
+vcvt.s32.f32 s12, s12
+vmov lr, s9
+qadd r2, r2, lr
+str r2, [r1, #0]
+vmov lr, s12
+ldr.w r2, [r0, #4]!
+qadd r2, r2, lr
+vmov lr, s10
+str r2, [r0, #0]
+ldr.w r2, [r5, r3, lsl #3]
+qadd r2, r2, lr
+str.w r2, [r5, r3, lsl #3]
+adds r3, #1
+cmp r3, #32
+bne.n <mixer_calcNextSampleBlock+0x1dae>
+b.w <mixer_calcNextSampleBlock+0x610>
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+ldr.w ip, [pc, #864] @ <mixer_calcNextSampleBlock+0x21a8>
+add.w r3, sl, #8
+vldr s7, [pc, #832] @ <mixer_calcNextSampleBlock+0x2190>
+add.w r9, sp, #126 @ 0x7e
+add.w lr, ip, #128 @ 0x80
+movs r2, #0
+uxtb r1, r2
+vmov.f32 s10, s14
+vmov.f32 s9, s11
+adds r2, #1
+vmov s15, r1
+ldrsh.w r1, [r9, #2]!
+adds r3, #8
+cmp r2, #32
+vcvt.f32.u32 s15, s15
+vfma.f32 s9, s12, s15
+vfma.f32 s10, s15, s13
+vmov s15, r1
+ldr.w r1, [ip, #4]!
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s7
+vmul.f32 s10, s15, s10
+vmul.f32 s15, s15, s9
+vmul.f32 s8, s10, s20
+vrintz.f32 s15, s15
+vmul.f32 s10, s10, s21
+vmul.f32 s9, s15, s20
+vmul.f32 s15, s15, s21
+vcvt.s32.f32 s8, s8
+vcvt.s32.f32 s10, s10
+vcvt.s32.f32 s9, s9
+vcvt.s32.f32 s15, s15
+vmov r0, s8
+qadd r1, r1, r0
+str.w r1, [ip]
+vmov r5, s10
+ldr.w r0, [lr, #4]!
+vmov r1, s9
+qadd r0, r0, r5
+str.w r0, [lr]
+ldrd r5, r0, [r3, #-16]
+qadd r1, r5, r1
+vmov r5, s15
+qadd r0, r0, r5
+strd r1, r0, [r3, #-16]
+bne.n <mixer_calcNextSampleBlock+0x1e5a>
+b.w <mixer_calcNextSampleBlock+0x610>
+subs r3, #3
+cmp r3, #1
+bls.w <mixer_calcNextSampleBlock+0x1972>
+ldr.w r3, [r8, #4]
+ldrsb.w r2, [r8, #33] @ 0x21
+ldr.w r1, [r8, #56] @ 0x38
+mls r3, r1, r2, r3
+str.w r3, [r8, #4]
+b.n <mixer_calcNextSampleBlock+0x1972>
+movs r1, #1
+mov r0, r8
+bl <osc_typedPositionApply>
+b.n <mixer_calcNextSampleBlock+0x18f6>
+ldrd ip, r0, [r8, #148] @ 0x94
+ldr r2, [pc, #624] @ (<mixer_calcNextSampleBlock+0x2194>)
+add.w r1, r0, ip
+ldr.w r9, [pc, #644] @ <mixer_calcNextSampleBlock+0x21ac>
+add.w lr, r2, #64 @ 0x40
+mov r3, r1
+b.n <mixer_calcNextSampleBlock+0x1f56>
+ldrsh.w r0, [r8, #144] @ 0x90
+vmov s15, r0
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s0
+mov r0, r1
+vcvt.s32.f32 s15, s15
+vmov r5, s15
+strh.w r5, [r2, #2]!
+cmp lr, r2
+beq.n <mixer_calcNextSampleBlock+0x1fea>
+add r1, ip
+cmp r0, r3
+str.w r3, [r8, #152] @ 0x98
+add r3, ip
+bls.n <mixer_calcNextSampleBlock+0x1f32>
+ldr.w r0, [r9, #2056] @ 0x808
+sxth r0, r0
+vmov s15, r0
+strh.w r0, [r8, #144] @ 0x90
+vcvt.f32.s32 s15, s15
+b.n <mixer_calcNextSampleBlock+0x1f3e>
+ldr r3, [pc, #544] @ (<mixer_calcNextSampleBlock+0x2198>)
+ldr.w r0, [r8, #152] @ 0x98
+ldrb.w r2, [r8, #161] @ 0xa1
+ldr r1, [pc, #532] @ (<mixer_calcNextSampleBlock+0x2194>)
+add.w ip, r3, r2, lsl #11
+vldr s12, [pc, #532] @ <mixer_calcNextSampleBlock+0x219c>
+ldr.w lr, [r8, #148] @ 0x94
+mov r3, r0
+add.w r9, r1, #64 @ 0x40
+lsrs r5, r3, #22
+ubfx r2, r3, #0, #22
+add r3, lr
+vmov s13, r2
+adds r2, r5, #1
+ldrsh.w r5, [ip, r5, lsl #1]
+ubfx r2, r2, #0, #10
+vcvt.f32.s32 s13, s13
+vmov s15, r5
+ldrsh.w r2, [ip, r2, lsl #1]
+vmul.f32 s13, s13, s12
+subs r2, r2, r5
+vcvt.f32.s32 s15, s15
+vmov s14, r2
+vcvt.f32.s32 s14, s14
+vfma.f32 s15, s13, s14
+vrintz.f32 s15, s15
+vmul.f32 s15, s0, s15
+vcvt.s32.f32 s15, s15
+vmov r2, s15
+strh.w r2, [r1, #2]!
+cmp r9, r1
+bne.n <mixer_calcNextSampleBlock+0x1f92>
+add.w r0, r0, lr, lsl #5
+str.w r0, [r8, #152] @ 0x98
+ldr r1, [pc, #436] @ (<mixer_calcNextSampleBlock+0x21a0>)
+ldrd r0, r5, [r1, #352] @ 0x160
+ldrd r2, r3, [r1, #288] @ 0x120
+qadd16 r2, r2, r0
+qadd16 r3, r3, r5
+ldr.w r0, [r1, #296] @ 0x128
+strd r2, r3, [r1, #288] @ 0x120
+ldrd r2, r3, [r1, #360] @ 0x168
+qadd16 r2, r0, r2
+ldr.w r0, [r1, #300] @ 0x12c
+qadd16 r3, r0, r3
+ldr.w r0, [r1, #304] @ 0x130
+strd r2, r3, [r1, #296] @ 0x128
+ldrd r2, r3, [r1, #368] @ 0x170
+qadd16 r2, r0, r2
+ldr.w r0, [r1, #308] @ 0x134
+qadd16 r3, r0, r3
+ldr.w r0, [r1, #312] @ 0x138
+strd r2, r3, [r1, #304] @ 0x130
+ldrd r3, r2, [r1, #376] @ 0x178
+qadd16 r3, r0, r3
+ldr.w r0, [r1, #316] @ 0x13c
+qadd16 r2, r0, r2
+ldr.w r0, [r1, #320] @ 0x140
+strd r3, r2, [r1, #312] @ 0x138
+ldrd r2, r3, [r1, #384] @ 0x180
+qadd16 r2, r0, r2
+ldr.w r0, [r1, #324] @ 0x144
+qadd16 r3, r0, r3
+strd r2, r3, [r1, #320] @ 0x140
+ldr.w r2, [r1, #392] @ 0x188
+ldr.w r3, [r1, #328] @ 0x148
+qadd16 r3, r3, r2
+str.w r3, [r1, #328] @ 0x148
+ldrb.w lr, [r8, #34] @ 0x22
+add.w lr, lr, #4294967295 @ ADDR
+cmp.w lr, #3
+ldrd r2, r3, [r1, #332] @ 0x14c
+ldrd r0, r5, [r1, #396] @ 0x18c
+qadd16 r2, r2, r0
+qadd16 r3, r3, r5
+ldr.w r0, [r1, #340] @ 0x154
+strd r2, r3, [r1, #332] @ 0x14c
+ldrd r3, r2, [r1, #404] @ 0x194
+qadd16 r3, r0, r3
+ldr.w r0, [r1, #344] @ 0x158
+qadd16 r2, r0, r2
+strd r3, r2, [r1, #340] @ 0x154
+ldr.w r2, [r1, #348] @ 0x15c
+ldr.w r3, [r1, #412] @ 0x19c
+qadd16 r3, r2, r3
+str.w r3, [r1, #348] @ 0x15c
+bls.w <mixer_calcNextSampleBlock+0x2e1e>
+ldrb.w r3, [r8, #18]
+ldrb.w r2, [r8, #19]
+and.w r3, r3, #127 @ 0x7f
+subs r3, r3, r2
+adds r3, #64 @ 0x40
+and.w r3, r3, #127 @ 0x7f
+subs r3, #64 @ 0x40
+add r2, r3
+and.w r2, r2, #127 @ 0x7f
+strb.w r2, [r8, #19]
+ldrb.w r2, [r8, #16]
+cmp r2, #3
+iteet hi
+movhi r3, #0
+sxtbls r2, r3
+lslls r3, r3, #20
+movhi r2, r3
+strb.w r2, [r8, #33] @ 0x21
+ldr.w r2, [r8, #4]
+add r2, r3
+str.w r2, [r8, #4]
+ldrb.w r3, [r8, #34] @ 0x22
+subs r3, #1
+cmp r3, #3
+bhi.w <mixer_calcNextSampleBlock+0x2a9a>
+ldrb.w r3, [r8, #51] @ 0x33
+subs r3, #1
+cmp r3, #3
+bhi.w <mixer_calcNextSampleBlock+0x2f90>
+tbh [pc, r3, lsl #1]
+.short 0x0322
+.word ADDR
+.short 0x032d
+ldr r3, [pc, #132] @ (<mixer_calcNextSampleBlock+0x21a4>)
+ldr.w r0, [r8, #152] @ 0x98
+ldrb.w r2, [r8, #161] @ 0xa1
+ldr r1, [pc, #104] @ (<mixer_calcNextSampleBlock+0x2194>)
+add.w ip, r3, r2, lsl #11
+vldr s12, [pc, #108] @ <mixer_calcNextSampleBlock+0x219c>
+ldr.w lr, [r8, #148] @ 0x94
+mov r3, r0
+add.w r9, r1, #64 @ 0x40
+lsrs r5, r3, #22
+ubfx r2, r3, #0, #22
+add r3, lr
+vmov s13, r2
+adds r2, r5, #1
+ldrsh.w r5, [ip, r5, lsl #1]
+ubfx r2, r2, #0, #10
+vcvt.f32.s32 s13, s13
+vmov s15, r5
+ldrsh.w r2, [ip, r2, lsl #1]
+vmul.f32 s13, s13, s12
+subs r2, r2, r5
+vcvt.f32.s32 s15, s15
+vmov s14, r2
+vcvt.f32.s32 s14, s14
+vfma.f32 s15, s13, s14
+vrintz.f32 s15, s15
+vmul.f32 s15, s0, s15
+vcvt.s32.f32 s15, s15
+vmov r2, s15
+strh.w r2, [r1, #2]!
+cmp r9, r1
+bne.n <mixer_calcNextSampleBlock+0x213c>
+b.n <mixer_calcNextSampleBlock+0x1fe2>
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+ldr r3, [pc, #848] @ (<mixer_calcNextSampleBlock+0x2504>)
+ldr.w r0, [r8, #152] @ 0x98
+ldrb.w r2, [r8, #161] @ 0xa1
+ldr r1, [pc, #844] @ (<mixer_calcNextSampleBlock+0x2508>)
+add.w ip, r3, r2, lsl #11
+vldr s12, [pc, #840] @ <mixer_calcNextSampleBlock+0x250c>
+ldr.w lr, [r8, #148] @ 0x94
+mov r3, r0
+add.w r9, r1, #64 @ 0x40
+lsrs r5, r3, #22
+ubfx r2, r3, #0, #22
+add r3, lr
+vmov s13, r2
+adds r2, r5, #1
+ldrsh.w r5, [ip, r5, lsl #1]
+ubfx r2, r2, #0, #10
+vcvt.f32.s32 s13, s13
+vmov s15, r5
+ldrsh.w r2, [ip, r2, lsl #1]
+vmul.f32 s13, s13, s12
+subs r2, r2, r5
+vcvt.f32.s32 s15, s15
+vmov s14, r2
+vcvt.f32.s32 s14, s14
+vfma.f32 s15, s13, s14
+vrintz.f32 s15, s15
+vmul.f32 s15, s0, s15
+vcvt.s32.f32 s15, s15
+vmov r2, s15
+strh.w r2, [r1, #2]!
+cmp r9, r1
+bne.n <mixer_calcNextSampleBlock+0x21ce>
+b.n <mixer_calcNextSampleBlock+0x1fe2>
+ldr.w r0, [r8, #152] @ 0x98
+ldr r1, [pc, #736] @ (<mixer_calcNextSampleBlock+0x2508>)
+vldr s12, [pc, #740] @ <mixer_calcNextSampleBlock+0x250c>
+mov r2, r0
+ldr.w lr, [r8, #148] @ 0x94
+add.w r9, r1, #64 @ 0x40
+ldr r3, [pc, #728] @ (<mixer_calcNextSampleBlock+0x2510>)
+mov.w ip, r2, lsr #22
+ubfx r5, r2, #0, #22
+add r2, lr
+vmov s13, r5
+add.w r5, ip, #1
+ldrsh.w ip, [r3, ip, lsl #1]
+ldrsh.w r5, [r3, r5, lsl #1]
+vcvt.f32.s32 s13, s13
+vmov s15, ip
+sub.w r5, r5, ip
+vmul.f32 s13, s13, s12
+vmov s14, r5
+vcvt.f32.s32 s15, s15
+vcvt.f32.s32 s14, s14
+vfma.f32 s15, s13, s14
+vrintz.f32 s15, s15
+vmul.f32 s15, s0, s15
+vcvt.s32.f32 s15, s15
+vmov r5, s15
+strh.w r5, [r1, #2]!
+cmp r9, r1
+bne.n <mixer_calcNextSampleBlock+0x2236>
+add.w r3, r0, lr, lsl #5
+str.w r3, [r8, #152] @ 0x98
+b.n <mixer_calcNextSampleBlock+0x1fea>
+ldrd ip, r0, [r8, #148] @ 0x94
+ldr r2, [pc, #636] @ (<mixer_calcNextSampleBlock+0x2514>)
+add.w r1, ip, r0
+ldr.w r9, [pc, #644] @ <mixer_calcNextSampleBlock+0x2524>
+add.w lr, r2, #64 @ 0x40
+mov r3, r1
+b.n <mixer_calcNextSampleBlock+0x22cc>
+ldrsh.w r0, [r8, #144] @ 0x90
+vmov s15, r0
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s0
+mov r0, r1
+vcvt.s32.f32 s15, s15
+vmov r5, s15
+strh.w r5, [r2, #2]!
+cmp lr, r2
+beq.n <mixer_calcNextSampleBlock+0x2360>
+add r1, ip
+cmp r0, r3
+str.w r3, [r8, #152] @ 0x98
+add r3, ip
+bls.n <mixer_calcNextSampleBlock+0x22a8>
+ldr.w r0, [r9, #2056] @ 0x808
+sxth r0, r0
+vmov s15, r0
+strh.w r0, [r8, #144] @ 0x90
+vcvt.f32.s32 s15, s15
+b.n <mixer_calcNextSampleBlock+0x22b4>
+ldr r3, [pc, #556] @ (<mixer_calcNextSampleBlock+0x2518>)
+ldr.w r0, [r8, #152] @ 0x98
+ldrb.w r2, [r8, #161] @ 0xa1
+ldr r1, [pc, #540] @ (<mixer_calcNextSampleBlock+0x2514>)
+add.w ip, r3, r2, lsl #11
+vldr s12, [pc, #528] @ <mixer_calcNextSampleBlock+0x250c>
+ldr.w lr, [r8, #148] @ 0x94
+mov r3, r0
+add.w r9, r1, #64 @ 0x40
+lsrs r5, r3, #22
+ubfx r2, r3, #0, #22
+add r3, lr
+vmov s13, r2
+adds r2, r5, #1
+ldrsh.w r5, [ip, r5, lsl #1]
+ubfx r2, r2, #0, #10
+vcvt.f32.s32 s13, s13
+vmov s15, r5
+ldrsh.w r2, [ip, r2, lsl #1]
+vmul.f32 s13, s13, s12
+subs r2, r2, r5
+vcvt.f32.s32 s15, s15
+vmov s14, r2
+vcvt.f32.s32 s14, s14
+vfma.f32 s15, s13, s14
+vrintz.f32 s15, s15
+vmul.f32 s15, s0, s15
+vcvt.s32.f32 s15, s15
+vmov r2, s15
+strh.w r2, [r1, #2]!
+cmp r9, r1
+bne.n <mixer_calcNextSampleBlock+0x2308>
+add.w r0, r0, lr, lsl #5
+str.w r0, [r8, #152] @ 0x98
+ldr r1, [pc, #440] @ (<mixer_calcNextSampleBlock+0x251c>)
+ldrd r0, r5, [r1, #224] @ 0xe0
+ldrd r2, r3, [r1, #160] @ 0xa0
+qadd16 r2, r2, r0
+qadd16 r3, r3, r5
+ldr.w r0, [r1, #168] @ 0xa8
+strd r2, r3, [r1, #160] @ 0xa0
+ldrd r2, r3, [r1, #232] @ 0xe8
+qadd16 r2, r0, r2
+ldr.w r0, [r1, #172] @ 0xac
+qadd16 r3, r0, r3
+ldr.w r0, [r1, #176] @ 0xb0
+strd r2, r3, [r1, #168] @ 0xa8
+ldrd r2, r3, [r1, #240] @ 0xf0
+qadd16 r2, r0, r2
+ldr.w r0, [r1, #180] @ 0xb4
+qadd16 r3, r0, r3
+ldr.w r0, [r1, #184] @ 0xb8
+strd r2, r3, [r1, #176] @ 0xb0
+ldrd r3, r2, [r1, #248] @ 0xf8
+qadd16 r3, r0, r3
+ldr.w r0, [r1, #188] @ 0xbc
+qadd16 r2, r0, r2
+ldr.w r0, [r1, #192] @ 0xc0
+strd r3, r2, [r1, #184] @ 0xb8
+ldrd r2, r3, [r1, #256] @ 0x100
+qadd16 r2, r0, r2
+ldr.w r0, [r1, #196] @ 0xc4
+qadd16 r3, r0, r3
+strd r2, r3, [r1, #192] @ 0xc0
+ldr.w r2, [r1, #264] @ 0x108
+ldr.w r3, [r1, #200] @ 0xc8
+qadd16 r3, r3, r2
+str.w r3, [r1, #200] @ 0xc8
+ldrb.w lr, [r8, #34] @ 0x22
+add.w lr, lr, #4294967295 @ ADDR
+cmp.w lr, #3
+ldrd r2, r3, [r1, #204] @ 0xcc
+ldrd r0, r5, [r1, #268] @ 0x10c
+qadd16 r2, r2, r0
+qadd16 r3, r3, r5
+ldr.w r0, [r1, #212] @ 0xd4
+strd r2, r3, [r1, #204] @ 0xcc
+ldrd r3, r2, [r1, #276] @ 0x114
+qadd16 r3, r0, r3
+ldr.w r0, [r1, #216] @ 0xd8
+qadd16 r2, r0, r2
+strd r3, r2, [r1, #212] @ 0xd4
+ldr.w r2, [r1, #220] @ 0xdc
+ldr.w r3, [r1, #284] @ 0x11c
+qadd16 r3, r2, r3
+str.w r3, [r1, #220] @ 0xdc
+bls.w <mixer_calcNextSampleBlock+0x2e9e>
+ldrb.w r3, [r8, #18]
+ldrb.w r2, [r8, #19]
+and.w r3, r3, #127 @ 0x7f
+subs r3, r3, r2
+adds r3, #64 @ 0x40
+and.w r3, r3, #127 @ 0x7f
+subs r3, #64 @ 0x40
+add r2, r3
+and.w r2, r2, #127 @ 0x7f
+strb.w r2, [r8, #19]
+ldrb.w r2, [r8, #16]
+cmp r2, #3
+iteet hi
+movhi r3, #0
+sxtbls r2, r3
+lslls r3, r3, #20
+movhi r2, r3
+strb.w r2, [r8, #33] @ 0x21
+ldr.w r2, [r8, #4]
+add r2, r3
+str.w r2, [r8, #4]
+ldrb.w r3, [r8, #34] @ 0x22
+subs r3, #1
+cmp r3, #3
+bhi.w <mixer_calcNextSampleBlock+0x297a>
+ldrb.w r3, [r8, #51] @ 0x33
+subs r3, #1
+cmp r3, #3
+bhi.w <mixer_calcNextSampleBlock+0x2f56>
+tbh [pc, r3, lsl #1]
+.word ADDR
+.word ADDR
+ldr r3, [pc, #136] @ (<mixer_calcNextSampleBlock+0x2520>)
+ldr.w r0, [r8, #152] @ 0x98
+ldrb.w r2, [r8, #161] @ 0xa1
+ldr r1, [pc, #116] @ (<mixer_calcNextSampleBlock+0x2514>)
+add.w ip, r3, r2, lsl #11
+vldr s12, [pc, #100] @ <mixer_calcNextSampleBlock+0x250c>
+ldr.w lr, [r8, #148] @ 0x94
+mov r3, r0
+add.w r9, r1, #64 @ 0x40
+lsrs r5, r3, #22
+ubfx r2, r3, #0, #22
+add r3, lr
+vmov s13, r2
+adds r2, r5, #1
+ldrsh.w r5, [ip, r5, lsl #1]
+ubfx r2, r2, #0, #10
+vcvt.f32.s32 s13, s13
+vmov s15, r5
+ldrsh.w r2, [ip, r2, lsl #1]
+vmul.f32 s13, s13, s12
+subs r2, r2, r5
+vcvt.f32.s32 s15, s15
+vmov s14, r2
+vcvt.f32.s32 s14, s14
+vfma.f32 s15, s13, s14
+vrintz.f32 s15, s15
+vmul.f32 s15, s0, s15
+vcvt.s32.f32 s15, s15
+vmov r2, s15
+strh.w r2, [r1, #2]!
+cmp r9, r1
+bne.n <mixer_calcNextSampleBlock+0x24b2>
+b.n <mixer_calcNextSampleBlock+0x2358>
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+ldr r3, [pc, #660] @ (<mixer_calcNextSampleBlock+0x27c0>)
+ldr.w r0, [r8, #152] @ 0x98
+ldrb.w r2, [r8, #161] @ 0xa1
+ldr r1, [pc, #656] @ (<mixer_calcNextSampleBlock+0x27c4>)
+add.w ip, r3, r2, lsl #11
+vldr s12, [pc, #652] @ <mixer_calcNextSampleBlock+0x27c8>
+ldr.w lr, [r8, #148] @ 0x94
+mov r3, r0
+add.w r9, r1, #64 @ 0x40
+lsrs r5, r3, #22
+ubfx r2, r3, #0, #22
+add r3, lr
+vmov s13, r2
+adds r2, r5, #1
+ldrsh.w r5, [ip, r5, lsl #1]
+ubfx r2, r2, #0, #10
+vcvt.f32.s32 s13, s13
+vmov s15, r5
+ldrsh.w r2, [ip, r2, lsl #1]
+vmul.f32 s13, s13, s12
+subs r2, r2, r5
+vcvt.f32.s32 s15, s15
+vmov s14, r2
+vcvt.f32.s32 s14, s14
+vfma.f32 s15, s13, s14
+vrintz.f32 s15, s15
+vmul.f32 s15, s0, s15
+vcvt.s32.f32 s15, s15
+vmov r2, s15
+strh.w r2, [r1, #2]!
+cmp r9, r1
+bne.n <mixer_calcNextSampleBlock+0x2546>
+b.n <mixer_calcNextSampleBlock+0x2358>
+ldr.w r0, [r8, #152] @ 0x98
+ldr r1, [pc, #548] @ (<mixer_calcNextSampleBlock+0x27c4>)
+vldr s12, [pc, #552] @ <mixer_calcNextSampleBlock+0x27c8>
+mov r2, r0
+ldr.w lr, [r8, #148] @ 0x94
+add.w r9, r1, #64 @ 0x40
+ldr r3, [pc, #540] @ (<mixer_calcNextSampleBlock+0x27cc>)
+mov.w ip, r2, lsr #22
+ubfx r5, r2, #0, #22
+add r2, lr
+vmov s13, r5
+add.w r5, ip, #1
+ldrsh.w ip, [r3, ip, lsl #1]
+ldrsh.w r5, [r3, r5, lsl #1]
+vcvt.f32.s32 s13, s13
+vmov s15, ip
+sub.w r5, r5, ip
+vmul.f32 s13, s13, s12
+vmov s14, r5
+vcvt.f32.s32 s15, s15
+vcvt.f32.s32 s14, s14
+vfma.f32 s15, s13, s14
+vrintz.f32 s15, s15
+vmul.f32 s15, s0, s15
+vcvt.s32.f32 s15, s15
+vmov r5, s15
+strh.w r5, [r1, #2]!
+cmp r9, r1
+bne.n <mixer_calcNextSampleBlock+0x25ae>
+add.w r3, r0, lr, lsl #5
+str.w r3, [r8, #152] @ 0x98
+b.n <mixer_calcNextSampleBlock+0x2360>
+add.w r9, sp, #126 @ 0x7e
+vmov.f32 s0, #96 @ ADDR 0.5
+movs r3, #32
+add r2, sp, #128 @ 0x80
+ldr r1, [pc, #440] @ (<mixer_calcNextSampleBlock+0x27d0>)
+mov r0, r8
+bl <osc_pwmRenderFm>
+ldrb.w r3, [r8, #34] @ 0x22
+subs r2, r3, #1
+cmp r2, #3
+bls.w <mixer_calcNextSampleBlock+0x2e48>
+ldr.w r3, [r8, #4]
+ldrsb.w r2, [r8, #33] @ 0x21
+sub.w r3, r3, r2, lsl #20
+str.w r3, [r8, #4]
+movs r3, #0
+strb.w r3, [r8, #33] @ 0x21
+ldrb.w r3, [r8, #518] @ 0x206
+cmp r3, #0
+bne.w <mixer_calcNextSampleBlock+0x2c7e>
+ldrb.w r3, [r8, #484] @ 0x1e4
+cmp r3, #1
+beq.w <mixer_calcNextSampleBlock+0x2e82>
+add r2, sp, #128 @ 0x80
+ldrb.w r1, [r8, #276] @ 0x114
+add.w r0, r8, #240 @ 0xf0
+bl <SVF_calcBlockZDF.constprop.0>
+ldrb.w r5, [r8, #484] @ 0x1e4
+cmp r5, #1
+mov r3, r5
+beq.n <mixer_calcNextSampleBlock+0x268c>
+ldrb.w r2, [r8, #292] @ 0x124
+subs r1, r2, #2
+cmp r1, #11
+bls.w <mixer_calcNextSampleBlock+0x2d7a>
+cmp r2, #1
+bls.w <mixer_calcNextSampleBlock+0x2ed6>
+ldr r1, [pc, #336] @ (<mixer_calcNextSampleBlock+0x27d0>)
+add.w r0, r8, #280 @ 0x118
+bl <transient_calcUserBlock.constprop.0>
+ldrb.w r5, [r8, #484] @ 0x1e4
+ldrb.w r3, [r8, #480] @ 0x1e0
+vldr s14, [r8, #348] @ 0x15c
+cbz r3, <mixer_calcNextSampleBlock+0x269e>
+vldr s15, [r8, #232] @ 0xe8
+vmul.f32 s14, s14, s15
+ldrb.w r3, [r8, #483] @ 0x1e3
+cmp r3, #0
+beq.w <mixer_calcNextSampleBlock+0x2c1a>
+vldr s11, [r8, #488] @ 0x1e8
+vldr s15, [pc, #292] @ <mixer_calcNextSampleBlock+0x27d4>
+vsub.f32 s12, s14, s11
+vmul.f32 s12, s12, s15
+cmp r5, #1
+vmov.f32 s6, #112 @ ADDR 1.0
+vldr s10, [r8, #316] @ 0x13c
+vldr s9, [r8, #312] @ 0x138
+beq.w <mixer_calcNextSampleBlock+0x2c24>
+mov r1, r9
+vldr s7, [pc, #264] @ <mixer_calcNextSampleBlock+0x27d8>
+vldr s8, [pc, #264] @ <mixer_calcNextSampleBlock+0x27dc>
+movs r2, #0
+ldr r0, [pc, #264] @ (<mixer_calcNextSampleBlock+0x27e0>)
+ldrsh.w r3, [r1, #2]!
+ldrsh.w r5, [r0, #2]!
+add r3, r5
+ssat r3, #16, r3
+vmov s15, r2
+sxth r3, r3
+vmov.f32 s5, s11
+adds r2, #1
+vcvt.f32.s32 s13, s15
+vmov s15, r3
+cmp r2, #32
+vcvt.f32.s32 s15, s15
+vfma.f32 s5, s13, s12
+vmov.f32 s13, s6
+vmul.f32 s15, s15, s7
+vmul.f32 s15, s15, s5
+vabs.f32 s5, s15
+vmul.f32 s15, s15, s10
+vfma.f32 s13, s5, s9
+vdiv.f32 s5, s15, s13
+vmul.f32 s15, s5, s8
+vcvt.s32.f32 s15, s15
+vmov r3, s15
+strh r3, [r1, #0]
+bne.n <mixer_calcNextSampleBlock+0x26d8>
+movs r3, #0
+ldr r0, [sp, #44] @ 0x2c
+vstr s14, [r8, #488] @ 0x1e8
+strb.w r3, [r8, #483] @ 0x1e3
+bl <mixer_probeAdd.lto_priv.0>
+b.w <mixer_calcNextSampleBlock+0x3dc>
+vmov.f32 s0, #96 @ ADDR 0.5
+movs r3, #32
+add r2, sp, #128 @ 0x80
+ldr r1, [pc, #128] @ (<mixer_calcNextSampleBlock+0x27d0>)
+mov r0, r8
+add.w r9, sp, #126 @ 0x7e
+bl <__osc_slpFmBlock_veneer>
+b.n <mixer_calcNextSampleBlock+0x261e>
+vmov.f32 s0, #96 @ ADDR 0.5
+movs r3, #32
+add r2, sp, #128 @ 0x80
+ldr r1, [pc, #108] @ (<mixer_calcNextSampleBlock+0x27d0>)
+mov r0, r8
+add.w r9, sp, #126 @ 0x7e
+bl <__osc_smpFmBlock_veneer>
+b.n <mixer_calcNextSampleBlock+0x261e>
+vmov.f32 s0, #96 @ ADDR 0.5
+movs r3, #32
+add r2, sp, #128 @ 0x80
+ldr r1, [pc, #84] @ (<mixer_calcNextSampleBlock+0x27d0>)
+mov r0, r8
+add.w r9, sp, #126 @ 0x7e
+bl <__osc_wtbFmBlendBlock_veneer>
+b.n <mixer_calcNextSampleBlock+0x261e>
+movs r2, #32
+ldr r1, [pc, #88] @ (<mixer_calcNextSampleBlock+0x27e4>)
+mov r0, r8
+bl <__osc_wtbBlendBlock.lto_priv.0_veneer>
+b.w <mixer_calcNextSampleBlock+0x1956>
+movs r2, #32
+ldr r1, [pc, #76] @ (<mixer_calcNextSampleBlock+0x27e4>)
+mov r0, r8
+bl <osc_pwmRenderPlain.lto_priv.0>
+b.w <mixer_calcNextSampleBlock+0x1956>
+movs r2, #32
+ldr r1, [pc, #60] @ (<mixer_calcNextSampleBlock+0x27e4>)
+mov r0, r8
+bl <__osc_slpPlainBlock.lto_priv.0_veneer>
+b.w <mixer_calcNextSampleBlock+0x1956>
+movs r2, #32
+ldr r1, [pc, #48] @ (<mixer_calcNextSampleBlock+0x27e4>)
+mov r0, r8
+bl <__osc_smpPlainBlock.lto_priv.0_veneer>
+b.w <mixer_calcNextSampleBlock+0x1956>
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+add.w r9, sp, #126 @ 0x7e
+vmov.f32 s0, #112 @ ADDR 1.0
+movs r3, #32
+add r2, sp, #128 @ 0x80
+ldr r1, [pc, #832] @ (<mixer_calcNextSampleBlock+0x2b38>)
+mov r0, r8
+bl <__osc_wtbFmBlendBlock_veneer>
+ldrb.w r3, [r8, #34] @ 0x22
+subs r2, r3, #1
+cmp r2, #3
+bls.w <mixer_calcNextSampleBlock+0x2e2a>
+ldr.w r3, [r8, #4]
+ldrsb.w r2, [r8, #33] @ 0x21
+sub.w r3, r3, r2, lsl #20
+str.w r3, [r8, #4]
+movs r3, #0
+strb.w r3, [r8, #33] @ 0x21
+ldrb.w r3, [r8, #502] @ 0x1f6
+cmp r3, #0
+bne.w <mixer_calcNextSampleBlock+0x2ce4>
+ldrb.w r3, [r8, #471] @ 0x1d7
+cmp r3, #1
+beq.w <mixer_calcNextSampleBlock+0x2e68>
+add r2, sp, #128 @ 0x80
+ldrb.w r1, [r8, #276] @ 0x114
+add.w r0, r8, #240 @ 0xf0
+bl <SVF_calcBlockZDF.constprop.0>
+ldrb.w r5, [r8, #471] @ 0x1d7
+cmp r5, #1
+mov r3, r5
+beq.n <mixer_calcNextSampleBlock+0x286a>
+ldrb.w r2, [r8, #416] @ 0x1a0
+subs r1, r2, #2
+cmp r1, #11
+bls.w <mixer_calcNextSampleBlock+0x2cf0>
+cmp r2, #1
+bls.w <mixer_calcNextSampleBlock+0x2eca>
+ldr r1, [pc, #728] @ (<mixer_calcNextSampleBlock+0x2b38>)
+add.w r0, r8, #404 @ 0x194
+bl <transient_calcUserBlock.constprop.0>
+ldrb.w r5, [r8, #471] @ 0x1d7
+ldrb.w r3, [r8, #468] @ 0x1d4
+vldr s14, [r8, #464] @ 0x1d0
+cbz r3, <mixer_calcNextSampleBlock+0x287c>
+vldr s15, [r8, #232] @ 0xe8
+vmul.f32 s14, s14, s15
+ldrb.w r3, [r8, #470] @ 0x1d6
+cmp r3, #0
+beq.n <mixer_calcNextSampleBlock+0x2970>
+vldr s11, [r8, #472] @ 0x1d8
+vldr s15, [pc, #688] @ <mixer_calcNextSampleBlock+0x2b3c>
+vsub.f32 s12, s14, s11
+vmul.f32 s12, s12, s15
+cmp r5, #1
+vmov.f32 s6, #112 @ ADDR 1.0
+vldr s10, [r8, #432] @ 0x1b0
+vldr s9, [r8, #428] @ 0x1ac
+beq.w <mixer_calcNextSampleBlock+0x2c8a>
+mov r1, r9
+vldr s7, [pc, #660] @ <mixer_calcNextSampleBlock+0x2b40>
+vldr s8, [pc, #660] @ <mixer_calcNextSampleBlock+0x2b44>
+movs r2, #0
+ldr r0, [pc, #660] @ (<mixer_calcNextSampleBlock+0x2b48>)
+ldrsh.w r3, [r1, #2]!
+ldrsh.w r5, [r0, #2]!
+add r3, r5
+ssat r3, #16, r3
+vmov s15, r2
+sxth r3, r3
+vmov.f32 s5, s11
+adds r2, #1
+vcvt.f32.s32 s13, s15
+vmov s15, r3
+cmp r2, #32
+vcvt.f32.s32 s15, s15
+vfma.f32 s5, s13, s12
+vmov.f32 s13, s6
+vmul.f32 s15, s15, s7
+vmul.f32 s15, s15, s5
+vabs.f32 s5, s15
+vmul.f32 s15, s15, s10
+vfma.f32 s13, s5, s9
+vdiv.f32 s5, s15, s13
+vmul.f32 s15, s5, s8
+vcvt.s32.f32 s15, s15
+vmov r3, s15
+strh r3, [r1, #0]
+bne.n <mixer_calcNextSampleBlock+0x28b4>
+movs r3, #0
+ldr r0, [sp, #44] @ 0x2c
+vstr s14, [r8, #472] @ 0x1d8
+strb.w r3, [r8, #470] @ 0x1d6
+bl <mixer_probeAdd.lto_priv.0>
+b.w <mixer_calcNextSampleBlock+0x3dc>
+vmov.f32 s0, #112 @ ADDR 1.0
+movs r3, #32
+add r2, sp, #128 @ 0x80
+ldr r1, [pc, #524] @ (<mixer_calcNextSampleBlock+0x2b38>)
+mov r0, r8
+add.w r9, sp, #126 @ 0x7e
+bl <__osc_smpFmBlock_veneer>
+b.n <mixer_calcNextSampleBlock+0x27fc>
+vmov.f32 s0, #112 @ ADDR 1.0
+movs r3, #32
+add r2, sp, #128 @ 0x80
+ldr r1, [pc, #504] @ (<mixer_calcNextSampleBlock+0x2b38>)
+mov r0, r8
+add.w r9, sp, #126 @ 0x7e
+bl <osc_pwmRenderFm>
+b.n <mixer_calcNextSampleBlock+0x27fc>
+vmov.f32 s0, #112 @ ADDR 1.0
+movs r3, #32
+add r2, sp, #128 @ 0x80
+ldr r1, [pc, #480] @ (<mixer_calcNextSampleBlock+0x2b38>)
+mov r0, r8
+add.w r9, sp, #126 @ 0x7e
+bl <__osc_slpFmBlock_veneer>
+b.n <mixer_calcNextSampleBlock+0x27fc>
+movs r2, #64 @ 0x40
+movs r1, #0
+ldr r0, [pc, #484] @ (<mixer_calcNextSampleBlock+0x2b4c>)
+bl <memset>
+b.w <mixer_calcNextSampleBlock+0x1802>
+vmov.f32 s11, s14
+vldr s12, [pc, #472] @ <mixer_calcNextSampleBlock+0x2b50>
+b.n <mixer_calcNextSampleBlock+0x2894>
+ldrb.w r3, [r8, #16]
+cmp r3, #4
+bhi.w <mixer_calcNextSampleBlock+0x2f56>
+tbb [pc, r3]
+.word ADDR
+.byte 0x03
+.byte 0x00
+ldrd ip, r0, [r8, #4]
+add.w r9, sp, #126 @ 0x7e
+add.w lr, sp, #190 @ 0xbe
+add.w r1, ip, r0
+ldr r5, [pc, #436] @ (<mixer_calcNextSampleBlock+0x2b54>)
+mov r2, r9
+mov r3, r1
+cmp r3, r0
+str.w r3, [r8, #8]
+add r3, ip
+bcc.w <mixer_calcNextSampleBlock+0x2e04>
+ldrh.w r0, [r8]
+strh.w r0, [r2, #2]!
+cmp r2, lr
+mov r0, r1
+beq.w <mixer_calcNextSampleBlock+0x27fc>
+add r1, ip
+b.n <mixer_calcNextSampleBlock+0x29a4>
+vmov.f32 s0, #112 @ ADDR 1.0
+add r2, sp, #128 @ 0x80
+ldr r1, [pc, #364] @ (<mixer_calcNextSampleBlock+0x2b38>)
+mov r0, r8
+add.w r9, sp, #126 @ 0x7e
+bl <__calcFmBlock.constprop.0_veneer>
+b.n <mixer_calcNextSampleBlock+0x27fc>
+vmov.f32 s0, #112 @ ADDR 1.0
+add r2, sp, #128 @ 0x80
+ldr r1, [pc, #344] @ (<mixer_calcNextSampleBlock+0x2b38>)
+mov r0, r8
+add.w r9, sp, #126 @ 0x7e
+bl <__calcFmBlock.constprop.2_veneer>
+b.n <mixer_calcNextSampleBlock+0x27fc>
+vmov.f32 s0, #112 @ ADDR 1.0
+add r2, sp, #128 @ 0x80
+ldr r1, [pc, #324] @ (<mixer_calcNextSampleBlock+0x2b38>)
+mov r0, r8
+add.w r9, sp, #126 @ 0x7e
+bl <__calcFmBlock.constprop.1_veneer>
+b.n <mixer_calcNextSampleBlock+0x27fc>
+ldr.w ip, [r8, #8]
+add.w r9, sp, #126 @ 0x7e
+vldr s11, [r8, #24]
+vldr s12, [pc, #328] @ <mixer_calcNextSampleBlock+0x2b58>
+mov r0, ip
+ldr r1, [pc, #308] @ (<mixer_calcNextSampleBlock+0x2b48>)
+mov lr, r9
+ldr.w r2, [r8, #4]
+ldr r3, [pc, #320] @ (<mixer_calcNextSampleBlock+0x2b5c>)
+str.w ip, [sp, #80] @ 0x50
+ldrsh.w r5, [r1, #2]!
+vmov s15, r5
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s11
+vcvt.u32.f32 s15, s15
+vmov r5, s15
+add.w r5, r0, r5, lsl #17
+add r0, r2
+mov.w ip, r5, lsr #22
+ubfx r5, r5, #0, #22
+vmov s15, r5
+add.w r5, ip, #1
+ldrsh.w ip, [r3, ip, lsl #1]
+ldrsh.w r5, [r3, r5, lsl #1]
+vcvt.f32.s32 s15, s15
+vmov s14, ip
+sub.w r5, r5, ip
+vmul.f32 s15, s15, s12
+vmov s13, r5
+vcvt.f32.s32 s14, s14
+vcvt.f32.s32 s13, s13
+vfma.f32 s14, s15, s13
+vrintz.f32 s15, s14
+vcvt.s32.f32 s15, s15
+vmov r5, s15
+strh.w r5, [lr, #2]!
+ldr r5, [pc, #216] @ (<mixer_calcNextSampleBlock+0x2b60>)
+cmp r5, r1
+bne.n <mixer_calcNextSampleBlock+0x2a20>
+ldr.w ip, [sp, #80] @ 0x50
+add.w r3, ip, r2, lsl #5
+str.w r3, [r8, #8]
+b.n <mixer_calcNextSampleBlock+0x27fc>
+ldrb.w r3, [r8, #16]
+cmp r3, #4
+bhi.w <mixer_calcNextSampleBlock+0x2f90>
+tbb [pc, r3]
+.word ADDR
+.byte 0x03
+.byte 0x00
+ldr.w r3, [r8, #8]
+add.w r9, sp, #126 @ 0x7e
+vmov.f32 s14, #96 @ ADDR 0.5
+ldr.w r0, [r8, #4]
+add.w lr, sp, #190 @ 0xbe
+mov r1, r3
+mov r2, r9
+ldr r5, [pc, #140] @ (<mixer_calcNextSampleBlock+0x2b54>)
+b.n <mixer_calcNextSampleBlock+0x2aec>
+ldrsh.w ip, [r8]
+vmov s15, ip
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s14
+vcvt.s32.f32 s15, s15
+vmov ip, s15
+strh.w ip, [r2, #2]!
+cmp lr, r2
+beq.w <mixer_calcNextSampleBlock+0x261e>
+add r3, r0
+cmp r3, r1
+str.w r3, [r8, #8]
+add r1, r0
+bcs.n <mixer_calcNextSampleBlock+0x2aca>
+ldr.w ip, [r5, #2056] @ 0x808
+sxth.w ip, ip
+vmov s15, ip
+strh.w ip, [r8]
+vcvt.f32.s32 s15, s15
+b.n <mixer_calcNextSampleBlock+0x2ad6>
+vmov.f32 s0, #96 @ ADDR 0.5
+add r2, sp, #128 @ 0x80
+ldr r1, [pc, #76] @ (<mixer_calcNextSampleBlock+0x2b64>)
+mov r0, r8
+add.w r9, sp, #126 @ 0x7e
+bl <__calcFmBlock.constprop.0_veneer>
+b.n <mixer_calcNextSampleBlock+0x261e>
+vmov.f32 s0, #96 @ ADDR 0.5
+add r2, sp, #128 @ 0x80
+ldr r1, [pc, #56] @ (<mixer_calcNextSampleBlock+0x2b64>)
+mov r0, r8
+add.w r9, sp, #126 @ 0x7e
+bl <__calcFmBlock.constprop.2_veneer>
+b.n <mixer_calcNextSampleBlock+0x261e>
+nop
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+vmov.f32 s0, #96 @ ADDR 0.5
+add r2, sp, #128 @ 0x80
+ldr r1, [pc, #884] @ (<mixer_calcNextSampleBlock+0x2ee4>)
+mov r0, r8
+add.w r9, sp, #126 @ 0x7e
+bl <__calcFmBlock.constprop.1_veneer>
+b.n <mixer_calcNextSampleBlock+0x261e>
+ldr.w r5, [r8, #8]
+add.w r9, sp, #126 @ 0x7e
+vmov.f32 s10, #96 @ ADDR 0.5
+vldr s11, [r8, #24]
+vldr s12, [pc, #856] @ <mixer_calcNextSampleBlock+0x2ee8>
+mov r0, r5
+ldr r1, [pc, #856] @ (<mixer_calcNextSampleBlock+0x2eec>)
+mov lr, r9
+ldr.w r2, [r8, #4]
+ldr r3, [pc, #852] @ (<mixer_calcNextSampleBlock+0x2ef0>)
+str r5, [sp, #80] @ 0x50
+ldrsh.w r5, [r1, #2]!
+vmov s15, r5
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s11
+vcvt.u32.f32 s15, s15
+vmov r5, s15
+add.w r5, r0, r5, lsl #17
+add r0, r2
+mov.w ip, r5, lsr #22
+ubfx r5, r5, #0, #22
+vmov s14, r5
+add.w r5, ip, #1
+ldrsh.w ip, [r3, ip, lsl #1]
+ldrsh.w r5, [r3, r5, lsl #1]
+vcvt.f32.s32 s14, s14
+vmov s15, ip
+sub.w r5, r5, ip
+vmul.f32 s14, s14, s12
+vmov s13, r5
+vcvt.f32.s32 s15, s15
+vcvt.f32.s32 s13, s13
+vfma.f32 s15, s14, s13
+vrintz.f32 s15, s15
+vmul.f32 s15, s15, s10
+vcvt.s32.f32 s15, s15
+vmov r5, s15
+strh.w r5, [lr, #2]!
+ldr r5, [pc, #744] @ (<mixer_calcNextSampleBlock+0x2ef4>)
+cmp r5, r1
+bne.n <mixer_calcNextSampleBlock+0x2b9e>
+ldr r5, [sp, #80] @ 0x50
+add.w r3, r5, r2, lsl #5
+str.w r3, [r8, #8]
+b.n <mixer_calcNextSampleBlock+0x261e>
+vmov.f32 s11, s14
+vldr s12, [pc, #728] @ <mixer_calcNextSampleBlock+0x2ef8>
+b.n <mixer_calcNextSampleBlock+0x26b8>
+mov r2, r9
+vldr s7, [pc, #724] @ <mixer_calcNextSampleBlock+0x2efc>
+vldr s8, [pc, #724] @ <mixer_calcNextSampleBlock+0x2f00>
+movs r3, #0
+vmov s15, r3
+vmov.f32 s13, s11
+ldrsh.w r1, [r2, #2]!
+adds r3, #1
+vcvt.f32.s32 s15, s15
+cmp r3, #32
+vfma.f32 s13, s15, s12
+vmov s15, r1
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s7
+vmul.f32 s15, s15, s13
+vmov.f32 s13, s6
+vabs.f32 s5, s15
+vmul.f32 s15, s15, s10
+vfma.f32 s13, s5, s9
+vdiv.f32 s5, s15, s13
+vmul.f32 s15, s5, s8
+vcvt.s32.f32 s15, s15
+vmov r1, s15
+strh r1, [r2, #0]
+bne.n <mixer_calcNextSampleBlock+0x2c30>
+b.n <mixer_calcNextSampleBlock+0x2730>
+add r1, sp, #128 @ 0x80
+add.w r0, r8, #492 @ 0x1ec
+bl <oscSection_renderOldCarrier.constprop.0>
+b.n <mixer_calcNextSampleBlock+0x264a>
+mov r2, r9
+vldr s7, [pc, #620] @ <mixer_calcNextSampleBlock+0x2efc>
+vldr s8, [pc, #620] @ <mixer_calcNextSampleBlock+0x2f00>
+movs r3, #0
+vmov s15, r3
+vmov.f32 s13, s11
+ldrsh.w r1, [r2, #2]!
+adds r3, #1
+vcvt.f32.s32 s15, s15
+cmp r3, #32
+vfma.f32 s13, s15, s12
+vmov s15, r1
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s7
+vmul.f32 s15, s15, s13
+vmov.f32 s13, s6
+vabs.f32 s5, s15
+vmul.f32 s15, s15, s10
+vfma.f32 s13, s5, s9
+vdiv.f32 s5, s15, s13
+vmul.f32 s15, s5, s8
+vcvt.s32.f32 s15, s15
+vmov r1, s15
+strh r1, [r2, #0]
+bne.n <mixer_calcNextSampleBlock+0x2c96>
+b.n <mixer_calcNextSampleBlock+0x290c>
+add r1, sp, #128 @ 0x80
+add.w r0, r8, #476 @ 0x1dc
+bl <oscSection_renderOldCarrier.constprop.0>
+b.n <mixer_calcNextSampleBlock+0x2828>
+vldr s12, [r8, #412] @ 0x19c
+movw ip, #2205 @ 0x89d
+vldr s15, [pc, #520] @ <mixer_calcNextSampleBlock+0x2f04>
+ldr r0, [pc, #520] @ (<mixer_calcNextSampleBlock+0x2f08>)
+ldr r2, [pc, #524] @ (<mixer_calcNextSampleBlock+0x2f0c>)
+vmul.f32 s12, s12, s15
+mla r1, ip, r1, r0
+vldr s11, [r8, #420] @ 0x1a4
+str.w r9, [sp, #84] @ 0x54
+add.w ip, r2, #64 @ 0x40
+ldr.w lr, [r8, #408] @ 0x198
+movw r0, #2204 @ 0x89c
+ldr r5, [pc, #496] @ (<mixer_calcNextSampleBlock+0x2f10>)
+mov r9, r3
+str r1, [sp, #80] @ 0x50
+vmov s15, lr
+cmp.w r0, lr, lsr #20
+mov.w r3, lr, lsr #20
+mov.w r1, #0
+vcvt.f32.u32 s13, s15
+bcc.n <mixer_calcNextSampleBlock+0x2d5c>
+ldr r1, [sp, #80] @ 0x50
+cmp lr, r5
+ldrsb r3, [r1, r3]
+it ls
+vaddls.f32 s13, s13, s12
+lsls r3, r3, #8
+vmov s14, r3
+vcvt.f32.s32 s14, s14
+vmul.f32 s14, s14, s11
+vcvt.s32.f32 s14, s14
+vmov r3, s14
+sxth r1, r3
+vcvt.u32.f32 s15, s13
+strh.w r1, [r2, #2]!
+cmp ip, r2
+vmov lr, s15
+bne.n <mixer_calcNextSampleBlock+0x2d22>
+mov r3, r9
+vstr s15, [r8, #408] @ 0x198
+ldr.w r9, [sp, #84] @ 0x54
+mov r5, r3
+b.n <mixer_calcNextSampleBlock+0x286a>
+vldr s12, [r8, #288] @ 0x120
+movw ip, #2205 @ 0x89d
+vldr s15, [pc, #384] @ <mixer_calcNextSampleBlock+0x2f04>
+ldr r0, [pc, #384] @ (<mixer_calcNextSampleBlock+0x2f08>)
+ldr r2, [pc, #352] @ (<mixer_calcNextSampleBlock+0x2eec>)
+vmul.f32 s12, s12, s15
+mla r1, ip, r1, r0
+vldr s11, [r8, #296] @ 0x128
+str.w r9, [sp, #84] @ 0x54
+add.w ip, r2, #64 @ 0x40
+ldr.w lr, [r8, #284] @ 0x11c
+movw r0, #2204 @ 0x89c
+ldr r5, [pc, #360] @ (<mixer_calcNextSampleBlock+0x2f10>)
+mov r9, r3
+str r1, [sp, #80] @ 0x50
+vmov s15, lr
+cmp.w r0, lr, lsr #20
+mov.w r3, lr, lsr #20
+mov.w r1, #0
+vcvt.f32.u32 s13, s15
+bcc.n <mixer_calcNextSampleBlock+0x2de6>
+ldr r1, [sp, #80] @ 0x50
+cmp lr, r5
+ldrsb r3, [r1, r3]
+it ls
+vaddls.f32 s13, s13, s12
+lsls r3, r3, #8
+vmov s14, r3
+vcvt.f32.s32 s14, s14
+vmul.f32 s14, s14, s11
+vcvt.s32.f32 s14, s14
+vmov r3, s14
+sxth r1, r3
+vcvt.u32.f32 s15, s13
+strh.w r1, [r2, #2]!
+cmp ip, r2
+vmov lr, s15
+bne.n <mixer_calcNextSampleBlock+0x2dac>
+mov r3, r9
+vstr s15, [r8, #284] @ 0x11c
+ldr.w r9, [sp, #84] @ 0x54
+mov r5, r3
+b.n <mixer_calcNextSampleBlock+0x268c>
+ldr.w r0, [r5, #2056] @ 0x808
+sxth r0, r0
+strh.w r0, [r8]
+strh.w r0, [r2, #2]!
+cmp r2, lr
+mov r0, r1
+beq.w <mixer_calcNextSampleBlock+0x27fc>
+add r1, ip
+b.n <mixer_calcNextSampleBlock+0x29a4>
+movs r1, #1
+mov r0, r8
+bl <osc_typedPositionApply>
+b.w <mixer_calcNextSampleBlock+0x20fa>
+subs r3, #3
+cmp r3, #1
+bls.w <mixer_calcNextSampleBlock+0x2818>
+ldr.w r3, [r8, #4]
+ldrsb.w r2, [r8, #33] @ 0x21
+ldr.w r1, [r8, #56] @ 0x38
+mls r3, r1, r2, r3
+str.w r3, [r8, #4]
+b.n <mixer_calcNextSampleBlock+0x2818>
+subs r3, #3
+cmp r3, #1
+bls.w <mixer_calcNextSampleBlock+0x263a>
+ldr.w r3, [r8, #4]
+ldrsb.w r2, [r8, #33] @ 0x21
+ldr.w r1, [r8, #56] @ 0x38
+mls r3, r1, r2, r3
+str.w r3, [r8, #4]
+b.w <mixer_calcNextSampleBlock+0x263a>
+vmov.f32 s1, #112 @ ADDR 1.0
+movs r3, #32
+add r2, sp, #128 @ 0x80
+add.w r1, r8, #504 @ 0x1f8
+add.w r0, r8, #404 @ 0x194
+vmov.f32 s0, s1
+bl <voiceFold_process>
+b.n <mixer_calcNextSampleBlock+0x2832>
+vmov.f32 s1, #96 @ ADDR 0.5
+movs r3, #32
+vmov.f32 s0, #0 @ ADDR 2.0
+add r2, sp, #128 @ 0x80
+add.w r1, r8, #476 @ 0x1dc
+add.w r0, r8, #280 @ 0x118
+bl <voiceFold_process>
+b.w <mixer_calcNextSampleBlock+0x2654>
+movs r1, #1
+mov r0, r8
+bl <osc_typedPositionApply>
+b.w <mixer_calcNextSampleBlock+0x2470>
+add r1, r7
+ldrsb.w lr, [r1, #6]
+ldrb r2, [r1, #6]
+cmp.w lr, #0
+blt.n <mixer_calcNextSampleBlock+0x2ebe>
+cmp r2, #0
+bne.w <mixer_calcNextSampleBlock+0x171c>
+vldr s19, [pc, #56] @ <mixer_calcNextSampleBlock+0x2ef8>
+vmov.f32 s21, s19
+b.w <mixer_calcNextSampleBlock+0x10b0>
+movs r2, #64 @ 0x40
+movs r1, #0
+ldr r0, [pc, #68] @ (<mixer_calcNextSampleBlock+0x2f14>)
+bl <memset>
+b.n <mixer_calcNextSampleBlock+0x286a>
+movs r2, #64 @ 0x40
+movs r1, #0
+ldr r0, [pc, #8] @ (<mixer_calcNextSampleBlock+0x2ee4>)
+bl <memset>
+b.w <mixer_calcNextSampleBlock+0x268c>
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+movs r1, #9
+mov.w r2, #4416 @ 0x1140
+ldr r3, [r3, #4]
+mla r2, r1, r2, r2
+subs r3, r3, r2
+b.w <mixer_calcNextSampleBlock+0x71c>
+movs r1, #10
+b.n <mixer_calcNextSampleBlock+0x2f1a>
+movs r1, #11
+b.n <mixer_calcNextSampleBlock+0x2f1a>
+movs r1, #8
+b.n <mixer_calcNextSampleBlock+0x2f1a>
+movs r1, #7
+b.n <mixer_calcNextSampleBlock+0x2f1a>
+movs r1, #5
+b.n <mixer_calcNextSampleBlock+0x2f1a>
+movs r1, #6
+b.n <mixer_calcNextSampleBlock+0x2f1a>
+movs r1, #2
+b.n <mixer_calcNextSampleBlock+0x2f1a>
+movs r1, #3
+b.n <mixer_calcNextSampleBlock+0x2f1a>
+movs r1, #4
+b.n <mixer_calcNextSampleBlock+0x2f1a>
+movs r1, #1
+b.n <mixer_calcNextSampleBlock+0x2f1a>
+movs r1, #0
+b.n <mixer_calcNextSampleBlock+0x2f1a>
+movs r2, #64 @ 0x40
+movs r1, #0
+add r0, sp, #128 @ 0x80
+add.w r9, sp, #126 @ 0x7e
+bl <memset>
+b.n <mixer_calcNextSampleBlock+0x27fc>
+ldr r1, [pc, #316] @ (<mixer_calcNextSampleBlock+0x30a4>)
+add.w r0, r8, #144 @ 0x90
+bl <__osc_renderUserList.constprop.0_veneer>
+b.w <mixer_calcNextSampleBlock+0x1fea>
+ldr r1, [pc, #304] @ (<mixer_calcNextSampleBlock+0x30a8>)
+add.w r0, r8, #72 @ 0x48
+bl <__osc_renderUserList.constprop.0_veneer>
+b.w <mixer_calcNextSampleBlock+0xd1c>
+ldr r1, [pc, #296] @ (<mixer_calcNextSampleBlock+0x30ac>)
+add.w r0, r8, #144 @ 0x90
+bl <__osc_renderUserList.constprop.0_veneer>
+b.w <mixer_calcNextSampleBlock+0x2360>
+movs r2, #64 @ 0x40
+movs r1, #0
+add r0, sp, #128 @ 0x80
+add.w r9, sp, #126 @ 0x7e
+bl <memset>
+b.w <mixer_calcNextSampleBlock+0x261e>
+movs r2, #64 @ 0x40
+movs r1, #0
+ldr r0, [pc, #264] @ (<mixer_calcNextSampleBlock+0x30b0>)
+bl <memset>
+b.w <mixer_calcNextSampleBlock+0x1956>
+ldr r3, [sp, #64] @ 0x40
+cmp r3, #0
+bne.n <mixer_calcNextSampleBlock+0x3038>
+vldr s12, [pc, #252] @ <mixer_calcNextSampleBlock+0x30b4>
+add.w r0, sp, #126 @ 0x7e
+ldr r2, [pc, #248] @ (<mixer_calcNextSampleBlock+0x30b8>)
+uxtb r1, r3
+vmov.f32 s11, s14
+adds r3, #1
+vmov s15, r1
+ldrsh.w r1, [r0, #2]!
+cmp r3, #32
+vcvt.f32.u32 s15, s15
+vfma.f32 s11, s15, s13
+vmov s15, r1
+ldr.w r1, [r2, #4]!
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s12
+vmul.f32 s15, s15, s11
+vcvt.s32.f32 s15, s15
+vmov r5, s15
+qadd r1, r1, r5
+str r1, [r2, #0]
+bne.n <mixer_calcNextSampleBlock+0x2fc0>
+b.w <mixer_calcNextSampleBlock+0x610>
+ldr r1, [pc, #184] @ (<mixer_calcNextSampleBlock+0x30bc>)
+add.w r0, r8, #72 @ 0x48
+bl <__osc_renderUserList.constprop.0_veneer>
+b.w <mixer_calcNextSampleBlock+0xa5e>
+vldr s21, [pc, #172] @ <mixer_calcNextSampleBlock+0x30c0>
+vldr s20, [pc, #172] @ <mixer_calcNextSampleBlock+0x30c4>
+b.w <mixer_calcNextSampleBlock+0x5ae>
+movs r2, #64 @ 0x40
+movs r1, #0
+add r0, sp, #128 @ 0x80
+bl <memset>
+ldr r0, [sp, #44] @ 0x2c
+bl <mixer_probeAdd.lto_priv.0>
+b.w <mixer_calcNextSampleBlock+0x3dc>
+movs r3, #0
+ldr r1, [pc, #148] @ (<mixer_calcNextSampleBlock+0x30c8>)
+b.w <mixer_calcNextSampleBlock+0x2e>
+ldr r3, [pc, #124] @ (<mixer_calcNextSampleBlock+0x30b8>)
+add.w ip, sp, #126 @ 0x7e
+vldr s11, [pc, #116] @ <mixer_calcNextSampleBlock+0x30b4>
+movs r2, #0
+add.w r1, r3, #128 @ 0x80
+uxtb r0, r2
+vmov.f32 s12, s14
+adds r2, #1
+vmov s15, r0
+ldrsh.w r0, [ip, #2]!
+cmp r2, #32
+vcvt.f32.u32 s15, s15
+vfma.f32 s12, s15, s13
+vmov s15, r0
+ldr.w r0, [r3, #4]!
+vcvt.f32.s32 s15, s15
+vmul.f32 s15, s15, s11
+vmul.f32 s15, s15, s12
+vmul.f32 s12, s15, s20
+vmul.f32 s15, s15, s21
+vcvt.s32.f32 s12, s12
+vcvt.s32.f32 s15, s15
+vmov r5, s12
+qadd r0, r0, r5
+str r0, [r3, #0]
+vmov r5, s15
+ldr.w r0, [r1, #4]!
+qadd r0, r0, r5
+str r0, [r1, #0]
+bne.n <mixer_calcNextSampleBlock+0x3048>
+b.w <mixer_calcNextSampleBlock+0x610>
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR
+.word ADDR

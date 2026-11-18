@@ -1648,6 +1648,8 @@ static void buttonHandler_perfVoiceHeldSeqPressed(uint8_t seqButtonPressed)
  *       PAR_FOLLOW off, single click: view change only via menu_setShownPattern()
  *         + menu_refreshPerfSceneLeds(); playback and per-track overrides stay.
  *       PAR_FOLLOW off, double click: full Scene change + coalesce + realign.
+ *       (S098 P1: the realign is an explicit call in both branches; a Scene
+ *       change keeps identical tracks in place.)
  * Why: PAR_FOLLOW off lets the user navigate the viewed Scene without changing
  * playback; a deliberate double-click then commits the change. Inputs:
  * seqButtonPressed 0..15, parameter_values[PAR_FOLLOW], and the double-click
@@ -1676,8 +1678,23 @@ static void buttonHandler_perfScenePressed(uint8_t seqButtonPressed)
         /* Single click changes only the viewed Scene, not playback. */
         menu_setShownPattern(seqButtonPressed);
         menu_refreshPerfSceneLeds();
-        if (isDouble)
+        if (isDouble) {
             menu_perfModeSceneButtonPressed(seqButtonPressed);
+            /*
+             * The double-click realign is explicit (S098 P1).
+             *
+             * What: after the full Scene change, every track is put back on
+             * the master clock, as the PAR_FOLLOW-on double click does.
+             * Why: this branch relied on the Scene change realigning every
+             * track. A switch now keeps identical tracks where they are
+             * (target T1), so the documented "+ realign" of this gesture is
+             * made explicit. With a deferred (scd) change the realign runs
+             * at the press, as in the PAR_FOLLOW-on branch; when the change
+             * fires, its changed tracks are realigned again.
+             * Affiliates: seq_realignActivePatternToMasterClock().
+             */
+            seq_realignActivePatternToMasterClock();
+        }
     }
 }
 

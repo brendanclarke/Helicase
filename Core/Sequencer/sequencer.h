@@ -337,17 +337,23 @@ void seq_setExtSyncSource(uint8_t source);
 uint8_t seq_getExtSyncSource(void);
 void seq_noteExtSyncActivity(uint8_t source, uint32_t timestampUs);
 /*
- * Immediately select the active Scene/Pattern for front-panel PERF switching.
+ * Select the active Scene, decided per track (S098 P1; user, Q2).
  *
- * Inputs: pattern is a resident Scene/Pattern index validated against
- * PatternData. Outputs: seq_activePattern and seq_pendingPattern are aligned,
- * deferred pattern-load flags are cleared, track counters are recalculated from
- * the existing master tick/step position, UI follow/chase state is notified, and
- * any sounding notes are released. Clients: menu_perfModeSceneButtonPressed().
- * Pattern-only queued switching is retired; callers that need a musical switch
- * must use this Scene-aligned path or a future Scene-level scheduler.
+ * Inputs: pattern, a resident Scene (or 16) validated against PatternData;
+ * keep_mask, bit t set when track t and its voice slot are identical in the
+ * Scene the track plays and in `pattern` (preset_sceneSwitchKeepMask();
+ * tracks 5 and 6 are forced to agree); effect_same, the Effect record and
+ * Effect Morph amount are identical.
+ * Outputs: every track reads `pattern`. Changed tracks are reset, realigned
+ * to the master clock, have their queued triggers dropped and their MIDI note
+ * ended, and get the Colloid change mark. Kept tracks continue untouched. The
+ * FX sequence is realigned only when the Effect changed. The LEDs and the
+ * program change follow, and Scene 17 is released when left.
+ * Client: menu_perfSceneChangeExecute(). The voice half is
+ * preset_startSceneSwitchApply().
  */
-void seq_selectActivePattern(uint8_t pattern);
+void seq_selectActivePattern(uint8_t pattern, uint8_t keep_mask,
+                             uint8_t effect_same);
 /*
  * Realign playback to a Scene selection that another owner has already made.
  *

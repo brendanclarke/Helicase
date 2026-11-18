@@ -159,7 +159,7 @@ since S075 F1.
 ## 2. P1 — Track Settings Expansion
 
 Source documents: `S078_P1_TRACK_SETTINGS.md` (accepted proposal) and
-`S078_P1_IMPLEMENTATION.md` (schedule, Codex progress log, Step 5 log, code
+`S078_P1_IMPLEMENTATION.md` (schedule, Step 5 log, code
 review). Before S078, only `track_length` affected playback (S068);
 `track_scale`/`track_shuffle` were stored, edited and persisted, but every
 track advanced on one global 24-PPQ-tick divisor

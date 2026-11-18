@@ -357,6 +357,47 @@ void presetMorph_requestVoice(uint8_t scene_index, uint8_t slot)
         presetMorph_beginPass();
 }
 
+/*
+ * Move the Morph worker to the Scene a switch selects (S098 P1).
+ *
+ * What: when the worker is working for `from`, it now works for `to`. The
+ * request and pass bits of the kept slots stay, and the changed slots are
+ * removed from both. If the interrupted priority slot is a changed slot,
+ * the worker resumes the pass where it was interrupted.
+ * Why: presetMorph_writeRuntimeBaseEx() refuses writes for a Scene that is
+ * not active. Without the retarget, a pass running at the switch (the last
+ * pass of a Morph sweep, for example) would never reach the runtime of a kept
+ * voice. `to` holds the same endpoints and amounts for a kept slot, so the
+ * continued pass writes exactly what it would have written. A changed slot
+ * must not be finished with the outgoing pass amount over the new endpoints;
+ * preset_startSceneSwitchApply() requests it afresh for `to`.
+ * Inputs: from (the Scene playing before the switch), to, keep_slots
+ * (bit s = slot s identical).
+ * Outputs: morph_worker.scene_index and masks.
+ * Context: foreground, before the switch; no worker tick runs in between.
+ * Accessors: preset_prepareSceneSwitch().
+ * Affiliates: presetMorph_requestVoice() (which restarts the worker when the
+ * Scene differs), presetMorph_tick().
+ */
+void presetMorph_retargetScene(uint8_t from, uint8_t to, uint8_t keep_slots)
+{
+    uint8_t drop;
+
+    if (morph_worker.scene_index != from || !scene_getConst(to))
+        return;
+    drop = (uint8_t)(~keep_slots & PRESET_MORPH_ALL_SLOTS_MASK);
+    morph_worker.scene_index = to;
+    morph_worker.requested_mask &= (uint8_t)~drop;
+    morph_worker.pass_mask &= (uint8_t)~drop;
+    morph_worker.pass_lfo_resolved_mask &= (uint8_t)~drop;
+    if (morph_worker.priority_resume_valid &&
+        (drop & PRESET_MORPH_SLOT_MASK(morph_worker.priority_slot)) != 0u) {
+        morph_worker.slot = morph_worker.resume_slot;
+        morph_worker.descriptor_index = morph_worker.resume_descriptor_index;
+        morph_worker.priority_resume_valid = 0u;
+    }
+}
+
 void presetMorph_requestAll(uint8_t scene_index)
 {
     if (!scene_getConst(scene_index))

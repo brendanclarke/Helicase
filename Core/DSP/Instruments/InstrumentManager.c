@@ -1983,6 +1983,146 @@ void instrumentManager_clearRuntimeModulationTargetsForSlot(uint8_t slot)
 }
 
 /*
+ * Does one installed supplemental binding touch a changing part? (S098 P1)
+ *
+ * What: 1 when the binding's target lies in a changed slot or, with
+ * effect_changed, is the Effect (a parameter or `fxm`). A Scene target is
+ * resolved through its descriptor's voice_slot; an unresolved one counts as
+ * touching. Slot decimation is a canonical voice parameter id.
+ * Inputs: the installed record, changed slot mask, effect_changed.
+ * Output: 0/1.
+ * Accessors: instrumentManager_prepareModulationForSlotChange().
+ * Affiliates: installed_mod_target_t, sceneModTarget_descriptor(),
+ * instrumentParam_slot().
+ */
+static uint8_t instrumentManager_installedTouches(
+    const installed_mod_target_t *installed, uint8_t changed_slots,
+    uint8_t effect_changed)
+{
+    switch (installed->kind) {
+    case INSTALLED_MOD_TARGET_SLOT_DECIMATION: {
+        uint8_t slot = instrumentParam_slot(installed->target_id);
+
+        return (slot < INSTRUMENT_SLOT_COUNT)
+            ? (uint8_t)((changed_slots >> slot) & 1u) : 1u; }
+    case INSTALLED_MOD_TARGET_SCENE_TARGET: {
+        const scene_mod_target_descriptor_t *descriptor =
+            sceneModTarget_descriptor(installed->target_id);
+
+        if (!descriptor)
+            return 1u;
+        switch (descriptor->kind) {
+        case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
+        case SCENE_MOD_TARGET_KIND_AUDIO_OUT:
+        case SCENE_MOD_TARGET_KIND_FX_SEND:
+            return (descriptor->voice_slot < INSTRUMENT_SLOT_COUNT)
+                ? (uint8_t)((changed_slots >> descriptor->voice_slot) & 1u)
+                : 1u;
+        case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
+            return (uint8_t)((changed_slots >> (INSTRUMENT_SLOT_COUNT - 1u)) &
+                             1u);
+        case SCENE_MOD_TARGET_KIND_EFFECT_MORPH:
+            return (uint8_t)(effect_changed != 0u);
+        default:
+            return 1u;
+        } }
+    case INSTALLED_MOD_TARGET_EFFECT:
+        return (uint8_t)(effect_changed != 0u);
+    default:
+        return 0u;
+    }
+}
+
+/*
+ * Prepare the modulation graph for a Scene switch that changes some slots
+ * (S098 P1).
+ *
+ * What: detaches only what the changing slots and Effect make stale, and
+ * returns the source mask the rebind cursor must revisit once the changed
+ * slots have committed:
+ *  - a changed source slot: both LFO pairs and its velocity binding are
+ *    detached exactly as instrumentManager_clearAllRuntimeModulationTargets()
+ *    detaches every source today (supplemental restore, node clear);
+ *  - a kept source: a pair or velocity binding is detached only when its
+ *    supplemental target (decimation, Scene target, Effect) touches a changed
+ *    slot or the changed Effect, or when its velocity node points directly
+ *    into a changed slot (that raw pointer must not survive the slot's
+ *    memset; the restore would write the old baseline into the new image);
+ *  - a kept source whose descriptor LFO adapter targets a changed slot is not
+ *    detached (adapters are not detached today either; the reinstall replaces
+ *    them), but it joins the rebind mask so the adapter is re-resolved
+ *    against the new image.
+ * Kept sources whose bindings stay inside kept slots are not touched at all:
+ * their LFO keeps modulating without a gap.
+ * Why: user, S098 Q2. A switch must not be heard on the tracks it keeps.
+ * The former all-source teardown detached Morph, Effect, decimation,
+ * Scene-target and velocity modulation of all six voices until every slot
+ * had committed (up to DRUMSET_APPLY_FORCE_TICKS, about 1 s).
+ * Inputs: changed_slots (bit s = slot s changes; 6 bits), effect_changed.
+ * Outputs: detached bindings; returns changed_slots | the kept sources to
+ * rebind.
+ * Context: foreground, before any changed slot is reset.
+ * Accessors: preset_startSceneSwitchApply().
+ * Affiliates: instrumentManager_clearAllRuntimeModulationTargets() (the
+ * all-source form, still used by Load/boot/copy applies),
+ * instrumentManager_installedTouches(), preset_tickInstrumentApply() (the
+ * masked rebind).
+ */
+uint8_t instrumentManager_prepareModulationForSlotChange(uint8_t changed_slots,
+                                                         uint8_t effect_changed)
+{
+    uint8_t source;
+    uint8_t rebind = 0u;
+
+    changed_slots = (uint8_t)(changed_slots &
+                              (uint8_t)((1u << INSTRUMENT_SLOT_COUNT) - 1u));
+    for (source = 0u; source < INSTRUMENT_SLOT_COUNT; source++) {
+        const uint8_t bit = (uint8_t)(1u << source);
+        const uint8_t own = (uint8_t)((changed_slots & bit) != 0u);
+        Lfo *lfo = instrumentManager_runtimeLfo(source);
+        const ModulationNode *velocity = &velocityModulators[source];
+        uint8_t pair;
+        uint8_t clear;
+
+        for (pair = 0u; pair < 2u; pair++) {
+            const instrument_lfo_target_adapter_t *adapter =
+                &lfo_descriptor_targets[source][pair];
+
+            clear = (uint8_t)(own ||
+                instrumentManager_installedTouches(
+                    &lfo_installed_targets[source][pair], changed_slots,
+                    effect_changed));
+            if (clear) {
+                instrumentManager_restoreLfoSupplementalTarget(source, pair);
+                if (lfo)
+                    modNode_clearDestination(pair ? &lfo->modTarget2
+                                                  : &lfo->modTarget);
+                rebind = (uint8_t)(rebind | bit);
+            }
+            if (adapter->active && adapter->slot < INSTRUMENT_SLOT_COUNT &&
+                (changed_slots & (uint8_t)(1u << adapter->slot)) != 0u)
+                rebind = (uint8_t)(rebind | bit);
+        }
+        clear = (uint8_t)(own ||
+            instrumentManager_installedTouches(
+                &velocity_installed_targets[source], changed_slots,
+                effect_changed));
+        if (velocity->destinationMode == MOD_NODE_DEST_DIRECT_PARAMETER &&
+            instrumentParam_isVoiceParameter(velocity->destination) &&
+            instrumentParam_slot(velocity->destination) < INSTRUMENT_SLOT_COUNT &&
+            (changed_slots &
+             (uint8_t)(1u << instrumentParam_slot(velocity->destination))) != 0u)
+            clear = 1u;
+        if (clear) {
+            instrumentManager_restoreVelocitySupplementalTarget(source);
+            modNode_clearDestination(&velocityModulators[source]);
+            rebind = (uint8_t)(rebind | bit);
+        }
+    }
+    return (uint8_t)(rebind | changed_slots);
+}
+
+/*
  * Reset one slot's runtime type from a caller-selected Scene (S077 P2 §2.1).
  *
  * What: identical to instrumentManager_resetRuntimeSlot() but resolves the

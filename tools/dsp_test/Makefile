@@ -61,12 +61,12 @@ OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
         elf_p4_snapshot elf_p4_check seq_steplen lfo lfo_rate_table alk_post_tables \
         space space_cpu_check colloid colloid_tables colloid_cpu_check \
         tetrakt tetrakt_tables tetrakt_cpu_check \
-        distortion dist_makeup_table
+        distortion dist_makeup_table scene_identity
 all: oscillator modulation voice_control sequencer seq_steplen instrument_manager samples \
      sampleoptimize run_modes special_tags stock_tables voicefold fold_tables pwm_tables \
      crumpbit crumpbit_tables alkaline alkaline_tables alk_post_tables lfo lfo_rate_table \
      space colloid colloid_tables distortion dist_makeup_table tetrakt tetrakt_tables \
-     buscomp
+     buscomp scene_identity
 
 $(GEN):
 	mkdir -p $(GEN)
@@ -259,6 +259,25 @@ seq_steplen: | $(GEN)
 	@if ./build/seq_steplen_break >/dev/null 2>&1; then \
 	  echo "seq_steplen_break: FAILED (the 32-bit product was not caught)"; \
 	  exit 1; else echo "seq_steplen_break: caught (AL-T fails as expected)"; fi
+
+# S098 P1: Scene switch identity (laws in modules/scene_identity.c). Break:
+# comparing whole address entries (pool offsets included) must fail law 1.
+scene_identity: | $(GEN)
+	$(EX) --src $(ROOT)/Core/Bank/Scene/Preset/presetManager.c \
+	  --func preset_trackStepsMatch --func preset_instrumentImageMatches \
+	  --out $(GEN)/preset_identity.c
+	$(HOSTCC) $(HOSTFLAGS) modules/scene_identity.c -o build/scene_identity
+	./build/scene_identity
+	mkdir -p build/break_identity
+	sed 's/if ((entry_a & PAT_ADDR_TRIGGER_BIT) != (entry_b & PAT_ADDR_TRIGGER_BIT))/if (entry_a != entry_b)/' \
+	  $(GEN)/preset_identity.c > build/break_identity/preset_identity.c
+	@grep -q 'if (entry_a != entry_b)' build/break_identity/preset_identity.c || \
+	  { echo "scene_identity_break: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_identity $(HOSTFLAGS) modules/scene_identity.c \
+	  -o build/scene_identity_break
+	@if ./build/scene_identity_break >/dev/null 2>&1; then \
+	  echo "scene_identity_break: FAILED (a pool-offset compare was not caught)"; \
+	  exit 1; else echo "scene_identity_break: caught (law 1 fails as expected)"; fi
 
 # Breaks: the gate without its SELECTOR branch (law 3); the row as
 # DTYPE_0B127 (law 4).

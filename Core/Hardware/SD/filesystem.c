@@ -13313,7 +13313,8 @@ static void filesystem_patternServiceFinish(uint16_t scene_mask)
 }
 
 /*
- * Realign the tracks that play a replaced Pattern (S097 P3 §9).
+ * Realign the tracks that play a replaced Pattern (S097 P3 §9; backstop
+ * since S098 P2).
  *
  * What: while the sequencer runs, refreshes the effective track-timing cache
  * from the new regions, then puts every track whose played Scene is in
@@ -13324,6 +13325,12 @@ static void filesystem_patternServiceFinish(uint16_t scene_mask)
  * also carry a different length, scale or play mode. Either way the track's
  * cursor and accumulator keep the old phase and stay off the grid. Tracks
  * playing other Scenes are not touched.
+ * Since S098 P2 a running Menu Scene, Pattern or Bank Load that replaces a
+ * played Scene moves those tracks onto Scene 17 first, so this finds no
+ * track to realign. It stays (decision Q3) for the two cases that still
+ * write a played region in place: a Load posted while stopped and then
+ * started before the Pattern was read, and the copy/clear "reload Scene" job
+ * (ccClear_runReloadScene()).
  * Inputs: the replaced-Scene mask. Outputs: seq_realignTrackToMasterClock()
  * for each matching track. Callers: the explicit Pattern replacement ends
  * (Scene Load phase 52, Pattern Load phase 14, Bank empty Scenes); never

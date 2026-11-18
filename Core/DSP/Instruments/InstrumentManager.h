@@ -753,6 +753,19 @@ void instrumentManager_clearAllRuntimeModulationTargets(void);
  */
 void instrumentManager_clearRuntimeModulationTargetsForSlot(uint8_t slot);
 /*
+ * Prepare the modulation graph for a Scene switch that changes some slots
+ * (S098 P1).
+ *
+ * Inputs: changed_slots (bit s = slot s is replaced), effect_changed.
+ * Output: the bindings the change makes stale are detached; returns the
+ * source mask the Scene worker's rebind must revisit (the changed slots plus
+ * every kept source whose binding points into one of them, or into the
+ * changed Effect). Kept sources with bindings inside kept slots are left
+ * running. Client: preset_startSceneSwitchApply().
+ */
+uint8_t instrumentManager_prepareModulationForSlotChange(uint8_t changed_slots,
+                                                         uint8_t effect_changed);
+/*
  * Quiet test for deferred Scene-slot replacement.
  *
  * Inputs: zero-based instrument slot. Output: nonzero when the slot has no

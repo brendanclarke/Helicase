@@ -1,8 +1,10 @@
 # S098 P0 — Implementation Schedule: Scene Switch Corrections
 
 Date: 2026-11-18. Branch `dev-ph7-alkaline` at `04c5c004`, with the S097 P3
-work uncommitted in the tree (fact only). **Status: schedule, not yet
-implemented.**
+work uncommitted in the tree (fact only). **Status: P1 and P2 applied in the
+tree, assessed, and the assessment fixes F1/F2 applied; builds, host tests
+and the loop gate are green. Device matrices remain (see the assessment and
+§A.6 at the end).**
 
 Plan and decisions: `S098_P0_SCENE_SWITCH_CORRECTIONS.md`. Q1–Q11 were decided
 by the user on 2026-11-18. Q2 was decided against the recommendation: one
@@ -33,7 +35,7 @@ but never schedule entry numbers.
 | 1 | `instrument_apply_rebind_mask` | `presetManager.c` | P1 | lets the shared rebind cursor skip the sources a switch did not touch |
 | 1 | `pm_bg_kind` | `presetManager.c` | P2 | the Load kind of the background machine. `pm_request_type` cannot carry it, because `preset_loadName()` (`presetManager.c:4143`) rewrites it while the user browses |
 
-Approval: ______ (date). Record it here and in the session log.
+Approval: **approved by the user, 2026-11-18**, before implementation.
 
 **No other RAM.** The identity compare uses two `PAT_RAW_BLOCK_MAX` (136 B)
 buffers on the foreground stack. `preset_copyBackgroundTrack()` already uses
@@ -2385,3 +2387,357 @@ See `S098_P0_SCENE_SWITCH_CORRECTIONS.md` §10. In addition:
 - **`STORAGE_SRAM_MANIFEST.md`:** the three bytes of §0.
 - **`MODULE_INTERCHANGE_SPEC.md`** (`seq_clearSceneAutomationDirty()` row,
   l. 1185): Scene changes now use the per-part clear.
+
+---
+
+## Implementation progress log
+
+### P1 — applied 2026-11-18
+
+All P1 entries A1–L2 are in the tree. Notes taken while applying them:
+
+- **A1–A5 (`sequencer.c`)** — done. `seq_clearSceneAutomationDirtyFor()` and
+  `seq_resetTrackForSceneChange()` added; `seq_selectActivePattern()` now takes
+  `keep_mask`/`effect_same` and resets/realigns/marks only changed tracks;
+  `seq_realignTrackPosition()` added and `seq_realignTrackToMasterClock()`
+  delegates to it. The FX realign/overlay reset now follows the Effect and
+  changed tracks. `_Static_assert` values were checked in the tree first.
+- **B1 (`sequencer.h`)** — prototype and contract comment updated.
+- **C1/D1 (`InstrumentManager.c/.h`)** —
+  `instrumentManager_prepareModulationForSlotChange()` and its
+  `instrumentManager_installedTouches()` helper added. Kept sources with
+  bindings wholly inside kept slots are untouched; descriptor-LFO adapters on
+  a changed slot join the rebind mask but are not detached (as specified).
+- **E1/F1 (`presetMorphEngine.c/.h`)** — `presetMorph_retargetScene()` added;
+  the worker keeps only kept slots' request/pass bits and resumes an
+  interrupted priority slot from `resume_slot`/`resume_descriptor_index`.
+- **G1–G8 (`presetManager.c`)** — `PM_ALL_SLOTS`,
+  `drumset_apply_rebind_mask`, `instrument_apply_rebind_mask`,
+  `preset_clearSlotStepOverrides()`, the shared `PRESET_*_FIELDS` lists with
+  their three `_Static_assert`s, the per-content identity tests,
+  `preset_sceneSwitchKeepMask()`, `preset_prepareSceneSwitch()` and
+  `preset_startSceneSwitchApply()` added; the two rebind sites and the masked
+  cursor (`preset_tickInstrumentApply()`) updated; both Scene 17 copy
+  functions now expand the shared lists.
+  - `instrument_apply_rebind_mask` initialises to `PM_ALL_SLOTS` (63), so it
+    is one `.data` byte, not `.bss`; `drumset_apply_rebind_mask` is the other
+    approved byte (`.bss`). Total new RAM is the approved 2 B for P1.
+- **H1 (`presetManager.h`)** — three prototypes and their contract added.
+- **I1 (`menu.c`)** — executor decides, carries, switches, then applies the
+  voice half. The `pcr` comment notes Q1.
+- **J1 (`buttonHandler.c`)** — the `PAR_FOLLOW`-off double click now calls
+  `seq_realignActivePatternToMasterClock()` explicitly; comment updated.
+- **K1/K2** — DEV stage `'x'` added to `AutosaveTrace.h` (lowercase `x` was
+  free) and decoded in `decode_devlogs.py`.
+- **L1/L2** — `tools/dsp_test/modules/scene_identity.c` and the Makefile
+  target added; the tree `all:` and `.PHONY` lists include `scene_identity`.
+
+**P1 build (FS_OS=1, the S097 P3 image configuration).**
+
+| Measure | Start-of-P1 ELF | After P1 | Delta |
+|---------|-----------------|----------|-------|
+| text | 679,952 | 683,160 | +3,208 |
+| data | 432 | 432 | 0 |
+| bss | 422,452 | 422,452 | 0 (section; the two bytes fit existing padding) |
+| flash headroom | 73,280 | 70,072 | −3,208 |
+
+The start-of-P1 ELF was the tree's last build; it is 432 B below the
+`S097_P3` §11 figure of 680,384, so the true P1 growth against the latest
+S097 P3 link is about 2,776 B. `FS_OS=0` builds are ~719.8 KB and are not
+comparable (that flag is off by default until its retest; see Makefile).
+
+**Gate results (baseline in `tools/dsp_test/baselines/S098/`):**
+
+- `elf_loopdump.py --compare`: **86/86** oscillator/fold loops exact, 0
+  renamed, 0 missing.
+- `elf_hotloops.py --compare`: **58** mixer hot loops equal, 0 shrank,
+  0 grew.
+- `elf_symdump.py --compare` on the 12 captured ISR/render bodies:
+  `mixer_calcNextSampleBlock()` and ten IRQ handlers identical;
+  `audio_check_and_render.part.0` **grew 4 B** (`0x102c` → `0x1030`). The
+  only semantic-neutral change is a branch-layout swap in inlined MIDI
+  note-off code (`cbz r3,…; cmp r2,#15; bls.w` became
+  `cmp r2,#15; bhi.n; ldr; cmp; bne.w`, plus one operand order). No
+  per-sample loop, call set or TIM3 body moved; the scheduled “all 21
+  identical” criterion is met for 11 of 12 captured bodies, and the twelfth
+  is an equivalent layout change recorded here.
+  *(Superseded by Assessment A.2: all 18 standalone bodies of the S097
+  list compared, 17 identical.)*
+- Host tests: `make -C tools/dsp_test all` green. `scene_identity` reports 0
+  failures and its break build is caught (pool-offset compare fails law 1).
+
+**P1 device matrix is not run here** (no hardware in this session). It is
+listed in `S098_P0_SCENE_SWITCH_CORRECTIONS.md` §8 and remains for the user.
+
+### P2 — applied 2026-11-18
+
+All P2 entries M–Q are in the tree:
+
+- **M1–M10 (`presetManager.c`)** — `pm_bg_kind` (`+1 B`, approved) with its
+  comment; the Bank request and phase-0 MIDI start state the kind;
+  `preset_backgroundBankLoadRunning()` is Bank-only; the new
+  `preset_requestBackgroundSceneLoad()` validates the slot and destination
+  mask; `preset_bgEnd()` records a MIDI CC0 result only for a Bank load and
+  resets the kind; phase 1 skips the quiesce for a Scene/Pattern Load that
+  does not build Scene 17; phase 2 waits for copy/clear instead of dropping
+  it; phase 4 posts the kind's request and starts the availability session
+  when the transport runs; both completion callbacks end that session.
+- **N1 (`presetManager.h`)** — `PRESET_BG_KIND_BANK/SCENE/PATTERN` and the
+  request prototype added.
+- **O1/O2 (`menu.c`)** — the Scene and Pattern Load OK now call
+  `preset_requestBackgroundSceneLoad()` with their kind; the refused-OK hold
+  path is unchanged.
+- **P1 (`menu.c`)** — `LED_MODE4` on the `LED_FAST_SLOT_BANK_LOAD` slot
+  fast-blinks whenever `scene_backgroundExists()` is true, in every mode; the
+  unlocked Bank load condition is kept. Comment updated.
+- **Q1 (`filesystem.c`)** — the `filesystem_patternRealignPlayingTracks()`
+  comment now names S098 P2 and the two cases it still covers.
+- **K2 decoder** — verified on two synthetic `'x'` records (keep mask all
+  seven with the Effect kept, Scene 17 → 10, 123 µs; and one kept track
+  with a changed Effect, saturated compare time). Output was correct.
+
+**P2 build (FS_OS=1).**
+
+| Measure | After P1 | After P2 | P2 delta |
+|---------|----------|----------|----------|
+| text | 683,160 | 683,704 | +544 |
+| data | 432 | 432 | 0 |
+| bss section | 422,452 | 422,452 | 0 (symbols `pm_bg_kind` +1, padding) |
+| flash used | 683,592 | 684,136 | +544 |
+| flash headroom | 70,072 | 69,528 | −544 |
+
+The three approved bytes are present as symbols
+(`drumset_apply_rebind_mask`, `instrument_apply_rebind_mask`,
+`pm_bg_kind`). The `.bss`/`.data` section totals do not move because the
+linker's section tail padding absorbs them.
+
+**P2 gates:** `elf_loopdump.py` **86/86 exact**; `elf_hotloops.py` **58**
+equal, 0 grew; ISR/render comparison is identical to P1 (the same single
+4-byte equivalent branch-layout change in `audio_check_and_render.part.0`,
+unchanged by P2). `make -C tools/dsp_test all` green (the `scene_identity`
+and its break build included). `make img` produced
+`build/LXRV2_lxr02.img` (684,136 B payload).
+
+**P2 device matrix is not run here.** It remains in
+`S098_P0_SCENE_SWITCH_CORRECTIONS.md` §8 for the user.
+
+### Items left for the user
+
+- The P1 and P2 device matrices (no hardware in this session).
+- The three approved RAM bytes: recorded as approved 2026-11-18 in the code
+  comments at the user's instruction for this session.
+- The out-of-date statements in §10/T above (`MEMORY.md`, specifications,
+  `DRAFT_ONGOING_BUGS.md`) are unchanged by design.
+
+---
+
+## Assessment of the applied code (2026-11-18)
+
+Written for the user, before the device run.
+
+**Method:**
+
+- every S098 site in the tree was read against entries A–Q of this schedule;
+- the tree was rebuilt clean in a scratch copy, with both `FS_OS=0` (the
+  Makefile default) and `FS_OS=1` (the configuration of the handed-over
+  image);
+- the full host suite was run;
+- the loop gate and an ISR/render comparison were run against
+  `tools/dsp_test/baselines/S098/lxr02_baseline.elf`.
+
+The S097 P3 work, also uncommitted, was not re-reviewed.
+
+### A.1 Conformance
+
+| Entries | Result |
+|---------|--------|
+| A1–A5 `sequencer.c` | as scheduled. `seq_realignTrackToMasterClock()` was split in place: its old comment block now sits over `seq_realignTrackPosition()`'s new one, and the old block was re-added above the public function. The code is identical to the schedule |
+| B1 `sequencer.h` | as scheduled |
+| C1/D1 `InstrumentManager.c/.h` | as scheduled |
+| E1/F1 `presetMorphEngine.c/.h` | as scheduled |
+| G1–G8 `presetManager.c` | as scheduled. Line numbers moved by the insertions, as expected |
+| H1, I1, K1, K2, L1, L2 | as scheduled |
+| J1 `buttonHandler.c` | code as scheduled; its comment repeats an error that was in the schedule (F2) |
+| M1–M10, N1, O1, O2, P1, Q1 | as scheduled |
+
+No code deviates from the schedule.
+
+### A.2 Independent build and gates
+
+| Check | Result |
+|-------|--------|
+| Clean build `FS_OS=0` | exit 0. Every warning is older than S098; none is in an S098 file. text 720,320, data 432, bss 422,532; flash 720,752 / 753,664 B, headroom **32,912 B** |
+| Clean build `FS_OS=1` | text **683,704** (+3,752 against the baseline ELF's 679,952), data 432, bss 422,452; flash 684,136 B, headroom 69,528 B. The same numbers as the progress log |
+| Handed-over image | `build/LXRV2_lxr02.img` is **byte-identical** to the scratch `FS_OS=1` image of this tree |
+| RAM | `drumset_apply_rebind_mask` 1 B (`.bss`), `instrument_apply_rebind_mask` 1 B (`.data`, initialised to 63), `pm_bg_kind` 1 B (`.bss`): the approved 3 B |
+| Host suite `make -C tools/dsp_test all` | exit 0. `scene_identity` 0 failures, and its break is caught (law 1). The 14 failures printed under `voice_control` are its intentional break build (`-DBREAK_DRAIN_AFTER_FIRE`); the real test reports 0 |
+| Loop gate (`elf_p4_check`, `P4BASE=baselines/S098`) | **86/86 exact**, 0 missing; **58** mixer hot loops equal, 0 grew. The same result for `FS_OS=0` and `FS_OS=1` |
+| ISR/render bodies | All 18 standalone bodies of the S097 list (every handler, `audio_check_and_render`, the mixer, `din_dout_exchange`, `endlessPots_tick`, `encode_read4`) were compared against the baseline ELF; `voiceControl_processPending()` and `seq_rampService()` are inlined into `audio_check_and_render.part.0`. **17 are identical**; `audio_check_and_render.part.0` changed |
+
+**The change in `audio_check_and_render.part.0`.** After normalising the
+offsets, it consists of:
+
+- two operand swaps (`cmp r0, r3` → `cmp r3, r0`; one `orr.w`);
+- one table-branch offset;
+- one reordered test (`ldr; cbz; …; bls.w` became `bhi.n; ldr; cmp; bne.w`);
+- one alignment `nop`.
+
+It is per-pass control code, not a per-sample loop, and the call set is
+unchanged. Accepted as LTO layout jitter, as in the progress log.
+
+### A.3 Findings
+
+**F1 (defect, low): an Instrument or Kit apply in flight can lose part of its
+rebind** (`presetManager.c`, `preset_startSceneSwitchApply()`).
+
+*Mechanism:*
+
+- The worker carry is read only when `drumset_apply_active`.
+- An Instrument Load or Kit Morph apply runs on `instrument_apply_*` with the
+  drumset worker idle.
+- A Scene change in that window starts this worker's rebind with a partial
+  source mask. It does so either at once (only the Effect changed) or when the
+  changed slots commit.
+- That rebind overwrites the apply's cursor
+  (`preset_startSceneModulationRebind()` sets the phase, the source and the
+  mask).
+- Before S098 the overwrite also happened, but with all six sources, so every
+  binding of the loaded Instrument was reinstalled.
+
+*Reachable:* MIDI PC, queued and chain-fired changes are not gated on the apply
+workers (`MidiProgram.c:38` calls `menu_perfModeSceneChangeFrom()` directly).
+
+*Effect:* LFO and velocity targets of the sources outside the mask stay
+uninstalled until the next apply.
+
+*Fix:* in `preset_startSceneSwitchApply()`, directly after
+`rebind = instrumentManager_prepareModulationForSlotChange(...)`, add:
+
+```c
+    /*
+     * An Instrument or Kit apply in flight (S098 assessment F1).
+     *
+     * What: when this switch will start the shared rebind cursor (a slot
+     * changed, or a binding must be revisited), every source is rebound.
+     * Why: the cursor is shared, so starting it here ends the running
+     * apply's own all-source rebind. Before S098 the Scene worker always
+     * rebound all six and covered it; a partial mask would leave the loaded
+     * Instrument's other bindings uninstalled. A switch that changes nothing
+     * starts no rebind and leaves the apply running.
+     * Affiliates: preset_startSceneModulationRebind(),
+     * preset_tickInstrumentApply().
+     */
+    if (instrument_apply_active && rebind != 0u)
+        carry_rebind = PM_ALL_SLOTS;
+```
+
+`rebind` always contains `changed`, so the one test covers both the pending
+branch and the "only bindings" branch. No RAM, no new state.
+
+**F2 (comment, from the schedule): the J1 comment's last sentence is wrong**
+(`buttonHandler.c` l. 1691–1692, "A deferred (scd) change still realigns when
+it fires, as before").
+
+- With `scd` not instant and the transport running,
+  `menu_perfModeSceneButtonPressed()` only queues the change. The explicit
+  realign then runs at the press, on the outgoing Scene.
+- When the change fires, only its changed tracks are realigned.
+- The tracks end up on the grid either way, as with the `PAR_FOLLOW`-on
+  branch, which has always realigned at the press.
+
+*Replace* the sentence with:
+
+```c
+             * With a deferred (scd) change the realign runs at the
+             * press, as in the PAR_FOLLOW-on branch; when the change
+             * fires, its changed tracks are realigned again.
+```
+
+**F3 (process, binding rule): a document outside this work was edited.**
+`knowledge_files/log_archive/078_SESSION_HANDOFF_LOG.md` lost the words
+"Codex progress log," from l. 162.
+
+- MEMORY.md "Document edits (S093, binding)": a turn that touches code must
+  not touch `knowledge_files/`.
+- The edit is unrelated to S098.
+- Restore it with
+  `git checkout -- knowledge_files/log_archive/078_SESSION_HANDOFF_LOG.md`,
+  unless you made it yourself.
+
+**F4 (record): the progress log's gate statement understates the check.** It
+says "11 of 12 captured bodies" and treats that as the scheduled "21". The S098
+baseline captured only 12 bodies. A.2 above replaces it: all 18 standalone
+bodies of the S097 list, 17 identical, the change explained.
+
+The loop gate also holds for the default `FS_OS=0` build. Its symbol suffixes
+differ from the `FS_OS=1` baseline (`.lto_priv.0`, `.constprop.0`), which the
+gate's base-name matching absorbs.
+
+**F5 (record): §0 still reads "Approval: ______".** The code comments say
+"approved 2026-11-18" for all three bytes, and the progress log says this was
+recorded at your instruction. Fill in §0, or tell me the approval does not
+stand.
+
+### A.4 Design observations (no change proposed)
+
+**D1. A track whose steps changed but whose instrument is identical still gets
+its voice reset.**
+
+- `preset_keptSlotsOfTracks()` marks the slot changed whenever its track
+  changed. That is the decided rule: "a changed track gets today's per-track
+  change".
+- The cost: editing one step in a copied Scene resets that track's voice at
+  its next quiet point or trigger, which cuts a Tetrakt S1 tail and gives a
+  Colloid a fresh glide start.
+- The alternative: decide the slot separately (kept when the slot matches,
+  even if the steps differ). The sequencer's change mark would still release a
+  held Colloid at the first step.
+- Worth deciding after the device run, by ear.
+
+**D2. Already documented (G6).** Step overrides carry no writer identity. A
+kept track's Scene-target automation of a *changed* slot is cleared with that
+slot. A changed track's automation of a *kept* slot stays until the next
+automated step or a transport stop.
+
+### A.5 Before the device run
+
+1. Apply the F1 fix and the F2 comment. Rebuild (`make all FS_OS=1 && make img`
+   for the same configuration as the handed-over image). Re-run
+   `elf_p4_check P4BASE=baselines/S098`; F1 is cold Preset code, so the loops
+   should stay exact.
+2. Resolve F3 and F5.
+3. Run the P1 and P2 device matrices
+   (`S098_P0_SCENE_SWITCH_CORRECTIONS.md` §8), and copy the cards to
+   `SD_CARD_S098_P1` / `SD_CARD_S098_P2`.
+
+### A.6 Assessment fixes applied (2026-11-18)
+
+| Finding | Action |
+|---------|--------|
+| **F1** | **Applied.** In `presetManager.c`, `preset_startSceneSwitchApply()`, directly after the `instrumentManager_prepareModulationForSlotChange()` call, the guard `if (instrument_apply_active && rebind != 0u) carry_rebind = PM_ALL_SLOTS;` was added with the comment block given in A.3. `carry_rebind` is ORed into `drumset_apply_rebind_mask` a few lines below, so a switch that starts the shared rebind cursor while an Instrument or Kit apply runs rebinds all six sources, as before S098. A switch that changes nothing starts no rebind and leaves the apply alone. No RAM |
+| **F2** | **Applied.** `buttonHandler.c`, the J1 comment: the wrong last sentence now reads "With a deferred (scd) change the realign runs at the press, as in the PAR_FOLLOW-on branch; when the change fires, its changed tracks are realigned again." Comment only |
+| **F3** | **Withdrawn: not a finding.** The user made the edit to `knowledge_files/log_archive/078_SESSION_HANDOFF_LOG.md`. Nothing is to be restored |
+| **F4** | **Recorded.** The progress-log ISR bullet is marked as superseded by A.2 |
+| **F5** | **Withdrawn: not a finding.** The user approved the 3 B of RAM on 2026-11-18, before implementation; §0 now records it |
+
+**Build and gates after the fixes** (in the tree, `make all FS_OS=1 && make img FS_OS=1`, the configuration of the device image):
+
+| Check | Result |
+|-------|--------|
+| Build | exit 0, no warning in the two edited files. text **683,728** (+24 B against the assessed build), data 432, bss 422,452; flash 684,160 / 753,664 B, headroom 69,504 B |
+| Image | `build/LXRV2_lxr02.img` rewritten (684,176 B file, 684,160 B payload). This is the image for the device run |
+| Loop gate (`elf_p4_check P4BASE=baselines/S098`) | **86/86 exact**; **58** mixer hot loops equal, 0 grew |
+| ISR/render, 18 standalone bodies | against the S098 baseline: 17 identical, `audio_check_and_render.part.0` with the layout change explained in A.2. Against the assessed build before the fixes: **all 18 identical**, so the fixes moved nothing in the render path |
+| Host suite (scratch copy with the fixed sources) | exit 0. `scene_identity` 0 failures, its break caught; `instrument_manager` 0; special tags OK. The `voice_control` 14 failures are its intentional break build |
+
+**Next:** the P1 and P2 device matrices
+(`S098_P0_SCENE_SWITCH_CORRECTIONS.md` §8) with this image. Copy the cards to
+`SD_CARD_S098_P1` / `SD_CARD_S098_P2`.
+
+### A.7 Correction to this assessment (2026-11-18)
+
+F3 and F5 were raised wrongly, by the assessor (Claude), and are withdrawn.
+The repository belongs to the user. The user made the edit to
+`078_SESSION_HANDOFF_LOG.md` and approved the RAM, and neither needed the
+assessor's confirmation. Raising them as items for the user was the
+assessor's error.

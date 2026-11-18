@@ -138,6 +138,8 @@ STAGE_ENUM = {
     "w": "AUTOSAVE_TRACE_STAGE_FS_OWNER",
     "f": "AUTOSAVE_TRACE_STAGE_FS_PASS",
     "k": "AUTOSAVE_TRACE_STAGE_LOADSAVE_CLICK",
+    # x: S098 P1 Scene switch decision (keep mask, Effect, compare time).
+    "x": "AUTOSAVE_TRACE_STAGE_SCENE_SWITCH",
     # p: S094 P2 per-slot render cycle probe (DWT, DEV only).
     "p": "AUTOSAVE_TRACE_STAGE_CPU_PROBE",
 }
@@ -186,6 +188,7 @@ STAGE_PRODUCER = {
     "w": "filesystem_traceOwnerTransition() (S090 P5)",
     "f": "filesystem_passProbe() (S097 P3)",
     "k": "menu_loadSaveTraceClick() (S097 P3)",
+    "x": "preset_sceneSwitchKeepMask() (S098 P1)",
     "p": "mixer_probeEnd() (S094 P2)",
 }
 
@@ -1205,6 +1208,18 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
                   f"{outcomes.get(flags, f'outcome {flags}')}; page={page} "
                   f"what={what} state={state} filesystem="
                   f"{statuses.get(fs, fs)}")
+    elif ch == "x":
+        # S098 P1 Scene switch decision; layout in AutosaveTrace.h ('x').
+        keep = flags & 0x7F
+        target = value & 0xFF
+        prev = (value >> 8) & 0xFF
+        us = (value >> 16) & 0xFFFF
+        kept = ",".join(str(t + 1) for t in range(7) if keep & (1 << t))
+        prev_name = "17" if prev == 16 else str(prev + 1)
+        detail = (f"{enum_name} via {producer}: Scene {prev_name} -> "
+                  f"{target + 1}; tracks kept: {kept or 'none'}; Effect "
+                  f"{'kept' if flags & 0x80 else 'changed'}; compare "
+                  f"{us}{'+' if us == 0xFFFF else ''} us")
     elif ch == "d":
         # S090 P3 boot directory tail trim; layout in AutosaveTrace.h ('d').
         dirs = {0: "SD root", 1: "/Scene", 2: "/Kit", 3: "/Bank",

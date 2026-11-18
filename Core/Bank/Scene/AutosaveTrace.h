@@ -384,6 +384,17 @@ typedef enum {
      * tools/diagnostic_tools/decode_devlogs.py ('k' branch).
      */
     AUTOSAVE_TRACE_STAGE_LOADSAVE_CLICK = 'k',
+    /*
+     * x: one executed whole-Scene change and what it kept (S098 P1, DEV
+     * only). flags bits 0..6 = the keep mask (bit t = track t continued
+     * untouched), bit 7 = the Effect was identical (rebound, not reset).
+     * value32 = target Scene bits 0..7 | outgoing active Scene bits 8..15
+     * (16 = Scene 17) | the identity compare time in microseconds bits
+     * 16..31 (saturated at 0xFFFF). Producer: preset_sceneSwitchKeepMask()
+     * (presetManager.c). Consumer: tools/diagnostic_tools/decode_devlogs.py
+     * ('x' branch).
+     */
+    AUTOSAVE_TRACE_STAGE_SCENE_SWITCH = 'x',
 } autosave_trace_stage_t;
 
 #define AUTOSAVE_TRACE_MLRN_WRITE    0x01u
