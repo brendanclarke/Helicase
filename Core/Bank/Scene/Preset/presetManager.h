@@ -581,6 +581,11 @@ uint8_t preset_tickDrumsetApply(void);
  */
 void    preset_startSingleVoiceApply(uint8_t slot, uint8_t source_scene);
 /*
+ * Apply a finished Scene/Kit Load: the whole active Scene only when the Load
+ * replaced it, otherwise only per-track slots playing a loaded Scene (S097 P3).
+ */
+void    preset_startLoadApply(uint16_t scene_mask);
+/*
  * Resolve one slot's played Scene for per-track playback (S077 P2 §3.5).
  *
  * Inputs: slot 0..5. Output: the resident Scene playback reads for that slot's

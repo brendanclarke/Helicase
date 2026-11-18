@@ -215,11 +215,9 @@ OS_SRCS = \
   Core/Menu/SplashAnimation.c
 
 # S097 P2 step 3: filesystem.c with -Os as well (-36 KB, every per-sample loop
-# exact with COLD_LAST below). Off by default again: on the device the FS_OS=1
-# image showed a sequencer stumble during a Scene Load into non-playing slots
-# (user, 2026-11-17). The logs neither confirm nor exclude -Os as the cause, so
-# it waits for an A/B test of the same action on this FS_OS=0 image
-# (S097_P2_UI_STORAGE_IMPLEMENTATION.md §10). Build it with
+# exact with COLD_LAST below). Off by default while it is retested: the Scene
+# Load stumble first seen on the FS_OS=1 image was a baseline defect, fixed in
+# S097 P3 §8-§9 (S097_P3_FS_OPTIMIZE_INVESTIGATION.md §10). Build it with
 # `make clean && make all FS_OS=1`. FS_OS_BUILD keeps the helpers reachable
 # from TIM3/MIDI at -O2 (FS_HOT_O2 in filesystem.c). Changing FS_OS needs
 # `make clean` (compiler flags are not object prerequisites).

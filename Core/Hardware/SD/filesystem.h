@@ -605,7 +605,7 @@ uint8_t     filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind);
  * coalesced by the implementation's 250 ms quiet window and 5 s maximum
  * latency; non-semantic Pattern maintenance remains independently scheduled.
  * The elapsed-time background CPU budget is refilled in this scheduler and is
- * shared by scalar drain, Pattern drain, and Pattern repair: 2.5% while the
+ * shared by scalar drain, Pattern drain, and Pattern repair: 3% while the
  * sequencer runs and 5% while stopped.
  * Input: current filesystem/runtime state and owner dirty registers. Output:
  * bounded progress with no blocking wait or filesystem ownership transfer to
@@ -656,7 +656,7 @@ uint8_t     filesystem_fastDrainActive(void);
  * Why: scalar AutoSave drain, Pattern AutoSave staging, and Pattern repair
  * share one budget so their aggregate foreground CPU is bounded rather than
  * each subsystem independently spending the full allowance. The budget is
- * 2.5% during playback and 5% while stopped, as configured in config.h.
+ * 3% during playback and 5% while stopped, as configured in config.h.
  *
  * Inputs: refill reads TIM2 and seq_isRunning(); charge reads TIM2 and takes
  * a work-class identifier. Outputs: an admission predicate and diagnostic

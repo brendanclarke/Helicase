@@ -1,0 +1,162 @@
+#types	drm	snr	cym	hat	alk	col	tkt
+CollidSt	024
+ColxTime	067	R
+Barf	-
+Barf	-
+Barf	-
+Barf	-
+ColxTime	067	R
+ColxTime	067	R
+ColxTime	067	R
+ColxTime	067	R
+ColxTime	067	R
+ColxTime	067	R
+ColxTime	067	R
+ColxTime	067	R
+ColxTime	067	R
+ColxTime	059
+ColxTime	059
+Hard	-	R
+SeaWaked	-
+Eris	-
+Flux	-
+Beatmstr	-
+Hard	-	R
+Hard	-	R
+Hard	-	R
+Hard	-	R
+Hard	-	R
+Hard	-	R
+Hard	-	R
+Hard	-	R
+Hard	-	R
+Hard	-
+Hard	-
+init   1	-	tkt	R
+beatmsd2	-	drm	R
+init   3	-	alk	R
+init   4	-	alk	R
+init   5	-	col	R
+foresth6	-	hat	R
+seawakd1	-	drm
+seawakd2	-	drm
+seawakd3	-	drm
+seawaks4	-	snr
+seawakc5	-	cym
+seawakh6	-	hat
+erisd1 1	-	drm
+erisd2 2	-	drm
+erisd3 3	-	drm
+eriss1 4	-	snr
+erisc1 5	-	cym
+erish1 6	-	hat
+fluxd1 1	-	drm
+fluxd2 2	-	drm
+fluxd3 3	-	drm
+fluxs1 4	-	snr
+fluxc1 5	-	cym
+fluxh1 6	-	hat
+beatmsd1	-	drm
+beatmsd2	-	drm
+beatmsd3	-	drm
+beatmss4	-	snr
+beatmsc5	-	cym
+beatmsh6	-	hat
+init   1	-	tkt	R
+beatmsd2	-	drm	R
+init   3	-	alk	R
+init   4	-	alk	R
+init   5	-	col	R
+foresth6	-	hat	R
+init   1	-	tkt	R
+beatmsd2	-	drm	R
+init   3	-	alk	R
+init   4	-	alk	R
+init   5	-	col	R
+foresth6	-	hat	R
+init   1	-	tkt	R
+beatmsd2	-	drm	R
+init   3	-	alk	R
+init   4	-	alk	R
+init   5	-	col	R
+foresth6	-	hat	R
+init   1	-	tkt	R
+beatmsd2	-	drm	R
+init   3	-	alk	R
+init   4	-	alk	R
+init   5	-	col	R
+foresth6	-	hat	R
+init   1	-	tkt	R
+beatmsd2	-	drm	R
+init   3	-	alk	R
+init   4	-	alk	R
+init   5	-	col	R
+foresth6	-	hat	R
+init   1	-	tkt	R
+beatmsd2	-	drm	R
+init   3	-	alk	R
+init   4	-	alk	R
+init   5	-	col	R
+foresth6	-	hat	R
+init   1	-	tkt	R
+beatmsd2	-	drm	R
+init   3	-	alk	R
+init   4	-	alk	R
+init   5	-	col	R
+foresth6	-	hat	R
+init   1	-	tkt	R
+beatmsd2	-	drm	R
+init   3	-	alk	R
+init   4	-	alk	R
+init   5	-	col	R
+foresth6	-	hat	R
+init   1	-	tkt	R
+beatmsd2	-	drm	R
+init   3	-	alk	R
+init   4	-	alk	R
+init   5	-	col	R
+foresth6	-	hat	R
+init   1	-	tkt
+beatmsd2	-	drm
+init   3	-	alk
+init   4	-	alk
+init   5	-	col
+foresth6	-	hat
+init   1	-	tkt
+beatmsd2	-	drm
+init   3	-	alk
+init   4	-	alk
+init   5	-	col
+foresth6	-	hat
+Empty	-	R
+Empty	@
+Empty	@
+Empty	@
+Empty	@
+Empty	-
+Empty	-
+Empty	-
+Empty	-
+Empty	-
+Empty	-
+Empty	-
+Empty	-
+Empty	-
+Empty	-
+Empty	-
+effects	-	R
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-	R
+effects	-	R
+effects	-	R
+effects	-	R
+effects	-	R
+effects	-	R
+effects	-	R
+effects	-	R
+effects	-	R
+effects	-
+effects	-

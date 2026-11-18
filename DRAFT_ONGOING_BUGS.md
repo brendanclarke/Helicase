@@ -93,6 +93,12 @@ parameters may not register as dirty after an edit.
 3. **Debounce restart.** Check whether continuous editing keeps pushing the
    5 s deadline out ("writer armed once": it may be armed only once).
 
+**Update (S097 P3 §14, 2026-11-18):** the playing budget is now 30 µs/ms
+(3 %). `SD_CARD_ATS_TEST` shows the Load/Save page guard (S090 P2) holding the
+writer for the whole ~35 s spent on those pages. Edits made there (Loads) are
+not in the AutoSave until the page is left. Relaxing the guard is an open
+decision.
+
 **Relevant rules:** `AUTOSAVE.md` (format, dirty ownership, writer
 lifecycle); MEMORY.md "Load/Save drops AutoSave (S090 P2)" and "Start-up
 AutoSave settle"; the background budget in `filesystem.h`
@@ -100,7 +106,7 @@ AutoSave settle"; the background budget in `filesystem.h`
 
 ---
 
-## B3. Bank Save over an occupied slot keeps the old Bank's other Scenes
+## B3. Bank Save over an occupied slot keeps the old Bank's other Scenes: **fixed, waiting for the device** (S097 P3 §13)
 
 **Report (user, 2026-11-17, S097 P2 test).** After a Bank Save and a Bank
 Load, Scene slots 2–6 were populated, though no merge option was used.
@@ -130,9 +136,16 @@ not fail the whole save (the ErrS05 reason the tree delete was dropped).
 Check that the Bank preview and Bank Load use the same present rule.
 Pre-existing: unrelated to the S097 `-Os` work.
 
+**Correction and fix (S097 P3 §13, 2026-11-18):** the design already removes
+non-masked children in a replace Save (empty mask, phases 20–21). The real
+cause is that `filesystem_requestSaveBank()` set the written and empty masks
+before `filesystem_start()`, which clears them, so every Bank Save ran with
+both at 0. Fixed by setting them after the start, plus a CWD fix for a removed
+child visited before any written one.
+
 ---
 
-## B4. Sequencer stumbles during a Scene Load into non-playing slots (`FS_OS=1` only)
+## B4. Sequencer timing off after a Scene Load: **fixed (stopgap), confirmed on the device** (S097 P3 §9–§10)
 
 **Report (user, 2026-11-17, `FS_OS=1` image).** The sequencer "stumbled" or
 dropped a step while Scenes were loading, though the load did not target the
@@ -164,7 +177,7 @@ adds DEV RAM and touches `main.c`, which is in the LTO unit.
 
 ---
 
-## B5. Scene Save needs several presses of OK
+## B5. Scene Save needs several presses of OK: **fixed, confirmed on the device** (S097 P3 §8.2, §9.1)
 
 **Report (user, 2026-11-17).** It took a few encoder presses on OK before a
 Scene saved.
@@ -176,6 +189,26 @@ menu (`menu_handleLoadSaveMenu()` and the Save confirm and overwrite flow), or
 the encoder press was missed. **Next:** find out what the LCD showed between
 presses (a confirm step, an overwrite question, nothing). Then trace the press
 handling on the Save page. Unrelated to `-Os` (`menu.c` is `-O2`).
+
+**Update (S097 P3, 2026-11-17):**
+
+- **B4:** the stumble also happened on the baseline (two of five Loads, card
+  `SD_CARD_BASE`), with no underrun and no slow filesystem pass. Cause: every
+  runtime Scene/Kit Load re-applied the active Scene (voice resets, step
+  overrides cleared, Effect re-activated, modulation cleared) even when the
+  Load did not touch it. Fixed by `preset_startLoadApply()`.
+  **Correction (second run, `SD_CARD_BASE_2`):** the audible problem was
+  *timing*: after a Load into the playing Scene, track 5 stayed off the beat
+  until a PERF realign. The Load rewrites the playing Pattern in place (defaults
+  first, then the new length and scale), and the track's phase was never put
+  back on the master clock. Fixed by realigning the tracks that play a replaced
+  Pattern (S097 P3 §9). **Confirmed fixed on the device.** The user calls the
+  realign a stopgap: the intended design moves playback onto the background
+  Scene 17 during a Load into the playing Scene (future work, S097 P3 §10).
+- **B5:** a dropped or refused OK left `editModeActive` flipped. Fixed by
+  `menu_loadSaveDropClick()`. A refused OK still needs one more press;
+  automatic retry is a possible follow-up. **Confirmed on the device**
+  (`SD_CARD_BASE_2`: 6 accepted, 1 refused then accepted, none stuck).
 
 ---
 

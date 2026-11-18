@@ -349,6 +349,41 @@ typedef enum {
      * Consumer: tools/diagnostic_tools/decode_devlogs.py ('p' branch).
      */
     AUTOSAVE_TRACE_STAGE_CPU_PROBE = 'p',
+    /*
+     * f: filesystem pass probe (S097 P3, DEV only).
+     * Times every filesystem_tick() call (TIM2 microseconds) while audio
+     * runs, tagged with the operation and phase it entered with.
+     * flags 0 (slow pass): one call took >= FS_PASS_PROBE_SLOW_US.
+     * flags 1 (operation maximum): the operation in bits 16..23 has ended (the
+     * next call entered with another operation); its longest call.
+     * flags 2 (underrun): audioCodec_underrunCount rose during or before this
+     * call; bits 0..15 = the increase.
+     * flags 3 (main-loop gap): once per second, the longest time between two
+     * filesystem_tick() starts in that second (one main-loop pass, render
+     * included), with the operation and phase at the call that ended it.
+     * value32 = microseconds (flags 0/1/3) or underruns (flags 2), saturated at
+     * 0xFFFF, in bits 0..15 | fs_internal_op_t bits 16..23 | op_phase bits
+     * 24..31.
+     * Never written for the trace-flush or boot-log operations, so a record
+     * can never start the next trace flush (SD_CARD_TEST_6 boot freeze).
+     * Producer: filesystem_passProbe(). Consumer:
+     * tools/diagnostic_tools/decode_devlogs.py ('f' branch).
+     */
+    AUTOSAVE_TRACE_STAGE_FS_PASS = 'f',
+    /*
+     * k: one Load/Save page OK click and what happened to it (S097 P3, DEV
+     * only). flags = outcome: 0 accepted (the Load/Save command started),
+     * 1 dropped (a command was still running), 2 dropped (Load name still
+     * blank), 3 dropped (Bank copy held), 4 refused (the Preset/filesystem
+     * request returned 0), 5 an ordinary edit-mode toggle on a type/number
+     * row, 6 held (storage busy; the OK is replayed when idle), 7 a held OK
+     * replayed (its own outcome record follows). Outcomes 2 and 4 on the OK
+     * row also hold the press. value32 = menu_activePage bits 0..7 | menu_saveOptions.what bits
+     * 8..15 | menu_saveOptions.state bits 16..23 | filesystem_status() bits
+     * 24..31. Producer: menu_loadSaveTraceClick() (menu.c). Consumer:
+     * tools/diagnostic_tools/decode_devlogs.py ('k' branch).
+     */
+    AUTOSAVE_TRACE_STAGE_LOADSAVE_CLICK = 'k',
 } autosave_trace_stage_t;
 
 #define AUTOSAVE_TRACE_MLRN_WRITE    0x01u

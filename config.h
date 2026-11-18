@@ -696,7 +696,7 @@
  *
  * What: BACKGROUND_CPU_BUDGET_US_PER_MS_PLAYING is the microseconds of
  * background work allowed per millisecond of wall time while the sequencer
- * transport is running (2.5% CPU). BACKGROUND_CPU_BUDGET_US_PER_MS_STOPPED
+ * transport is running (3% CPU; 2.5% until S097 P3 §14). BACKGROUND_CPU_BUDGET_US_PER_MS_STOPPED
  * is the allowance while stopped (5% CPU). Zero disables the budget
  * (unlimited -- debugging only).
  *
@@ -708,7 +708,7 @@
  * budget state/refill/drain gates, PatternStackService.c repair gating, and
  * seq_isRunning(). These constants consume no RAM.
  */
-#define BACKGROUND_CPU_BUDGET_US_PER_MS_PLAYING  25u
+#define BACKGROUND_CPU_BUDGET_US_PER_MS_PLAYING  30u
 #define BACKGROUND_CPU_BUDGET_US_PER_MS_STOPPED  50u
 
 /*

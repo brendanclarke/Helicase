@@ -1,0 +1,162 @@
+#types	drm	snr	cym	hat	alk	col	tkt
+CollidSt	024
+ColxTime	114
+Barf	-
+Barf	-
+Barf	-
+ColxTime	059
+ColxTime	059
+ColxTime	114
+ColxTime	114
+ColxTime	114	R
+ColxTime	067
+ColxTime	067
+ColxTime	067
+ColxTime	059	R
+ColxTime	059	R
+ColxTime	059	R
+ColxTime	059	R
+Hard	-
+SeaWaked	-
+Eris	-
+Flux	-
+Hard	-
+Hard	-
+Hard	-
+Hard	-
+Hard	-	R
+Hard	-
+Hard	-
+Hard	-
+Hard	-	R
+Hard	-	R
+Hard	-	R
+Hard	-	R
+init   1	-	tkt
+beatmsd2	-	drm
+init   3	-	alk
+init   4	-	alk
+init   5	-	col
+foresth6	-	hat
+seawakd1	-	drm
+seawakd2	-	drm
+seawakd3	-	drm
+seawaks4	-	snr
+seawakc5	-	cym
+seawakh6	-	hat
+erisd1 1	-	drm
+erisd2 2	-	drm
+erisd3 3	-	drm
+eriss1 4	-	snr
+erisc1 5	-	cym
+erish1 6	-	hat
+fluxd1 1	-	drm
+fluxd2 2	-	drm
+fluxd3 3	-	drm
+fluxs1 4	-	snr
+fluxc1 5	-	cym
+fluxh1 6	-	hat
+init   1	-	tkt
+beatmsd2	-	drm
+init   3	-	alk
+init   4	-	alk
+init   5	-	col
+foresth6	-	hat
+init   1	-	tkt
+beatmsd2	-	drm
+init   3	-	alk
+init   4	-	alk
+init   5	-	col
+foresth6	-	hat
+init   1	-	tkt
+beatmsd2	-	drm
+init   3	-	alk
+init   4	-	alk
+init   5	-	col
+foresth6	-	hat
+init   1	-	tkt
+beatmsd2	-	drm
+init   3	-	alk
+init   4	-	alk
+init   5	-	col
+foresth6	-	hat
+init   1	-	tkt
+beatmsd2	-	drm
+init   3	-	alk
+init   4	-	alk
+init   5	-	col
+foresth6	-	hat	R
+init   1	-	tkt
+beatmsd2	-	drm
+init   3	-	alk
+init   4	-	alk
+init   5	-	col
+foresth6	-	hat
+init   1	-	tkt
+beatmsd2	-	drm
+init   3	-	alk
+init   4	-	alk
+init   5	-	col
+foresth6	-	hat
+init   1	-	tkt
+beatmsd2	-	drm
+init   3	-	alk
+init   4	-	alk
+init   5	-	col
+foresth6	-	hat
+init   1	-	tkt	R
+beatmsd2	-	drm	R
+init   3	-	alk	R
+init   4	-	alk	R
+init   5	-	col	R
+foresth6	-	hat	R
+init   1	-	tkt	R
+beatmsd2	-	drm	R
+init   3	-	alk	R
+init   4	-	alk	R
+init   5	-	col	R
+foresth6	-	hat	R
+init   1	-	tkt	R
+beatmsd2	-	drm	R
+init   3	-	alk	R
+init   4	-	alk	R
+init   5	-	col	R
+foresth6	-	hat	R
+init   1	-	tkt	R
+beatmsd2	-	drm	R
+init   3	-	alk	R
+init   4	-	alk	R
+init   5	-	col	R
+foresth6	-	hat	R
+Empty	-
+Empty	@
+Empty	@
+Empty	@
+Empty	-
+Empty	-
+Empty	@
+Empty	-
+Empty	-
+Empty	-
+Empty	-
+Empty	-
+Empty	-
+Empty	-
+Empty	-
+Empty	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-
+effects	-	R
+effects	-	R
+effects	-	R
+effects	-	R

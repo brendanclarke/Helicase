@@ -1655,6 +1655,7 @@ static void filesystem_copyLongComponent(char *dst, uint16_t cap,
                                          const char *src);
 static uint8_t filesystem_patternServiceReady(uint16_t scene_mask);
 static void filesystem_patternServiceFinish(uint16_t scene_mask);
+static void filesystem_patternRealignPlayingTracks(uint16_t scene_mask);
 static void filesystem_patternDisplayFromFilename(
     char dst[STORAGE_KIT_DISPLAY_NAME_LEN + 1u], const char *filename);
 static uint16_t filesystem_interpolateMorphEndpoint(uint16_t normal,
@@ -13311,6 +13312,39 @@ static void filesystem_patternServiceFinish(uint16_t scene_mask)
     }
 }
 
+/*
+ * Realign the tracks that play a replaced Pattern (S097 P3 §9).
+ *
+ * What: while the sequencer runs, refreshes the effective track-timing cache
+ * from the new regions, then puts every track whose played Scene is in
+ * scene_mask back on the master clock, as the PERF double-click does.
+ * Why: a load writes the played region in place. pat_initScene() leaves the
+ * Normal defaults (length 16, default scale) until the header is read, and
+ * presetMorph_tick() feeds them to the DDA within a pass; the new Pattern can
+ * also carry a different length, scale or play mode. Either way the track's
+ * cursor and accumulator keep the old phase and stay off the grid. Tracks
+ * playing other Scenes are not touched.
+ * Inputs: the replaced-Scene mask. Outputs: seq_realignTrackToMasterClock()
+ * for each matching track. Callers: the explicit Pattern replacement ends
+ * (Scene Load phase 52, Pattern Load phase 14, Bank empty Scenes); never
+ * filesystem_finish(), whose op_scene_load_scene_mask may be stale.
+ */
+static void filesystem_patternRealignPlayingTracks(uint16_t scene_mask)
+{
+    uint8_t track;
+
+    if (scene_mask == 0u || !seq_isRunning())
+        return;
+    seq_refreshTrackEffectiveParams();
+    for (track = 0u; track < NUM_TRACKS; track++) {
+        uint8_t scene_index = seq_getTrackPlayedScene(track);
+
+        if (scene_index < 16u &&
+            (scene_mask & (uint16_t)(1u << scene_index)) != 0u)
+            seq_realignTrackToMasterClock(track);
+    }
+}
+
 static void filesystem_loadSceneDirectory_tick(void)
 {
     uint8_t line_ready;
@@ -14406,6 +14440,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         /* Pattern bytes are no longer being written; release the service gate
          * before effect cleanup or the terminal Scene publication continues. */
         filesystem_patternServiceFinish(op_scene_load_scene_mask);
+        filesystem_patternRealignPlayingTracks(op_scene_load_scene_mask);
         if (filesystem_bankPayloadDetailActive())
             filesystem_bootLoggingSetBankSceneDetail('P');
         op_close_done = false;
@@ -15614,6 +15649,7 @@ static void filesystem_loadBankDirectory_tick(void)
             return;
         filesystem_bankEmptyScenes(op_bank_scene_empty_mask);
         filesystem_patternServiceFinish(op_bank_scene_empty_mask);
+        filesystem_patternRealignPlayingTracks(op_bank_scene_empty_mask);
         if (op_bank_scene_load_mask == 0u) {
             /* No children to load — enter the empty-Bank branch. */
             uint16_t old_bank_source =
@@ -16557,6 +16593,7 @@ static void filesystem_loadPattern_tick(void)
         if (op_close_status != FS_STATUS_DONE) {
             pat_initScene(op_pattern_scene);
             filesystem_patternServiceFinish(op_scene_load_scene_mask);
+            filesystem_patternRealignPlayingTracks(op_scene_load_scene_mask);
             bank_invalidateSdCleanScene(op_pattern_scene);
             filesystem_finish(FS_STATUS_ERROR);
             return;
@@ -16585,6 +16622,7 @@ static void filesystem_loadPattern_tick(void)
             }
         }
         filesystem_patternServiceFinish(op_scene_load_scene_mask);
+        filesystem_patternRealignPlayingTracks(op_scene_load_scene_mask);
         filesystem_startPatternHcnamesUpdate();
         return;
     default:
@@ -21132,6 +21170,12 @@ static void filesystem_saveBankDirectory_tick(void)
         }
         if (op_bank_scene_empty_mask &
             (uint16_t)(1u << op_bank_child_cursor)) {
+            /* The delete scanner works in the current directory and never
+             * changes it: the CWD is still the Bank directory, so phase 12
+             * may go straight to phase 20. Without this, a removed child
+             * visited before any written one sent phase 12 to the root-based
+             * reopen (phase 13) from inside the Bank directory (S097 P3 §13). */
+            op_bank_cwd_at_parent = 1u;
             op_phase = 12u;
             return;
         }
@@ -28806,7 +28850,162 @@ static void filesystem_batchScanTick(void (*tick)(void))
     }
 }
 
+#if DEV_MODE_LOGGING
+/*
+ * Filesystem pass probe (S097 P3, DEV only).
+ *
+ * What: filesystem_tick() is filesystem_tickBody() timed with the TIM2
+ * microsecond counter. While audio runs, filesystem_passProbe() records
+ * (stage 'f', AutosaveTrace.h):
+ *  - every call that took >= FS_PASS_PROBE_SLOW_US, with the operation and
+ *    phase the call entered with;
+ *  - when the operation changes, the previous operation's longest call and
+ *    its phase;
+ *  - every rise of audioCodec_underrunCount, with the operation and phase;
+ *  - once per second, the longest gap between two filesystem_tick() calls
+ *    (one whole main-loop pass, render included), with the operation and
+ *    phase at the call that closed it.
+ * Why: the FS_OS=1 build (filesystem.c at -Os) stumbled during a Scene Load
+ * into non-playing slots (S097 P2 log §10-§11). One fixed-work phase is
+ * suspected to run long enough to delay the render and the trigger drain; the
+ * trace had no measure of it. This finds the phase.
+ * Rules: nothing is recorded for the trace-flush or boot-log operations (a
+ * record must never start the next trace flush, S090 P5), and nothing before
+ * audio starts (boot work is blocking by design). Cost: two timer reads per
+ * call; 20 B of RAM in DEV builds only (user sign-off, S097 P3).
+ * Inputs: current_op, op_phase, audioCodec_underrunCount.
+ * Affiliates: AUTOSAVE_TRACE_STAGE_FS_PASS, S097_P3_FS_OPTIMIZE_INVESTIGATION.md.
+ */
+#define FS_PASS_PROBE_SLOW_US      1000u
+#define FS_PASS_PROBE_FLAG_SLOW    0u
+#define FS_PASS_PROBE_FLAG_OP_MAX  1u
+#define FS_PASS_PROBE_FLAG_UNDERRUN 2u
+#define FS_PASS_PROBE_FLAG_LOOP_GAP 3u
+#define FS_PASS_PROBE_GAP_WINDOW_US 1000000u
+
+static uint8_t  fs_probe_op = 0u;           /* operation whose maximum is held */
+static uint8_t  fs_probe_max_phase = 0u;
+static uint16_t fs_probe_max_us = 0u;
+static uint32_t fs_probe_underruns = 0u;    /* last count seen */
+static uint32_t filesystem_passProbeValue(uint32_t low, uint8_t op,
+                                          uint8_t phase);
+static uint32_t fs_probe_last_entry_us = 0u;   /* previous call's start */
+static uint32_t fs_probe_gap_window_us = 0u;   /* gap window start */
+static uint16_t fs_probe_gap_max_us = 0u;
+static uint8_t  fs_probe_gap_op = 0u;
+static uint8_t  fs_probe_gap_phase = 0u;
+
+/*
+ * Main-loop gap (flags 3): the time from the previous filesystem_tick() start
+ * to this one is one main-loop pass, render included. The longest gap of each
+ * one-second window is recorded once, so the cost is one record per second.
+ */
+static void filesystem_passProbeGap(uint32_t start_us, uint8_t op,
+                                    uint8_t phase)
+{
+    uint32_t gap = timebase_tim2Delta(start_us, fs_probe_last_entry_us);
+
+    fs_probe_last_entry_us = start_us;
+    if (!audioCodec_isInitialized()) {
+        fs_probe_gap_window_us = start_us;
+        fs_probe_gap_max_us = 0u;
+        return;
+    }
+    if (gap > fs_probe_gap_max_us) {
+        fs_probe_gap_max_us = (uint16_t)(gap > 0xFFFFu ? 0xFFFFu : gap);
+        fs_probe_gap_op = op;
+        fs_probe_gap_phase = phase;
+    }
+    if (timebase_tim2Delta(start_us, fs_probe_gap_window_us) <
+        FS_PASS_PROBE_GAP_WINDOW_US)
+        return;
+    /* Never record from a trace flush or the boot log (S090 P5); the window
+     * stays open and is recorded at the next other call. */
+    if (op == (uint8_t)FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH ||
+        op == (uint8_t)FS_INTERNAL_OP_PATTERN_TRACE_FLUSH ||
+        op == (uint8_t)FS_INTERNAL_OP_WRITE_BOOT_LOG)
+        return;
+    autosaveTrace_record(AUTOSAVE_TRACE_STAGE_FS_PASS,
+                         FS_PASS_PROBE_FLAG_LOOP_GAP,
+                         filesystem_passProbeValue(fs_probe_gap_max_us,
+                                                   fs_probe_gap_op,
+                                                   fs_probe_gap_phase));
+    fs_probe_gap_window_us = start_us;
+    fs_probe_gap_max_us = 0u;
+}
+
+static uint32_t filesystem_passProbeValue(uint32_t low, uint8_t op,
+                                          uint8_t phase)
+{
+    if (low > 0xFFFFu)
+        low = 0xFFFFu;
+    return low | ((uint32_t)op << 16) | ((uint32_t)phase << 24);
+}
+
+static void filesystem_passProbe(uint32_t start_us, uint8_t op, uint8_t phase)
+{
+    uint32_t elapsed = timebase_tim2Delta(timebase_tim2Now(), start_us);
+    uint32_t underruns = audioCodec_underrunCount;
+
+    if (!audioCodec_isInitialized()) {
+        fs_probe_underruns = underruns;
+        fs_probe_op = (uint8_t)FS_INTERNAL_OP_NONE;
+        fs_probe_max_us = 0u;
+        return;
+    }
+    if (underruns != fs_probe_underruns) {
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_FS_PASS,
+                             FS_PASS_PROBE_FLAG_UNDERRUN,
+                             filesystem_passProbeValue(
+                                 underruns - fs_probe_underruns, op, phase));
+        fs_probe_underruns = underruns;
+    }
+    if (op == (uint8_t)FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH ||
+        op == (uint8_t)FS_INTERNAL_OP_PATTERN_TRACE_FLUSH ||
+        op == (uint8_t)FS_INTERNAL_OP_WRITE_BOOT_LOG)
+        return;
+    if (op != fs_probe_op) {
+        /* Flush Finish closes every trace flush twice a second: its
+         * maximum is not recorded (a slow one still is, as flags 0). */
+        if (fs_probe_op != (uint8_t)FS_INTERNAL_OP_NONE &&
+            fs_probe_op != (uint8_t)FS_INTERNAL_OP_FLUSH_FINISH &&
+            fs_probe_max_us != 0u)
+            autosaveTrace_record(AUTOSAVE_TRACE_STAGE_FS_PASS,
+                                 FS_PASS_PROBE_FLAG_OP_MAX,
+                                 filesystem_passProbeValue(fs_probe_max_us,
+                                                           fs_probe_op,
+                                                           fs_probe_max_phase));
+        fs_probe_op = op;
+        fs_probe_max_us = 0u;
+        fs_probe_max_phase = 0u;
+    }
+    if (op != (uint8_t)FS_INTERNAL_OP_NONE && elapsed > fs_probe_max_us) {
+        fs_probe_max_us = (uint16_t)(elapsed > 0xFFFFu ? 0xFFFFu : elapsed);
+        fs_probe_max_phase = phase;
+    }
+    if (elapsed >= FS_PASS_PROBE_SLOW_US)
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_FS_PASS,
+                             FS_PASS_PROBE_FLAG_SLOW,
+                             filesystem_passProbeValue(elapsed, op, phase));
+}
+
+static void filesystem_tickBody(void);
+
 void filesystem_tick(void)
+{
+    const uint32_t start_us = timebase_tim2Now();
+    const uint8_t op = (uint8_t)current_op;
+    const uint8_t phase = op_phase;
+
+    filesystem_passProbeGap(start_us, op, phase);
+    filesystem_tickBody();
+    filesystem_passProbe(start_us, op, phase);
+}
+
+static void filesystem_tickBody(void)
+#else
+void filesystem_tick(void)
+#endif
 {
 #if DEV_MODE_LOGGING && DEV_LOGGING_IWDG
     filesystem_devIwdgFeed();
@@ -34121,9 +34320,6 @@ bool filesystem_requestSaveBank(uint16_t slot,
                    (bank_hasResidentBank()
                         ? bank_scenePresentMask() : 0u));
     full_save_mask = bank_scene_save_mask;
-    op_bank_save_written_mask = full_save_mask;
-    op_bank_scene_empty_mask = (uint16_t)(empty_mask &
-                                          (uint16_t)~full_save_mask & 0xffffu);
     /*
      * Option 2: compute which children may skip their on-card rewrite.
      *
@@ -34180,6 +34376,16 @@ bool filesystem_requestSaveBank(uint16_t slot,
 
     op_kit_save_source_scene = source_scene;
     op_kit_save_mode = STORAGE_INSTRUMENT_SAVE_NORMAL;
+    /*
+     * The written and removed masks are set after filesystem_start(), which
+     * clears every op_bank_* mask (S097 P3 §13). Set before it, as until S097,
+     * both were always zero: a replace Save never removed the slot's other
+     * children (it acted as a Merge) and every child counted as untouched in
+     * the manifest staging below and in phases 6/61-64.
+     */
+    op_bank_save_written_mask = full_save_mask;
+    op_bank_scene_empty_mask = (uint16_t)(empty_mask &
+                                          (uint16_t)~full_save_mask & 0xffffu);
     op_bank_scene_save_mask = (uint16_t)(full_save_mask & ~skip_mask);
     op_bank_sd_clean_candidate_mask = op_bank_scene_save_mask;
     op_bank_sd_clean_candidate_slot = slot;

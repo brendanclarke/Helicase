@@ -136,6 +136,8 @@ STAGE_ENUM = {
     "d": "AUTOSAVE_TRACE_STAGE_DIR_TRIM",
     # w: S090 P5 F5 filesystem facade owner transitions (Load/Save timing).
     "w": "AUTOSAVE_TRACE_STAGE_FS_OWNER",
+    "f": "AUTOSAVE_TRACE_STAGE_FS_PASS",
+    "k": "AUTOSAVE_TRACE_STAGE_LOADSAVE_CLICK",
     # p: S094 P2 per-slot render cycle probe (DWT, DEV only).
     "p": "AUTOSAVE_TRACE_STAGE_CPU_PROBE",
 }
@@ -182,6 +184,8 @@ STAGE_PRODUCER = {
     "s": "filesystem_settleAutosaveBlocking() (S090 P2)",
     "d": "filesystem_trimDirectoryTailsBlocking() (S090 P3)",
     "w": "filesystem_traceOwnerTransition() (S090 P5)",
+    "f": "filesystem_passProbe() (S097 P3)",
+    "k": "menu_loadSaveTraceClick() (S097 P3)",
     "p": "mixer_probeEnd() (S094 P2)",
 }
 
@@ -1159,6 +1163,48 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
                   f"{statuses.get((value >> 8) & 0xFF, (value >> 8) & 0xFF)}; "
                   f"previous owner held the facade {since} "
                   f"(time since the previous 'w' record)")
+    elif ch == "f":
+        # S097 P3 filesystem pass probe; layout in AutosaveTrace.h ('f').
+        low = value & 0xFFFF
+        op = (value >> 16) & 0xFF
+        phase = (value >> 24) & 0xFF
+        op_name = _nth(FS_INTERNAL_OPS, op) if op else "idle"
+        sat = "+" if low == 0xFFFF else ""
+        if flags == 0:
+            detail = (f"{enum_name} via {producer}: SLOW filesystem_tick() "
+                      f"{low}{sat} us in {op_name} phase {phase}")
+        elif flags == 1:
+            detail = (f"{enum_name} via {producer}: {op_name} ended; longest "
+                      f"filesystem_tick() {low}{sat} us in phase {phase}")
+        elif flags == 2:
+            detail = (f"{enum_name} via {producer}: UNDERRUN +{low}{sat} "
+                      f"(audioCodec_underrunCount) seen in {op_name} phase "
+                      f"{phase}")
+        elif flags == 3:
+            detail = (f"{enum_name} via {producer}: longest main-loop pass "
+                      f"this second {low}{sat} us (gap between filesystem_tick() "
+                      f"calls), at {op_name} phase {phase}")
+        else:
+            detail = f"{enum_name} via {producer}: flags {flags} value 0x{value:08x}"
+    elif ch == "k":
+        # S097 P3 Load/Save OK click outcome; layout in AutosaveTrace.h ('k').
+        outcomes = {0: "ACCEPTED (command started)",
+                    1: "DROPPED: a command was still running",
+                    2: "DROPPED: Load name still blank",
+                    3: "DROPPED: Bank copy held",
+                    4: "REFUSED: Preset/filesystem request returned 0",
+                    5: "edit-mode toggle (type/number row)",
+                    6: "HELD: storage busy, OK held for replay",
+                    7: "RETRY: held OK replayed (outcome follows)"}
+        statuses = {0: "IDLE", 1: "BUSY", 2: "DONE", 3: "ERROR"}
+        page = value & 0xFF
+        what = (value >> 8) & 0xFF
+        state = (value >> 16) & 0xFF
+        fs = (value >> 24) & 0xFF
+        detail = (f"{enum_name} via {producer}: "
+                  f"{outcomes.get(flags, f'outcome {flags}')}; page={page} "
+                  f"what={what} state={state} filesystem="
+                  f"{statuses.get(fs, fs)}")
     elif ch == "d":
         # S090 P3 boot directory tail trim; layout in AutosaveTrace.h ('d').
         dirs = {0: "SD root", 1: "/Scene", 2: "/Kit", 3: "/Bank",

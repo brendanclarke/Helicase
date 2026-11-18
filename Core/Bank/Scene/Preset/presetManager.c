@@ -2107,6 +2107,44 @@ static uint8_t preset_tickSingleVoiceApply(void)
 }
 
 /*
+ * Apply what a finished Scene or Kit Load changed, and nothing else (S097 P3).
+ *
+ * What: when scene_mask (the Load's destination Scenes) holds the active
+ * Scene, the whole active Scene is re-applied as before
+ * (preset_startDrumsetApply()). Otherwise the playing sound did not change:
+ * no Scene settings, Effect, modulation or voice reset is done, and only a
+ * slot whose track plays one of the loaded Scenes through per-track Scene
+ * playback (S077) is re-armed from that Scene (preset_startSingleVoiceApply(),
+ * quiet-wait or trigger commit).
+ * Why: every runtime Load used to run the full active-Scene apply. A Load into
+ * other Scenes then reset the playing voices one by one
+ * (instrumentManager_resetRuntimeSlotFromScene()), cleared the step
+ * audio-out/FX-send/decay overrides (preset_applySceneSettings()),
+ * re-activated the Effect and cleared runtime modulation mid-pattern: the
+ * sequencer "stumble" heard on the device (S097 P3 log §7).
+ * Inputs: scene_mask bit n = resident Scene n. Outputs: one of the two applies
+ * above, or none. Caller: menu.c load completion (Scene Load, Kit Load).
+ * Affiliates: preset_getSlotPlayedScene(), preset_tickDrumsetApply().
+ */
+void preset_startLoadApply(uint16_t scene_mask)
+{
+    uint8_t active = scene_getActiveIndex();
+    uint8_t slot;
+
+    if (active < 16u && (scene_mask & (uint16_t)(1u << active)) != 0u) {
+        preset_startDrumsetApply();
+        return;
+    }
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        uint8_t played = preset_getSlotPlayedScene(slot);
+
+        if (played != active && played < 16u &&
+            (scene_mask & (uint16_t)(1u << played)) != 0u)
+            preset_startSingleVoiceApply(slot, played);
+    }
+}
+
+/*
  * Arm a deferred single-voice apply for one slot from a played Scene
  * (S077 P2 §2.1, §3.4).
  *

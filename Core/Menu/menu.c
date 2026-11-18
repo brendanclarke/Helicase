@@ -129,6 +129,22 @@ static uint8_t menu_pendingPageSwitch;
  * completion paths.
  */
 static uint8_t menu_loadSaveCommandActive = 0u;
+/*
+ * Held Load/Save OK press (S097 P3 §11).
+ *
+ * What: attempts left for an OK press that could not act yet: storage was busy
+ * (menu_parseEncoder() gate), the name was not read yet, or the request was
+ * refused. 0 = nothing held. menu_pollPresetStatus() replays it as an ordinary
+ * OK click once storage and Preset are idle; a refusal there spends one
+ * attempt. Any turn or click, or leaving the OK row, drops it.
+ * Why: index and name reads keep storage busy for seconds while playing (more
+ * with FS_OS=1), and an OK press then did nothing at all; the user had to
+ * press until one landed in an idle moment.
+ * Affiliates: menu_loadSaveHoldOk(), menu_loadSaveRetryOk(),
+ * menu_handleLoadSaveMenu().
+ */
+static uint8_t menu_loadSaveOkRetry = 0u;
+#define MENU_LS_OK_ATTEMPTS 4u
 static uint8_t menu_deferSelectionRequest = 0;
 /*
  * Load/Save selection-coordinate generation.
@@ -440,17 +456,39 @@ static uint8_t menu_tickGlobalApply(void)
     return 1u;
 }
 
+/*
+ * Make room for a two-line LCD overlay (S097 P3 §14).
+ *
+ * What: before audio starts, waits for the LCD queue to drain (the former
+ * behaviour). Once audio runs, never waits: returns 0 when the queue lacks
+ * room for an overlay (clear, home, two lines), so the caller tries again on a
+ * later pass. Why: lcd_waitForIdle() spins without rendering audio; the boot
+ * "Last Bank / loaded" notice called it after audio start and the device
+ * logged 63 audio underruns at that moment (SD_CARD_ATS_TEST).
+ */
+#define MENU_LCD_OVERLAY_OPS 40u
+
+static uint8_t menu_lcdOverlayRoom(void)
+{
+    if (audioCodec_renderCount == 0u) {
+        lcd_waitForIdle();
+        return 1u;
+    }
+    return (uint8_t)(lcd_queueFree() >= MENU_LCD_OVERLAY_OPS);
+}
+
 static void menu_showStaleSettingsWarning(fs_stale_warning_source_t src)
 {
     const char *line2 = (src == FS_STALE_WARNING_ALL) ? "check&save .all" : "check&save .glo";
 
-    lcd_waitForIdle();
+    (void)menu_lcdOverlayRoom();
     lcd_clear();
     lcd_home();
     lcd_string("old settings");
     lcd_setcursor(0, 2);
     lcd_string(line2);
-    lcd_waitForIdle();
+    if (audioCodec_renderCount == 0u)
+        lcd_waitForIdle();
 
     if (audioCodec_renderCount == 0u) {
         uint16_t t0 = time_sysTick;
@@ -468,7 +506,11 @@ static void menu_showStaleSettingsWarning(fs_stale_warning_source_t src)
  *
  * What: shows sequential non-blocking LCD overlays for each Case-3
  * invalidated Scene and the bank-fallback event. Bank notice first (if
- * pending), then each Scene in index order. Each overlay runs ~2 seconds
+ * pending), then each Scene in index order. The bank-fallback notice reads
+ * "Last Bank / loaded": no AutoSave was restored; boot loaded the Bank that
+ * settings.cfg names (canonical Bank Load or the HCNAMES-authoritative load).
+ * Until S097 P3 §14 it read "AutoSave / bank load", which suggested the
+ * opposite. Each overlay runs ~2 seconds
  * and auto-advances. Inputs: menu_bootNotice* state, time_sysTick.
  * Outputs: LCD overlays, menu_storageBusy toggled. No early-dismiss, no
  * input suppression beyond storageBusy. Affiliates: §9
@@ -486,13 +528,13 @@ static void menu_drainAutosaveBootNotices(void)
         return;
     }
     if (menu_bootNoticeBankFlag) {
-        lcd_waitForIdle();
+        if (!menu_lcdOverlayRoom())
+            return;
         lcd_clear();
         lcd_home();
-        lcd_string("AutoSave");
+        lcd_string("Last Bank");
         lcd_setcursor(0, 2);
-        lcd_string("bank load");
-        lcd_waitForIdle();
+        lcd_string("loaded");
         menu_bootNoticeBankFlag = 0u;
         menu_storageBusy = 1u;
         menu_bootNoticeActive = 1u;
@@ -504,6 +546,8 @@ static void menu_drainAutosaveBootNotices(void)
         uint8_t i;
         uint8_t pos = 0u;
 
+        if (!menu_lcdOverlayRoom())
+            return;
         for (i = 0u; i < 16u; i++) {
             if (menu_bootNoticeSceneMask & (uint16_t)(1u << i))
                 break;
@@ -522,19 +566,29 @@ static void menu_drainAutosaveBootNotices(void)
         line2[pos++] = 't';
         line2[pos++] = 'y';
         line2[pos] = '\0';
-        lcd_waitForIdle();
         lcd_clear();
         lcd_home();
         lcd_string("AutoSave");
         lcd_setcursor(0, 2);
         lcd_string(line2);
-        lcd_waitForIdle();
         menu_storageBusy = 1u;
         menu_bootNoticeActive = 1u;
         menu_bootNoticeStart = time_sysTick;
         return;
     }
 }
+
+/*
+ * Destination Scenes of the Load whose sound apply is being started (S097 P3).
+ *
+ * What: MENU_SOUND_APPLY_ALL_SCENES (the default) keeps the full active-Scene
+ * apply; a Scene or Kit Load completion sets the Load's destination mask just
+ * before menu_startSoundApply(), which consumes and resets it and hands it to
+ * preset_startLoadApply(). Why: a Load into other Scenes must not reset the
+ * playing voices (the device "stumble"). Affiliates: preset_startLoadApply().
+ */
+#define MENU_SOUND_APPLY_ALL_SCENES 0xffffu
+static uint16_t menu_soundApplyLoadMask = MENU_SOUND_APPLY_ALL_SCENES;
 
 /* Start loaded-sound apply.
 **
@@ -552,6 +606,9 @@ static void menu_startSoundApply(uint8_t updateGap,
                                  uint8_t showStaleWarning,
                                  fs_stale_warning_source_t staleWarning)
 {
+    const uint16_t load_mask = menu_soundApplyLoadMask;
+
+    menu_soundApplyLoadMask = MENU_SOUND_APPLY_ALL_SCENES;
     /*
      * Kit/Scene/Bank/All/Performance Load has committed retained types into
      * one or more Scenes. Repair directional VOICE masks before any later
@@ -625,7 +682,10 @@ static void menu_startSoundApply(uint8_t updateGap,
     menu_soundApplyClearStorageBusy = clearStorageBusy;
     menu_soundApplyShowStaleWarning = showStaleWarning;
     menu_soundApplyStaleWarning = staleWarning;
-    preset_startDrumsetApply();
+    if (load_mask == MENU_SOUND_APPLY_ALL_SCENES)
+        preset_startDrumsetApply();
+    else
+        preset_startLoadApply(load_mask);
 }
 
 static void menu_finishSoundApply(void)
@@ -16173,12 +16233,115 @@ static void menu_paintTypeStepWhileBusy(void)
 ** to Kit in the promoted type cycle and reuses the same numbered Kit browser
 ** while dispatching to the Morph Save/Load projection.
 ** ----------------------------------------------------------------------- */
+/*
+ * Load/Save OK click bookkeeping (S097 P3).
+ *
+ * What: menu_parseEncoder() toggles editModeActive for every click before it
+ * calls menu_handleLoadSaveMenu(). When this handler then drops the click
+ * (command still running, name not read yet, Bank copy held) or the requested
+ * Load/Save is refused (the filesystem is busy, for example with a name or
+ * index read or a trace flush), menu_loadSaveDropClick() toggles the flag back,
+ * so the next OK acts. Before S097 P3 the flag stayed flipped: the OK row sat
+ * in "edit mode", where the encoder does nothing (seen as a freeze until a
+ * mode change), and the next OK only toggled it back, so a Load or Save took
+ * two or three presses. In DEV builds each Load/Save-page click outcome is
+ * traced (stage 'k').
+ * Inputs: outcome (MENU_LS_CLICK_*). Outputs: editModeActive restored for
+ * every outcome except ACCEPTED and EDIT.
+ */
+#define MENU_LS_CLICK_ACCEPTED       0u
+#define MENU_LS_CLICK_COMMAND_ACTIVE 1u
+#define MENU_LS_CLICK_NAME_BLANK     2u
+#define MENU_LS_CLICK_COPY_HELD      3u
+#define MENU_LS_CLICK_REFUSED        4u
+#define MENU_LS_CLICK_EDIT           5u
+#define MENU_LS_CLICK_HELD           6u
+#define MENU_LS_CLICK_RETRY          7u
+
+static void menu_loadSaveTraceClick(uint8_t outcome)
+{
+#if DEV_MODE_LOGGING
+    autosaveTrace_record(AUTOSAVE_TRACE_STAGE_LOADSAVE_CLICK, outcome,
+                         (uint32_t)menu_activePage |
+                         ((uint32_t)menu_saveOptions.what << 8u) |
+                         ((uint32_t)menu_saveOptions.state << 16u) |
+                         ((uint32_t)filesystem_status() << 24u));
+#else
+    (void)outcome;
+#endif
+}
+
+static void menu_loadSaveDropClick(uint8_t outcome)
+{
+    editModeActive = (uint8_t)(1u - editModeActive);
+    menu_loadSaveTraceClick(outcome);
+}
+
+/* Nonzero while the cursor is on a top-level Load/Save OK row that a held
+ * press may replay (numbered and test types; not Glo/Samples, not nested
+ * Instrument Load/Save, not while a command runs). */
+static uint8_t menu_loadSaveOkRowHoldable(void)
+{
+    return (uint8_t)(
+        (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
+        menu_saveOptions.state == SAVE_STATE_OK &&
+        menu_saveOptions.what < SAVE_TYPE_GLO &&
+        !menu_instrumentLoadActive &&
+        !menu_loadSaveCommandActive);
+}
+
+/* Hold an OK press the storage-busy input gate would drop. */
+static void menu_loadSaveHoldOk(void)
+{
+    if (!menu_loadSaveOkRowHoldable())
+        return;
+    menu_loadSaveOkRetry = MENU_LS_OK_ATTEMPTS;
+    menu_loadSaveTraceClick(MENU_LS_CLICK_HELD);
+}
+
+/*
+ * Replay a held OK press once storage and Preset are idle.
+ *
+ * What: with the cursor still on the OK row, sets edit mode as the click
+ * toggle would and runs the ordinary OK path. An accepted request starts the
+ * command; another refusal re-holds it with one attempt fewer. Called every
+ * main-loop pass from menu_pollPresetStatus() before its early returns.
+ */
+static void menu_loadSaveRetryOk(void)
+{
+    uint8_t left;
+
+    if (menu_loadSaveOkRetry == 0u)
+        return;
+    if (!menu_loadSaveOkRowHoldable()) {
+        menu_loadSaveOkRetry = 0u;
+        return;
+    }
+    if (menu_storageBusy || preset_getStatus() != PRESET_IDLE ||
+        filesystem_status() == FS_STATUS_BUSY)
+        return;
+    left = (uint8_t)(menu_loadSaveOkRetry - 1u);
+    menu_loadSaveTraceClick(MENU_LS_CLICK_RETRY);
+    editModeActive = 1u;
+    menu_handleLoadSaveMenu(0, 1u);
+    if (menu_loadSaveOkRetry != 0u)
+        menu_loadSaveOkRetry = left;
+    menu_repaintAll();
+}
+
 static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
 {
     uint8_t commandAccepted = 0u;
 
-    if (menu_loadSaveCommandActive)
+    /* New input replaces a held OK; a refusal below may hold this one. */
+    if (inc != 0 || btnClicked)
+        menu_loadSaveOkRetry = 0u;
+
+    if (menu_loadSaveCommandActive) {
+        if (btnClicked)
+            menu_loadSaveDropClick(MENU_LS_CLICK_COMMAND_ACTIVE);
         return;
+    }
 
     if (menu_instrumentLoadActive) {
         if (menu_instrumentSaveMode) {
@@ -16501,13 +16664,20 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 break;
             }
         }
-        if (name_blank)
+        if (name_blank) {
             btnClicked = 0u;
+            menu_loadSaveDropClick(MENU_LS_CLICK_NAME_BLANK);
+            /* The name may still be on its way: hold the press. */
+            if (menu_loadSaveOkRowHoldable())
+                menu_loadSaveOkRetry = MENU_LS_OK_ATTEMPTS;
+        }
     }
 
     if (btnClicked && menu_bankPageActive() &&
-        (menu_bankUiFlags & MENU_BANK_COPY_HELD))
+        (menu_bankUiFlags & MENU_BANK_COPY_HELD)) {
         btnClicked = 0u;
+        menu_loadSaveDropClick(MENU_LS_CLICK_COPY_HELD);
+    }
     if (btnClicked) {
         if ((editModeActive && menu_saveOptions.state == SAVE_STATE_OK) ||
             (menu_saveOptions.what >= SAVE_TYPE_GLO && menu_saveOptions.state > SAVE_STATE_EDIT_TYPE)) {
@@ -16652,16 +16822,24 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 case SAVE_TYPE_SAMPLES:
                     menu_beginLoadSaveCommand();
                     menu_loadSamplesModal();
+                    commandAccepted = 2u;   /* modal ran; not a refusal */
                     break;
                 default: break;
                 }
             }
-            if (commandAccepted) {
+            if (commandAccepted == 1u) {
                 /* Freeze this committed coordinate against older callbacks. */
                 menu_selectionGeneration++;
                 menu_selectionGenerationSnapshot = menu_selectionGeneration;
                 menu_beginLoadSaveCommand();
+                menu_loadSaveTraceClick(MENU_LS_CLICK_ACCEPTED);
+            } else if (commandAccepted == 0u) {
+                menu_loadSaveDropClick(MENU_LS_CLICK_REFUSED);
+                if (menu_loadSaveOkRowHoldable())
+                    menu_loadSaveOkRetry = MENU_LS_OK_ATTEMPTS;
             }
+        } else {
+            menu_loadSaveTraceClick(MENU_LS_CLICK_EDIT);
         }
     }
 
@@ -17080,6 +17258,12 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
          */
         if (!allow_load_number_scroll && !allow_type_step &&
             !allow_browse_nav) {
+            /* An OK press is held and replayed when storage is idle
+             * (S097 P3 §11); a turn drops a held one. */
+            if (button && button != lastEncoderButton)
+                menu_loadSaveHoldOk();
+            else if (inc != 0)
+                menu_loadSaveOkRetry = 0u;
             lastEncoderButton = button;
             return;
         }
@@ -18355,6 +18539,9 @@ void menu_pollPresetStatus(void)
      * snapshot cannot spin. Morph mode is included through that function's
      * Morph branch. See S054_INST_RESTORE_FIX.md.
      */
+    /* Replay a held Load/Save OK press once storage is idle (S097 P3 §11). */
+    menu_loadSaveRetryOk();
+
     if (menu_instrumentKitRestorePending &&
         menu_instrumentLoadActive &&
         !menu_instrumentSaveMode &&
@@ -18598,6 +18785,8 @@ void menu_pollPresetStatus(void)
             preset_getKitRequestSceneMask());
         if (selection_stale || !menu_isLoadSaveSelectionCurrent())
             memset(preset_currentName, ' ', 8u);
+        /* S097 P3: apply only what the Kit Load replaced. */
+        menu_soundApplyLoadMask = preset_getKitRequestSceneMask();
         menu_startSoundApply(1u, 0u, 1u, 0u, 0u, 0u, 1u, 0u,
                              FS_STALE_WARNING_NONE);
         break;
@@ -18679,6 +18868,8 @@ void menu_pollPresetStatus(void)
             uint8_t reset_save =
                 (uint8_t)(menu_activePage == LOAD_PAGE ||
                           menu_activePage == SAVE_PAGE);
+            /* S097 P3: apply only what the Scene Load replaced. */
+            menu_soundApplyLoadMask = preset_getKitRequestSceneMask();
             menu_startSoundApply(1u, reset_save, 1u, 0u, 1u, 0u, 1u, 0u,
                                  FS_STALE_WARNING_NONE);
         }
