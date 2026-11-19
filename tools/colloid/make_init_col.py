@@ -48,6 +48,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 TABLE = os.path.join(ROOT, "Core", "DSP", "Instruments", "Colloid", "ColloidParameters.c")
 OUT = os.path.join(ROOT, "SD_CARD", "Instrument", "Colloid", "init.col")
+OUT_ADV = os.path.join(ROOT, "SD_CARD", "Instrument", "ColAdv", "init.clx")
 # one descriptor row: macro name, then the quoted file key
 ROW = re.compile(r'^\s*(ROW[A-Z_]*)\("([^"]+)"')
 # rows whose macro sets INSTRUMENT_PARAM_FLAG_MORPHABLE (FLAGS_IMAGE)
@@ -80,18 +81,36 @@ INIT = {
     "col_noise_width": "127", "col_noise_pan": "63",
 }
 
+# S099 P1: the clx type's rows (after the @advanced-rows marker): cho I
+# (the Juno-60's mode I), crt 40 / cdp 127 (var and dbl only), cmx 64 (dry and
+# wet at -3 dB each), csr L-R; by ear in the D-G6 listening
+INIT_ADV = {
+    "chorus_type": "1", "chorus_rate": "40", "chorus_depth": "127",
+    "chorus_mix": "64", "chorus_source": "0",
+}
+MARKER = "@advanced-rows"
+
 def rows():
-    """(macro, key) for every descriptor row, in table order."""
+    """((macro, key) of the Basic rows, (macro, key) of the clx rows) in
+    table order; the clx rows follow the @advanced-rows marker (S099 P1)."""
+    basic, adv, seen = [], [], False
     with open(TABLE) as fh:
-        return [(m.group(1), m.group(2)) for m in map(ROW.match, fh) if m]
+        for line in fh:
+            if MARKER in line:
+                seen = True
+                continue
+            m = ROW.match(line)
+            if m:
+                (adv if seen else basic).append((m.group(1), m.group(2)))
+    return basic, adv
 
 
-def text(r):
+def text(r, typ, init):
     """The file text, line for line as the firmware writer emits it."""
-    lines = ["format=helicase.instrument", "version=1", "type=col", "", "[params]"]
-    lines += [f"{k}={INIT[k]}" for _, k in r]
+    lines = ["format=helicase.instrument", "version=1", f"type={typ}", "", "[params]"]
+    lines += [f"{k}={init[k]}" for _, k in r]
     lines += ["", "[morph]"]
-    lines += [f"{k}={INIT[k]}" for m, k in r if m in MORPHABLE]
+    lines += [f"{k}={init[k]}" for m, k in r if m in MORPHABLE]
     lines += [""]
     return "\n".join(lines) + "\n"
 
@@ -100,24 +119,26 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true")
     a = ap.parse_args()
-    r = rows()
-    keys = [k for _, k in r]
-    missing = [k for k in keys if k not in INIT]
-    extra = [k for k in INIT if k not in keys]
-    if missing or extra:
-        sys.exit(f"make_init_col: {len(r)} rows; no INIT value for {missing}; "
-                 f"INIT keys not in the table {extra}")
-    want = text(r)
-    if a.check:
-        have = open(OUT, newline="").read() if os.path.exists(OUT) else None
-        if have != want:
-            sys.exit(f"make_init_col: {OUT} differs from the table (rerun without --check)")
-        print(f"make_init_col: init.col matches the table ({len(r)} rows)")
-        return
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    with open(OUT, "w", newline="\n") as fh:
-        fh.write(want)
-    print("wrote", OUT)
+    basic, adv = rows()
+    jobs = [(OUT, "col", basic, INIT), (OUT_ADV, "clx", basic + adv, {**INIT, **INIT_ADV})]
+    for path, typ, r, init in jobs:
+        keys = [k for _, k in r]
+        missing = [k for k in keys if k not in init]
+        extra = [k for k in init if k not in keys]
+        if missing or extra:
+            sys.exit(f"make_init_col: {len(r)} {typ} rows; no INIT value for {missing}; "
+                     f"INIT keys not in the table {extra}")
+        want = text(r, typ, init)
+        if a.check:
+            have = open(path, newline="").read() if os.path.exists(path) else None
+            if have != want:
+                sys.exit(f"make_init_col: {path} differs from the table (rerun without --check)")
+            print(f"make_init_col: {os.path.basename(path)} matches the table ({len(r)} rows)")
+            continue
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", newline="\n") as fh:
+            fh.write(want)
+        print("wrote", path)
 
 
 if __name__ == "__main__":

@@ -4883,3 +4883,729 @@ This schedule edits nothing in `MEMORY.md` or `knowledge_files/`.
 | The init.clx / init.alx bytes | D-G7, E-G5 | §D9.2 / §E5 |
 | C1 / C3 if the clx probe is over | D-G5 | applied and reported (Q-7) |
 | The Alkaline's spare (the ensemble tap's room) | E-G4 | measured, not acted on |
+
+---
+
+## 13. Implementation log (this session)
+
+Notes are appended here as each step is applied. Line numbers below are the
+schedule's (unedited-tree) numbers unless a note says otherwise.
+
+### Phase 0 - baselines (done)
+
+- **0.1** `make clean && make all && make img` on the unedited tree: clean,
+  no warning. `link_budget_pre.txt`:
+  `Flash 720,776 / 753,664 B (headroom 32,888)`, `ITCM 15,960 / 16,384`,
+  `DTCM statics 4,396`, `FXBUF 126,656 B (margin 3,776)`.
+  `.itcm` 15,960 B; `.text` 703,384 B.
+- **0.2** `elf_p4_snapshot P4BASE=baselines/s099p1/p4base`: 76 mixer loops,
+  the oscillator set written.
+- **0.3** `elf_s099_snapshot` / `elf_s099_check` added to
+  `tools/dsp_test/Makefile` (after `elf_p4_check`, in `.PHONY`).
+  `elf_s099_snapshot` writes `baselines/s099p1/pre/engines.txt`: 15 loops in
+  18 symbols. Two of the listed symbols,
+  `alk_renderWav` / `alk_renderWtb`, are wrappers since S097 (their bodies
+  `bl DiodeLadder_renderB2Osc`); they carry no loop, so they add no lines to
+  the snapshot. The comparison is unaffected (the file is keyed by name and
+  body).
+- **0.4** `colloid_cpu_pre.txt` (count 10):
+  `plain10-par 376.6`, `pwm6-par 404.7`, `pwm6-ser 377.9`, `pwmw6-par 407.8`,
+  `scan6-par 408.2`. `alk_cost_pre.txt`: per sample 42.7 instructions,
+  0.28 VDIV, per block 1,365 instructions / 9 VDIV.
+- **0.5** `sizes_pre.txt`: `sizeof(ColloidVoice)` **1,212 B**,
+  `sizeof(AlkalineVoice)` **564 B** (scratch translation unit, not in the
+  tree). Both match the schedule; §10's growths land in the 1,264 B slot.
+- **0.6** The session scratchpad no longer holds the spike sources. Written
+  `baselines/s099p1/spike/README.md` saying so; the phase gates measure
+  every new loop directly and do not depend on it.
+
+### Phase P-A - chop tables and audition (done)
+
+- **A1** `tools/plots/gen_pwm_tables.py` extended as scheduled; it writes
+  `Core/DSPAudio/oscChopTables.h/.c` (new) and leaves `oscPwmTables.*`
+  byte-identical (`git status`: only the two new files). Values: gate gains
+  6,738..19,540; `OSC_CHOP_LREF_RS` 1.975558, `OSC_CHOP_LREF_REX` 6.628639
+  (the draft's 6.62); `CHOP_REX_K` 5.
+- **Deviation, T12.** The scheduled closed form (`dmax = max(row) - min(row)`,
+  then `(dmax<<2) x g14 >> 16 + 32768`, times `32767 >> 16` <= 1.1 x 32767)
+  fails on the correct tables (49,083 at row 0): it pairs the row's largest
+  span with the curve's largest value, which never occur at the same phase.
+  Replaced by `chop_range()`: an exact sweep of the loop's own integer
+  arithmetic (every row, every width, 2,048 phases a cycle). Result: largest
+  |gate| **70,605** (< 2^17) and largest |y| **24,687** (R-S) / **17,295**
+  (REx), both under the bound. T10, T11, T13, T14, T15 pass unchanged.
+- **A1.7** `oscChopTables.c` added to `DSP_SRCS` with its own `-fno-lto`
+  rule (after the Colloid rules).
+- **A-G1** `make -C tools/dsp_test pwm_tables` prints `pwm tables OK`.
+- **A-G2** `make all && make img` after the tables: the `oscChop*` symbols
+  are absent from the ELF (`--gc-sections`), flash still 720,776 B. The
+  image is *not* byte-identical to Phase 0: 250 bytes differ, all of them
+  the call sites and bodies of `__osc_setFreq_veneer`, which LTO moved 16 B
+  (0x80b3c20 -> 0x80b3c30). `elf_p4_check`: 86 of 86 loops exact; the mixer:
+  58 equal, 0 grew. No instruction changed; the veneer order did.
+- **A2** `tools/plots/render_chop_audition.py` added and run into
+  `/tmp/s099p1_audition` (44 WAV files: `rec`, `rs`, `rs-lowfirst`,
+  `rexk4/5/6`, each at 55 / 110 / 440 / 1,760 Hz and form T / I). **A-G3
+  is open (yours):** k, the gate orientation, and form T at 55 / 110 Hz.
+  The code is written for the default (k = 5, high first, form T).
+
+### Phase P-B - Alkaline R-S / REx (done)
+
+- **Applied:** B1.1-B1.3 (wave lists: `ALK_WAVE_RS` 3, `ALK_WAVE_REX` 4,
+  `ALK_PWM_WAVE_COUNT` 5), B2.1-B2.4 (mode 5 in `dl_renderB2Body()`, the
+  `ALK_CHOP_READ_FORM` form, `DiodeLadder_renderB2OscChop()`), B3 (the
+  prototype), B4 (`Alkaline_renderChop()`, the `alk_renderPwm()` dispatch,
+  the per-type clamp), B5.1-B5.5 (menu names, wave domain, asserts), B6
+  (`control_cost.py`), B7 (law AL-CH and its three breaks).
+- **Deviation 1, `Alkaline_renderChop()` is its own file**
+  (`AlkalineChop.c`, declared in `AlkalineVoice.h`, `-fno-lto`), instead of
+  a static function in `AlkalineVoice.c`. Reason: R-5. With the render in
+  the LTO unit, `elf_p4_check` showed ten Drum-family loops changed, two of
+  them +1 (`calcSineRingBlock` 30 -> 31, `calcSineSyncBlock` 33 -> 34).
+- **Deviation 2, `DiodeLadder.o` is compiled `-fno-lto`.** With only
+  `AlkalineChop.o` outside the unit, the new copy of `dl_renderB2Body()`
+  still re-partitioned it (fourteen loops changed, two +1). Outside, no
+  loop grows, the four existing B2R wrappers are instruction-identical
+  (`elf_s099_check`: 15 of 15 exact, `elf_p4_check`'s mixer: 58 equal), and
+  the ladder's own loops are unchanged by the flag (checked: all four B2R
+  wrappers exact). Cost: `Alkaline_calcVoiceAsync` 935 -> 937 (+2 a block,
+  the dispatch test's budget).
+- **B-G1** `make all`: clean, no new warning. Flash **728,144 B**
+  (+7,368; headroom 25,520). ITCM **15,984 / 16,384** (+24, so 400 free;
+  P-C's 424 B budget moves to 400 — see the P-C note).
+  `make -C tools/dsp_test all`: exit 0; AL-CH 0 failures, its three
+  breaks caught; the rest of the suite passes.
+- **B-G1, AL-TY amended.** The law asserted "pwm clamps to Tri" for a byte
+  past the pwm list; the pwm list now ends at REx. It now asserts "pwm
+  clamps to REx" and adds "pwm REx -> wav = Tri".
+- **B-G2** `elf_p4_check`: 74 exact, 12 MISSING by text, **0 loops longer**
+  (`baselines/s099p1/p4_lengths_b.txt`: the ten symbols that differ are
+  shorter or keep an equal-length twin; the other two are a renamed
+  symbol). Read on length, as S095 P2 step 0 established. `elf_s099_check`:
+  15 of 15 exact. The mixer: 58 equal, 0 shrank, 0 grew.
+- **B-G3** `DiodeLadder_renderB2OscChop`: **220** a sample (3 VDIV);
+  per-block 1,370 / 32 = **42.8**; total **262.8 per sample**
+  (<= 263.7). (`control_cost.py` with the new ITERS entry and the guard.)
+- **B-G4/B-G5 are open (yours):** the device probe and the ear.
+  Measured level on the host: R-S at pos 0 is **-2.67 dB RMS** against
+  pwm Saw at 0, inside AL-CH's 6 dB window; the read form 2 is **-33.7 dB**
+  against form 0 (the guard is -15 dB).
+
+### Phase P-C - Colloid R-S / REx (done)
+
+- **Applied:** C1 (pwm list 0..5, `COL_PWM_IS_CHOP`, the assert), C2 (the
+  section macro, `col_smulwt`, `col_chopDcInit`, `col_chopPairAdd`, the
+  header), C3 (`col_chopBlock`, the sync dispatch, the comments), C4 (the
+  linker script: `.itcm.s099p1` after `.itcm.s096p3`), C5 (menu names,
+  branch, asserts), C6 (`colloid_cpu.py` chop row), C7 (CO-CHP, the
+  restated law in `check_pwm_form()`, `test_pwg()` to REx, three breaks).
+- **`col_chopBlock()` is two passes, not one** (deviation, C-G4): the first
+  form built three packed arrays in a 6-iteration loop and spilled on every
+  iteration (84 instructions an oscillator). It now computes the four mean
+  sums in the first pass (nothing else can run before `col_chopDcInit()`),
+  then builds each pair's halves in registers in a second pass (72 an
+  oscillator).
+- **C-G1** `make all && make img`: clean. Flash **729,736 B** (+1,592;
+  headroom 23,928). ITCM **16,288 / 16,384**: 96 B free (P-B left 400, so
+  the loop and its padding took 304). The linker's ITCM ASSERT holds.
+  `make -C tools/dsp_test all`: exit 0; CO-CHP 0 failures, CO-PWM and
+  CO-PWG pass on R-S / REx, the three CO-CHP breaks caught.
+- **C-G2** `elf_p4_check`: same 12-by-12 text drift as P-B, 0 longer
+  (unchanged). `elf_s099_check`: 15 of 15 exact. `col_oscControl`: the
+  longest loop **187 -> 185**, so no cost rise, but the loop set itself
+  changed (10 loops -> 8; GCC re-chose its unrolling in the same object).
+  Reported as a deviation from "only an immediate may differ"; the
+  cost gate holds. `Colloid_calcVoiceSyncBlock`'s straight path
+  126 -> 134 (+8 a block: the new branch and its call, 0.25 a sample).
+- **C-G3** `col_chopPairAdd` **306 B** (<= 424), in `.itcm.s099p1`;
+  `_eitcm - _sitcm` = 16,288. `col_chopPairAdd` **54** a pair a sample
+  (<= 58, the spike's figure exactly); `col_chopDcInit` **8** (<= 8).
+- **C-G4** `colloid_cpu.py --count 10`: **pwm6-par 404.7**,
+  **chop6-par 392.9** (-11.8), chop6-ser 366.1; plain 376.3 (was 376.6).
+  The gate asked for `chop6-par <= pwm6-par - 20`; **-11.8 is short of
+  it.** The draft's -30 was an estimate that omitted the six-oscillator
+  mean/normalisation pass this schedule requires (deviation §0.3 item 2);
+  the schedule's own per-block addition (one VDIV, the pass, the init)
+  costs about 16 a sample. The device gate (C-G5) is the deciding one: the
+  host model has the chop below pwm Saw/Rec, and both are below 19,620.
+- **C-G5/C-G6 are open (yours):** the device probe (chop 6 against pwm
+  Saw/Rec 6) and the form T ear check at 55 / 110 Hz.
+
+### Phase P-D - `clx`, the Advanced Colloid and the chorus (done)
+
+- **Applied:** D1 (`tools/chorus/gen_chorus_tables.py`, run; the pair is in
+  the tree), D2/D3 (`BbdChorus.h/.c`), D4 (Makefile: `-I.../Chorus`, the two
+  objects `-fno-lto`), D5 (types, writer tag, engine map, the pointer table,
+  units, the Colloid's five rows, the 64-row table, the shared pages macro,
+  `colloidParameters_cellInactive()`), D6 (InstrumentManager: the registry
+  row, every `clx` case, the writer, the quiet tail, the right-block table),
+  D7 (CAT_CHORUS, LONG_DEPTH/SOURCE, SHORT_CHO/CRT/CDP/CMX/CSR, the tags 9
+  and 10, the two name lists, the menu branch), D8 (MIDI note modes, the
+  storage define), D9 (checker, `make_init_col.py` -> `init.clx`, the decoder),
+  D10 (`modules/chorus.c`, the `chorus`/`chorus_tables` targets, three
+  breaks, law 9, the checker's macro test).
+- **D-G1** `make all && make img`: clean. Flash **734,688 B** (+4,952;
+  headroom **18,976**, above `link_budget.py`'s 16 KiB). ITCM 16,288 (no
+  change). `make -C tools/dsp_test all` passes; `chorus` passes CH-TAP ..
+  CH-INIT with the three breaks caught; law 9 passes; `special_tags` 394
+  rows; `init.col` byte-identical, `init.clx` written (64 rows).
+- **D-G2** `elf_p4_check` / `elf_s099_check`: the same drift as P-B/P-C
+  (74 exact, 12 by text, **0 longer**; 15 of 15 exact), so the Basic engines'
+  cost is unchanged. `colloid_menu_pages` is the same table through the
+  shared macro (the Basic layout's spelling only).
+- **D-G3 (loop counts, measured, over on three of the four lines):**
+  `bbd_sideD` **25** (spike 22; gate <= 24), `bbd_midA` **29** (<= 28),
+  `bbd_tapB` **18** (<= 17), `bbdChorus_renderColloid` entry/exit **24**
+  (<= 30). Each is one instruction over its line, not the 16-value spill the
+  gate warns about (the loops are 25/29/18 instructions wide).
+  `bbdChorus_control`'s straight path is **146** a block (gate <= 90): its
+  two inlined `bbd_sidePlan()` calls plus the clamps and the two slews.
+- **D-G4** `colloid_cpu.py` gains `clx-pwm6-par` = 404.7 + **57.0** =
+  **461.7** (the gate's `pwm6 + 50` is 454.7; **+7 over**), made of
+  2 x 25 loop plus (146 control + 24 render + 2 x 25 entry/exit) / 32.
+- **D-G5 is open (yours):** the device probe (median and p95 <= 21,803 in
+  pwm Saw/Rec 6, cho II, csr L-R; then csr mid lower), the reseat, the Scene
+  carry-over, `ColAdv` in the Load menu, the two-Advanced cap and the reboot
+  round trip. No C1/C3 fallback was needed or applied: the host counts, not
+  the device, are what is over the schedule's estimates.
+
+### Phase P-E - `alx`, the Advanced Alkaline and the chorus (done)
+
+- **Applied:** E1 (`INSTRUMENT_TYPE_ALX` 8, UNKNOWN 9), E2 (the
+  `AlkalineVoice` chorus block: `choUnit`, seven bytes, `right[32]`), E3
+  (the 38-row table, `ALK_PARAM_CHORUS_*`, the shared `ALK_PAGES_0_6`
+  macro, `alkaline_adv_menu_pages`, `alkalineParameters_cellInactive()`), E4
+  (the registry row, the engine map, `unitsWanted`, `slotRightUpdate`, every
+  `alx` case, the mono chorus pass, the quiet tail, the writer), E5 (the
+  `SHORT_CBW/CDV/CWD` labels, `STORAGE_INSTRUMENT_ALX`, the checker's ALX
+  table, `make_init_alk.py` -> `init.alx`).
+- **E-G1** `make all && make img`: clean. Flash **735,584 B** (+896;
+  headroom **18,080**, above the 16 KiB warning). ITCM 16,288 (no change).
+  `make -C tools/dsp_test all`: exit 0, `special_tags` 439 rows, `init.alk`
+  byte-identical, `init.alx` written (38 rows).
+- **E-G2** `elf_p4_check`: the same drift as before, **0 loops longer**
+  (the mixer: 58 equal, 0 grew); `elf_s099_check`: 15 of 15 exact. P-E edits
+  no mixer code (the stereo path is the Colloid's existing one).
+- **E-G3 (measured, over on both lines):** `bbd_alkA` **36** (gate <= 31),
+  `bbd_alkB` **20** (<= 19); `bbdChorus_renderAlkaline` entry/exit **20**.
+  The Alkaline form is 1-5 instructions wider than the spike's estimate, no
+  spill.
+- **E-G4/E-G5 are open (yours):** the alx probe (median, p95 and the spare
+  against 21,803), the two-Advanced Scene against S096 P3, and the ear
+  (`cbw`, `cdv`, `cwd`, and `cmx` 0 identical to a plain Alkaline).
+
+### Final verification (this tree)
+
+- `make all && make img`: clean, no new warning.
+  Flash **735,584 / 753,664 B** (headroom 18,080); ITCM **16,288 / 16,384**
+  (96 free); DTCM statics 4,396; FXBUF 126,656 B.
+- `make -C tools/dsp_test all`: exit 0 (every law, every break, the table
+  checks and both init writers).
+- `elf_p4_check`: 74 exact, 12 by text, **0 longer**
+  (`baselines/s099p1/p4_lengths_b.txt`); mixer 58 equal, 0 grew.
+  `elf_s099_check`: 15 of 15 exact.
+- Device/ear gates left open: A-G3, B-G4/B-G5, C-G5/C-G6, D-G5/D-G6/D-G7,
+  E-G4/E-G5. The A2 audition files are in `/tmp/s099p1_audition`.
+
+### Measured ledger (§10's rows, for sign-off)
+
+| Item | Measured |
+|---|---:|
+| `sizeof(ColloidVoice)` | 1,212 -> **1,224** (+12) |
+| `sizeof(AlkalineVoice)` | 564 -> **640** (+76) |
+| `instrumentManager_rightBlock[6]` | **24 B** SRAM1 .bss |
+| `menu_instrumentLoadIndex[]` (two types) | +4 B .bss |
+| Voice unit per chorus slot | 4,416 B claimed from the existing DTCM arena (no new RAM) |
+| `col_chopPairAdd()` | **306 B** in `.itcm.s099p1`; ITCM 15,960 -> **16,288** (96 free) |
+| Flash | 720,776 -> **735,584 B** (+14,808); headroom 18,080 |
+| `col_chopBlock()` stack | ≈ 40 B (the render stack) |
+| Records | `baselines/s099p1/` (`link_budget_post.txt`, `colloid_cpu_post.txt`, `alk_cost_post.txt`, `p4_lengths_final.txt`) |
+
+### Gate deviations, collected (all measured in this tree)
+
+1. **A-G2**: the table-only image is not byte-identical: 250 bytes differ,
+   all `__osc_setFreq_veneer` call sites and bodies; LTO moved the veneer
+   16 B. Every loop is exact (86/86).
+2. **B-G2/C-G2/D-G2/E-G2**: `elf_p4_check` reports 12 loop dumps by text
+   (ten symbols, each shorter or with an equal-length twin); **0 loops
+   longer**, the mixer 58 equal. Read on length, the S095 P2 step 0 rule.
+   `elf_s099_check` is 15 of 15 exact throughout.
+3. **`DiodeLadder.o` and `AlkalineChop.o` are `-fno-lto`**: with the mode-5
+   body in the LTO unit, ten Drum loops changed and two grew by 1; outside
+   it, none grows. `DiodeLadder.o`'s own wrappers are unchanged by the flag
+   (checked).
+4. **C-G4**: `chop6-par` is 392.9, i.e. -11.8 against `pwm6-par` 404.7, not
+   the -20 the schedule asked. The per-oscillator mean/normalisation pass
+   (deviation §0.3 item 2) costs about 16 a sample; the two-pass form cut it
+   from 84 to 72 an oscillator.
+5. **D-G3/D-G4**: `bbd_sideD` 25 (gate 24), `bbd_midA` 29 (28), `bbd_tapB` 18
+   (17), `bbdChorus_control` 146 a block (90); `clx-pwm6-par` 461.7 against
+   the gate's 454.7.
+6. **E-G3**: `bbd_alkA` 36 (31), `bbd_alkB` 20 (19).
+7. **`col_oscControl`**: its longest loop shrank 187 -> 185, but its loop set
+   changed (10 -> 8; GCC re-chose unrolling in the same object).
+8. The host laws' order in `modules/colloid.c`: `test_chop()` is last, so
+   the existing laws keep the RNG stream they had (CO-PWG's click metric is
+   borderline and read differently when it ran earlier).
+
+---
+
+## 14. Review of the implementation (2026-11-19)
+
+Reviewed: the working tree on `2c889c40` (the S099 P1 changes uncommitted),
+against §2–§12 and the implementation log in §13. Method:
+- the gates were re-run independently on this tree;
+- the diffs of every changed source file were read;
+- loop lengths were compared directly from the ELF dumps, not only from the
+  log's summary.
+
+### 14.1 Verdict
+
+**The implementation matches the schedule, and the host and ELF gates
+hold.** Every new law passes, every new break is caught, and no Basic loop
+grew. Two findings need a decision before the device round:
+- **F1:** the Advanced Colloid is likely over the Q-6 criterion on the
+  device (p95);
+- **F2:** the Alkaline's per-block cost rose by 5 instructions on every
+  mode, its dearest included.
+
+Nothing was found that is wrong in behaviour.
+
+### 14.2 Re-run results (this review)
+
+| Gate | Result |
+|---|---|
+| `make all && make img` | clean, no warning. Flash **735,584 / 753,664 B** (headroom 18,080, above the 16 KiB warning); ITCM **16,288 / 16,384** (96 B free). Matches §13. |
+| `make -C tools/dsp_test all` | exit 0. AL-CH, CO-CHP, CH-TAP … CH-INIT and law 9: 0 failures. All nine new breaks print "caught" (3 AL-CH, 3 CO-CHP, 3 chorus). `special_tags` 439 rows, 0 mismatches. `pwm_tables` and `chorus_tables` OK. |
+| Init files | `init.col` (59 rows) and `init.alk` (31) match their tables and are unchanged against HEAD. `init.clx` (64) and `init.alx` (38) are written. In `init.clx`, `chorus_type` and `chorus_source` are correctly absent from `[morph]`. |
+| `elf_s099_check` | 15 of 15 loops exact. |
+| `elf_p4_check` | **exits 2**: 86 baseline loops, 74 exact, 12 missing by text (F5). Direct length compare of the same dumps: in the 10 changed oscillator symbols the longest loop is equal or shorter (e.g. `osc_pwmWsSyncBlock` 38 → 37/35, `osc_smpFmBlock` 43 → 42). In `osc_slpRingBlock` / `osc_slpSyncBlock` the text differs at equal length. Mixer: **0 grew**. |
+| Colloid host cost (`colloid_cpu_pre/post.txt`) | every Basic mode equal or lower: `plain10-par` 376.6 → 376.3, `pwm6-par` 404.7 → 404.7, `pwmw6-par` 407.8 → 407.8, `scan6-par` 408.2 → 408.2. New: `chop6-par` 392.9, `clx-pwm6-par` 461.7. |
+| Alkaline host cost (`alk_cost_pre/post.txt`) | per block 1,365 → **1,370** (async 935 → 937; `alk_renderWav` / `alk_renderWtb` 361 / 412 → 364 / 415; `DiodeLadder_setNet` now a call). See F2. |
+
+### 14.3 Code read against the schedule
+
+These match the schedule's design, or an equivalent of it:
+- **The chorus kernel** (`BbdChorus.c`): the five loops, the control,
+  `bbd_sidePlan()`, init and the tail test. This includes the corrected
+  guard refresh (deviation §0.3 item 13), proved by CH-GUARD and its break.
+- **The Colloid chop:**
+  - `col_chopPairAdd()` is in `.itcm.s099p1`, the linker pattern is after
+    `.itcm.s096p3`, and the loop is 306 B;
+  - `col_chopDcInit()`;
+  - `col_chopBlock()`: the two-pass form computes the same sums and halves
+    as the scheduled one pass;
+  - the sync dispatch and the `inGain` / `inGainR` fix-up.
+- **The Alkaline chop:** mode 5 in `dl_renderB2Body()`, with `ff0` /
+  `ffStep` / `rowB` reused as scheduled; `DiodeLadder_renderB2OscChop()`;
+  the dispatch in `alk_renderPwm()`; and the per-type clamp in
+  `Alkaline_setOscType()`.
+- **InstrumentManager:**
+  - both registry rows, the engine map, `unitsWanted()`, the two-argument
+    `slotVoiceUnits()`, the pointer table and `slotRightUpdate()`;
+  - the writer and `chorusBind()`;
+  - the quiet tails, and every `clx` / `alx` case.
+  I checked each case label's fall-through target in all ten switches:
+  every `clx` label reaches the Colloid body and every `alx` label the
+  Alkaline body, and the `runtimeInit()` claims precede the right engine's
+  init.
+- **The engine tests** in the hooks, the special writer branches,
+  `menu_formatWaveCell()` (all three branches) and `MidiNoteModes.c` (all
+  three sites).
+- **Tables, labels, tags and tooling:** the name tables and asserts, the
+  ON/OFF tags 9 and 10, `storageTypes.h`, the decoder's type names, and
+  `check_special_tags.py` (CLX / ALX tables, the `chorus_type` writer, the
+  macro check).
+
+These deviations from the schedule are reported in §13 and are accepted
+here:
+- **`AlkalineChop.c` and `DiodeLadder.o` are `-fno-lto`.** The reason is
+  measured: in the LTO unit, two Drum loops grew by 1. The effect is F2.
+- **T12 is an exact sweep of the loop's integer arithmetic.** The
+  scheduled closed form paired a row's largest span with the curve's
+  largest value, which never occur at the same phase. The sweep is the
+  stronger check.
+- **AL-TY is amended.** A pwm byte past the list now clamps to REx, the
+  list's new last entry (the platform's rule), and pwm REx → wav gives Tri.
+  That is the intended behaviour.
+- **`test_chop()` runs last in `modules/colloid.c`,** so the existing laws
+  keep their RNG stream.
+
+### 14.4 Findings
+
+**F1 — the Advanced Colloid is likely over Q-6 at p95 on the device
+(decide before image D, or accept the Q-7 fallbacks).**
+- The chorus measures **57.0 instructions a sample** with its per-block
+  work, against the plan's 49 (`clx-pwm6-par` 461.7 against `pwm6-par`
+  404.7). That is 1,824 instructions a block.
+- On the S096 P3 pwm Saw/Rec 6 record (median 19,136, p95 19,562), using
+  the draft's CPI band:
+
+| CPI | added | median | p95 | against 21,803 |
+|---:|---:|---:|---:|---|
+| 1.2 | 2,189 | 21,325 | 21,751 | both pass |
+| 1.4 | 2,554 | 21,690 | **22,116** | median passes by 113, p95 over by 313 |
+| 1.6 | 2,918 | **22,054** | **22,480** | both over |
+
+- Where the 8 over the plan come from:
+  - `bbdChorus_control()` is **146** instructions a block (+3.5 a sample
+    against the plan's ≈ 44);
+  - each loop is one instruction over its line: `bbd_sideD` 25,
+    `bbd_midA` 29, `bbd_tapB` 18;
+  - none of them spills.
+- Recommended order, cheapest sound cost first:
+  1. **Trim `bbdChorus_control()`.** It is per-block code, so a trim
+     changes no sound. Its two inlined `bbd_sidePlan()` calls each clamp in
+     float, convert to Q16 and do three table reads. Folding the clamp into
+     one fixed-point step per side, and computing the shared tone
+     coefficient once instead of in each call, should recover about half.
+     That is ≈ 2 a sample, ≈ 90–120 cycles a block.
+  2. **C1 (drop the pre-pole):** −2 a channel, ≈ 180 cycles. Pre-authorised
+     under Q-7, reported up front.
+  3. **C3 (half-rate wet):** ≈ 670 cycles. Pre-authorised after its host
+     image check.
+- Item 1 plus C1 brings p95 at CPI 1.4 to about the line (≈ 21,810).
+  Only C3 gives margin there.
+- The probe decides: at the low end of the band (CPI 1.2) nothing is needed.
+
+**F2 — the Alkaline's per-block cost rose by 5 instructions on every mode,
+its dearest (`wtb` with a slot) included (≈ +0.16 a sample).**
+- Cause: `DiodeLadder.o` left the LTO unit.
+  - `DiodeLadder_setNet()` is now a call from `Alkaline_calcVoiceAsync()`
+    (+2).
+  - Each render wrapper's call into the ladder costs +3: `alk_renderWav`
+    and `alk_renderWtb`, and the Saw/Sqr/Tri path of `alk_renderPwm`.
+- None of the existing loops changed (`elf_s099_check` exact). The rise is
+  ≈ 7 cycles a block, well inside the probe's noise, but under the S089 P2
+  reading the schedule uses (Q-11, "no Basic type's dearest rises") it is a
+  rise. Options:
+  - accept it, recorded as S099 P1's cost of keeping the Drum loops exact;
+  - declare `DiodeLadder_setNet()` / `DiodeLadder_setPost()` as `static
+    inline` in `DiodeLadder.h`, so the Alkaline's LTO-unit async inlines
+    them again. That should recover the +2; the wrappers' +3 needs a look
+    at their call-site argument moves;
+  - offset it elsewhere in the Alkaline's control path.
+- B-G4 measures it on the device either way.
+
+**F3 — `chop6-par` is 11.8 below `pwm6-par`, not the 20 C-G4 asked.** Not
+a problem:
+- the gate's purpose holds, since chop 6 is cheaper than the Colloid's
+  dearest mode and no Basic mode rose;
+- the margin went to the per-oscillator normalisation (deviation §0.3
+  item 2);
+- C-G5 on the device stays the deciding check.
+
+**F4 — the Advanced Alkaline loops are wider than planned** (`bbd_alkA` 36
+against 31, `bbd_alkB` 20 against 19). No spill. The Alkaline has ≈ 5,200
+cycles of Advanced room, so this only reduces the spare that E-G4 is meant
+to measure.
+
+**F5 — `elf_p4_check` now exits non-zero by design.**
+- The 12 text-only changes come from the LTO partition moving (two loops
+  became two-variant forms). The length compare in §14.2 shows none
+  longer.
+- Leaving the gate red hides a real regression in a later phase.
+- Recommendation: once image E passes on the device, re-snapshot (`make -C
+  tools/dsp_test elf_p4_snapshot P4BASE=baselines/s099p1/p4base_accepted`)
+  and point later checks at it.
+- The S096 P1 re-baseline (Makefile l. 984–987) is the precedent.
+
+**F6 — pre-existing, outside S099: `voice_control_break` is not
+asserted.**
+- The rule (`tools/dsp_test/Makefile` l. 253–255) runs the break binary,
+  and that binary prints 14 failures but exits 0.
+- So the suite passes whether or not the break is caught. Every other break
+  in the suite is wrapped in an `if ... then FAILED` test.
+- S099 did not touch it. It is reported because it shows up in this run's
+  output.
+
+**F7 — minor:**
+- **A stale name in a comment:** the engine-map comment
+  (`InstrumentManager.c` l. 154) names `instrumentManager_slotEngine()` as
+  an accessor, and no such function exists. Delete the name.
+- **The A2 renders are in `/tmp/s099p1_audition`** (44 files, present now),
+  not the session scratchpad (Q-16). `/tmp` is cleared at reboot, so copy
+  them before then if A-G3 is not done yet.
+
+### 14.5 Open, as before (device and ear)
+
+These stay open:
+- A-G3 (k, orientation, form T at low notes);
+- B-G4 / B-G5;
+- C-G5 / C-G6;
+- D-G5 / D-G6 / D-G7 (F1 decides how D-G5 is approached);
+- E-G4 / E-G5.
+
+No device-dependent claim in §13 or here has been checked on hardware.
+
+### 14.6 Additions to §11 (statements now out of date, for the user)
+
+- **`MEMORY.md` §DSP, the ITCM total:** 16,288 / 16,384 (96 B free) after
+  S099 P1.
+- **The flash total:** 735,584 B, headroom 18,080.
+- **`MEMORY.md` §DSP Alkaline and the Makefile notes:** `DiodeLadder.o`,
+  `AlkalineChop.o`, `oscChopTables.o`, `BbdChorus.o` and
+  `BbdChorusTables.o` build `-fno-lto` (the S095 P2 rule, extended).
+- **`ALKALINE_MODULE_REFERENCE.md` §7.1:** the Alkaline control path's
+  per-block count is 1,370 (F2).
+
+## 15. Review follow-ups (2026-11-19)
+
+The user's instructions on §14:
+- **F1:** get the cost down; if that is not enough, try C3; if C3 is still
+  not enough, come back with C1's details.
+- **F2:** fix it only if the Alkaline's worst case, Basic or Advanced, is
+  over the cap.
+- **Everything else:** fix it directly, and make the code comments correct.
+- **Separately:** remove the Colloid's amp-attack minimum, so the note is as
+  long as the step (or the length special), as from a keyboard.
+
+### 15.1 Summary
+
+- **F1 is done, with C3.** The Advanced Colloid's chorus is **47.0**
+  instructions a sample, down from 57.0. `clx-pwm6-par` is **449.9**, down
+  from 461.7. On the S096 P3 record, p95 passes at CPI 1.2 and 1.4 and is 73
+  cycles over at CPI 1.6 (§15.2). C1 was not applied.
+- **F2 needs no change.** Neither Alkaline worst case is over its cap
+  (§15.3).
+- **The Colloid note length is now the gate alone.** All three envelopes run
+  a plain ADSR from it (§15.4). As a side effect every Colloid mode's
+  per-block cost fell by 56 instructions.
+- **F6 was a wrong finding and is withdrawn.** F7's stale name is fixed. F3,
+  F4 and F5 need no code change (§15.5).
+- **Gates:** the host suite exits 0 and every break is caught; the ELF gates
+  hold against the S099 snapshot (§15.6).
+
+### 15.2 F1: the Advanced Colloid's chorus
+
+**Step 1: trims that leave the output unchanged.** Every chorus law gives
+the same result before and after. Files: `BbdChorus.c` and `BbdChorus.h`.
+- **The pre-pole state is kept at the sample's own scale.** It was ×2 and
+  stored `>> 1`, so the ring store now needs no shift. The ring holds the
+  same values: a one-pole filter of an int16 input stays inside int16.
+- **The writing loops end on the write count, not an end pointer.** The
+  loops are `bbd_sideD`, `bbd_midA` and `bbd_alkA`. The test is
+  `while ((w & (OUTPUT_DMA_SIZE - 1u)) != 0u)`, which is correct because `w`
+  is a multiple of 32 at every block start. The register allocator had
+  spilled the end pointer and reloaded it every sample.
+- **The guard test is one compare:** `(w & BBD_RMASK) == OUTPUT_DMA_SIZE`.
+- **The loops are inlined.** `BBD_LOOP` is now `always_inline`, so the loops
+  go into the two `noinline` render functions, and a block pays one entry
+  and exit instead of three.
+- **`bbd_sidePlan()` is `always_inline`.** The control reads the pre-pole
+  coefficient once.
+- **Result:** the full-rate L-R form went from 57.0 to **51.8** (`bbd_sideD`
+  25 → 23 a channel, control 146 → 141, render paths 45). That was still
+  over the target of 50: p95 at CPI 1.4 against 21,803.
+
+**Step 2: C3, the half-rate wet.** It is selected by `BBD_COL_HALF_RATE`
+(default 1) in `BbdChorus.h`; the Alkaline always runs at full rate.
+- **Design:**
+  - **Ring rate:** the rings are written and read at fs/2. Each ring sample
+    is the mean of two pre-pole outputs, which puts a zero at 22 kHz.
+  - **Tap:** one interpolated tap per output pair. The first output of the
+    pair uses the mean of this tap and the previous one (`tq`), so the two
+    outputs interpolate linearly between ring samples.
+  - **Full rate:** the pre pole, the post pole and the dry + wet mix stay
+    at full rate. The dry path is exact (CH-MIX0).
+  - **`w` counts ring samples:** 16 a block (`BBD_HALF_BLOCK`). The guard
+    refresh is `(w & BBD_RMASK) == BBD_HALF_BLOCK`.
+  - **Read position:** `bbd_sidePlan()` takes a `half` argument and returns
+    the read position in ring samples.
+  - **Struct changes:** `BbdSide` gained `tq` (+4 B a side), and
+    `BbdChorusState`'s `pad` byte became `half`. The state is still inside
+    the unit's 288 B tail. No RAM moved.
+- **New loops:** `bbd_sideH` (41 / 39 a pair), `bbd_midH` (52 a pair) and
+  `bbd_tapBH` (29 a pair). None spills, except three spill instructions for
+  `inc` / `tq` in `bbd_sideH`, which were kept.
+- **Cost:** control 145 and render paths 63 a block. The dearer form is the
+  mid form, at (52 + 29) / 2 = 40.5 a sample, plus (145 + 63) / 32 = 6.5,
+  for **47.0**.
+- **Rejected:** dropping the interpolation, which is cheaper but raises the
+  images by about 9 dB.
+
+**What C3 does to the sound.** New law **CH-HALF** compares the half-rate
+and full-rate forms through the same unit. Results are below; the bounds are
+in brackets.
+
+| Measure | Result |
+|---|---|
+| 1 kHz wet, half against full | −0.07 dB (±0.5) |
+| Image of 2 kHz at 20.05 kHz | −38.4 dB re the wet partial (≤ −18) |
+| Image of 5 kHz at 17.05 kHz | −20.7 dB re the wet partial (≤ −18) |
+| Fold of 15 kHz at 7.05 kHz | −14.5 dB re the input (≤ −10); the full-rate wet at 15 kHz is −8.4 dB |
+| Fold of 18 kHz at 4.05 kHz | −17.0 dB re the input (≤ −10); the full-rate wet at 18 kHz is −9.4 dB |
+
+The wet's content above about 11 kHz folds and images. The post pole
+(5–9 kHz) already takes most of it off. Whether the result sounds acceptable
+is a D-G6 ear check.
+
+**Cost against the record.** On the S096 P3 pwm Saw/Rec 6 record (median
+19,136, p95 19,562, measured at `pwm6-par` 404.7), `clx-pwm6-par` 449.9 adds
+45.2 instructions a sample, or 1,446 a block:
+
+| CPI | added | median | p95 | against 21,803 |
+|---:|---:|---:|---:|---|
+| 1.2 | 1,736 | 20,872 | 21,298 | both pass |
+| 1.4 | 2,025 | 21,161 | 21,587 | both pass (p95 by 216) |
+| 1.6 | 2,314 | 21,450 | **21,876** | median passes; p95 over by 73 |
+
+The 45.2 includes the −1.8 a sample from §15.4, which applies to the Basic
+Colloid as well.
+
+**If the device probe (D-G5) lands at the top of the CPI band, C1 is next.**
+- C1 drops the pre pole: about −2 instructions a sample in each form, about
+  −64 a block, so about −100 cycles at CPI 1.6. That clears the 73.
+- The cost is that the wet loses the pre-filter before the ring. With C3
+  the ring's 2-tap mean is then the only anti-alias filter, so the 15 and
+  18 kHz folds would rise. CH-HALF would measure by how much.
+- C1 is not applied. It needs your decision, and only if D-G5 asks for it.
+
+**Laws, breaks and tooling.**
+- **CH-ALK was wrong before this change.** Its "12 dB wet" check used a
+  formula that ignored the Alkaline's second post pole. It now measures the
+  wet at 16 kHz against the restated three-pole response: −13.13 dB, which
+  matches.
+- **CH-GUARD has a half-rate case:** the tap is checked against the exact
+  ring, and the guard refresh at `w & 1,023 == 16` is checked.
+- **CH-LAW** reads `rp` in ring units (`>> half`).
+- **`make -C tools/dsp_test chorus`** builds the default (half-rate) and
+  `-DBBD_COL_HALF_RATE=0` (`chorus_full`) versions, and both must pass.
+- **The chorus breaks are fixed:**
+  - each break now greps for its own law's FAIL;
+  - the mirror sed covers both mid loops;
+  - the mix sed matches the loops' new `x << 1` form. It had stopped
+    applying, and the break had been "caught" only by way of CH-ALK.
+- **`colloid_cpu.py`:**
+  - it finds the clx loops without needing `bbd_sideD`;
+  - it reads `BBD_COL_HALF_RATE` from `BbdChorus.h`;
+  - it charges max(the L-R form, the mid form) of the four loops divided by
+    the rate, plus the control and render paths divided by 32.
+- **Records:** `tools/dsp_test/baselines/s099p1/colloid_cpu_post2.txt`.
+
+**The Alkaline's loops are narrower after the trims:** `bbd_alkA` 36 → 34,
+`bbd_alkB` 20 (F4).
+
+### 15.3 F2: the Alkaline's worst cases against the caps
+
+Neither is over.
+- **Basic:** the worst on record is **16,591** cycles, from S094 P2 run 2,
+  segment E. The cap is 19,620. F2's +5 instructions a block is about 7
+  cycles.
+  - The "19,609" in the S-R draft has no record behind it. I found no log
+    with that number.
+- **Advanced:** 16,591 plus the Alkaline's chorus. The chorus costs about
+  1,925 instructions a block: loops 34 + 20 = 54 a sample (1,728 a block),
+  plus the control and render paths. That gives 18,900, 19,290 and 19,670 at
+  CPI 1.2, 1.4 and 1.6. The cap is 21,803.
+- **No change was made.** E-G4 on the device still measures the real
+  figure.
+
+### 15.4 The Colloid note length: a plain ADSR from the gate
+
+**The rule (user, 2026-11-19).**
+- The note lasts exactly as long as the step, or the length special's
+  window when there is one, as if it were played from a keyboard.
+- Sus on holds the note, and a later sus-off automation ends it.
+- Every envelope runs a normal ADSR from that gate.
+- This removes the S096 P3 amp-attack minimum. Under that rule:
+  - a short step played the whole amp attack, then went straight to release
+    with no decay;
+  - the filter and pitch envelopes were held with the amp
+    (`heldFP = held || amp in attack`).
+
+**The code (`ColloidVoice.c`).**
+- **`col_egStep()`** lost its `isAmp` argument. For every envelope: if the
+  gate is not held and the stage is not idle, the stage goes to release,
+  whatever it was, attack included. Attack at 1.0 always goes to decay.
+  Decay and sustain no longer test `held` themselves, because the check at
+  the top covers them. The doc block is rewritten.
+- **`Colloid_calcVoiceAsync()`:** `heldFP` is gone, and all three envelopes
+  step with `held`. The gate comment is rewritten.
+- **Comments elsewhere:**
+  - `ColloidVoice.h` (the gate fields' Why) now says there is no amp-attack
+    minimum;
+  - in `sequencer.c`, the `seq_lenWindow` note and `seq_lenStart()` no longer
+    say "the amp attack sets the note's length".
+- **Behaviour you will hear:** a step shorter than the amp attack now
+  releases mid-attack, from the level it reached, so a slow-attack patch on
+  short steps plays quieter notes than before.
+  - Fill 0 still rounds up to a 1-tick window, about 5 ms at 120 BPM. On a
+    slow attack that is now nearly silent.
+  - This follows the keyboard rule. If you want fill 0 to mean something
+    else, that is a separate decision.
+- **Cost:** every Colloid mode's per-block cost fell by 56 instructions (for
+  example `pwm6-par` 404.7 → 402.9). Flash fell by 120 B. Nothing changed
+  per sample.
+
+**The laws (`tools/dsp_test/modules/colloid.c`).**
+- **CO-GATE is rewritten** to the new rule:
+  - a step of g blocks, shorter than the attack, stays in attack for g
+    blocks, releases on block g + 1, and has not reached 1.0;
+  - a long step still holds decay and sustain until its end;
+  - sus holds past a short gate, and a following sus-off write releases all
+    three envelopes on the next block (new);
+  - a one-block gate holds amp, filter and pitch in attack for one block,
+    and all three release together on the next.
+- **CO-EG, CO-RETRIG, CO-CHANGE and CO-PENV** pass unchanged.
+- **The breaks (`tools/dsp_test/Makefile`):**
+  - `colloid_break_atk` now restores the old rule: attack is exempt from
+    the gate-closed release. CO-GATE catches it in four places.
+  - `colloid_break_sus` now disables the gate-closed release altogether.
+    The line it used to target no longer exists. CO-EG catches it.
+
+### 15.5 The other findings
+
+- **F3 (`chop6-par` margin):** no change, as §14 said. It is now 391.2,
+  against `pwm6-par` 402.9.
+- **F4 (Alkaline chorus loops wider than planned):** reduced by the §15.2
+  trims (`bbd_alkA` 34). No further change.
+- **F5 (`elf_p4_check` red against the S096 P1 default baseline):** no
+  change. The re-snapshot waits until image E passes on the device, as §14
+  recommends.
+- **F6 is withdrawn.** It was a wrong finding.
+  - `voice_control.c` l. 364–367 inverts the break build's exit status:
+    `return failures > 0 ? 0 : 1;`.
+  - So `make` stops if the break is not caught. The 14 printed failures are
+    the break working as intended.
+- **F7:**
+  - The stale name is fixed. The engine map's Accessors line in
+    `InstrumentManager.c` no longer names `instrumentManager_slotEngine()`.
+  - The A2 renders are still in `/tmp/s099p1_audition` (44 files, 30 MB).
+    Per Q-16 they are not records, so they were not moved into the tree.
+    Copy them before a reboot if A-G3 is still open.
+- **Other comments made correct:**
+  - The `BBD_D_MIN` / `BBD_D_MAX` note now covers the half-rate case: 32.5
+    to 495 ring samples against 16 a block, so the guard and pass-B rules
+    hold by the same block margins.
+  - The `BBD_COL_HALF_RATE` doc block gives the measured 47.0 in place of
+    the estimate.
+  - The loop, struct and pole-scale comments in `BbdChorus.c` and
+    `BbdChorus.h` were read against the code and match it.
+
+### 15.6 Gates re-run (this tree)
+
+| Gate | Result |
+|---|---|
+| `make all && make img` | clean, no new warning. Flash **735,736 / 753,664 B** (headroom 17,928); ITCM **16,288 / 16,384** (96 B free, unchanged). |
+| `make -C tools/dsp_test all` | exit 0: every law has 0 failures (`chorus` and `chorus_full` included) and all 87 breaks are caught. `special_tags`, `pwm_tables`, `chorus_tables` and the init writers are OK. |
+| `elf_s099_check` | 15 of 15 loops exact. |
+| `elf_p4_check P4BASE=baselines/s099p1/p4base` | the same as §14: 74 exact, the same 12 text-only moves, and per-symbol lengths identical to `p4_lengths_final.txt` (0 longer). Mixer: 58 equal, 0 shrank, 0 grew. |
+| `elf_p4_check` (default S096 P1 base) | red, as F5 says. Against that older base, which predates later mixer work, the matcher pairs unrelated loops, so its "grew" lines do not show a regression. Use the S099 snapshot. |
+| Colloid host cost | `colloid_cpu_post2.txt`: every mode −1.8 a sample against `colloid_cpu_post.txt`; `clx-pwm6-par` 449.9. |
+| Alkaline host cost | `alk_cost_post2.txt`: unchanged, 1,370 a block. |
+
+### 15.7 Additions to §11 and §14.6 (statements now out of date, for the user)
+
+- **The flash total** (§14.6): 735,736 B, headroom 17,928.
+- **`MEMORY.md` §DSP, the Colloid:**
+  - the note length is the gate alone, and all envelopes run a plain ADSR
+    (S099 P1 §15.4);
+  - the S096 P3 amp-attack minimum is gone.
+- **`MEMORY.md` §DSP, the chorus:** the Colloid's wet runs at half rate
+  (`BBD_COL_HALF_RATE`), and the Alkaline's at full rate.
+- **`S096_P3_IMPLEMENTATION.md` / `S096_P3_COLLOID_TETRAKT_INST_MIDI.md`**
+  §2.1 rules 2 and 4 (the amp attack extends the gate) are superseded by
+  §15.4. They stay as historical records.
+- **D-G5:** judge the device probe against `clx-pwm6-par` 449.9 and the
+  §15.2 table. C1 is the remaining option if p95 is over.

@@ -669,8 +669,8 @@ static uint8_t seq_rollStepNote[NUM_TRACKS];
  *             decided Q2: only a Colloid acts on it). 0 = no window.
  *   Results:  1/16 (24 ticks, Q8.8 6144) at fill 50: (6144 x 50 + 12800) /
  *             25600 = 12 ticks; fill 0 rounds to 0 and is raised to 1 tick
- *             (seq_lenStart()), so the note ends at the next tick and the
- *             amp attack sets its length.
+ *             (seq_lenStart()), so the note ends at the next tick (the
+ *             envelopes release from there, S099 P1 §15).
  * seq_changeMask / seq_changeSteppedMask / seq_changePendingMask
  *   What:     bit t of seq_changeMask: track t's played Scene changed
  *             (whole-Scene change, per-track change, coalesce); TIM3 then
@@ -3247,7 +3247,7 @@ static uint8_t seq_rollCarries(uint8_t track, const pat_step_specials_t *sp)
  *             note's gate is the engine's one step. fill 0..99: the window
  *             step interval x fill / 100 in whole master ticks (the roll
  *             window's rounding), at least 1, so fill 0 releases at the next
- *             tick and the amp attack sets the note's length.
+ *             tick (S099 P1 §15: no amp-attack minimum).
  * Inputs:     track 0..6, the step's resolved fill (pat_step_specials_t).
  * Outputs:    seq_lenWindow[track].
  * Context:    TIM3 (seq_advanceTrackStep(), seq_fireDeferred()).

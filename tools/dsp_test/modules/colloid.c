@@ -128,6 +128,8 @@ int16_t GetRngValue(void)
 #include "AlkalinePostTables.host.h"
 #include "AlkalinePostTables.host.c"
 #include "oscPwmWarp.host.h"
+#include "oscChopTables.host.h"     /* S099 P1: the chop curves, gains, mean and levels */
+#include "oscChopTables.host.c"
 #include "ColloidTables.host.h"
 #include "ColloidOsc.host.h"
 #include "ColloidVoice.host.h"
@@ -138,12 +140,13 @@ int16_t GetRngValue(void)
 #define BLK OUTPUT_DMA_SIZE
 enum { G_OSC, G_POS, G_W, G_MOT, G_INT, G_SLEW, G_EG, G_AMP, G_SVF, G_SER, G_RTE, G_POST,
        G_PWM, G_WTB, G_MX, G_RND, G_JOIN, G_PWG, G_GATE, G_RETRIG, G_ROLLGATE,
-       G_CHANGE, G_PENV, G_NOISE, G_SCAN, G_N };
+       G_CHANGE, G_PENV, G_NOISE, G_SCAN, G_CHP, G_N };
 static const char *g_name[G_N] = { "CO-OSC", "CO-POS", "CO-W", "CO-MOT", "CO-INT", "CO-SLEW",
                                    "CO-EG", "CO-AMP", "CO-SVF", "CO-SER", "CO-RTE", "CO-POST",
                                    "CO-PWM", "CO-WTB", "MX-ST", "CO-RND", "CO-JOIN",
                                    "CO-PWG", "CO-GATE", "CO-RETRIG", "CO-ROLLGATE",
-                                   "CO-CHANGE", "CO-PENV", "CO-NOISE", "CO-SCAN" };
+                                   "CO-CHANGE", "CO-PENV", "CO-NOISE", "CO-SCAN",
+                                   "CO-CHP" };
 static unsigned g_fail[G_N];
 
 static void fail(int g, const char *what, double a, double b)
@@ -516,10 +519,11 @@ static void test_eg(void)
 	if (V.ampEg.stage != COL_EG_ATTACK || V.ampEg.level != lvl) fail(G_EG, "retrigger level", V.ampEg.level, lvl);
 }
 
-/* CO-GATE (S096 P3 C1, plan §2.3): the amp attack stretches the gate, then
- * every envelope releases; sustain holds; the length special's release
- * point is the gate's; the filter attack is cut by the gate but never before
- * the amp attack ends. */
+/* CO-GATE (S096 P3 C1, plan §2.3; S099 P1 §15 the plain ADSR): the note is
+ * the gate (the step, or the length special's window), as from a keyboard;
+ * every envelope releases at the gate's end from the stage and level it
+ * reached, attack included; sustain holds, and a later sus-off write
+ * releases on the next block; no amp-attack minimum. */
 static void test_gate(void)
 {
 	unsigned n, b, g;
@@ -536,17 +540,21 @@ static void test_gate(void)
 	if (V.ampEg.stage != COL_EG_DECAY || n < 3u)
 		fail(G_GATE, "reference attack did not end", n, V.ampEg.stage);
 
-	/* a step shorter than the attack: the whole attack plays, then RELEASE
-	 * (no DECAY block), with the envelope at 1.0 when the gate ends */
+	/* a step of g blocks, shorter than the attack: attack for g blocks,
+	 * then RELEASE on block g + 1 from the level reached (below 1.0) */
+	g = n / 2u;
 	voice_init(); host_running = 1u; V.sustain = 0u;
 	V.attack = 60u; V.decay = 0u; V.release = 40u; V.sustainLevel = 0.5f;
-	Colloid_triggerVoice(&V, 0u, 100u, 63u, (uint32_t)(n / 2u) * 32u, 1u);
-	for (b = 0u; b < n; b++)
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, (uint32_t)g * 32u, 1u);
+	for (b = 0u; b < g; b++)
 		block();
+	if (V.ampEg.stage != COL_EG_ATTACK)
+		fail(G_GATE, "short step left the attack before its gate ended", V.ampEg.stage, g);
+	block();
 	if (V.ampEg.stage != COL_EG_RELEASE)
-		fail(G_GATE, "short step went to decay, not release", V.ampEg.stage, n);
-	if (V.ampEg.level < 0.99f)
-		fail(G_GATE, "short step cut the attack", V.ampEg.level, 1.0);
+		fail(G_GATE, "short step did not release at its gate's end", V.ampEg.stage, g + 1u);
+	if (V.ampEg.level >= 0.99f)
+		fail(G_GATE, "short step played the whole attack", V.ampEg.level, 0.99);
 
 	/* a step longer than the attack: decay and sustain hold to the gate's
 	 * end, then release (fill 50 is the same law at half the step) */
@@ -570,22 +578,32 @@ static void test_gate(void)
 		block();
 	if (V.ampEg.stage == COL_EG_RELEASE || V.ampEg.stage == COL_EG_IDLE)
 		fail(G_GATE, "sustain did not hold past the gate", V.ampEg.stage, b);
+	/* a later sus-off write (the drain's automation) ends the held note:
+	 * every envelope releases on the next block */
+	V.sustain = 0u;
+	block();
+	if (V.ampEg.stage != COL_EG_RELEASE || V.fltEg.stage != COL_EG_RELEASE ||
+	    V.pitchEg.stage != COL_EG_RELEASE)
+		fail(G_GATE, "sus off did not release the held note", V.ampEg.stage, V.fltEg.stage);
 
-	/* the filter attack is cut by the gate, never before the amp attack ends */
+	/* a one-block gate: all three envelopes hold one block, then release
+	 * together on the next, in mid-attack */
 	voice_init(); host_running = 1u; V.sustain = 0u;
 	V.attack = 60u; V.decay = 0u; V.release = 40u; V.sustainLevel = 0.5f;
 	V.fAttack = 60u; V.fRelease = 40u; V.fSustain = 0.5f;
+	V.pAttack = 60u; V.pRelease = 40u; V.pSustain = 0.5f;
 	Colloid_triggerVoice(&V, 0u, 100u, 63u, 32u, 1u);
 	block();
-	if (V.ampEg.stage == COL_EG_ATTACK && V.fltEg.stage != COL_EG_ATTACK)
-		fail(G_GATE, "filter released before the amp attack ended", V.fltEg.stage, 1);
-	for (b = 0u; b < n + 2u; b++)
-		block();
+	if (V.ampEg.stage != COL_EG_ATTACK || V.fltEg.stage != COL_EG_ATTACK ||
+	    V.pitchEg.stage != COL_EG_ATTACK)
+		fail(G_GATE, "an envelope left the attack inside the gate", V.fltEg.stage, V.ampEg.stage);
+	block();
 	if (V.ampEg.stage != COL_EG_RELEASE)
-		fail(G_GATE, "amp did not release after the gate", V.ampEg.stage, n);
-	if (V.fltEg.stage != COL_EG_RELEASE && V.fltEg.stage != COL_EG_IDLE)
-		fail(G_GATE, "filter did not release with the amp", V.fltEg.stage, V.ampEg.stage);
-	(void)g;
+		fail(G_GATE, "amp did not release at the gate's end", V.ampEg.stage, 2);
+	if (V.fltEg.stage != COL_EG_RELEASE)
+		fail(G_GATE, "filter did not release with the gate", V.fltEg.stage, 2);
+	if (V.pitchEg.stage != COL_EG_RELEASE)
+		fail(G_GATE, "pitch did not release with the gate", V.pitchEg.stage, 2);
 }
 
 /* CO-RETRIG (S096 P3 C1): a retrigger in release restarts the attack from
@@ -1147,10 +1165,29 @@ static void test_post(void)
 }
 
 /* the voice's buses against the restated pwm forms, one block (S095 P3 F2) */
+/* the chop law, restated (S099 P1): one oscillator's y at sample n of the
+ * block, from its block-start phase, increment, end / start widths and row */
+static int32_t ref_chopY(const int16_t *row, const int16_t *curve, uint32_t ph0,
+                         uint32_t inc, unsigned n, uint16_t d, uint16_t d0, int16_t g14)
+{
+	const uint32_t p = ph0 + n * inc;
+	const uint32_t j = (inc << 1) - (uint32_t)(((int32_t)d - (int32_t)d0) * 131072);
+	const uint32_t q = (ph0 << 1) - ((uint32_t)d0 << 22) + n * j;
+	const int32_t dd = row[(p >> 21) & 1023u] - row[q >> 22];
+	const int32_t g = (int32_t)(((int64_t)(dd * 4) * g14) >> 16) + (int32_t)(((p << 1) - q) >> 16);
+	const int32_t v = curve[(p + 0x20000000u) >> 22];
+
+	return (int32_t)(((int64_t)g * v) >> 16);
+}
+
 static void check_pwm_form(uint8_t form)
 {
 	uint32_t ph[COL_OSC_MAX];
 	unsigned n, i;
+	/* S099 P1: a chop form's bus starts at minus the stack's mean
+	 * (col_chopBlock()'s start pass), rebuilt here from the widths */
+	int32_t dcM0 = 0, dcM1 = 0;
+
 	voice_init(); host_running = 1u;
 	Colloid_setOscType(&V, COL_TYP_PWM);
 	V.osc.waveform = form; V.osc.position = 40u; V.posSpread = 0.6f;
@@ -1159,6 +1196,17 @@ static void check_pwm_form(uint8_t form)
 	Colloid_calcVoiceAsync(&V);
 	memcpy(ph, V.phase, sizeof(ph));
 	Colloid_calcVoiceSyncBlock(&V, L, BLK);
+	if (COL_PWM_IS_CHOP(form)) {
+		const int16_t *const dcT = (form == COL_PWM_REX) ? oscChopDcRexQ15 : oscChopDcRsQ15;
+		const int16_t *const relT = (form == COL_PWM_REX) ? oscChopRelRexQ15 : oscChopRelRsQ15;
+
+		for (i = 0u; i < COL_PWM_COUNT; i++) {
+			const int32_t rel = relT[V.pwPos[i] & 127u];
+
+			dcM0 += ((int32_t)dcT[V.pwPos0[i] & 127u] * rel) >> 16;
+			dcM1 += ((int32_t)dcT[V.pwPos[i] & 127u] * rel) >> 16;
+		}
+	}
 	for (n = 0u; n < BLK; n++) {
 		int32_t m = 0;
 		/* S095 P5: each form renders its own count (6 Sin/Tri, 6 Saw/Rec
@@ -1171,11 +1219,24 @@ static void check_pwm_form(uint8_t form)
 				v = ref_warp(sine_table, at, oscPwmSinW[k], oscPwmSinRa[k], oscPwmSinRb[k]);
 			else if (form == COL_PWM_TRI)
 				v = ref_warp(V.row[i], at, oscPwmTriW[k], oscPwmTriRa[k], oscPwmTriRb[k]);
-			else   /* S096 P2 F5: the gliding pulse, from pwD0 to pwD */
+			else if (COL_PWM_IS_CHOP(form)) {
+				/* S099 P1: the restated chop; the voice's bus also holds the
+				 * mean's start pass, so the check is the pairs' sum less
+				 * that pass (rebuilt below) */
+				const int16_t *const curve = (form == COL_PWM_REX) ? oscChopCurveRex : oscChopCurveRs;
+				const int16_t *const relT = (form == COL_PWM_REX) ? oscChopRelRexQ15 : oscChopRelRsQ15;
+				const uint32_t r = (uint32_t)(V.row[i] - sawTable[0]) >> 10;
+				const int32_t y = ref_chopY(V.row[i], curve, ph[i], V.inc[i], n,
+				                            V.pwD[i], V.pwD0[i], oscChopGainQ14[r]);
+
+				v = (int32_t)(((int64_t)y * relT[k]) >> 16);
+			} else   /* S096 P2 F5: the gliding pulse, from pwD0 to pwD */
 				v = ref_pulseG(V.row[i], ph[i], V.inc[i], n, V.pwD[i], V.pwD0[i],
 				               (form == COL_PWM_SAW) ? 1 : -1);
 			m += v;
 		}
+		if (COL_PWM_IS_CHOP(form))
+			m += (-(dcM0 * 32) + (int32_t)n * (dcM0 - dcM1)) >> 5;
 		if (V.busM[n] != m) { fail(G_PWM, "form bus", form, n); break; }
 	}
 }
@@ -1680,7 +1741,7 @@ static void test_pwg(void)
 {
 	uint8_t form;
 
-	for (form = COL_PWM_SIN; form <= COL_PWM_REC; form++) {
+	for (form = COL_PWM_SIN; form <= COL_PWM_REX; form++) {
 		const float still = pwg_run(form, 0);
 		const float lim = 3.0f * still + 0.002f;
 		const float swept = pwg_run(form, 1);
@@ -1688,6 +1749,90 @@ static void test_pwg(void)
 
 		if (swept > lim) fail(G_PWG, "swept width clicks", form, swept);
 		if (fast > lim) fail(G_PWG, "full-slew width clicks", form, fast);
+	}
+}
+
+/* CO-CHP (S099 P1): the chop pair loop against the restated law, both
+ * buses, on random rows, phases, widths and levels; then a voice-level
+ * check: an R-S stack at psp 0, pos 0 and 127, has a mean of the mid bus
+ * within 0.3 % of one oscillator's full scale (the start pass removes the
+ * mean), and every oscillator's gate row is the octave row + 2. */
+static void test_chop(void)
+{
+	uint32_t s = 0x5EEDu;
+	unsigned t, n;
+
+	for (t = 0u; t < 400u; t++) {
+		int32_t bus[2 * BLK], refb[2 * BLK];
+		const int16_t *rows[2];
+		uint32_t ph[2], inc[2], ph0[2];
+		uint16_t w[2], w0[2];
+		int16_t g14[2], rel[2], rp[2];
+		const int16_t *const curve = (t & 1u) ? oscChopCurveRex : oscChopCurveRs;
+		uint32_t gq, lv, lp;
+
+		for (unsigned o = 0u; o < 2u; o++) {
+			const uint32_t r = golden_rand(&s) % 11u;
+			const uint32_t k = golden_rand(&s) & 127u;
+			/* the start width within the slew (+-2 index steps) of the end */
+			const uint32_t k0 = (k + 128u + (golden_rand(&s) % 5u) - 2u) & 127u;
+
+			rows[o] = sawTable[r];
+			ph0[o] = ph[o] = golden_rand(&s);
+			inc[o] = golden_rand(&s) >> 6;
+			w[o] = oscPwmDSaw[k];
+			w0[o] = oscPwmDSaw[k0];
+			g14[o] = oscChopGainQ14[r];
+			rel[o] = (int16_t)(golden_rand(&s) & 0x7FFFu);
+			rp[o] = (int16_t)((int32_t)(golden_rand(&s) & 0xFFFFu) - 32768);
+		}
+		gq = (uint32_t)(uint16_t)g14[0] | ((uint32_t)(uint16_t)g14[1] << 16);
+		lv = (uint32_t)(uint16_t)rel[0] | ((uint32_t)(uint16_t)rel[1] << 16);
+		lp = (uint32_t)(uint16_t)rp[0] | ((uint32_t)(uint16_t)rp[1] << 16);
+		for (n = 0u; n < 2u * BLK; n++)
+			bus[n] = refb[n] = (int32_t)(golden_rand(&s) & 0xFFFFu) - 32768;
+		col_chopPairAdd(rows, ph, inc, w, w0, gq, lv, lp, curve, bus);
+		for (n = 0u; n < BLK; n++) {
+			const int32_t y0 = ref_chopY(rows[0], curve, ph0[0], inc[0], n, w[0], w0[0], g14[0]);
+			const int32_t y1 = ref_chopY(rows[1], curve, ph0[1], inc[1], n, w[1], w0[1], g14[1]);
+			const int32_t m = refb[n] + (int32_t)(((int64_t)y0 * rel[0]) >> 16)
+			                          + (int32_t)(((int64_t)y1 * rel[1]) >> 16);
+			const int32_t sd = refb[n + BLK] + (int32_t)(((int64_t)y0 * rp[0]) >> 16)
+			                                 + (int32_t)(((int64_t)y1 * rp[1]) >> 16);
+
+			if (bus[n] != m) { fail(G_CHP, "chop mid bus", bus[n], m); break; }
+			if (bus[n + BLK] != sd) { fail(G_CHP, "chop side bus", bus[n + BLK], sd); break; }
+		}
+		if (ph[0] != ph0[0] + BLK * inc[0]) fail(G_CHP, "chop phase advance", ph[0], 0);
+	}
+	/* the voice: the mean is removed, the rows are lifted */
+	for (unsigned form = COL_PWM_RS; form <= COL_PWM_REX; form++) {
+		static const uint8_t posv[2] = { 0u, 127u };
+
+		for (unsigned pi = 0u; pi < 2u; pi++) {
+			double sum = 0.0;
+			unsigned b;
+
+			voice_init(); host_running = 1u;
+			Colloid_setOscType(&V, COL_TYP_PWM);
+			V.osc.waveform = (uint8_t)form;
+			V.osc.position = posv[pi];
+			V.posSpread = 0.0f;
+			Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+			for (b = 0u; b < 400u; b++) {
+				block();
+				for (n = 0u; n < BLK; n++)
+					sum += V.busM[n];
+			}
+			if (fabs(sum / (400.0 * BLK)) > 0.003 * 32767.0 * COL_PWM_COUNT)
+				fail(G_CHP, "the stack's mean is not removed", form, sum / (400.0 * BLK));
+			for (unsigned i = 0u; i < COL_PWM_COUNT; i++) {
+				const uint32_t r = (uint32_t)(V.row[i] - sawTable[0]) >> 10;
+
+				if (r < OSC_CHOP_LIFT && r != 10u)
+					fail(G_CHP, "gate row not lifted", i, r);
+			}
+		}
 	}
 }
 
@@ -1722,6 +1867,8 @@ int main(void)
 	test_rnd();
 	test_join();
 	test_pwg();
+	/* S099 P1: last, so the existing laws keep the RNG stream they had */
+	test_chop();
 	for (g = 0u; g < G_N; g++) {
 		printf("colloid %-7s failures: %u\n", g_name[g], g_fail[g]);
 		total += g_fail[g];

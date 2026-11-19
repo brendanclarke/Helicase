@@ -1,0 +1,196 @@
+/*
+ * BbdChorus.h - the Advanced types' BBD chorus (S099 P1).
+ *
+ * What:       a stereo emulation of the Roland Alpha Juno chorus (two
+ *             MN3009 lines, one triangle LFO, the right line's sweep
+ *             inverted; DRAFT_ADVANCED_BBD_CHORUS.md §1, §2): per side a
+ *             pre-BBD pole, an int16 ring in the slot's FxBuffer voice unit,
+ *             a linearly interpolated tap at a delay that moves linearly
+ *             inside each block, a post-BBD pole whose cutoff follows the
+ *             delay, and dry x gd + wet x gw. Hosts:
+ *               the Colloid (clx), stereo in: csr L-R (each side its own
+ *                 channel, bbd_sideD() twice) or mid (one mid into both
+ *                 rings, bbd_midA() then bbd_tapB());
+ *               the Alkaline (alx), mono in: bbd_alkA() then bbd_alkB() on
+ *                 one ring, with the BBD input drive into a hard clip and a
+ *                 12 dB wet (a second post pole).
+ *             Every value of the unit (rings, guards and BbdChorusState) is
+ *             the chorus's; the host keeps only the unit pointer and its
+ *             rows' bytes.
+ * Why:        the brief (user, 2026-11-19): one 50 ms voice unit while the
+ *             effect type is selected, inside the Advanced share.
+ * Unit layout (int16 samples of the 2,208-sample unit):
+ *               0 .. 1,023      ring L        1,024  guard L (= ring L [0])
+ *               1,032 .. 2,055  ring R        2,056  guard R
+ *               2,064 ..        BbdChorusState (<= 288 B, asserted)
+ *             The pads keep ring R and the state 4-byte aligned.
+ * Accessors:  InstrumentManager.c (the cho writer, the clx / alx async and
+ *             sync cases, the quiet test).
+ * Affiliates: BbdChorusTables.h; FxBuffer.h; tools/dsp_test modules/chorus.c.
+ */
+#ifndef BBD_CHORUS_H_
+#define BBD_CHORUS_H_
+
+#include <stdint.h>
+#include "config.h"      /* OUTPUT_DMA_SIZE, REAL_FS */
+#include "FxBuffer.h"    /* FXBUF_VOICE_UNIT_SAMPLES, FXBUF_VOICE_UNIT_BYTES */
+
+/* cho (the chorus type row): off, the three Juno-60 modes, the Alpha Juno's
+ * variable rate and depth, a wide doubler (draft §5.1). */
+#define BBD_MODE_OFF      0u
+#define BBD_MODE_I        1u
+#define BBD_MODE_II       2u
+#define BBD_MODE_I_II     3u
+#define BBD_MODE_VAR      4u
+#define BBD_MODE_DBL      5u
+#define BBD_MODE_COUNT    6u
+/* csr (the Colloid's source switch, draft §2.5) */
+#define BBD_SRC_LR        0u
+#define BBD_SRC_MID       1u
+#define BBD_SRC_COUNT     2u
+
+#define BBD_RING          1024u   /* a power of two: the wrap is one AND (D-3) */
+#define BBD_RMASK         (BBD_RING - 1u)
+#define BBD_RING_R_OFS    1032u
+#define BBD_STATE_OFS     2064u
+/* the delay's range in output samples: >= 65 keeps the guard rule (the tap
+ * reaches index 1,023 at least two blocks after ring[0] was written); <= 990
+ * keeps the mid form's pass B behind the 32 samples pass A wrote (S099 P1
+ * deviation §0.3 item 8). At half rate (BBD_COL_HALF_RATE) the delay in ring
+ * samples is half: 32.5 .. 495, against 16 ring samples a block, so both
+ * rules still hold by the same margins in blocks. */
+#define BBD_D_MIN         65.0f
+#define BBD_D_MAX         990.0f
+/* the quiet test: 32 blocks (23 ms) after the host went quiet, every ring
+ * sample written while it sounded has passed every tap */
+#define BBD_TAIL_BLOCKS   32u
+/* the Colloid's fixed wet cutoff (no cbw row on the clx, draft §7.2):
+ * bbdKcTone[73] = 9.0 kHz (Q-10, by ear) */
+#define BBD_COL_TONE      73u
+/*
+ * The Colloid's half-rate wet (S099 P1 review, F1: the chorus draft's C3).
+ *
+ * What:       1: the Colloid's chorus writes and reads its rings at half the
+ *             sample rate (22,054 Hz: one ring sample per two output
+ *             samples). Per output pair: the pre pole runs at the full rate on
+ *             both inputs, the ring takes their mean (a zero at 22 kHz: with
+ *             the pole, about -12 dB at 15 kHz and -22 dB at 20 kHz before the
+ *             fold), one interpolated tap feeds both outputs, the first through
+ *             the mean of this and the previous tap (a linear interpolation
+ *             between ring samples, so the half-rate images near 22 kHz - f
+ *             are sin^2-shaped, not sin), and the post pole and the dry + wet
+ *             run at the full rate. 0: the full-rate loops.
+ *             The Alkaline always runs full rate (it has room: S099 P1 review
+ *             F2).
+ * Why:        F1: the full-rate L-R form is 51.8 instructions a sample after
+ *             the behaviour-neutral trims; the p95 target at 1.4 cycles an
+ *             instruction is 50. The half-rate form measured 47.0 (40.5 in
+ *             the loops, 6.5 the control and render paths; S099 P1 §15).
+ *             The wet is band-limited anyway (the post pole at 5-9 kHz, the
+ *             BBD's own clock): a 11 kHz wet band is BBD-like at the long end
+ *             of the sweep (draft §6 C3).
+ * Sound:      the wet's highs above about 11 kHz fold and image; law CH-HALF
+ *             measures both against the full-rate form and bounds them. The
+ *             dry path is exact either way (law CH-MIX0).
+ * Inputs:     -DBBD_COL_HALF_RATE (bench builds compare both).
+ * Accessors:  bbdChorus_renderColloid(), bbd_sidePlan(), bbdChorus_init().
+ */
+#ifndef BBD_COL_HALF_RATE
+#define BBD_COL_HALF_RATE 1
+#endif
+/* the ring samples one half-rate block writes */
+#define BBD_HALF_BLOCK    (OUTPUT_DMA_SIZE / 2u)
+
+/*
+ * One side of the chorus (S099 P1).
+ *
+ * What:       ring (this side's ring: ring L, ring R, or ring L again for the
+ *             Alkaline's mono form), rp (the Q16 read position at the block's
+ *             start, in ring samples: index << 16 | fraction), inc (the Q16
+ *             read step per ring sample), p (the pre pole's state, at the
+ *             sample's own scale), o / o2 (the post poles' states, x 2; o2 the
+ *             Alkaline's second pole), kk (packed 1 - k, Q16: the pre pole in
+ *             the low half, the post pole in the high half), dEnd (the Q16
+ *             delay at the block's end, in output samples: the next block's
+ *             start), tq (the half-rate form's previous tap, x 2).
+ */
+typedef struct {
+	int16_t *ring;
+	uint32_t rp;
+	uint32_t inc;
+	int32_t  p, o, o2;
+	uint32_t kk;
+	int32_t  dEnd;
+	int32_t  tq;
+} BbdSide;
+
+/*
+ * The chorus state, kept in the unit's tail (S099 P1).
+ *
+ * What:       the two sides; w (the ring write count, free-running: the
+ *             index is w & 1,023); gk (packed gains: gn = gd - 32768 in the
+ *             low half, gw in the high half, Q15); gDrv (the Alkaline's BBD
+ *             input gain, Q13, x1 .. x4); lfoPh (the triangle's phase, 2^32 a
+ *             cycle); depthNow / cNow (the slewed sweep depth and centre, in
+ *             samples); idleBlocks (blocks since the host went quiet, held at
+ *             0xFFFF); mono (1 for the Alkaline's one-ring form); half (1
+ *             when the rings run at half rate: the Colloid with
+ *             BBD_COL_HALF_RATE; w then counts ring samples, 16 a block).
+ * Why:        the voice structs keep only 12 B (Colloid) / 76 B (Alkaline);
+ *             the unit has 288 B after its rings (draft §3.1).
+ */
+typedef struct {
+	BbdSide  side[2];
+	uint32_t w;
+	uint32_t gk;
+	uint32_t gDrv;
+	uint32_t lfoPh;
+	float    depthNow;
+	float    cNow;
+	uint16_t idleBlocks;
+	uint8_t  mono;
+	uint8_t  half;
+} BbdChorusState;
+
+_Static_assert(sizeof(BbdChorusState) <= (FXBUF_VOICE_UNIT_SAMPLES - BBD_STATE_OFS) * 2u,
+               "BbdChorusState must fit the unit's tail (288 B)");
+_Static_assert(BBD_RING_R_OFS >= BBD_RING + 1u && BBD_STATE_OFS >= BBD_RING_R_OFS + BBD_RING + 1u,
+               "ring R and the state must follow ring L and its guard");
+_Static_assert((BBD_RING_R_OFS % 2u) == 0u && (BBD_STATE_OFS % 2u) == 0u,
+               "ring R and the state must be 4-byte aligned");
+
+/*
+ * Entry points (S099 P1).
+ *
+ * bbdChorus_init(unit, mono, mode)
+ *   What:     clears the whole unit (the FxBuffer contract: owners clear
+ *             what they claim) and seeds the state: both sides on their
+ *             rings (mono: both on ring L), the centre at the mode's, the
+ *             depth 0 (it slews in), the delay ends at the centre, the gains
+ *             dry only (until the first control block).
+ *   Context:  foreground (the cho writer, a first bind after a slot reset).
+ * bbdChorus_control(unit, mode, rate, depth, mix, tone, drive, width, quiet)
+ *   What:     the block's control: the LFO step, the depth and centre slew,
+ *             each side's delay at the block's end and its read plan
+ *             (bbd_sidePlan()), the pole coefficients (tone, and the post
+ *             pole's tracking), the gains (mix, drive), the quiet count.
+ *   Context:  render (the slot async), every block while the unit is bound.
+ * bbdChorus_renderColloid(unit, left, right, src)
+ * bbdChorus_renderAlkaline(unit, left, right)
+ *   What:     the block's audio, in place on the host's two int16 blocks
+ *             (the Alkaline's right block is written from the left first).
+ *   Context:  render (the slot sync), after the host's own render.
+ * bbdChorus_tailDone(unit)
+ *   What:     1 once the host has been quiet for BBD_TAIL_BLOCKS blocks.
+ */
+void bbdChorus_init(int16_t *unit, uint8_t mono, uint8_t mode);
+void bbdChorus_control(int16_t *unit, uint8_t mode, uint8_t rate, uint8_t depth,
+                       uint8_t mix, uint8_t tone, uint8_t drive, uint8_t width,
+                       uint8_t quiet) __attribute__((noinline));
+void bbdChorus_renderColloid(int16_t *unit, int16_t *left, int16_t *right,
+                             uint8_t src) __attribute__((noinline));
+void bbdChorus_renderAlkaline(int16_t *unit, int16_t *left, int16_t *right)
+	__attribute__((noinline));
+uint8_t bbdChorus_tailDone(const int16_t *unit);
+
+#endif /* BBD_CHORUS_H_ */

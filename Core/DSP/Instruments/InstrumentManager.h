@@ -110,6 +110,35 @@ typedef enum {
      *             a leading part of the new list and is accepted.
      */
     INSTRUMENT_TYPE_TKT,
+    /*
+     * S099 P1: the Advanced Colloid (token "clx"), before UNKNOWN.
+     *
+     * What:       value 7; UNKNOWN moves from 7 to 8. The type runs the
+     *             Colloid engine (ColloidVoice, the same union member) and the
+     *             BBD chorus (BbdChorus.h) in one FxBuffer voice unit while
+     *             its cho row is not off; its registry row points at the
+     *             Colloid's descriptor table with 64 rows (the Colloid's 59,
+     *             then the five chorus rows).
+     * Why:        appended (the standing rule): no stored value changes
+     *             meaning; menu_instrumentLoadIndex[] (menu.c: +2 B .bss) and
+     *             every `type >= UNKNOWN` guard follow; a .hcnames header
+     *             written before the addition is a leading part of the new
+     *             list and is accepted. Engine-level code tests the engine
+     *             (instrumentManager_typeEngine(): clx -> col), not the type.
+     */
+    INSTRUMENT_TYPE_CLX,
+    /*
+     * S099 P1 (P-E): the Advanced Alkaline (token "alx"), before UNKNOWN.
+     *
+     * What:       value 8; UNKNOWN moves from 8 to 9. The type runs the
+     *             Alkaline engine (AlkalineVoice) and the BBD chorus in its
+     *             mono-in form (the Alpha Juno's own topology) with a 12 dB
+     *             wet, a BBD drive into a hard clip, a tone and a width; while
+     *             the chorus runs the slot is stereo (instrumentManager_
+     *             slotRight() returns the voice's right block).
+     * Why:        appended, as clx; menu_instrumentLoadIndex[] +2 B .bss.
+     */
+    INSTRUMENT_TYPE_ALX,
     INSTRUMENT_TYPE_UNKNOWN
 } instrument_type_t;
 
@@ -256,6 +285,29 @@ typedef enum {
      *             classifier.
      */
     IM_SPECIAL_LFO_SYNC,
+    /*
+     * S099 P1: chorus_type writer (the Advanced types' cho row).
+     *
+     * What:       IM_SPECIAL_CHORUS_TYPE = 24 (next after IM_SPECIAL_LFO_SYNC,
+     *             23); IM_SPECIAL_WRITER_COUNT becomes 25 (<= 32, the 5-bit
+     *             writer field, asserted below). The writer clamps the byte to
+     *             BBD_MODE_COUNT - 1, stores it in the voice, makes the slot
+     *             own one FxBuffer voice unit while it is not off (none while
+     *             off), binds and clears the unit on a first bind, and
+     *             refreshes the slot's right-block pointer.
+     * Why:        the brief: the chorus's 50 ms unit is held only while its
+     *             type is selected. The row is a selector that is neither
+     *             automatable, morphable nor a modulation target, so every
+     *             write comes from the foreground (FxBuffer's share callback
+     *             is foreground-only).
+     * Inputs:     slot, byte value (0..5; larger values become dbl).
+     * Outputs:    the voice's choType and choUnit; the slot's units.
+     * Accessors:  instrumentManager_writeSpecialRuntime() switch.
+     * Affiliates: BBD_MODE_* (BbdChorus.h); the chorus_type rows;
+     *             tools/dsp_test/check_special_tags.py; the diagnostic
+     *             classifier.
+     */
+    IM_SPECIAL_CHORUS_TYPE,
     IM_SPECIAL_WRITER_COUNT
 } instrument_special_writer_t;
 
@@ -918,14 +970,20 @@ void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
 /*
  * The slot's right output block, for a stereo engine (S095 P2, draft §5).
  *
- * What:       the Colloid's or the Tetrakt's (S096 P1) voice->right (32
- *             int16, written by its sync
- *             block in the same call that fills the mixer's left buffer), or
- *             NULL for every other type and for an empty slot.
+ * What:       the stereo voice's right block (32 int16, written by its
+ *             sync block in the same call that fills the mixer's left
+ *             buffer): the Colloid's and Advanced Colloid's voice->right, the
+ *             Tetrakt's (S096 P1), and (S099 P1, P-E) the Advanced
+ *             Alkaline's while its chorus runs; NULL for every other type, an
+ *             Advanced Alkaline with the chorus off, and an empty slot.
+ *             S099 P1: read from a per-slot pointer table set where the
+ *             runtime type or the chorus's unit changes
+ *             (instrumentManager_slotRightUpdate()).
  * Why:        the mixer renders one mono stack block per slot (sampleData);
  *             the right block lives inside the voice (the slot reserve), so a
  *             stereo voice costs no new RAM. noinline keeps the call out of
- *             mixer_calcNextSampleBlock()'s register allocation.
+ *             mixer_calcNextSampleBlock()'s register allocation; the table
+ *             read is shorter than the type tests it replaces.
  * Inputs:     slot 0..5. Outputs: a borrowed pointer valid until the next
  *             render of the slot, or NULL.
  * Accessors:  mixer_calcNextSampleBlock() (once per slot per block, after
@@ -1074,6 +1132,24 @@ void instrumentManager_setMidiHold(uint8_t slot, uint8_t on);
  * field write while a deferred Scene replacement is still pending.
  */
 instrument_type_t instrumentManager_runtimeType(uint8_t slot);
+/*
+ * The engine behind a type (S099 P1).
+ *
+ * What:       the type whose engine (union member, entry points, engine
+ *             rules) a registry type runs: INSTRUMENT_TYPE_CLX -> COL (P-E:
+ *             ALX -> ALK); every other type is its own engine; UNKNOWN and
+ *             out-of-range values give UNKNOWN.
+ *             instrumentManager_runtimeEngine(slot) is the same for the slot's
+ *             live runtime type.
+ * Why:        the Advanced types run the Basic engines unchanged; code that
+ *             asks "is this a Colloid voice" (menu wave names, the MIDI
+ *             note modes, the engine branches in InstrumentManager.c) tests
+ *             the engine, and registry lookups keep the type.
+ * Accessors:  InstrumentManager.c; menu.c menu_formatWaveCell();
+ *             MidiNoteModes.c.
+ */
+instrument_type_t instrumentManager_typeEngine(instrument_type_t type);
+instrument_type_t instrumentManager_runtimeEngine(uint8_t slot);
 /*
  * Visit the two modulation destinations owned by every live runtime LFO.
  *

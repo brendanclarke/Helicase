@@ -66,6 +66,7 @@
 #include "Oscillator.h"
 #include "AlkalineVoice.h"     /* S094 P4: ALK_WAVE_COUNT (the name assert) */
 #include "ColloidVoice.h"      /* S095 P2: COL_WAVE_COUNT, the COL_* counts (the name asserts) */
+#include "BbdChorus.h"         /* S099 P1: BBD_MODE_COUNT, BBD_SRC_COUNT (the name asserts) */
 #include "TetraktVoice.h"      /* S096 P1: TKT_LAYER_MASK_COUNT (the name assert) */
 #include "transientGenerator.h"   /* S087 P3: transient list with user one-shots */
 #include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* (name asserts) */
@@ -12492,25 +12493,28 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
     memset(nameDst, ' ', SAMPLE_DISPLAY_NAME_LEN);
     memset(codeDst, ' ', 3u);
     /*
-     * S093 P8: an Alkaline slot's osc1 under wav lists Saw, Sqr, Tri.
+     * S093 P8: an Alkaline slot's osc1 under wav lists Saw, Sqr, Tri; S099
+     * P1: under pwm Saw, Sqr, Tri, R-S, REx.
      *
-     * What:       value 0 -> "Saw", 1 -> "Sqr", 2 -> "Tri" (S094 P4)
-     *             (alkWaveNames), copied to the name and compact-code fields;
-     *             any other value names nothing (blank), as a Drum value past
-     *             its list.
+     * What:       value -> the list's name (alkWaveNames under wav,
+     *             alkPwmWaveNames under pwm), copied to the name and
+     *             compact-code fields; any other value names nothing (blank),
+     *             as a Drum value past its list.
      * Why:        the stock list (waveformNames: Sin, Tri, ...) is not the
-     *             Alkaline's; the voice plays Saw for 0, Sqr for 1 and Tri
-     *             for 2 (alk_renderWav()). Under wtb the Alkaline cell takes the
-     *             shared branch below (wNN, the table name).
+     *             Alkaline's; the voice plays Saw for 0, Sqr for 1, Tri for 2
+     *             and (pwm) R-S for 3 and REx for 4. Under wtb the Alkaline
+     *             cell takes the shared branch below (wNN, the table name).
      * Accessors:  menu_formatWaveValue3() (compact cells, overlays, the voice
      *             automation display), the single-parameter painter.
      */
-    /* S094 P4: the Alkaline lists Saw Sqr Tri under both wav and pwm */
     if (isOsc1 && (type == OSC_TYPE_WAV || type == OSC_TYPE_PWM) &&
-        instrumentManager_runtimeType(cell->slot) == INSTRUMENT_TYPE_ALK) {
-        if (value < (uint8_t)alkWaveNames[0][0]) {
-            memcpy(nameDst, alkWaveNames[value + 1u], 3u);
-            memcpy(codeDst, alkWaveNames[value + 1u], 3u);
+        instrumentManager_runtimeEngine(cell->slot) == INSTRUMENT_TYPE_ALK) {
+        const char (*const names)[4] = (type == OSC_TYPE_PWM) ? alkPwmWaveNames
+                                                              : alkWaveNames;
+
+        if (value < (uint8_t)names[0][0]) {
+            memcpy(nameDst, names[value + 1u], 3u);
+            memcpy(codeDst, names[value + 1u], 3u);
         }
         return;
     }
@@ -12531,16 +12535,32 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
     }
     /*
      * S095 P2 (C-D20): a Colloid slot's osc1 under wav lists Saw, Rec, Tri,
-     * Sin (colWaveNames). S095 P3 F2: under pwm it takes the shared pwm
-     * branch below (Sin, Tri, Saw, Rec: the platform's list and order); under
-     * wtb the shared catalogue branch (wNN, the table name).
+     * Sin (colWaveNames); S099 P1: under pwm its own list Sin, Tri, Saw, Rec,
+     * R-S, REx (colPwmWaveNames, the branch below); under wtb the shared
+     * catalogue branch (wNN, the table name).
      */
     if (isOsc1 && type == OSC_TYPE_WAV &&
-        instrumentManager_runtimeType(cell->slot) == INSTRUMENT_TYPE_COL) {
+        instrumentManager_runtimeEngine(cell->slot) == INSTRUMENT_TYPE_COL) {
         if (value < COL_WAVE_COUNT) {
             memcpy(nameDst, colWaveNames[value + 1u], 3u);
             memcpy(codeDst, colWaveNames[value + 1u], 3u);
         }
+        return;
+    }
+    /*
+     * S099 P1: a Colloid slot's osc1 under pwm (Sin Tri Saw Rec R-S REx).
+     *
+     * What:       value 0..COL_PWM_WAVE_COUNT - 1 -> colPwmWaveNames; any
+     *             other value names nothing. No compact code (the shared pwm
+     *             branch has none either).
+     * Why:        the shared branch below names the drum engines' four from
+     *             waveformNames, where index 4 is Noi; the drum family has no
+     *             chopped waves (plan P-F, deferred).
+     */
+    if (isOsc1 && type == OSC_TYPE_PWM &&
+        instrumentManager_runtimeEngine(cell->slot) == INSTRUMENT_TYPE_COL) {
+        if (value < COL_PWM_WAVE_COUNT)
+            memcpy(nameDst, colPwmWaveNames[value + 1u], 3u);
         return;
     }
     /*
@@ -12758,6 +12778,8 @@ static const char (*menu_onoffTagNames(uint8_t tag))[4]
     case ONOFF_TAG_COL_FILT_TYPE:  return colFiltTypeNames;
     case ONOFF_TAG_COL_TYPE:       return colTypeNames;      /* S096 P3 */
     case ONOFF_TAG_TKT_LAYERS:     return tktLayerNames;      /* S096 P1 */
+    case ONOFF_TAG_CHO_TYPE:       return choTypeNames;       /* S099 P1 */
+    case ONOFF_TAG_CHO_SOURCE:     return choSrcNames;        /* S099 P1 */
     default:                    return oscRunNames;
     }
 }
@@ -12909,6 +12931,11 @@ _Static_assert((sizeof(voiceChainNames) / sizeof(voiceChainNames[0])) - 1u ==
 _Static_assert((sizeof(alkWaveNames) / sizeof(alkWaveNames[0])) - 1u ==
                    ALK_WAVE_COUNT,
                "alkWaveNames must list Saw, Sqr and Tri");
+/* S099 P1: the Alkaline pwm list names every pwm value: Saw, Sqr, Tri, R-S,
+ * REx (ALK_PWM_WAVE_COUNT, AlkalineVoice.h). */
+_Static_assert((sizeof(alkPwmWaveNames) / sizeof(alkPwmWaveNames[0])) - 1u ==
+                   ALK_PWM_WAVE_COUNT,
+               "alkPwmWaveNames must list Saw, Sqr, Tri, R-S and REx");
 /* S093 P8 / S094 P1: the Alkaline typ list is wav, wtb, pwm (ALK_TYP_COUNT,
  * AlkalineVoice.h) */
 _Static_assert((sizeof(alkTypeNames) / sizeof(alkTypeNames[0])) - 1u == 3u,
@@ -12917,6 +12944,10 @@ _Static_assert((sizeof(alkTypeNames) / sizeof(alkTypeNames[0])) - 1u == 3u,
  * enumerations (ColloidVoice.h, ColloidTables.h). */
 _Static_assert((sizeof(colWaveNames) / sizeof(colWaveNames[0])) - 1u == COL_WAVE_COUNT,
                "colWaveNames must list Saw, Rec, Tri and Sin");
+/* S099 P1: the Colloid's pwm list names every pwm value (COL_PWM_WAVE_COUNT). */
+_Static_assert((sizeof(colPwmWaveNames) / sizeof(colPwmWaveNames[0])) - 1u ==
+                   COL_PWM_WAVE_COUNT,
+               "colPwmWaveNames must list Sin, Tri, Saw, Rec, R-S and REx");
 _Static_assert((sizeof(colRouteNames) / sizeof(colRouteNames[0])) - 1u == COL_RTE_COUNT,
                "colRouteNames must list str and every filter type (S095 P3)");
 _Static_assert((sizeof(colFiltTypeNames) / sizeof(colFiltTypeNames[0])) - 1u == COL_FT_COUNT,
@@ -12927,6 +12958,11 @@ _Static_assert((sizeof(colTypeNames) / sizeof(colTypeNames[0])) - 1u == COL_TYP_
 /* S096 P1: the layer-switch names list every 4-bit mask (TetraktVoice.h). */
 _Static_assert((sizeof(tktLayerNames) / sizeof(tktLayerNames[0])) - 1u == TKT_LAYER_MASK_COUNT,
                "tktLayerNames must list the 16 layer sets");
+/* S099 P1: the chorus lists name every stored value (BbdChorus.h). */
+_Static_assert((sizeof(choTypeNames) / sizeof(choTypeNames[0])) - 1u == BBD_MODE_COUNT,
+               "choTypeNames must list off I II 1+2 var dbl");
+_Static_assert((sizeof(choSrcNames) / sizeof(choSrcNames[0])) - 1u == BBD_SRC_COUNT,
+               "choSrcNames must list L-R and mid");
 _Static_assert((sizeof(foldTypeNames) / sizeof(foldTypeNames[0])) - 1u ==
                    VOICE_FOLD_COUNT &&
                (sizeof(foldTypeLongNames) / sizeof(foldTypeLongNames[0])) - 1u ==

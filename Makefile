@@ -39,6 +39,7 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/DSP/Instruments/Alkaline \
           -ICore/DSP/Instruments/Colloid \
           -ICore/DSP/Instruments/Tetrakt \
+          -ICore/DSP/Instruments/Chorus \
           -ICore/DSP/Effects \
           -ICore/DSP/Effects/CrumpBit \
           -ICore/DSP/Effects/Space \
@@ -161,6 +162,7 @@ DSP_SRCS = \
   Core/DSP/Instruments/Alkaline/AlkalineTables.c \
   Core/DSP/Instruments/Alkaline/AlkalinePostTables.c \
   Core/DSP/Instruments/Alkaline/AlkalineVoice.c \
+  Core/DSP/Instruments/Alkaline/AlkalineChop.c \
   Core/DSP/Instruments/Colloid/ColloidOsc.c \
   Core/DSP/Instruments/Colloid/ColloidTables.c \
   Core/DSP/Instruments/Colloid/ColloidVoice.c \
@@ -193,7 +195,10 @@ DSP_SRCS = \
   Core/DSPAudio/transientTables.c \
   Core/DSPAudio/voiceFold.c \
   Core/DSPAudio/voiceFoldTables.c \
-  Core/DSPAudio/wavetable.c
+  Core/DSPAudio/wavetable.c \
+  Core/DSPAudio/oscChopTables.c \
+  Core/DSP/Instruments/Chorus/BbdChorus.c \
+  Core/DSP/Instruments/Chorus/BbdChorusTables.c
 
 # -Ofast for DSP: enables -ffast-math (float reordering, NaN/Inf assumptions)
 CFLAGS_DSP = $(subst -O2,-Ofast,$(CFLAGS))
@@ -300,6 +305,24 @@ $(BUILD)/Core/DSP/Instruments/HiHat/HiHat.o: Core/DSP/Instruments/HiHat/HiHat.c 
 $(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineVoice.o: Core/DSP/Instruments/Alkaline/AlkalineVoice.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
+# S099 P1: the chopped waves' render (Alkaline_renderChop()) is its own object,
+# -fno-lto for the S095 P2 reason (the Makefile comment above the Colloid
+# rules): in the LTO unit it re-partitioned the unit and ten Drum-family loops
+# changed, two of them +1. Outside it no loop grows (the ten that differ are
+# shorter or an equal-length twin; baselines/s099p1/p4_lengths_b.txt). The
+# render is a noinline call from alk_renderPwm(), so it loses nothing from LTO.
+$(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineChop.o: Core/DSP/Instruments/Alkaline/AlkalineChop.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+# S099 P1: the ladder (mode 5's body copy) is -fno-lto as well. With only
+# AlkalineChop.c outside the unit, the new copy of dl_renderB2Body() still
+# re-partitioned it (fourteen Drum loops changed, two of them +1). Outside, no
+# loop grows and the four existing B2R wrappers are
+# instruction-identical to the Phase 0 snapshot (elf_s099_check); the ladder
+# loses nothing from LTO (its wrappers are noinline).
+$(BUILD)/Core/DSPAudio/DiodeLadder.o: Core/DSPAudio/DiodeLadder.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 $(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineControl.o: Core/DSP/Instruments/Alkaline/AlkalineControl.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
@@ -334,6 +357,26 @@ $(BUILD)/Core/DSP/Instruments/Colloid/ColloidOsc.o: Core/DSP/Instruments/Colloid
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 $(BUILD)/Core/DSP/Instruments/Colloid/ColloidTables.o: Core/DSP/Instruments/Colloid/ColloidTables.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+
+# S099 P1: the chopped pwm waves' tables (generated, data only). -fno-lto for
+# the S095 P2 reason: outside the LTO unit a new object cannot shift LTO's
+# partitioning of the other engines' loops (gate: elf_p4_check). The
+# Alkaline (in the LTO unit) and the Colloid (-fno-lto) both read them as
+# ordinary externals.
+$(BUILD)/Core/DSPAudio/oscChopTables.o: Core/DSPAudio/oscChopTables.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+
+# S099 P1: the BBD chorus (the Advanced types' insert) and its tables are DSP:
+# -Ofast, and -fno-lto for the S095 P2 reason (a new object outside the LTO
+# unit cannot shift the other engines' loops; its entry points are noinline
+# calls from InstrumentManager).
+$(BUILD)/Core/DSP/Instruments/Chorus/BbdChorus.o: Core/DSP/Instruments/Chorus/BbdChorus.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+$(BUILD)/Core/DSP/Instruments/Chorus/BbdChorusTables.o: Core/DSP/Instruments/Chorus/BbdChorusTables.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 

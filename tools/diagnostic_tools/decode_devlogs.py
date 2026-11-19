@@ -1120,8 +1120,10 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
         budget = 216e6 / (44108.07291666667 / 32.0)
         if (flags & 7) < 6:
             # S096 P1: the Colloid (5) and the Tetrakt (6) are named too
-            # (the probe's type field is InstrumentManager.h's enum).
-            types = {0: "drm", 1: "snr", 2: "cym", 3: "hat", 4: "alk", 5: "col", 6: "tkt"}
+            # (the probe's type field is InstrumentManager.h's enum);
+            # S099 P1: the Advanced Colloid (7) and Advanced Alkaline (8)
+            types = {0: "drm", 1: "snr", 2: "cym", 3: "hat", 4: "alk", 5: "col", 6: "tkt",
+                     7: "clx", 8: "alx"}
             typ = flags >> 3
             blk = (value >> 16) & 0xFFFF
             ren = value & 0xFFFF

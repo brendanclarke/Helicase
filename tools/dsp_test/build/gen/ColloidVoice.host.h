@@ -184,27 +184,32 @@ _Static_assert(COL_PWM_WARP_COUNT >= 2u && COL_PWM_WARP_COUNT <= COL_PWM_COUNT &
 #define COL_WAVE_COUNT        4u
 
 /*
- * osc.waveform under typ pwm (S095 P3 F2, Q10; was C-D21's Rec alone).
+ * osc.waveform under typ pwm (S095 P3 F2, Q10; S099 P1 the chopped waves).
  *
  * What:       the platform's pwm list and order (Oscillator.h SINE, TRI,
- *             SAW, REC; OSC_PWM_WAVE_COUNT): 0 Sin and 1 Tri are the phase-warp
- *             forms (col_warpStore/Add on sine_table or a triTable octave
- *             row, W/Ra/Rb from oscPwmSin* / oscPwmTri*), 2 Saw and 3 Rec the
- *             two-read form (col_pwmPairStore/Add with sign +1 / -1 on a
- *             sawTable octave row, the width from oscPwmDSaw / oscPwmDRec). A
- *             byte past Rec plays Rec (the platform's S087 r8 rule).
- * Why:        the same names and order as the drum engines' pwm cell, so the
- *             menu's shared pwm branch names them (waveformNames) and a Scene
- *             reads alike across engines; the width law per form is the
- *             shipped S094 P4 tables.
- * Accessors:  col_oscControl(), Colloid_calcVoiceSyncBlock(),
+ *             SAW, REC; OSC_PWM_WAVE_COUNT) and then the Colloid's two
+ *             chopped waves: 0 Sin and 1 Tri are the phase-warp forms
+ *             (col_warpStore/Add), 2 Saw and 3 Rec the two-read form
+ *             (col_pwmPairStore/Add, sign +1 / -1), 4 R-S (the Alpha Juno
+ *             chopped saw) and 5 REx (the same chop on a rising exponential):
+ *             the chop form (col_chopBlock(): col_chopDcInit() and three
+ *             col_chopPairAdd() calls). A byte past REx plays Rec (the
+ *             unchanged clamp in col_oscControl() and the sync block).
+ * Why:        the first four keep the drum engines' names and order, so a
+ *             Scene reads alike across engines; the chopped waves are the
+ *             Colloid's (S099 P1, D-1; the drum family's chop is deferred,
+ *             plan P-F, Q-2), so the Colloid's pwm names are its own list
+ *             (MenuText.h colPwmWaveNames).
+ * Accessors:  col_oscControl(), Colloid_calcVoiceSyncBlock(), col_chopBlock(),
  *             Colloid_setOscType(); InstrumentManager.c waveDomainMax.
  */
 #define COL_PWM_SIN           0u
 #define COL_PWM_TRI           1u
 #define COL_PWM_SAW           2u
 #define COL_PWM_REC           3u
-#define COL_PWM_WAVE_COUNT    4u
+#define COL_PWM_RS            4u    /* S099 P1: the chopped saw */
+#define COL_PWM_REX           5u    /* S099 P1: the chopped exponential */
+#define COL_PWM_WAVE_COUNT    6u
 
 /*
  * The pwm form's oscillator count (S095 P5, user 2026-11-14).
@@ -214,7 +219,9 @@ _Static_assert(COL_PWM_WARP_COUNT >= 2u && COL_PWM_WARP_COUNT <= COL_PWM_COUNT &
  *             Rec, a pulse form, so the test is w <= COL_PWM_TRI.
  *             COL_PWM_FORM_COUNT(w) is that form's oscillator count:
  *             COL_PWM_WARP_COUNT (6) for Sin/Tri, COL_PWM_COUNT for Saw/Rec
- *             (8 in S095 P5, 6 again since S096 P2 F5).
+ *             (8 in S095 P5, 6 again since S096 P2 F5). The chop forms (R-S,
+ *             REx) are not warp forms: they render COL_PWM_COUNT (6)
+ *             oscillators, as Saw/Rec.
  * Why:        one definition for the async (count, level) and the sync block
  *             (the warp loop's bound), so the two can never render different
  *             counts in the same block.
@@ -223,8 +230,13 @@ _Static_assert(COL_PWM_WARP_COUNT >= 2u && COL_PWM_WARP_COUNT <= COL_PWM_COUNT &
  */
 #define COL_PWM_IS_WARP(w)    ((uint32_t)(w) <= COL_PWM_TRI)
 #define COL_PWM_FORM_COUNT(w) (COL_PWM_IS_WARP(w) ? COL_PWM_WARP_COUNT : COL_PWM_COUNT)
-_Static_assert(COL_PWM_WAVE_COUNT == OSC_PWM_WAVE_COUNT,
-               "the Colloid's pwm list is the platform's");
+/* S099 P1: 1 for the chop forms R-S and REx (osc.waveform under typ pwm;
+ * col_oscControl() and the sync block clamp a byte past the list to Rec
+ * before testing, so the test is w >= COL_PWM_RS). */
+#define COL_PWM_IS_CHOP(w)    ((uint32_t)(w) >= COL_PWM_RS)
+_Static_assert(COL_PWM_WAVE_COUNT == OSC_PWM_WAVE_COUNT + 2u,
+               "the Colloid's pwm list is the platform's, then R-S and REx "
+               "(S099 P1; the drum family's chop is deferred)");
 
 /* typ (C-D20; S096 P3): the descriptor byte 0 wav, 1 wtb, 2 pwm, 3 wts
  * (the Colloid's ONOFF_TAG_COL_TYPE list, colTypeNames);
@@ -443,8 +455,9 @@ typedef struct ColloidVoiceStruct
 	 *             unless a trigger fired (which clears changeArm) or susSeen
 	 *             is set.
 	 * Why:        the brief (2026-11-17): a step plays its length (or the
-	 *             length special's), at least through the amp attack, then
-	 *             releases; sustain holds until the track or Scene changes.
+	 *             length special's), then releases (S099 P1 §15: no
+	 *             amp-attack minimum); sustain holds until the track or Scene
+	 *             changes.
 	 *             Before S096 P3 nothing told the engine that a note ended
 	 *             (C-D8/C-D19).
 	 * RAM:        4 B in the padding after oscLive, 4 B for gateLeft; the
@@ -505,6 +518,32 @@ typedef struct ColloidVoiceStruct
 	float    nG2;           /* G = g / (1 + g) at the low-pass corner */
 	float    nGL, nGR;      /* the noise's gain into each channel's drive */
 	float    nHSt, nLSt;    /* the slewed corners (semitones above 20 Hz) */
+	/*
+	 * The Advanced Colloid's chorus (S099 P1; DRAFT_ADVANCED_BBD_CHORUS.md
+	 * §2, §7).
+	 *
+	 * What:       choUnit: the slot's FxBuffer voice unit while cho is not
+	 *             off (the rings, guards and BbdChorusState, BbdChorus.h), else
+	 *             NULL; choType cho (BBD_MODE_*), choRate crt, choDepth cdp,
+	 *             choMix cmx, choSrc csr (BBD_SRC_*): the clx type's five rows,
+	 *             the descriptor bytes as they are.
+	 * Why:        the clx type runs this engine unchanged, then the chorus pass
+	 *             (instrumentManager_calcSlotSyncBlock()). A Basic Colloid (col,
+	 *             59 rows) never writes these bytes, and choUnit stays NULL
+	 *             (the slot reset clears the whole member).
+	 * RAM:        12 B in the 1,264 B slot reserve (1,212 -> 1,224 B, measured
+	 *             at step 0.5): appended, so no existing member moves and no
+	 *             loop's offsets change.
+	 * Accessors:  ColloidParameters.c (rows 59..63); InstrumentManager.c
+	 *             (IM_SPECIAL_CHORUS_TYPE, the clx async and sync, the quiet
+	 *             test); colloidParameters_cellInactive().
+	 */
+	int16_t *choUnit;
+	uint8_t  choType;
+	uint8_t  choRate;
+	uint8_t  choDepth;
+	uint8_t  choMix;
+	uint8_t  choSrc;
 } ColloidVoice;
 
 /*

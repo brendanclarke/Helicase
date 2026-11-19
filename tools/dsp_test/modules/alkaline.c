@@ -101,6 +101,9 @@
 #include "Oscillator.host.c"
 /* S094 P1 S3: the real generated PWM tables referenced by Oscillator.c. */
 #include "oscPwmTables.host.c"
+/* S099 P1: the chopped waves' tables (alk_renderChop()) */
+#include "oscChopTables.host.h"
+#include "oscChopTables.host.c"
 
 /* the tables the whole Oscillator.c references: the real triangle since
  * S094 P4 (the Tri laws); sine_table and recTable stay zero stand-ins */
@@ -152,6 +155,7 @@ void instrumentManager_applyVelocityModulationTarget(uint8_t source_slot, float 
 #include "AlkalinePostTables.host.c"   /* S094 P1 S4: the real generated tables */
 #include "AlkalineSquareTable.host.c"
 #include "AlkalineVoice.host.c"
+#include "AlkalineChop.host.c"     /* S099 P1: Alkaline_renderChop() */
 
 #define BLK OUTPUT_DMA_SIZE
 #define ALK_STEP 5514u   /* a 16th at 120 BPM, samples */
@@ -159,13 +163,13 @@ void instrumentManager_applyVelocityModulationTarget(uint8_t source_slot, float 
 /* law groups (S094 P1: AL-OD0 golden, AL-A3 drive tables, AL-OV overdrive,
  * AL-TN tone, AL-PW pwm appended; S094 P4: AL-XT and AL-PWW appended; the
  * array holds one counter per group) */
-static unsigned g_fail[23];
+static unsigned g_fail[24];
 enum { G_B, G_R, G_S, G_N, G_AB, G_D, G_Q, G_F, G_O, G_X, G_A, G_M, G_SO, G_PS, G_W, G_TY,
-       G_OD0, G_A3, G_OV, G_TN, G_PW, G_XT, G_PWW };
+       G_OD0, G_A3, G_OV, G_TN, G_PW, G_XT, G_PWW, G_CH };
 static const char *g_name[] = { "AL-B", "AL-R", "AL-S", "AL-N", "AL-AB", "AL-D", "AL-Q",
                                 "AL-F", "AL-O", "AL-X", "AL-A", "AL-M", "AL-SO", "AL-PS",
                                 "AL-W", "AL-TY", "AL-OD0", "AL-A3", "AL-OV", "AL-TN",
-                                "AL-PW", "AL-XT", "AL-PWW" };
+                                "AL-PW", "AL-XT", "AL-PWW", "AL-CH" };
 enum { K_B2R = 0, K_AR = 1, K_BR = 2 };
 static const char *k_name[] = { "B2R", "A-R", "B-R" };
 
@@ -1522,16 +1526,22 @@ static void test_typ(void)
 	Alkaline_setOscType(&v, ALK_TYP_WTB);
 	if (v.osc.interpStamp != 0u || v.wtbSlot != 0u)
 		fail(G_TY, "a type change keeps the slot", v.osc.interpStamp, v.wtbSlot);
-	/* S094 P1 S5: 2 and above are pwm; S094 P4: pwm clamps wav to Tri; the
-	 * phase runs on */
+	/* S094 P1 S5: 2 and above are pwm; S094 P4: pwm clamps wav to its last
+	 * entry; S099 P1: that entry is REx (4, the pwm list's last); the phase
+	 * runs on */
 	v.osc.waveform = 9u;
 	v.osc.phase = 0x0badf00du;
 	Alkaline_setOscType(&v, 7u);
 	if (v.osc.oscType != OSC_TYPE_PWM) fail(G_TY, "7 is pwm", v.osc.oscType, 0);
-	if (v.osc.waveform != ALK_WAVE_TRI) fail(G_TY, "pwm clamps to Tri", v.osc.waveform, 0);
+	if (v.osc.waveform != ALK_WAVE_REX) fail(G_TY, "pwm clamps to REx", v.osc.waveform, 0);
 	if (v.osc.phase != 0x0badf00du) fail(G_TY, "the phase runs on (-> pwm)", 0, 0);
+	/* S099 P1: a pwm R-S / REx switched to wav plays Tri (the wav list's last) */
+	v.osc.waveform = ALK_WAVE_REX;
+	Alkaline_setOscType(&v, ALK_TYP_WAV);
+	if (v.osc.waveform != ALK_WAVE_TRI) fail(G_TY, "pwm REx -> wav Tri", v.osc.waveform, 0);
 	/* S094 P4: Tri (2) is in both lists: pwm Tri -> wav stays Tri */
 	v.osc.waveform = ALK_WAVE_TRI;
+	Alkaline_setOscType(&v, ALK_TYP_PWM);
 	Alkaline_setOscType(&v, ALK_TYP_WAV);
 	if (v.osc.waveform != ALK_WAVE_TRI) fail(G_TY, "pwm Tri -> wav Tri", v.osc.waveform, 0);
 }
@@ -1971,6 +1981,144 @@ static void test_pwm_wt(void)
 	}
 }
 
+/* ---------------------------------------------------------------- AL-CH
+ * S099 P1: the Alkaline chopped waves R-S and REx (fused mode 5).
+ *   - pos 0, 64, 127 under R-S and REx: finite, bounded, sounding;
+ *   - the width slew and the note snap are the pwm rules (AL-PW's, on R-S);
+ *   - the read-form error: this build's render (ALK_CHOP_READ_FORM 2) against
+ *     the form-0 reference written by the second bench build
+ *     (build/alk_chop_ref.bin): printed; it must stay at least 15 dB below the
+ *     reference RMS (a gross-error guard, as AL-PW). The three Makefile breaks
+ *     (wrap at the cycle end, no floor offset, a summed gate) each move the
+ *     render by far more than that, so each fails here;
+ *   - level: R-S at pos 0 within 6 dB RMS of Saw under pwm at pos 0 (printed;
+ *     the ALK_CHOP_SCALE_V setting, by ear in B-G5). */
+#define CH_PATH "build/alk_chop_ref.bin"
+
+static void ch_render(int16_t *out)
+{
+	AlkalineVoice v;
+
+	gold_voice(&v, ALK_WAVE_SAW, 0u);
+	Alkaline_setOscType(&v, ALK_TYP_PWM);
+	v.osc.waveform = ALK_WAVE_RS;
+	v.osc.position = 24u;
+	gold_pattern(&v, out);
+	gold_voice(&v, ALK_WAVE_SAW, 0u);
+	Alkaline_setOscType(&v, ALK_TYP_PWM);
+	v.osc.waveform = ALK_WAVE_REX;
+	v.osc.position = 96u;
+	gold_pattern(&v, out + (size_t)GOLD_PAT_BLOCKS * BLK);
+}
+
+static int mode_chopRender(const char *path)
+{
+	int16_t *buf = malloc((size_t)2 * GOLD_PAT_BLOCKS * BLK * sizeof(int16_t));
+	FILE *fo = fopen(path, "wb");
+
+	ch_render(buf);
+	if (!fo || fwrite(buf, sizeof(int16_t), (size_t)2 * GOLD_PAT_BLOCKS * BLK, fo)
+	           != (size_t)2 * GOLD_PAT_BLOCKS * BLK)
+		return 1;
+	fclose(fo);
+	free(buf);
+	return 0;
+}
+
+static void test_chop(void)
+{
+	static const uint8_t pos[3] = { 0u, 64u, 127u };
+	static const uint8_t wave[2] = { ALK_WAVE_RS, ALK_WAVE_REX };
+
+	/* bounds at the width extremes */
+	for (int w = 0; w < 2; w++)
+		for (int p = 0; p < 3; p++) {
+			static int16_t buf[GOLD_PAT_BLOCKS * BLK];
+			AlkalineVoice v;
+			double s = 0.0;
+
+			gold_voice(&v, ALK_WAVE_SAW, 0u);
+			Alkaline_setOscType(&v, ALK_TYP_PWM);
+			v.osc.waveform = wave[w];
+			v.osc.position = pos[p];
+			gold_pattern(&v, buf);
+			for (size_t i = 0; i < (size_t)GOLD_PAT_BLOCKS * BLK; i++)
+				s += (double)buf[i] * buf[i];
+			if (!isfinite(s) || s <= 0.0) fail(G_CH, "bounded and sounding", w, pos[p]);
+		}
+	/* the width slew and the note snap, as AL-PW's, on R-S (S099 P1) */
+	{
+		AlkalineVoice v;
+		int16_t buf[BLK];
+
+		gold_voice(&v, ALK_WAVE_SAW, 0u);
+		Alkaline_setOscType(&v, ALK_TYP_PWM);
+		v.osc.waveform = ALK_WAVE_RS;
+		v.osc.position = 10u;
+		Alkaline_triggerVoice(&v, 0u, 80u, 63u, ALK_STEP);
+		if (v.osc.positionApplied != 10u)
+			fail(G_CH, "a note snaps the width", v.osc.positionApplied, 10);
+		v.osc.position = 100u;
+		for (int b = 0; b < 60; b++) {
+			const uint8_t before = v.osc.positionApplied;
+
+			block(&v, buf, K_B2R);
+			if (abs((int)v.osc.positionApplied - (int)before) > OSC_PWM_SLEW_STEPS)
+				fail(G_CH, "width slew", before, v.osc.positionApplied);
+		}
+		if (v.osc.positionApplied != 100u)
+			fail(G_CH, "the slew lands", v.osc.positionApplied, 100);
+	}
+	/* the read form against the reference */
+	{
+		const size_t n = (size_t)2 * GOLD_PAT_BLOCKS * BLK;
+		int16_t *now = malloc(n * sizeof(int16_t));
+		int16_t *ref = malloc(n * sizeof(int16_t));
+		FILE *fi = fopen(CH_PATH, "rb");
+		double se = 0.0, sr = 0.0;
+
+		ch_render(now);
+		if (!fi || fread(ref, sizeof(int16_t), n, fi) != n) {
+			fail(G_CH, "no reference render", 0, 0);
+		} else {
+			for (size_t i = 0; i < n; i++) {
+				const double e = (double)now[i] - ref[i];
+
+				se += e * e;
+				sr += (double)ref[i] * ref[i];
+			}
+			{
+				const double db = 10.0 * log10((se + 1e-9) / (sr + 1e-9));
+
+				printf("AL-CH: chop form %d against form 0 %.1f dB RMS\n", ALK_CHOP_READ_FORM, db);
+				if (ALK_CHOP_READ_FORM != 0 && db > -15.0) fail(G_CH, "read-form error", db, -15.0);
+			}
+		}
+		if (fi) fclose(fi);
+		free(now);
+		free(ref);
+	}
+	/* level against Saw under pwm at pos 0 (printed, bounded) */
+	{
+		AlkalineVoice v;
+		static int16_t a[GOLD_PAT_BLOCKS * BLK];
+		double sa = 0.0;
+		double db;
+
+		gold_voice(&v, ALK_WAVE_SAW, 0u);
+		Alkaline_setOscType(&v, ALK_TYP_PWM);
+		v.osc.waveform = ALK_WAVE_RS;
+		v.osc.position = 0u;
+		gold_pattern(&v, a);
+		for (size_t i = 0; i < (size_t)GOLD_PAT_BLOCKS * BLK; i++)
+			sa += (double)a[i] * a[i];
+		db = 20.0 * log10(sqrt(sa / ((double)GOLD_PAT_BLOCKS * BLK)) /
+		                  pw_rms(ALK_WAVE_SAW, ALK_TYP_PWM, 0u));
+		printf("AL-CH: R-S pwm at 0 against Saw pwm at 0 %+.2f dB RMS\n", db);
+		if (fabs(db) > 6.0) fail(G_CH, "R-S level", db, 6.0);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	unsigned g, total = 0u;
@@ -1987,6 +2135,9 @@ int main(int argc, char **argv)
 	/* S094 P1 S5: write the pwm reference render (the form-0 build) */
 	if (argc > 2 && !strcmp(argv[1], "--pwm-render"))
 		return mode_pwmRender(argv[2]);
+	/* S099 P1: write the chop reference render (the form-0 build) */
+	if (argc > 2 && !strcmp(argv[1], "--chop-render"))
+		return mode_chopRender(argv[2]);
 
 	test_bounds();
 	for (int k = 0; k < 3; k++) {
@@ -2041,6 +2192,8 @@ int main(int argc, char **argv)
 	test_pwm();
 	/* S094 P4: the Alkaline pwm Tri (fused mode 4) */
 	test_pwm_wt();
+	/* S099 P1: the Alkaline chopped waves R-S and REx (fused mode 5) */
+	test_chop();
 	/* every group in g_name (S093 P6: fourteen; was a literal 10) */
 	for (g = 0u; g < sizeof g_name / sizeof g_name[0]; g++) {
 		printf("%s: %u failure(s)\n", g_name[g], g_fail[g]);

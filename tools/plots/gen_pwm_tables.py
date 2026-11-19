@@ -53,12 +53,56 @@ Accessors:  tools/dsp_test/Makefile target pwm_tables.
 Affiliates: Oscillator.c osc_pwmPlan(); AlkalineVoice.c alk_renderPwm();
             tools/dsp_test/modules/oscillator.c group pwm; modules/alkaline.c
             AL-PW / AL-PWW; S094_P4_IMPLEMENTATION.md §2.
+S099 P1:    the chopped waves R-S and REx (DRAFT_S-R_PWM_WAVE.md §4, §6.4)
+            go in their own pair, Core/DSPAudio/oscChopTables.h/.c, so the
+            tables above (and T1-T9) stay byte-identical:
+              oscChopCurveRs[1024], oscChopCurveRex[1024]
+                                 int16 round(32767 c(x)), x = i/1024 - 1/8:
+                                 the 1x ramp wrapped at 7/8 of the cycle
+                                 (index (ph + 2^29) >> 22), so the wrap sits
+                                 inside the last chopped section for every
+                                 width <= 1/2. R-S: c(x) = x. REx: c(x) =
+                                 s(x) / s(7/8), s(x) = (e^(kx) - 1) /
+                                 (e^k - 1), k = CHOP_REX_K (D-11, by ear).
+              oscChopGainQ14[11] int16 round(16384 x 65536 / span_r): the
+                                 gate's normalisation per sawTable row r
+                                 (span_r = 2 A_r 32767, A_r the row's naive
+                                 saw amplitude from its middle slope).
+              oscChopSpanF[11], oscChopInvSpanF[11]
+                                 float span_r and 1 / span_r (the
+                                 Alkaline's float form; no VDIV).
+              oscChopDcRsQ15[128], oscChopDcRexQ15[128]
+                                 int16 round(32767 dc(w)), w = oscPwmDSaw[k]
+                                 / 1024: the wave's mean, the integral of c
+                                 over the two passed segments [0, w/2) and
+                                 [1/2, 1/2 + w/2).
+              oscChopLevelRs[128], oscChopLevelRex[128]
+                                 float 1 / P(w), P = c((1 + w)/2) - dc(w):
+                                 the peak-keeping level (D-5, Q-14).
+              oscChopRelRsQ15[128], oscChopRelRexQ15[128]
+                                 int16 round(32767 level / Lref), Lref = the
+                                 largest level of the wave (written as
+                                 OSC_CHOP_LREF_RS / _REX in the header): the
+                                 Colloid's per-oscillator level.
+            Checks T10-T15 (below); T8 covers the new pair too.
 """
 import math
+import re
 import sys
 
 H_PATH = "Core/DSPAudio/oscPwmTables.h"
 C_PATH = "Core/DSPAudio/oscPwmTables.c"
+
+# --- S099 P1: the chopped waves (oscChopTables.h/.c) ---
+CHOP_H_PATH = "Core/DSPAudio/oscChopTables.h"
+CHOP_C_PATH = "Core/DSPAudio/oscChopTables.c"
+WAVETABLE_C = "Core/DSPAudio/wavetable.c"
+# D-11 (user, 2026-11-19): one fixed REx curve, chosen by ear from 4..6 in
+# the P-A audition (S099_P1_IMPLEMENTATION.md A2); 5 until then
+CHOP_REX_K = 5.0
+CHOP_POINTS = 1024
+CHOP_WRAP_INDEX = 128          # (ph + 2^29) >> 22 puts x = 0 at index 128
+CHOP_ROWS = 11
 
 N = 128
 D_REC_STEP = 4            # points per pos step: 512 -> 4 (0.39 %)
@@ -92,6 +136,158 @@ def split(w_end):
 
 def lift(ws):
     return [int(round(math.log2(0.5 / w))) for w in ws]
+
+
+def saw_rows():
+    """sawTable[11][1024] from wavetable.c (comments stripped), as
+    gen_stock_tables.py read_table() reads it."""
+    text = open(WAVETABLE_C).read()
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", "", text)
+    m = re.search(r"sawTable\[11\]\[1024\]\s*=\s*\{(.*?)\};", text, re.S)
+    v = [int(x) for x in re.findall(r"-?\d+", m.group(1))]
+    if len(v) != CHOP_ROWS * CHOP_POINTS:
+        sys.exit("gen_pwm_tables.py: sawTable has %d values" % len(v))
+    return [v[r * CHOP_POINTS:(r + 1) * CHOP_POINTS] for r in range(CHOP_ROWS)]
+
+
+def row_amplitude(row):
+    """A_r: minus half the least-squares slope of the row's middle half
+    (points 256..767) in full-scale units per cycle (S-R draft §4.1,
+    Appendix A). About 1 for rows 0-5, up to 2.43 for row 10."""
+    xs = [i / 1024.0 for i in range(256, 768)]
+    ys = [row[i] / 32767.0 for i in range(256, 768)]
+    mx = sum(xs) / len(xs)
+    my = sum(ys) / len(ys)
+    slope = (sum((x - mx) * (y - my) for x, y in zip(xs, ys)) /
+             sum((x - mx) ** 2 for x in xs))
+    return -slope / 2.0
+
+
+def rex_s(x, k=None):
+    k = CHOP_REX_K if k is None else k
+    return (math.exp(k * x) - 1.0) / (math.exp(k) - 1.0)
+
+
+def rex_S(x, k=None):
+    """The integral of rex_s from 0 to x."""
+    k = CHOP_REX_K if k is None else k
+    return ((math.exp(k * x) - 1.0) / k - x) / (math.exp(k) - 1.0)
+
+
+def curve_fns(wave):
+    """(c, C): the wave's curve c(x) and its integral C(x) from 0, in the
+    table's units (c(7/8) = 1 for REx; c(x) = x for R-S)."""
+    if wave == "rs":
+        return (lambda x: x), (lambda x: x * x / 2.0)
+    top = rex_s(7.0 / 8.0)
+    return (lambda x: rex_s(x) / top), (lambda x: rex_S(x) / top)
+
+
+def chop_curve(wave):
+    c, _ = curve_fns(wave)
+    return [int(round(32767.0 * c(i / 1024.0 - 1.0 / 8.0))) for i in range(CHOP_POINTS)]
+
+
+def chop_dc_level(wave, d_saw_v):
+    """dc(w) and level(w) = 1 / P(w) at every pos (w = d / 1024)."""
+    c, C = curve_fns(wave)
+    dcs, levels = [], []
+    for d in d_saw_v:
+        w = d / 1024.0
+        dc = (C(w / 2.0) - C(0.0)) + (C(0.5 + w / 2.0) - C(0.5))
+        peak = c(0.5 + w / 2.0) - dc
+        dcs.append(dc)
+        levels.append(1.0 / peak)
+    return dcs, levels
+
+
+def chop_tables(d_saw_v):
+    rows = saw_rows()
+    amp = [row_amplitude(r) for r in rows]
+    span = [2.0 * a * 32767.0 for a in amp]
+    gain = [int(round(16384.0 * 65536.0 / s)) for s in span]
+    out = {"rows": rows, "span": span, "gain": gain}
+    for wave in ("rs", "rex"):
+        dcs, lv = chop_dc_level(wave, d_saw_v)
+        lref = max(lv)
+        out[wave] = {
+            "curve": chop_curve(wave),
+            "dc_q15": [int(round(32767.0 * x)) for x in dcs],
+            "dc": dcs,
+            "level": lv,
+            "lref": lref,
+            "rel": [int(round(32767.0 * x / lref)) for x in lv],
+        }
+    return out
+
+
+def chop_checks(t, d_saw_v):
+    """T10-T15 (S099 P1). Each returns False with a printed reason."""
+    ok = True
+    def bad(msg):
+        print("chop tables:", msg)
+        return False
+    for wave in ("rs", "rex"):
+        cv = t[wave]["curve"]
+        # T10: the curve is 0 at x = 0 (index 128), strictly increasing,
+        # inside int16, and below full scale over the read range
+        if cv[CHOP_WRAP_INDEX] != 0:
+            ok = bad("T10 %s curve(0) = %d" % (wave, cv[CHOP_WRAP_INDEX]))
+        if any(b <= a for a, b in zip(cv, cv[1:])):
+            ok = bad("T10 %s curve not strictly increasing" % wave)
+        if max(cv) >= 32767 or min(cv) < -32768:
+            ok = bad("T10 %s curve out of range" % wave)
+        # T13: the positive peak after the DC dominates (the level keeps the
+        # peak, not the negative excursion -dc), and level x peak = 1
+        for k, (dc, lv) in enumerate(zip(t[wave]["dc"], t[wave]["level"])):
+            if not (1.0 / lv > dc > 0.0):
+                ok = bad("T13 %s pos %d: peak %.4f dc %.4f" % (wave, k, 1.0 / lv, dc))
+        # T14: the Colloid's relative levels fit Q15 and are >= 1
+        rel = t[wave]["rel"]
+        top = t[wave]["level"].index(t[wave]["lref"])
+        if max(rel) > 32767 or min(rel) < 1 or rel[top] != 32767:
+            ok = bad("T14 %s rel range" % wave)
+    # T11: every gate gain fits a signed halfword and is positive
+    if any(not (0 < g <= 32767) for g in t["gain"]):
+        ok = bad("T11 gain %s" % t["gain"])
+    # T12: the Colloid loop's range (col_chopPairAdd()), swept exactly as the
+    # loop computes it: every row, every width, every 2x gate point of a cycle
+    # (ph in steps of 2^21, so the gate and the curve indices cover their whole
+    # grid and their pairing is the loop's). The gate stays under 2^17 and its
+    # product with the curve, >> 16, inside int16 x 1.1 (the Gibbs overshoot).
+    # A closed form on span x g14 alone is too loose: the largest gate and the
+    # largest curve never meet (the ramp's peak sits in a chopped section).
+    for wave in ("rs", "rex"):
+        gmax, ymax, at = chop_range(t, d_saw_v, wave)
+        if gmax >= (1 << 17) or ymax > int(32767 * 1.1):
+            ok = bad("T12 %s gate %d y %d at %s" % (wave, gmax, ymax, at))
+    # T15: pos 0 is the Alpha Juno Saw 2 (w = 1/2): R-S dc = 3/16, level
+    # 1 / 0.5625 (S-R draft §2), to the table's rounding
+    if abs(t["rs"]["dc"][0] - 0.1875) > 1e-9 or abs(t["rs"]["level"][0] - 1.0 / 0.5625) > 1e-9:
+        ok = bad("T15 R-S pos 0 is not Saw 2")
+    return ok
+
+
+def chop_range(t, d_saw_v, wave):
+    """(largest |gate|, largest |y|, where) over rows, widths and the 2x gate
+    grid, computed exactly as col_chopPairAdd() computes them (T12)."""
+    cv = t[wave]["curve"]
+    gmax = ymax = 0
+    at = None
+    for r, row in enumerate(t["rows"]):
+        g14 = t["gain"][r]
+        for d in d_saw_v:
+            for ph in range(0, 1 << 32, 1 << 21):
+                itg = (ph >> 21) & 0x3FF
+                g = (((row[itg] - row[(itg - d) & 0x3FF]) << 2) * g14 >> 16) + (d << 6)
+                y = (g * cv[((ph + 0x20000000) & 0xFFFFFFFF) >> 22]) >> 16
+                if abs(g) > gmax:
+                    gmax = abs(g)
+                if abs(y) > ymax:
+                    ymax = abs(y)
+                    at = (r, d, itg)
+    return gmax, ymax, at
 
 
 def finite_values(ws, W, ra, rb):
@@ -247,6 +443,81 @@ def render_c(d_rec_v, d_saw_v, l_rec, l_saw, tri_w, tri_ra, tri_rb, tri_lift,
     return "\n".join(parts)
 
 
+def render_chop_h(t):
+    return "\n".join([
+        "/* Generated by tools/plots/gen_pwm_tables.py (S099 P1). Do not edit. */",
+        "#ifndef OSC_CHOP_TABLES_H_",
+        "#define OSC_CHOP_TABLES_H_",
+        "",
+        "#include <stdint.h>",
+        "",
+        "/*",
+        " * The chopped pwm waves R-S and REx (S099 P1; DRAFT_S-R_PWM_WAVE.md §4,",
+        " * §6.4), flash.",
+        " *",
+        " * What:       y = c(ramp_w(phi)) x gate(phi) - dc: the 1x ramp, wrapped",
+        " *             at 7/8 of the cycle and read through the wave's curve",
+        " *             table, times a band-limited pulse an octave up (the",
+        " *             shipped Rec two-read at twice the phase, on the sawTable",
+        " *             row OSC_CHOP_LIFT octaves above the note's), minus the",
+        " *             wave's mean. Tables by pos (positionApplied 0..127; the",
+        " *             width w = oscPwmDSaw[pos] / 1,024 of each gate cycle):",
+        " *               oscChopCurveRs / Rex: the curve on x = i / 1,024 - 1/8",
+        " *                 (index (ph + 2^29) >> 22); R-S linear, REx",
+        " *                 (e^(kx) - 1) / (e^k - 1) scaled to 1 at x = 7/8;",
+        " *               oscChopGainQ14[row]: the gate's normalisation,",
+        " *                 16384 x 65536 / span (D x g14 / 16384 spans 65,536);",
+        " *               oscChopSpanF / InvSpanF[row]: span and 1 / span (float);",
+        " *               oscChopDc*Q15[pos]: 32767 x the mean;",
+        " *               oscChopLevel*[pos]: 1 / the peak after the mean;",
+        " *               oscChopRel*Q15[pos]: 32767 x level / OSC_CHOP_LREF_*.",
+        " * Why:        the Alpha Juno's PWM saw is a ramp chopped to its floor by",
+        " *             a pulse at +1 octave; no sum of saw reads makes its kinks,",
+        " *             a product does. Per-block lookups, no division.",
+        " * Accessors:  AlkalineVoice.c alk_renderChop(); ColloidVoice.c",
+        " *             col_chopBlock(); ColloidOsc.c col_chopPairAdd().",
+        " * Affiliates: oscPwmTables.h (oscPwmDSaw, the widths);",
+        " *             tools/plots/gen_pwm_tables.py (the law, T10-T15).",
+        " */",
+        "#define OSC_CHOP_LIFT 2u          /* Q-15: the gate row is the note's + 2 */",
+        "#define OSC_CHOP_REX_K %.6ff     /* D-11: the REx curve's k */" % CHOP_REX_K,
+        "#define OSC_CHOP_LREF_RS %.9ef  /* the largest R-S level */" % t["rs"]["lref"],
+        "#define OSC_CHOP_LREF_REX %.9ef /* the largest REx level */" % t["rex"]["lref"],
+        "extern const int16_t oscChopCurveRs[1024];",
+        "extern const int16_t oscChopCurveRex[1024];",
+        "extern const int16_t oscChopGainQ14[11];",
+        "extern const float   oscChopSpanF[11];",
+        "extern const float   oscChopInvSpanF[11];",
+        "extern const int16_t oscChopDcRsQ15[128];",
+        "extern const int16_t oscChopDcRexQ15[128];",
+        "extern const float   oscChopLevelRs[128];",
+        "extern const float   oscChopLevelRex[128];",
+        "extern const int16_t oscChopRelRsQ15[128];",
+        "extern const int16_t oscChopRelRexQ15[128];",
+        "",
+        "#endif /* OSC_CHOP_TABLES_H_ */",
+        "",
+    ])
+
+
+def render_chop_c(t):
+    f = lambda vals: ["    " + ", ".join("%.9ef" % v for v in vals[i:i + 4]) + ","
+                      for i in range(0, len(vals), 4)]
+    parts = ["/* Generated by tools/plots/gen_pwm_tables.py (S099 P1). Do not edit. */",
+             '#include "oscChopTables.h"', ""]
+    for name, wave in (("oscChopCurveRs", "rs"), ("oscChopCurveRex", "rex")):
+        parts += ["const int16_t %s[1024] = {" % name]
+        parts += rows(t[wave]["curve"], "%6d", 8) + ["};", ""]
+    parts += ["const int16_t oscChopGainQ14[11] = {"] + rows(t["gain"], "%6d", 11) + ["};", ""]
+    parts += ["const float oscChopSpanF[11] = {"] + f(t["span"]) + ["};", ""]
+    parts += ["const float oscChopInvSpanF[11] = {"] + f([1.0 / s for s in t["span"]]) + ["};", ""]
+    for wave, suffix in (("rs", "Rs"), ("rex", "Rex")):
+        parts += ["const int16_t oscChopDc%sQ15[128] = {" % suffix] + rows(t[wave]["dc_q15"], "%6d", 8) + ["};", ""]
+        parts += ["const float oscChopLevel%s[128] = {" % suffix] + f(t[wave]["level"]) + ["};", ""]
+        parts += ["const int16_t oscChopRel%sQ15[128] = {" % suffix] + rows(t[wave]["rel"], "%6d", 8) + ["};", ""]
+    return "\n".join(parts)
+
+
 def main():
     d_rec_v, d_saw_v = d_rec(), d_saw()
     l_rec, l_saw = level(d_rec_v), level(d_saw_v)
@@ -255,19 +526,24 @@ def main():
     sin_ws, sin_w, sin_ra, sin_rb = split(SIN_W_END)
     ok = checks(d_rec_v, d_saw_v, l_rec, l_saw, tri_ws, tri_w, tri_ra, tri_rb,
                 tri_lift, sin_ws, sin_w, sin_ra, sin_rb)
+    # S099 P1: the chop tables, on the same widths (oscPwmDSaw)
+    chop = chop_tables(d_saw_v)
+    ok = chop_checks(chop, d_saw_v) and ok
     h = render_h()
     c = render_c(d_rec_v, d_saw_v, l_rec, l_saw, tri_w, tri_ra, tri_rb, tri_lift,
                  sin_w, sin_ra, sin_rb)
+    ch, cc = render_chop_h(chop), render_chop_c(chop)
     if "--check" in sys.argv:
-        ok = ok and open(H_PATH).read() == h and open(C_PATH).read() == c
+        ok = (ok and open(H_PATH).read() == h and open(C_PATH).read() == c and
+              open(CHOP_H_PATH).read() == ch and open(CHOP_C_PATH).read() == cc)
         print("pwm tables", "OK" if ok else "FAILED")
         return 0 if ok else 1
     if not ok:
-        print("pwm tables: T1-T7/T9 failed")
+        print("pwm tables: T1-T7/T9 or T10-T15 failed")
         return 1
-    open(H_PATH, "w").write(h)
-    open(C_PATH, "w").write(c)
-    print("wrote", H_PATH, C_PATH)
+    for path, text in ((H_PATH, h), (C_PATH, c), (CHOP_H_PATH, ch), (CHOP_C_PATH, cc)):
+        open(path, "w").write(text)
+    print("wrote", H_PATH, C_PATH, CHOP_H_PATH, CHOP_C_PATH)
     return 0
 
 

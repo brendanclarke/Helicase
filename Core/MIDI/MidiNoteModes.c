@@ -113,7 +113,7 @@ midiNoteMode_t midiNoteMode_trackMode(uint8_t scene_index, uint8_t track,
         return MNM_LAYER4;
     /* S096 P3 C3: a Colloid on its own (non-G) channel, with the BAR overlay
      * off, is paraphonic. A Colloid on G keeps the single trigger. */
-    if (type == (uint8_t)INSTRUMENT_TYPE_COL &&
+    if (instrumentManager_typeEngine((instrument_type_t)type) == INSTRUMENT_TYPE_COL &&
         channel != midiIn_globalChannel() &&
         buttonHandler_overlayActive() == 0u)
         return MNM_PARA;
@@ -591,7 +591,8 @@ void midiNoteMode_service(void)
             continue;
         }
         track = (uint8_t)((slot >= 5u) ? 5u : slot);
-        if (midiNoteMode_slotType(scene, slot) != (uint8_t)INSTRUMENT_TYPE_COL ||
+        if (instrumentManager_typeEngine((instrument_type_t)midiNoteMode_slotType(scene, slot))
+                != INSTRUMENT_TYPE_COL ||
             buttonHandler_overlayActive() != 0u ||
             g->channel == midiIn_globalChannel())
             ok = 0u;
@@ -610,7 +611,8 @@ void midiNoteMode_service(void)
              * cleared and the group freed; the new instrument was reset by
              * its load and holds no paraphonic state.
              */
-            if (midiNoteMode_slotType(scene, slot) == (uint8_t)INSTRUMENT_TYPE_COL)
+            if (instrumentManager_typeEngine((instrument_type_t)midiNoteMode_slotType(scene, slot))
+                    == INSTRUMENT_TYPE_COL)
                 midiNoteMode_queue(track, instrumentParam_make(slot, COL_IDX_SUSTAIN), 0u);
             instrumentManager_setMidiHold(slot, 0u);
             midiNoteMode_freeGroup(gi);

@@ -114,6 +114,26 @@ _Static_assert(DL_NET_ROWS * DL_NET_PHASES == ALK_NET_STATES, "rows split evenly
 #define ALK_PWM_READ_FORM 2
 #endif
 
+/*
+ * The Alkaline chop read form (S099 P1, fused mode 5).
+ *
+ * What:       how fused mode 5 reads its three points (the gate's A and B,
+ *             the curve):
+ *               2  all three truncated (the shipped form, mode 3's form 2);
+ *               0  all three interpolated (the reference for bench law AL-CH;
+ *                  never shipped).
+ * Why:        inside the fused loop a truncated read is the cheaper form, and
+ *             the ladder's low-pass hides the gate edges' quantisation to
+ *             1/2,048 of a cycle (mode 3 accepted the same; S-R draft §4.3).
+ *             AL-CH prints the RMS error against form 0, as AL-PW does for
+ *             mode 3.
+ * Inputs:     -DALK_CHOP_READ_FORM (bench and measurement builds).
+ * Accessors:  dl_renderB2Body() fused mode 5.
+ */
+#ifndef ALK_CHOP_READ_FORM
+#define ALK_CHOP_READ_FORM 2
+#endif
+
 /* [5/4] Pade of tanh: tanh(z) = z N(z^2)/D(z^2); secant t = N/D. */
 #define DL_P54N(s)     (945.0f + (s) * (105.0f + (s)))
 #define DL_P54D(s)     (945.0f + (s) * (420.0f + 15.0f * (s)))
@@ -325,9 +345,17 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 	 *   4  S094 P4: pwm Tri, the warp: the 1,024-point row (the caller's
 	 *      lifted triTable row) read at psi = osc_pwmWarp(ph, wPh, wRa, wRb),
 	 *      interpolated in float (DiodeLadder_renderB2OscPwmWt()).
-	 * rowB, ff0 and ffStep are read only under 2, pwD and pwSign only under
-	 * 3, wPh, wRa and wRb only under 4; the other wrappers pass 0 / 0.0f and
-	 * the compiler drops them with the branch. */
+	 *   5  S099 P1: pwm R-S / REx, the chop: the gate (mode 3's
+	 *      difference on the lifted saw row, read at twice the phase,
+	 *      floored by chC) times the 1x ramp read through the wave's curve
+	 *      table (rowB) at (ph + 2^29) >> 22, minus chDc
+	 *      (DiodeLadder_renderB2OscChop()).
+	 * rowB, ff0 and ffStep are read only under 2, and under 5 (rowB the
+	 * curve table, ff0 chC, ffStep chDc: the chop reuses the three so the
+	 * body's signature, and every other wrapper, is unchanged); pwD only
+	 * under 3 and 5; pwSign only under 3; wPh, wRa and wRb only under 4; the
+	 * other wrappers pass 0 / 0.0f and the compiler drops them with the
+	 * branch. */
 	uint32_t ph = fused ? *phase : 0u;
 	/* S093 P8 r3: the frame mix of fused 2, 0 = row, 1 = rowB; it starts at
 	 * ff0 and moves by ffStep per sample, so a block glides linearly from
@@ -468,6 +496,56 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 
 			ph += phaseInc;
 			s = (a + fr * (b - a)) * sScale;
+		} else if (fused == 5) {
+			/*
+			 * S099 P1: the Alkaline chopped waves R-S and REx.
+			 *
+			 * What:       the gate g = row[2 phi] - row[2 phi - pwD] + chC:
+			 *             mode 3's difference (high first, the shipped Rec
+			 *             orientation) on the caller's sawTable row
+			 *             OSC_CHOP_LIFT octaves above the note's, read at
+			 *             twice the phase (point (ph >> 21) & 1,023: a pulse
+			 *             an octave up), floored at 0 by chC = w x span (w =
+			 *             pwD / 1,024 of each gate cycle passes); the ramp
+			 *             v = rowB[(ph + 2^29) >> 22], the wave's curve table
+			 *             (oscChopCurveRs linear, oscChopCurveRex the
+			 *             exponential) on the 1x phase wrapped at 7/8 of the
+			 *             cycle, inside the last chopped section for every
+			 *             width; s = (v x g - chDc) x sScale, chDc the wave's
+			 *             mean (oscChopDc*Q15[pos] x span), sScale =
+			 *             ALK_CHOP_SCALE_V x level x drive / span (the
+			 *             caller's). ALK_CHOP_READ_FORM 2 truncates all three
+			 *             points; 0 interpolates them (the bench reference).
+			 * Why:        DRAFT_S-R_PWM_WAVE.md §4: the Alpha Juno's PWM saw is
+			 *             a ramp chopped to its floor by a pulse an octave up.
+			 *             A smooth ramp times a band-limited gate, with the
+			 *             ramp's own wrap inside a chopped section (where the
+			 *             gate is about 0), keeps the alias near the shipped
+			 *             pulse's (prototype §5.3: -72 dB, against -39 dB with
+			 *             the wrap at the cycle end). The gate's B offset is a
+			 *             whole number of points for the block, as mode 3's
+			 *             (the S094 P1 S5 form; the ladder hides the
+			 *             block-edge step of a moving width).
+			 * Cost:       estimated mode 3 + 5 (S-R draft §4.3); the linked
+			 *             count is gate B-G3 (loop + per block <= 263.7).
+			 */
+			const float chC = ff0, chDc = ffStep;
+			const uint32_t itg = (ph >> 21) & 0x000003FFu;
+			const uint32_t ib = (itg - pwD) & 0x000003FFu;
+			const uint32_t iv = (ph + 0x20000000u) >> 22;
+#if ALK_CHOP_READ_FORM == 2
+			const float g = (float)(row[itg] - row[ib]) + chC;
+			const float v = (float)rowB[iv];
+#else
+			const float fg = (float)((ph << 1) & 0x003FFFFFu) * 2.384185791015625e-07f;
+			const float fv = (float)((ph + 0x20000000u) & 0x003FFFFFu) * 2.384185791015625e-07f;
+			const float ga = (float)row[itg] + fg * (float)(row[(itg + 1u) & 0x000003FFu] - row[itg]);
+			const float gb = (float)row[ib] + fg * (float)(row[(ib + 1u) & 0x000003FFu] - row[ib]);
+			const float g = ga - gb + chC;
+			const float v = (float)rowB[iv] + fv * (float)(rowB[(iv + 1u) & 0x000003FFu] - rowB[iv]);
+#endif
+			ph += phaseInc;
+			s = (v * g - chDc) * sScale;
 		} else if (fused) {
 			const uint32_t itg = ph >> 22;
 			int16_t o = row[itg];
@@ -707,6 +785,43 @@ __attribute__((noinline)) void DiodeLadder_renderB2OscPwmWt(DiodeLadder *dl, int
 {
 	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 4, row, phase, phaseInc,
 	                0, 0.0f, 0.0f, 0u, 0.0f, wPh, wRa, wRb);
+}
+
+/*
+ * B2R with the chopped pwm waves fused: R-S and REx (S099 P1, fused mode 5).
+ *
+ * What:       the fused loop with the input s_j = (C(r_j) x G_j - chDc) x
+ *             sScale: G_j the gate, the row's difference at twice the phase
+ *             and pwD points earlier plus chC; C the curve table read at the
+ *             1x ramp wrapped at 7/8 (ALK_CHOP_READ_FORM); the phase advances
+ *             by phaseInc per sample and is written back.
+ * Why:        the Alkaline's R-S and REx (S-R draft §4.3, stage 1): one more
+ *             loop copy in flash, no ITCM. noinline as the other wrappers: its
+ *             registers stay out of the caller, and its only loop is the audio
+ *             loop (control_cost.py weight 0).
+ * Inputs:     dl (the ladder; DiodeLadder_setNet() and DiodeLadder_setPost()
+ *             ran this block), buf (output only), row (the gate's sawTable
+ *             row, the note's octave + OSC_CHOP_LIFT, clamped to 10), curve
+ *             (oscChopCurveRs or oscChopCurveRex), phase (in/out), phaseInc,
+ *             pwD (oscPwmDSaw[pos], 512 .. 26 points of the gate's cycle),
+ *             chC (w x span), chDc (the mean x span), sScale (ALK_CHOP_SCALE_V
+ *             x level x drive / span), iLadEnd, iAbcEnd (as the other B2R
+ *             wrappers).
+ * Outputs:    buf (int16, the ladder's toned VCA output); *phase; the ladder
+ *             state.
+ * Accessors:  AlkalineVoice.c alk_renderChop().
+ * Affiliates: oscChopTables.h; ALK_CHOP_READ_FORM; bench law AL-CH;
+ *             control_cost.py ITERS.
+ */
+__attribute__((noinline)) void DiodeLadder_renderB2OscChop(DiodeLadder *dl, int16_t *buf,
+                              const int16_t *row, const int16_t *curve,
+                              uint32_t *phase, const uint32_t phaseInc,
+                              const uint32_t pwD, const float chC, const float chDc,
+                              const float sScale,
+                              const float iLadEnd, const float iAbcEnd)
+{
+	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 5, row, phase, phaseInc,
+	                curve, chC, chDc, pwD, 0.0f, 0u, 0u, 0u);
 }
 
 /* ------------------------------------------------------------------- B-R

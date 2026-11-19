@@ -20,6 +20,7 @@
 
 
 
+
 /*
  * Control constants (S095 P2). The "by ear" values (C-D12/C-D14/C-D15 and
  * the ranges of H.3) are first settings, set in the listening step and
@@ -439,54 +440,48 @@ static __attribute__((noinline)) void col_noiseControl(ColloidVoice *voice, floa
                                                         float dgR, float base);
 
 /*
- * Step one envelope by one block (S095 P2, draft §4.1; S096 P3 the gate).
+ * Step one envelope by one block (S095 P2, draft §4.1; S096 P3 the gate;
+ * S099 P1 §15 the plain ADSR).
  *
- * What:       attack: level += K[a] (1.2 - level); at 1.0 it goes to decay
- *             if the gate is held, otherwise straight to release (the amp
- *             skips decay on a step shorter than its attack);
+ * What:       gate not held -> release, from any stage but idle, attack
+ *             included, for every envelope alike;
+ *             attack: level += K[a] (1.2 - level), at 1.0 -> decay;
  *             decay: level += K[d] (s - level), within 0.01 of s -> sustain;
  *             sustain: keeps following s (K[d]);
- *             decay or sustain with the gate not held -> release;
  *             release: level -= K[r] level, below 1e-4 -> idle at 0.
- *             isAmp 0 (the filter and pitch envelopes): when the gate is not
- *             held they release from any stage, attack included, at once.
- *             isAmp 1 (the amp): its attack always runs to 1.0 first.
  *             K = colEgK[byte & 127].
- * Why:        plan §2.1 rules 2 and 4 (user, 2026-11-17): decay and sustain
- *             run only while the note counts as held; a short step still plays
- *             the whole amp attack, then releases; only the amp attack extends
- *             the gate. The caller passes held = gate || amp in attack for the
- *             filter and pitch envelopes, so they release together with the amp
- *             once its attack ends.
+ * Why:        S099 P1 §15 (user, 2026-11-19): the note is as long as the step
+ *             (or the length special), as from a keyboard; the gate alone sets
+ *             it and every envelope runs a normal ADSR from it. The S096 P3
+ *             amp-attack minimum (a short step played the whole amp attack,
+ *             and the filter and pitch held with it) is removed.
  * Inputs:     e, the time bytes a, d, r, the level s (0..1 float), held
- *             (Colloid_calcVoiceAsync()'s gate this block), isAmp.
+ *             (Colloid_calcVoiceAsync()'s gate this block).
  * Outputs:    e->level, e->stage.
- * Results:    a step of n blocks shorter than the attack: ATTACK ... 1.0 ->
- *             RELEASE (no DECAY block); a held note: ATTACK -> DECAY ->
- *             SUSTAIN until the gate closes; a retrigger (stage set to ATTACK
- *             by the trigger) climbs from the current level.
- * Cost:       one compare more than S095 per call; two to three calls per
- *             block. No per-sample work.
+ * Results:    a step shorter than the attack: ATTACK ... -> RELEASE at the
+ *             gate's end, from the level reached; a held note: ATTACK ->
+ *             DECAY -> SUSTAIN until the gate closes; a retrigger (stage set
+ *             to ATTACK by the trigger) climbs from the current level.
+ * Cost:       one compare per call; three calls per block. No per-sample work.
  * Accessors:  Colloid_calcVoiceAsync() (amp, filter, pitch).
  */
 static void col_egStep(ColEg *e, const uint8_t a, const uint8_t d, const float s,
-                       const uint8_t r, const uint8_t held, const uint8_t isAmp)
+                       const uint8_t r, const uint8_t held)
 {
 	const float sl = col_clamp01(s);
 
-	if (!isAmp && !held && e->stage != COL_EG_IDLE)
+	if (!held && e->stage != COL_EG_IDLE)
 		e->stage = COL_EG_RELEASE;      /* gate closed: release from anywhere */
 	switch (e->stage) {
 	case COL_EG_ATTACK:
 		e->level += colEgK[a & 127u] * (COL_EG_ATTACK_AIM - e->level);
 		if (e->level >= 1.0f) {
 			e->level = 1.0f;
-			e->stage = held ? COL_EG_DECAY : COL_EG_RELEASE;
+			e->stage = COL_EG_DECAY;
 		}
 		break;
 	case COL_EG_DECAY:
 	case COL_EG_SUSTAIN:
-		if (!held) { e->stage = COL_EG_RELEASE; break; }
 		e->level += colEgK[d & 127u] * (sl - e->level);
 		if (e->stage == COL_EG_DECAY && fabsf(e->level - sl) <= COL_EG_SETTLE)
 			e->stage = COL_EG_SUSTAIN;
@@ -875,11 +870,14 @@ static __attribute__((noinline)) void col_scanControl(ColloidVoice *voice, const
  *               pitch envelope's 2^(offset), after the slew like the LFO /
  *               velocity multiplier), clamped to 0.45 fs;
  *               inc = f x 2^32 / fs;
- *             - row: wtb, the latched frame of the bound table (the last
- *               frame if the table shrank); Sin, the 1,024-point sine; pwm,
- *               by form: Sin the sine, Tri the triTable octave row lifted by
- *               oscPwmTriLift[width], Saw/Rec the sawTable octave row;
- *               Saw/Rec/Tri under wav, the octave row of that table;
+	 *             - row: wtb, the latched frame of the bound table (the last
+	 *               frame if the table shrank); Sin, the 1,024-point sine; pwm,
+	 *               by form: Sin the sine, Tri the triTable octave row lifted by
+	 *               oscPwmTriLift[width], Saw/Rec the sawTable octave row;
+	 *               Saw/Rec/Tri under wav, the octave row of that table;
+	 *               R-S and REx (S099 P1) take the Saw/Rec rows, widths and
+	 *               level here; col_chopBlock() lifts the rows and replaces the
+	 *               widths and the level in the sync block;
  *             - pwm: the width index slews toward col_pwmTarget() by at most
  *               OSC_PWM_SLEW_STEPS (2) per block, or lands on it when the
  *               oscillator rejoins (S095 P5, as the pitch); Saw/Rec take pwD =
@@ -1287,10 +1285,9 @@ void Colloid_calcVoiceAsync(ColloidVoice *voice)
 	 *             (susBreak), and the transport running or MIDI keys held
 	 *             (midiHold). held = susEff or gate samples left.
 	 *             gateLeft then drops by one block (32 samples), floored at
-	 *             0. The amp steps with held; the filter (and in P3b the
-	 *             pitch) envelope with held or the amp still in attack, so a
-	 *             gate shorter than the amp attack is stretched to it and
-	 *             every envelope releases together when it ends.
+	 *             0. The amp, filter and pitch envelopes all step with held
+	 *             (S099 P1 §15: no amp-attack minimum), so the note is the
+	 *             step's gate, or the length special's, as from a keyboard.
 	 * Why:        plan §2.1. With the transport stopped and no MIDI keys held,
 	 *             sus does not hold (C-D19 kept): a pad or a preview plays one
 	 *             step's gate. The order matters: held is taken before the
@@ -1305,7 +1302,6 @@ void Colloid_calcVoiceAsync(ColloidVoice *voice)
 	const uint8_t susEff = (uint8_t)(voice->sustain != 0u && !voice->susBreak &&
 	                                 (seq_isRunning() != 0u || voice->midiHold != 0u));
 	const uint8_t held = (uint8_t)(susEff || voice->gateLeft > 0);
-	uint8_t heldFP;
 	float base, step, level, famL, famR, cutR, resR, driveR, norm, pitchMul;
 	float dgL, dgR;
 	uint8_t typeB;
@@ -1315,13 +1311,11 @@ void Colloid_calcVoiceAsync(ColloidVoice *voice)
 	                ? voice->gateLeft - (int32_t)OUTPUT_DMA_SIZE : 0;
 	voice->ampLast = voice->ampEg.level;
 	col_egStep(&voice->ampEg, voice->attack, voice->decay, voice->sustainLevel,
-	           voice->release, held, 1u);
-	/* the filter and pitch envelopes hold while the amp still climbs */
-	heldFP = (uint8_t)(held || voice->ampEg.stage == COL_EG_ATTACK);
+	           voice->release, held);
 	col_egStep(&voice->fltEg, voice->fAttack, voice->fDecay, voice->fSustain,
-	           voice->fRelease, heldFP, 0u);
+	           voice->fRelease, held);
 	col_egStep(&voice->pitchEg, voice->pAttack, voice->pDecay, voice->pSustain,
-	           voice->pRelease, heldFP, 0u);
+	           voice->pRelease, held);
 
 	/*
 	 * Pitch (the Alkaline's formula, S093 P3): log2 of the note plus coarse
@@ -1821,6 +1815,125 @@ static __attribute__((noinline)) void col_renderSer(ColloidVoice *voice, int16_t
 	voice->toneZR = tz;
 }
 
+/*
+ * One block of pwm R-S or REx (S099 P1; S-R draft §6.3, §6.4).
+ *
+ * What:       for each of the COL_PWM_COUNT (6) oscillators o, with k =
+ *             pwPos[o] (the block's end width index) and k0 = pwPos0[o] (its
+ *             start):
+ *               - the gate row: the octave row col_oscControl() picked for
+ *                 the pulse forms (sawTable[octave], read back from row[o]),
+ *                 lifted by OSC_CHOP_LIFT, at most row 10;
+ *               - the widths: pwD = oscPwmDSaw[k], pwD0 = oscPwmDSaw[k0]
+ *                 (col_oscControl() wrote the Rec table's for every pulse
+ *                 form; the chop uses the Saw floor of 2.54 %, D-5);
+ *               - the pair's packed halves: g14 = oscChopGainQ14[row], rel =
+ *                 oscChopRel*Q15[k], rel x position / 2;
+ *               - the stack's mean at the start and end widths, mid and side,
+ *                 in bus units (dc x rel >> 16; the side also x position);
+ *             then col_chopDcInit() starts both buses at minus that mean,
+ *             gliding from the start to the end, and col_chopPairAdd() adds
+ *             the three pairs. Finally the bus-to-drive gain: the async set
+ *             inGain with the stack's mean Rec level (col_oscControl()'s
+ *             return for a pulse form, oscPwmLevelRecQ14 / 16,384 averaged);
+ *             the chop's level is rel x OSC_CHOP_LREF_* per oscillator, and
+ *             its bus multiplies halve the bus, so inGain (and inGainR in the
+ *             stereo route) is scaled by 2 x Lref / that mean: one VDIV per
+ *             block, chop forms only.
+ * Why:        the chop runs in the sync block, not in the async, so
+ *             col_oscControl()'s per-oscillator loop and
+ *             Colloid_calcVoiceAsync() keep their code (S096 P3 noise update:
+ *             anything added to that loop costs every mode); the values this
+ *             pass replaces (row, pwD, pwD0) are rewritten by the next
+ *             block's col_oscControl() before anything else reads them.
+ *             The mean needs no state: both ends of its glide come from the
+ *             widths the voice already holds (S099 P1 deviation §0.3 item 4).
+ * Range:      per oscillator dc x rel >> 16 < 6,200; the six summed, x 32
+ *             (col_chopDcInit()'s Q5), < 1.2 M.
+ * Inputs:     voice (the async ran this block: row, pwPos, pwPos0, posPair,
+ *             phase, inc, inGain, inGainR, route), form (COL_PWM_RS or
+ *             COL_PWM_REX).
+ * Outputs:    busM, busS; phase[0..5]; row, pwD, pwD0 (this block's); inGain,
+ *             inGainR.
+ * Cost:       per block: the six-oscillator loop, one VDIV, the init pass
+ *             (6 a sample) and the three pairs (≈ 54 a pair a sample).
+ * Accessors:  Colloid_calcVoiceSyncBlock() (typ pwm, wav R-S or REx).
+ * Affiliates: col_chopDcInit(), col_chopPairAdd() (ColloidOsc.c);
+ *             oscChopTables.h; law CO-CHP.
+ */
+static __attribute__((noinline)) void col_chopBlock(ColloidVoice *voice, const uint8_t form)
+{
+	const uint8_t rex = (uint8_t)(form == COL_PWM_REX);
+	const int16_t *const curve = rex ? oscChopCurveRex : oscChopCurveRs;
+	const int16_t *const dcTab = rex ? oscChopDcRexQ15 : oscChopDcRsQ15;
+	const int16_t *const relTab = rex ? oscChopRelRexQ15 : oscChopRelRsQ15;
+	const float lref = rex ? OSC_CHOP_LREF_REX : OSC_CHOP_LREF_RS;
+	int32_t dcM0 = 0, dcM1 = 0, dcS0 = 0, dcS1 = 0;
+	int32_t recSum = 0;
+	uint32_t i;
+
+/* The mean's four sums first: col_chopDcInit() must start both buses before
+ * any pair adds, so this pass reads the widths, the level and the position
+ * only (no row or width is written here). */
+#pragma GCC unroll 1
+	for (i = 0u; i < COL_PWM_COUNT; i++) {
+		const uint32_t k = (uint32_t)(voice->pwPos[i] & 127u);
+		const uint32_t k0 = (uint32_t)(voice->pwPos0[i] & 127u);
+		const uint32_t half = (i & 1u) ? 16u : 0u;
+		/* the oscillator's Q15 stereo position (posPair: even low, odd high) */
+		const int32_t pos = (int32_t)(int16_t)(voice->posPair[i >> 1] >> half);
+		const int32_t rel = relTab[k];
+		const int32_t relPos = (rel * pos) >> 16;   /* rel x pos / 2, Q15 */
+		recSum += oscPwmLevelRecQ14[k];
+		dcM0 += ((int32_t)dcTab[k0] * rel) >> 16;
+		dcM1 += ((int32_t)dcTab[k] * rel) >> 16;
+		dcS0 += ((int32_t)dcTab[k0] * relPos) >> 16;
+		dcS1 += ((int32_t)dcTab[k] * relPos) >> 16;
+	}
+	col_chopDcInit(voice->busM, -(dcM0 * 32), dcM0 - dcM1, -(dcS0 * 32), dcS0 - dcS1);
+	/* then one pair at a time, its two halves built in registers (the arrays
+	 * the first form used spilled on every iteration: 84 per oscillator, the
+	 * pair form is about half that; C-G4) */
+#pragma GCC unroll 1
+	for (i = 0u; i < COL_PWM_COUNT / 2u; i++) {
+		uint32_t gq = 0u, lv = 0u, lp = 0u;
+		uint32_t h;
+
+#pragma GCC unroll 1
+		for (h = 0u; h < 2u; h++) {
+			const uint32_t o = 2u * i + h;
+			const uint32_t k = (uint32_t)(voice->pwPos[o] & 127u);
+			const uint32_t k0 = (uint32_t)(voice->pwPos0[o] & 127u);
+			const uint32_t half = h ? 16u : 0u;
+			const int32_t pos = (int32_t)(int16_t)(voice->posPair[i] >> half);
+			const int32_t rel = relTab[k];
+			const int32_t relPos = (rel * pos) >> 16;
+			/* the octave row col_oscControl() picked (a sawTable row) */
+			uint32_t r = (uint32_t)(voice->row[o] - sawTable[0]) >> 10;
+
+			r = (r + OSC_CHOP_LIFT > 10u) ? 10u : r + OSC_CHOP_LIFT;
+			voice->row[o] = sawTable[r];
+			voice->pwD[o] = oscPwmDSaw[k];
+			voice->pwD0[o] = oscPwmDSaw[k0];
+			gq |= (uint32_t)(uint16_t)oscChopGainQ14[r] << half;
+			lv |= (uint32_t)(uint16_t)rel << half;
+			lp |= (uint32_t)(uint16_t)relPos << half;
+		}
+		col_chopPairAdd(&voice->row[2u * i], &voice->phase[2u * i], &voice->inc[2u * i],
+		                &voice->pwD[2u * i], &voice->pwD0[2u * i], gq, lv, lp,
+		                curve, voice->busM);   /* busM then busS: one 64-word bus */
+	}
+	{
+		/* the stack's level: 2 x Lref (the bus multiplies halve the bus) in
+		 * place of the mean Rec level the async put into inGain */
+		const float ratio = (2.0f * 16384.0f * (float)COL_PWM_COUNT) * lref / (float)recSum;
+
+		voice->inGain *= ratio;
+		if (voice->route == COL_RTE_STR || voice->route >= COL_RTE_COUNT)
+			voice->inGainR *= ratio;
+	}
+}
+
 /* S096 P2 F5: the warp loops take busM as one 64-word bus, mid then side */
 _Static_assert(offsetof(ColloidVoice, busS) ==
                    offsetof(ColloidVoice, busM) + OUTPUT_DMA_SIZE * sizeof(int32_t),
@@ -1841,6 +1954,8 @@ void Colloid_calcVoiceSyncBlock(ColloidVoice *voice, int16_t *buf, uint8_t size)
 	 *                 (COL_PWM_COUNT, 6 since S096 P2 F5), sign +1 (Saw) or -1
 	 *                 (Rec), the second read gliding from pwD0 to pwD (S096 P2
 	 *                 F5);
+	 *               typ pwm, wav R-S or REx (S099 P1): col_chopBlock() (the
+	 *                 mean's start pass and three col_chopPairAdd() calls);
 	 *               typ wts: col_scanPairStore/Add per pair (COL_SCAN_COUNT),
 	 *                 g and dg from pwD0 / pwD (S096 P3);
 	 *               otherwise: col_oscPairStore/Add per pair (COL_OSC_COUNT);
@@ -1884,6 +1999,10 @@ void Colloid_calcVoiceSyncBlock(ColloidVoice *voice, int16_t *buf, uint8_t size)
 				            tW[k0], tRa[k0], tRb[k0], dW, dRa, dRb, pq,
 				            voice->busM);
 		}
+	} else if (isPwm && COL_PWM_IS_CHOP(form)) {
+		/* S099 P1: the chopped waves (the dispatch costs pwm Saw/Rec about 2
+		 * instructions a block, ≈ +0.06 a sample; measured at gate C-G4) */
+		col_chopBlock(voice, form);
 	} else if (isPwm) {
 		const int32_t sign = -1;
 
@@ -2007,8 +2126,8 @@ void Colloid_setOscType(ColloidVoice *voice, const uint8_t typ)
 	const uint8_t scan = (uint8_t)(typ == COL_TYP_WTS);
 	const uint8_t type = (typ == COL_TYP_WAV) ? OSC_TYPE_WAV
 	                   : (((typ == COL_TYP_WTB) || scan) ? OSC_TYPE_WTB : OSC_TYPE_PWM);
-	/* the new list's length: Saw..Sin, Sin..Rec (S095 P3 F2), or the
-	 * installed tables */
+	/* the new list's length: Saw..Sin, Sin..REx (S095 P3 F2; S099 P1), or
+	 * the installed tables */
 	const uint8_t count = (type == OSC_TYPE_WTB) ? sampleMemory_getNumWavetables()
 	                    : ((type == OSC_TYPE_PWM) ? (uint8_t)COL_PWM_WAVE_COUNT
 	                                              : (uint8_t)COL_WAVE_COUNT);

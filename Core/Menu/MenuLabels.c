@@ -74,6 +74,10 @@ const char shortNames[][4] = {
     {"p3"},{"den"},{"lng"},{"bal"},{"dmp"},{"xfb"},{"deg"},{"wow"},{"hld"},
     {"rev"},{"hed"},{"dck"},{"siz"},{"dcy"},{"dif"},{"lsh"},{"lsf"},{"hsh"},
     {"hsf"},{"frz"},{"shm"},{"int"},{"e>r"},{"bln"},
+    /* S099 P1: the chorus rows */
+    {"cho"},{"crt"},{"cdp"},{"cmx"},{"csr"},
+    /* S099 P1 (P-E): cbw cdv cwd (alx) */
+    {"cbw"},{"cdv"},{"cwd"},
 };
 
 /*
@@ -115,6 +119,8 @@ const char catNames[][9] = {
     {"Amp EG"},{"Pitch"},{"Unison"},{"Filt EG"},{"Pitch EG"},{"Sample"},
     {"Envelope"},{"Space"},{"Tone"},{"Effect"},{"Bits"},{"CrumpBit"},
     {"Grain"},{"Reverb"},{"Delay"},{"Shimmer"},{"Echo"},{"Plate"},
+    /* S099 P1: the chorus rows */
+    {"Chorus"},
 };
 
 const char longNames[][10] = {
@@ -175,6 +181,8 @@ const char longNames[][10] = {
     {"Reverse"},{"Heads"},{"Ducking"},{"PreDelay"},{"Size"},{"Diffusn"},
     {"LowShelf"},{"LowFreq"},{"HighDamp"},{"HighFreq"},{"Modulatn"},
     {"Freeze"},{"Interval"},{"GateBlom"},{"EchoRvb"},{"Blend"},
+    /* S099 P1: the chorus rows */
+    {"Depth"},{"Source"},
 };
 
 _Static_assert(sizeof(shortNames) / sizeof(shortNames[0]) == SHORT_LABEL_COUNT,

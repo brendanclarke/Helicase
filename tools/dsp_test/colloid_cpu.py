@@ -23,7 +23,9 @@ What:       for each mode, from the linked ELF (the space_cpu.py method,
             stereo (rte str, `par`, the dearest) and mono (`ser`); S096 P3
             adds scan (the wts two-frame pair loops, COL_SCAN_COUNT), which
             also charges col_scanControl() (the frame positions: its loop x
-            the count + its straight path).
+            the count + its straight path); S099 P1 adds chop (the R-S / REx
+            form: col_chopDcInit() a sample, three col_chopPairAdd() pairs,
+            and col_chopBlock()'s six-oscillator pass per block).
 Why:        the device run is the gate (S094 P2: measured cycles per block,
             cold, dearest, stereo send, against the Basic 19,620); these
             counts are the host regression baseline, recorded at step 5 in
@@ -72,6 +74,18 @@ SUB_BLOCK = _c_define('COL_SUB_BLOCK')   # S096 P3: the stereo loop's coefficien
 PWM_COUNT = _voice_define('COL_PWM_COUNT')
 PWM_WARP_COUNT = _voice_define('COL_PWM_WARP_COUNT')
 SCAN_COUNT = _voice_define('COL_SCAN_COUNT')   # S096 P3
+
+
+def _chorus_half_rate():
+    """S099 P1 review: BBD_COL_HALF_RATE's default in BbdChorus.h (1: the
+    Colloid's chorus loops render two output samples per pass)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..',
+                        'Core', 'DSP', 'Instruments', 'Chorus', 'BbdChorus.h')
+    m = re.search(r'^#define\s+BBD_COL_HALF_RATE\s+(\d+)', open(path).read(), re.M)
+    return int(m.group(1)) if m else 0
+
+
+HALF_RATE = _chorus_half_rate()
 HELPERS = ('col_svfControl', 'col_egStep', 'col_wtbBind', 'col_pspK',
            'col_noiseControl')                 # S096 P3: the noise control
 CTL = 'col_oscControl'   # S095 P3: the oscillator-control loop's own function
@@ -155,6 +169,10 @@ def main():
                 (B.block_path(a.elf, CTL)[0] if ctl_sym == CTL else 0))
     warp = present(a.elf, 'col_warpStore') and present(a.elf, 'col_warpAdd')
     scan = present(a.elf, 'col_scanPairStore') and present(a.elf, 'col_scanPairAdd')
+    chop = (present(a.elf, 'col_chopPairAdd') and present(a.elf, 'col_chopDcInit')
+            and present(a.elf, 'col_chopBlock'))
+    # S099 P1 review: the chorus loops are inlined into bbdChorus_renderColloid()
+    clx = (present(a.elf, 'bbdChorus_control') and present(a.elf, 'bbdChorus_renderColloid'))
     want = {}
     if a.baseline:
         for line in open(a.baseline):
@@ -164,8 +182,32 @@ def main():
     fail = False
     modes = ([('plain', a.count), ('pwm', PWM_COUNT)]
              + ([('pwmw', PWM_WARP_COUNT)] if warp else [])
-             + ([('scan', SCAN_COUNT)] if scan else []))
+             + ([('scan', SCAN_COUNT)] if scan else [])
+             + ([('chop', PWM_COUNT)] if chop else []))
     for typ, n in modes:
+        if typ == 'chop':
+            # S099 P1: the mean's start pass, then n / 2 add pairs; per block
+            # the sync block's chop pass (col_chopBlock(), a loop over the six
+            # oscillators) on top of the pulse forms' control
+            pairs = n // 2
+            for mode, render in (('par', 'col_renderPar'), ('ser', 'col_renderSer')):
+                per_sample = (loops(a.elf, 'col_chopDcInit')[0][0]
+                              + pairs * loops(a.elf, 'col_chopPairAdd')[0][0]
+                              + render_per_sample(a.elf, render))
+                blk = (base_blk + n * ctl_len
+                       + B.block_path(a.elf, 'col_chopDcInit')[0]
+                       + pairs * B.block_path(a.elf, 'col_chopPairAdd')[0]
+                       + n * loops(a.elf, 'col_chopBlock')[0][0]
+                       + B.block_path(a.elf, 'col_chopBlock')[0]
+                       + B.block_path(a.elf, render)[0])
+                total = per_sample + blk / FRAMES
+                name = f'chop{n}-{mode}'
+                note = ''
+                if name in want and total > want[name] + 0.5:
+                    note = f'  GREW (baseline {want[name]:.1f})'
+                    fail = True
+                print(f'{name}: loops {per_sample:.1f} + per block {blk}/{FRAMES} = {total:.1f}{note}')
+            continue
         store, add = {'plain': ('col_oscPairStore', 'col_oscPairAdd'),
                       'pwm': ('col_pwmPairStore', 'col_pwmPairAdd'),
                       'pwmw': ('col_warpStore', 'col_warpAdd'),
@@ -190,6 +232,29 @@ def main():
                 note = f'  GREW (baseline {want[name]:.1f})'
                 fail = True
             print(f'{name}: loops {per_sample:.1f} + per block {blk}/{FRAMES} = {total:.1f}{note}')
+            if typ == 'pwm' and n == PWM_COUNT and mode == 'par' and clx:
+                # S099 P1: the Advanced Colloid's chorus on top of pwm6-par.
+                # S099 P1 review: the four loops are inlined into
+                # bbdChorus_renderColloid(): the longest is the mid form's pass
+                # A (the mirror store and the mid), the shortest its pass B
+                # (no write), the middle two the L-R sides. The slot is charged
+                # for the dearer form; with BBD_COL_HALF_RATE each loop renders
+                # two output samples. The guard refresh's out-of-line jump
+                # (under 15 instructions) is not a loop.
+                ch = sorted([l[0] for l in loops(a.elf, 'bbdChorus_renderColloid') if l[0] >= 15],
+                            reverse=True)
+                if len(ch) != 4:
+                    sys.exit(f'colloid_cpu.py: bbdChorus_renderColloid has {len(ch)} loops, not 4')
+                rate = 2.0 if HALF_RATE else 1.0
+                consts = (max(ch[0] + ch[3], ch[1] + ch[2]) / rate
+                          + (B.block_path(a.elf, 'bbdChorus_control')[0]
+                             + B.block_path(a.elf, 'bbdChorus_renderColloid')[0]) / FRAMES)
+                clx_total = total + consts
+                clx_note = ''
+                if 'clx-pwm6-par' in want and clx_total > want['clx-pwm6-par'] + 0.5:
+                    clx_note = f'  GREW (baseline {want["clx-pwm6-par"]:.1f})'
+                    fail = True
+                print(f'clx-pwm6-par: {total:.1f} + {consts:.1f} = {clx_total:.1f}{clx_note}')
     sys.exit(1 if fail else 0)
 
 

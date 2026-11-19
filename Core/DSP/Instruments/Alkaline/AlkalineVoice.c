@@ -1,6 +1,7 @@
 /*
  * AlkalineVoice.c - the Alkaline (TB-303) voice engine (S093 P0, P3, P8;
- * S094 P1/P4: pwm and the Tri wave).
+ * S094 P1/P4: pwm and the Tri wave; S099 P1: the chopped waves R-S and REx
+ * (mode 5)).
  * See AlkalineVoice.h. Behaviour: S092_P6_DSP_EQUATIONS.md §4.6 and the
  * validated pattern driver tools/alkaline/validate.py dsp_pattern().
  */
@@ -706,6 +707,8 @@ static __attribute__((noinline)) void alk_renderWtb(AlkalineVoice *voice, int16_
  *               Tri -> mode 4 (DiodeLadder_renderB2OscPwmWt()) on
  *                      triTable[min(tableOffset + oscPwmTriLift[k], 10)],
  *                      W / ra / rb = oscPwmTri*[k], at ALK_TRI_SCALE_V;
+ *               R-S / REx -> Alkaline_renderChop() (mode 5, S099 P1;
+ *                      AlkalineChop.c);
  *             each times the drive.
  * Why:        S094 P4 (user): the same law as the drum instruments (pos 0 =
  *             50 %, no wrap; Sqr to 0.39 %, Saw and Tri to 2.54 %) and the
@@ -729,6 +732,19 @@ static __attribute__((noinline)) void alk_renderPwm(AlkalineVoice *voice, int16_
 	const uint32_t k = (uint32_t)(osc->positionApplied & 127u);
 	const float iAbc = voice->iAbcEnd * voice->makeup;
 
+	/*
+	 * S099 P1: R-S and REx have their own render (fused mode 5,
+	 * AlkalineChop.c, -fno-lto).
+	 *
+	 * What:       one compare per block before the Tri / Saw / Sqr forms.
+	 * Cost:       about 2 instructions per block on those forms (≈ +0.06 per
+	 *             sample); none of them is the Alkaline's dearest setting
+	 *             (wtb with a slot, 276.7).
+	 */
+	if (osc->waveform >= ALK_WAVE_RS) {
+		Alkaline_renderChop(voice, buf);
+		return;
+	}
 	if (osc->waveform == ALK_WAVE_TRI) {
 		uint32_t r = (uint32_t)osc->tableOffset + oscPwmTriLift[k];
 
@@ -793,11 +809,13 @@ void Alkaline_setOscType(AlkalineVoice *voice, const uint8_t typ)
 	/* the byte -> the platform type: 0 wav, 1 wtb, 2 and above pwm */
 	const uint8_t type = (typ == ALK_TYP_WAV) ? OSC_TYPE_WAV
 	                   : ((typ == ALK_TYP_WTB) ? OSC_TYPE_WTB : OSC_TYPE_PWM);
-	/* the number of entries of the new type's wav list (S094 P4): Saw Sqr
-	 * Tri under wav and pwm, the installed tables under wtb; a stored byte
-	 * past the list clamps to its last entry */
+	/* the number of entries of the new type's wav list (S094 P4; S099 P1):
+	 * Saw Sqr Tri under wav, Saw Sqr Tri R-S REx under pwm, the installed
+	 * tables under wtb; a stored byte past the list clamps to its last
+	 * entry (a pwm R-S / REx switched to wav plays Tri) */
 	const uint8_t count = (type == OSC_TYPE_WTB) ? sampleMemory_getNumWavetables()
-	                    : (uint8_t)ALK_WAVE_COUNT;
+	                    : ((type == OSC_TYPE_PWM) ? (uint8_t)ALK_PWM_WAVE_COUNT
+	                                              : (uint8_t)ALK_WAVE_COUNT);
 	const uint8_t last = count ? (uint8_t)(count - 1u) : 0u;
 
 	if (type == osc->oscType)

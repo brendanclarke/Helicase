@@ -1,5 +1,6 @@
 #include "ColloidParameters.h"
 #include "ColloidVoice.h"
+#include "BbdChorus.h"     /* S099 P1: BBD_MODE_* (cellInactive) */
 #include "menu.h"
 #include "MenuText.h"
 #include <stddef.h>
@@ -41,6 +42,9 @@
  * cells; the Morph row shows "ColloMrp" (menu.c, 5 characters + Mrp). */
 const char colloid_instrument_display_label[] = "Colloid";
 const uint8_t colloid_instrument_type_flags = COLLOID_INSTRUMENT_TYPE_FLAGS;
+/* S099 P1: the Advanced Colloid's Load-menu label ("ColAdv", 6 cells; the
+ * Morph row shows "ColAdMrp") */
+const char colloid_adv_instrument_display_label[] = "ColAdv";
 
 /* A normal sound cell: in both images, Morph-interpolated, a modulation
  * destination and step-automatable; written under [params] and [morph]. */
@@ -97,6 +101,23 @@ const uint8_t colloid_instrument_type_flags = COLLOID_INSTRUMENT_TYPE_FLAGS;
     { key_, short_, long_, cat_, (uint8_t)(DTYPE_ON_OFF | ((tag_) << 4)), \
       (INSTRUMENT_PARAM_FLAG_AUTOMATABLE | INSTRUMENT_PARAM_FLAG_SELECTOR), \
       MOD_NONE, BIND(member_, type_) }
+/*
+ * A fixed selector with a special writer (S099 P1: chorus_type).
+ *
+ * What:       DTYPE_ON_OFF | (tag << 4) with INSTRUMENT_PARAM_FLAG_SELECTOR
+ *             only: not automatable, not morphed, not an LFO / velocity
+ *             target; the special writer stores it.
+ * Why:        the chorus type claims or releases a voice unit, which only the
+ *             foreground may do (FxBuffer.h); with no AUTOMATABLE flag no step
+ *             lock or drain write can reach it (instrumentManager_targetValid()
+ *             admits a non-morphable row for automation only with SELECTOR
+ *             and AUTOMATABLE), and a Scene apply writes it through
+ *             preset_applyKitVoiceSelectors(), foreground.
+ */
+#define ROW_SELECT_FIXED_SPECIAL(key_, cat_, long_, short_, tag_, member_, type_, special_) \
+    { key_, short_, long_, cat_, (uint8_t)(DTYPE_ON_OFF | ((tag_) << 4)), \
+      INSTRUMENT_PARAM_FLAG_SELECTOR, \
+      MOD_NONE, BIND_SPECIAL(member_, type_, special_) }
 /* Cells with no ColloidVoice member (target selectors), flags 0: [params]
  * only. */
 #define ROW_NOBIND(key_, cat_, long_, short_, dtype_, bind_kind_) \
@@ -192,7 +213,18 @@ typedef enum {
     COL_PARAM_NOISE_TONE,
     COL_PARAM_NOISE_WIDTH,
     COL_PARAM_NOISE_PAN,
-    COL_PARAM_COUNT
+    COL_PARAM_COUNT,
+    /*
+     * S099 P1 (append-only, clx only): the chorus rows. The Basic Colloid's
+     * registry row stops at COL_PARAM_COUNT (59); the Advanced Colloid's at
+     * COL_PARAM_ADV_COUNT (64 = INSTRUMENT_PARAM_COUNT: no row is left).
+     */
+    COL_PARAM_CHORUS_TYPE = COL_PARAM_COUNT,
+    COL_PARAM_CHORUS_RATE,
+    COL_PARAM_CHORUS_DEPTH,
+    COL_PARAM_CHORUS_MIX,
+    COL_PARAM_CHORUS_SOURCE,
+    COL_PARAM_ADV_COUNT
 } colloid_param_index_t;
 
 _Static_assert(COLLOID_PARAM_DESCRIPTOR_COUNT == COL_PARAM_COUNT,
@@ -206,6 +238,13 @@ _Static_assert(COL_PARAM_SUSTAIN == COL_IDX_SUSTAIN,
                "COL_IDX_SUSTAIN must name col_sustain");
 _Static_assert(COL_PARAM_INTERVAL_1 == COL_IDX_INTERVAL_1,
                "COL_IDX_INTERVAL_1 must name col_interval_1");
+/* S099 P1 */
+_Static_assert(COLLOID_ADV_PARAM_DESCRIPTOR_COUNT == COL_PARAM_ADV_COUNT,
+               "COLLOID_ADV_PARAM_DESCRIPTOR_COUNT must match colloid_param_index_t");
+_Static_assert(COL_PARAM_ADV_COUNT <= INSTRUMENT_PARAM_COUNT,
+               "the clx rows must fit the 64-cell Kit image");
+_Static_assert(COL_PARAM_CHORUS_TYPE == COL_IDX_CHORUS_TYPE,
+               "COL_IDX_CHORUS_TYPE must name chorus_type");
 
 /*
  * Colloid parameter descriptors.
@@ -341,6 +380,26 @@ const ParamDescriptor colloid_param_descriptors[] = {
     ROW("col_noise_tone", CAT_NOISE, LONG_TONE, SHORT_NTO, DTYPE_PM63, MOD_PM63, nTone, TYPE_UINT8),
     ROW("col_noise_width", CAT_NOISE, LONG_WIDTH, SHORT_NWD, DTYPE_0B127, MOD_0_127, nWidth, TYPE_UINT8),
     ROW("col_noise_pan", CAT_NOISE, LONG_PAN_WORD, SHORT_NPN, DTYPE_PM63, MOD_PM63, nPan, TYPE_UINT8),
+    /*
+     * @advanced-rows: the rows below are the clx type's only (S099 P1;
+     * DRAFT_ADVANCED_BBD_CHORUS.md §7.2). tools/colloid/make_init_col.py
+     * writes init.col up to this marker and init.clx with every row.
+     *
+     * cho: off I II 1+2 var dbl (BBD_MODE_*; choTypeNames). A fixed
+     *   selector: its writer claims or releases the voice unit
+     *   (IM_SPECIAL_CHORUS_TYPE).
+     * crt: the var / dbl LFO rate, bbdRateHz[] (0.1 .. 10 Hz, log).
+     * cdp: the var / dbl depth, x / 127 of the mode's full sweep.
+     * cmx: dry / wet, equal power; 0 = the input alone; 64 = both -3 dB.
+     * csr: the source, L-R (each side its own channel) or mid (the
+     *   Juno: one signal into both lines); an automatable selector (a csr
+     *   switch needs no memory action: both rings are always written).
+     */
+    ROW_SELECT_FIXED_SPECIAL("chorus_type", CAT_CHORUS, LONG_TYPE, SHORT_CHO, ONOFF_TAG_CHO_TYPE, choType, TYPE_UINT8, IM_SPECIAL_CHORUS_TYPE),
+    ROW("chorus_rate", CAT_CHORUS, LONG_RATE, SHORT_CRT, DTYPE_0B127, MOD_0_127, choRate, TYPE_UINT8),
+    ROW("chorus_depth", CAT_CHORUS, LONG_DEPTH, SHORT_CDP, DTYPE_0B127, MOD_0_127, choDepth, TYPE_UINT8),
+    ROW("chorus_mix", CAT_CHORUS, LONG_MIX, SHORT_CMX, DTYPE_0B127, MOD_0_127, choMix, TYPE_UINT8),
+    ROW_SELECT_ONOFF("chorus_source", CAT_CHORUS, LONG_SOURCE, SHORT_CSR, ONOFF_TAG_CHO_SOURCE, choSrc, TYPE_UINT8),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -348,8 +407,8 @@ const uint8_t colloid_param_descriptor_count =
     (uint8_t)(sizeof(colloid_param_descriptors) / sizeof(colloid_param_descriptors[0]));
 
 _Static_assert(sizeof(colloid_param_descriptors) / sizeof(colloid_param_descriptors[0]) ==
-                   COL_PARAM_COUNT,
-               "colloid_param_descriptors must have one row per index");
+                   COL_PARAM_ADV_COUNT,
+               "colloid_param_descriptors must have one row per index (59 col + 5 clx)");
 
 /* One empty cell of a 16-cell page. */
 #define COL_E INSTRUMENT_MENU_EMPTY
@@ -376,23 +435,42 @@ _Static_assert(sizeof(colloid_param_descriptors) / sizeof(colloid_param_descript
  *               1 AEG     atk dec slv rel | pat pde psl pre
  *               2 MOD     dst amt sus slw | nlv nto nwd npn
  */
-const instrument_menu_page_t colloid_menu_pages[] = {
-    /* 0 OSC */
-    {{ COL_PARAM_OSC1_PITCH_COARSE, COL_PARAM_OSC1_PITCH_FINE, COL_PARAM_OSC1_POSITION, COL_PARAM_POS_SPREAD, COL_PARAM_WAVE, COL_PARAM_OSC1_TYPE, COL_PARAM_PENV_AMOUNT, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }},
-    /* 1 AEG */
-    {{ COL_PARAM_ATTACK, COL_PARAM_DECAY, COL_PARAM_SUSTAIN_LEVEL, COL_PARAM_RELEASE, COL_PARAM_PENV_ATTACK, COL_PARAM_PENV_DECAY, COL_PARAM_PENV_SUSTAIN_LEVEL, COL_PARAM_PENV_RELEASE, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }},
-    /* 2 MOD: velocity, the sustain switch, the slew; then the noise */
-    {{ COL_PARAM_VELO_MOD_DEST, COL_PARAM_VELO_MOD_AMOUNT, COL_PARAM_SUSTAIN, COL_PARAM_SLEW, COL_PARAM_NOISE_LEVEL, COL_PARAM_NOISE_TONE, COL_PARAM_NOISE_WIDTH, COL_PARAM_NOISE_PAN, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }},
-    /* 3 FM: the intervals and detune, then spread and motion */
-    {{ COL_PARAM_INTERVAL_1, COL_PARAM_INTERVAL_2, COL_PARAM_INTERVAL_3, COL_PARAM_DETUNE, COL_PARAM_SPREAD, COL_PARAM_MOTION, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }},
-    /* 4 click: the filter envelope, its amount, the filter drive */
-    {{ COL_PARAM_FENV_ATTACK, COL_PARAM_FENV_DECAY, COL_PARAM_FENV_SUSTAIN_LEVEL, COL_PARAM_FENV_RELEASE, COL_PARAM_FENV_AMOUNT, COL_PARAM_DRIVE, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }},
-    /* 5 FILTER: the filter and its route, then the right / second offsets */
-    {{ COL_PARAM_CUTOFF, COL_PARAM_RESO, COL_PARAM_FILT_TYPE, COL_PARAM_ROUTE, COL_PARAM_CUT_OFS, COL_PARAM_RES_OFS, COL_PARAM_ENV_OFS, COL_PARAM_DRIVE_OFS, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }},
-    /* 6 LFO: the Drum layout */
+/* S099 P1: pages 0..6, shared by the col and clx layouts (one source) */
+#define COL_PAGES_0_6 \
+    /* 0 OSC */ \
+    {{ COL_PARAM_OSC1_PITCH_COARSE, COL_PARAM_OSC1_PITCH_FINE, COL_PARAM_OSC1_POSITION, COL_PARAM_POS_SPREAD, COL_PARAM_WAVE, COL_PARAM_OSC1_TYPE, COL_PARAM_PENV_AMOUNT, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }}, \
+    /* 1 AEG */ \
+    {{ COL_PARAM_ATTACK, COL_PARAM_DECAY, COL_PARAM_SUSTAIN_LEVEL, COL_PARAM_RELEASE, COL_PARAM_PENV_ATTACK, COL_PARAM_PENV_DECAY, COL_PARAM_PENV_SUSTAIN_LEVEL, COL_PARAM_PENV_RELEASE, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }}, \
+    /* 2 MOD: velocity, the sustain switch, the slew; then the noise */ \
+    {{ COL_PARAM_VELO_MOD_DEST, COL_PARAM_VELO_MOD_AMOUNT, COL_PARAM_SUSTAIN, COL_PARAM_SLEW, COL_PARAM_NOISE_LEVEL, COL_PARAM_NOISE_TONE, COL_PARAM_NOISE_WIDTH, COL_PARAM_NOISE_PAN, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }}, \
+    /* 3 FM: the intervals and detune, then spread and motion */ \
+    {{ COL_PARAM_INTERVAL_1, COL_PARAM_INTERVAL_2, COL_PARAM_INTERVAL_3, COL_PARAM_DETUNE, COL_PARAM_SPREAD, COL_PARAM_MOTION, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }}, \
+    /* 4 click: the filter envelope, its amount, the filter drive */ \
+    {{ COL_PARAM_FENV_ATTACK, COL_PARAM_FENV_DECAY, COL_PARAM_FENV_SUSTAIN_LEVEL, COL_PARAM_FENV_RELEASE, COL_PARAM_FENV_AMOUNT, COL_PARAM_DRIVE, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }}, \
+    /* 5 FILTER: the filter and its route, then the right / second offsets */ \
+    {{ COL_PARAM_CUTOFF, COL_PARAM_RESO, COL_PARAM_FILT_TYPE, COL_PARAM_ROUTE, COL_PARAM_CUT_OFS, COL_PARAM_RES_OFS, COL_PARAM_ENV_OFS, COL_PARAM_DRIVE_OFS, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }}, \
+    /* 6 LFO: the Drum layout */ \
     {{ COL_PARAM_LFO_RATE, COL_PARAM_LFO_SYNC, COL_PARAM_LFO_WAVE, COL_PARAM_LFO_OFFSET, COL_PARAM_LFO_RETRIGGER_VOICE, COL_PARAM_LFO_POLARITY, COL_PARAM_LFO_AMOUNT, COL_PARAM_LFO_AMOUNT_2, COL_PARAM_LFO_TARGET_VOICE, COL_PARAM_LFO_TARGET_PARAM, COL_PARAM_LFO_TARGET_VOICE_2, COL_PARAM_LFO_TARGET_PARAM_2, COL_E, COL_E, COL_E, COL_E }},
+
+const instrument_menu_page_t colloid_menu_pages[] = {
+    COL_PAGES_0_6
     /* 7 MIX: vol pan, the tone, the overdrive (the Alkaline's cells) */
     {{ COL_PARAM_INSTRUMENT_VOL, COL_PARAM_INSTRUMENT_PAN, COL_PARAM_TONE, COL_PARAM_INSTRUMENT_DRIVE, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }},
+};
+
+/*
+ * The Advanced Colloid's layout (S099 P1; chorus draft §7.2).
+ *
+ * What:       the col pages 0..6, then MIX: vol pan ton drv | cho crt cdp cmx
+ *             | csr. The second screen of MIX was empty, so no SELECT
+ *             position moves.
+ * Why:        the chorus is the last stage before the mixer, beside the
+ *             post-filter tone and overdrive.
+ */
+const instrument_menu_page_t colloid_adv_menu_pages[] = {
+    COL_PAGES_0_6
+    /* 7 MIX + the chorus */
+    {{ COL_PARAM_INSTRUMENT_VOL, COL_PARAM_INSTRUMENT_PAN, COL_PARAM_TONE, COL_PARAM_INSTRUMENT_DRIVE, COL_PARAM_CHORUS_TYPE, COL_PARAM_CHORUS_RATE, COL_PARAM_CHORUS_DEPTH, COL_PARAM_CHORUS_MIX, COL_PARAM_CHORUS_SOURCE, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E, COL_E }},
 };
 
 const uint8_t colloid_menu_page_count =
@@ -401,6 +479,9 @@ const uint8_t colloid_menu_page_count =
 _Static_assert(COLLOID_MENU_PAGE_COUNT ==
                    (sizeof(colloid_menu_pages) / sizeof(colloid_menu_pages[0])),
                "COLLOID_MENU_PAGE_COUNT must match colloid_menu_pages");
+_Static_assert(COLLOID_MENU_PAGE_COUNT ==
+                   (sizeof(colloid_adv_menu_pages) / sizeof(colloid_adv_menu_pages[0])),
+               "the clx layout has the col layout's page count");
 
 /*
  * Exported row indices and the sus-row test (S096 P3, finding D8).
@@ -428,7 +509,7 @@ uint8_t colloidParameters_cellInactive(const ColloidVoice *voice,
     const ParamDescriptor *const base = colloid_param_descriptors;
 
     if (!voice || !descriptor || descriptor < base ||
-        descriptor >= base + COL_PARAM_COUNT)
+        descriptor >= base + COL_PARAM_ADV_COUNT)
         return 0u;
     switch ((colloid_param_index_t)(descriptor - base)) {
     case COL_PARAM_OSC1_POSITION:
@@ -441,6 +522,18 @@ uint8_t colloidParameters_cellInactive(const ColloidVoice *voice,
         /* a mono route (rte a filter type): positions have no effect (C-D16,
          * S095 P3 F9) */
         return (uint8_t)(voice->route != COL_RTE_STR && voice->route < COL_RTE_COUNT);
+    /* S099 P1: the chorus rows */
+    case COL_PARAM_CHORUS_RATE:
+    case COL_PARAM_CHORUS_DEPTH:
+        /* crt and cdp set var and dbl only; the Juno modes fix both */
+        return (uint8_t)(voice->choType < BBD_MODE_VAR);
+    case COL_PARAM_CHORUS_MIX:
+        return (uint8_t)(voice->choType == BBD_MODE_OFF);
+    case COL_PARAM_CHORUS_SOURCE:
+        /* no choice with the chorus off, or in a mono route (L = R: both
+         * forms play the same; the selected one still runs, constant cost) */
+        return (uint8_t)(voice->choType == BBD_MODE_OFF ||
+                         (voice->route != COL_RTE_STR && voice->route < COL_RTE_COUNT));
     default:
         return 0u;
     }
@@ -455,9 +548,11 @@ uint8_t colloidParameters_cellInactive(const ColloidVoice *voice,
 #undef ROW_MENU_SPECIAL
 #undef ROW_SELECT_ONOFF_SPECIAL
 #undef ROW_SELECT_ONOFF
+#undef ROW_SELECT_FIXED_SPECIAL
 #undef ROW_NOBIND
 #undef ROW_NOBIND_IMAGE
 #undef COL_E
+#undef COL_PAGES_0_6
 #undef MOD_WAVE
 #undef MOD_PM63
 #undef MOD_0_127

@@ -38,6 +38,13 @@ TABLES = {
     # S096 P1: the Tetrakt. Its special rows are the LFO's three (rate, sync,
     # offset), as every engine's; every tkt_* key is generic.
     'TKT': 'Core/DSP/Instruments/Tetrakt/TetraktParameters.c',
+    # S099 P1: the Advanced Colloid shares the Colloid's table (its 59 rows,
+    # then the five chorus rows); chorus_type is IM_SPECIAL_CHORUS_TYPE, the
+    # other chorus keys NONE.
+    'CLX': 'Core/DSP/Instruments/Colloid/ColloidParameters.c',
+    # S099 P1: the Advanced Alkaline shares the Alkaline's table (its 31 rows,
+    # then the seven chorus rows); chorus_type is IM_SPECIAL_CHORUS_TYPE.
+    'ALX': 'Core/DSP/Instruments/Alkaline/AlkalineParameters.c',
 }
 ENUM = 'Core/DSP/Instruments/InstrumentManager.h'
 REGISTRY = 'Core/DSP/Instruments/InstrumentManager.c'
@@ -81,7 +88,9 @@ def expected(t, key):
         'lfo_offset': 'LFO_OFFSET',
         # S094 P1 S1: lfo_sync recomputes the LFO step through
         # IM_SPECIAL_LFO_SYNC (lfo_setSync()).
-        'lfo_sync': 'LFO_SYNC'}
+        'lfo_sync': 'LFO_SYNC',
+        # S099 P1: the chorus type claims its voice unit (IM_SPECIAL_CHORUS_TYPE)
+        'chorus_type': 'CHORUS_TYPE'}
     if t == 'HAT' and key == 'amp_envelope_decay_choke':
         return {'IM_SPECIAL_HAT_DECAY_CHOKE'}
     if t in ('DRM', 'SNR'):
@@ -148,6 +157,21 @@ def main():
                 if want != got:
                     bad += 1
                     print(f'{path}:{n}: {m.group(2)} expected {sorted(want)} got {sorted(got)}')
+    # S099 P1: chorus_type must be a fixed selector in every table that has
+    # it: its macro sets INSTRUMENT_PARAM_FLAG_SELECTOR and not AUTOMATABLE,
+    # MORPHABLE or MODULATABLE (the cho writer claims a voice unit, a
+    # foreground-only operation; law 9 proves the gate side).
+    for t, path in TABLES.items():
+        text = open(path).read()
+        if '"chorus_type"' not in text:
+            continue
+        m = re.search(r'#define ROW_SELECT_FIXED_SPECIAL\(.*?\n(.*?)\n\s*MOD_NONE', text, re.S)
+        rowm = re.search(r'^\s*(ROW[A-Z_]*)\("chorus_type"', text, re.M)
+        if not m or not rowm or rowm.group(1) != 'ROW_SELECT_FIXED_SPECIAL' or \
+                'AUTOMATABLE' in m.group(1) or 'MORPHABLE' in m.group(1) or \
+                'MODULATABLE' in m.group(1) or 'FLAG_SELECTOR' not in m.group(1):
+            print(f'{path}: chorus_type is not a fixed selector (ROW_SELECT_FIXED_SPECIAL, SELECTOR only)')
+            bad += 1
     print(f'special tags {"OK" if not bad else "FAILED"} ({rows} rows, {bad} mismatches)')
     return 1 if bad else 0
 

@@ -59,14 +59,59 @@ OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
         stock_tables voicefold fold_tables pwm_tables crumpbit crumpbit_tables \
         crumpbit_elf_check crumpbit_cpu_check alkaline alkaline_tables \
         elf_p4_snapshot elf_p4_check seq_steplen lfo lfo_rate_table alk_post_tables \
+        elf_s099_snapshot elf_s099_check \
         space space_cpu_check colloid colloid_tables colloid_cpu_check \
         tetrakt tetrakt_tables tetrakt_cpu_check \
-        distortion dist_makeup_table scene_identity
+        distortion dist_makeup_table scene_identity chorus chorus_tables
 all: oscillator modulation voice_control sequencer seq_steplen instrument_manager samples \
      sampleoptimize run_modes special_tags stock_tables voicefold fold_tables pwm_tables \
      crumpbit crumpbit_tables alkaline alkaline_tables alk_post_tables lfo lfo_rate_table \
      space colloid colloid_tables distortion dist_makeup_table tetrakt tetrakt_tables \
-     buscomp scene_identity
+     buscomp scene_identity chorus chorus_tables
+
+# S099 P1: the BBD chorus (laws CH-TAP .. CH-HALF) and three breaks.
+# S099 P1 review: built twice, the default (BBD_COL_HALF_RATE 1, the Colloid's
+# half-rate wet, C3) and the full-rate Colloid (-DBBD_COL_HALF_RATE=0), so
+# both forms stay proven. The breaks run on the default build and reach both
+# Colloid forms: the mirror store of either mid loop; the dry gain's sign in
+# every loop (each break must fail its own law: the output is grepped).
+chorus: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/Chorus/BbdChorus.h --body --out $(GEN)/BbdChorus.host.h
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/Chorus/BbdChorus.c --body --out $(GEN)/BbdChorus.host.c
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/Chorus/BbdChorusTables.h --body --out $(GEN)/BbdChorusTables.host.h
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/Chorus/BbdChorusTables.c --body --out $(GEN)/BbdChorusTables.host.c
+	$(HOSTCC) $(HOSTFLAGS) -I. modules/chorus.c -o build/chorus -lm
+	./build/chorus
+	$(HOSTCC) $(HOSTFLAGS) -DBBD_COL_HALF_RATE=0 -I. modules/chorus.c -o build/chorus_full -lm
+	./build/chorus_full
+	mkdir -p build/break_cho_guard build/break_cho_mirror build/break_cho_mix
+	sed 's/r\[BBD_RING\] = r\[0\];/(void)0;/' $(GEN)/BbdChorus.host.c > build/break_cho_guard/BbdChorus.host.c
+	@grep -q '(void)0;' build/break_cho_guard/BbdChorus.host.c || { echo "chorus_break_guard: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_cho_guard $(HOSTFLAGS) -I. modules/chorus.c -o build/chorus_break_guard -lm
+	@if ./build/chorus_break_guard 2>&1 | grep -q 'CH-GUARD FAIL'; then \
+	  echo "chorus_break_guard: caught (law CH-GUARD fails as expected)"; \
+	else echo "chorus_break_guard: FAILED"; exit 1; fi
+	sed -e 's/ringR\[w & BBD_RMASK\] = q;/(void)ringR;/' \
+	    -e 's/ringR\[w & BBD_RMASK\] = (int16_t)p;/(void)ringR;/' \
+	  $(GEN)/BbdChorus.host.c > build/break_cho_mirror/BbdChorus.host.c
+	@test $$(grep -c '(void)ringR;' build/break_cho_mirror/BbdChorus.host.c) -eq 2 || \
+	  { echo "chorus_break_mirror: sed did not apply to both mid loops"; exit 1; }
+	$(HOSTCC) -Ibuild/break_cho_mirror $(HOSTFLAGS) -I. modules/chorus.c -o build/chorus_break_mirror -lm
+	@if ./build/chorus_break_mirror 2>&1 | grep -q 'CH-SRC FAIL'; then \
+	  echo "chorus_break_mirror: caught (law CH-SRC fails as expected)"; \
+	else echo "chorus_break_mirror: FAILED"; exit 1; fi
+	sed -e 's/bbd_smlawb(\([a-z0-9]*\) << 1, gk, /bbd_smlawb(-(\1 << 1), gk, /g' \
+	    -e 's/bbd_smlawb(x2, gk, xi)/bbd_smlawb(-x2, gk, xi)/' \
+	  $(GEN)/BbdChorus.host.c > build/break_cho_mix/BbdChorus.host.c
+	@grep -q 'bbd_smlawb(-(x0 << 1), gk, ' build/break_cho_mix/BbdChorus.host.c || \
+	  { echo "chorus_break_mix: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_cho_mix $(HOSTFLAGS) -I. modules/chorus.c -o build/chorus_break_mix -lm
+	@if ./build/chorus_break_mix 2>&1 | grep -q 'CH-MIX0 FAIL'; then \
+	  echo "chorus_break_mix: caught (law CH-MIX0 fails as expected; at cmx 64)"; \
+	else echo "chorus_break_mix: FAILED"; exit 1; fi
+
+chorus_tables:
+	cd $(ROOT) && python3 tools/chorus/gen_chorus_tables.py --check
 
 $(GEN):
 	mkdir -p $(GEN)
@@ -85,6 +130,11 @@ $(GEN)/oscPwmTables.host.c: $(ROOT)/Core/DSPAudio/oscPwmTables.c | $(GEN)
 	$(EX) --src $< --body --out $@
 # S094 P4: the shared pwm warp (Oscillator.c and DiodeLadder.c include it).
 $(GEN)/oscPwmWarp.host.h: $(ROOT)/Core/DSPAudio/oscPwmWarp.h | $(GEN)
+	$(EX) --src $< --body --out $@
+# S099 P1: the chopped waves' tables (AlkalineVoice.c includes them).
+$(GEN)/oscChopTables.host.h: $(ROOT)/Core/DSPAudio/oscChopTables.h | $(GEN)
+	$(EX) --src $< --body --out $@
+$(GEN)/oscChopTables.host.c: $(ROOT)/Core/DSPAudio/oscChopTables.c | $(GEN)
 	$(EX) --src $< --body --out $@
 
 # S089 P3 breaks (fmramp group): the ramp dispatcher sending wtb to the
@@ -433,12 +483,18 @@ ALK_GEN := $(GEN)/DiodeLadder.host.h $(GEN)/DiodeLadder.host.c \
            $(GEN)/AlkalineControl.host.h $(GEN)/AlkalineControl.host.c \
            $(GEN)/AlkalineTables.host.h $(GEN)/AlkalineTables.host.c \
            $(GEN)/AlkalineSquareTable.host.c \
-           $(GEN)/AlkalineVoice.host.h $(GEN)/AlkalineVoice.host.c \
+	           $(GEN)/AlkalineVoice.host.h $(GEN)/AlkalineVoice.host.c \
+	           $(GEN)/AlkalineChop.host.c \
 	           $(GEN)/alk_sawTable.c $(GEN)/alk_triTable.c $(GEN)/oscPwmTables.host.h \
-	           $(GEN)/oscPwmTables.host.c $(GEN)/oscPwmWarp.host.h
+	           $(GEN)/oscPwmTables.host.c $(GEN)/oscPwmWarp.host.h \
+	           $(GEN)/oscChopTables.host.h $(GEN)/oscChopTables.host.c
+# S099 P1: the chop render's own object (Alkaline_renderChop()).
+$(GEN)/AlkalineChop.host.c: $(ALK)/AlkalineChop.c | $(GEN)
+	$(EX) --src $< --body --out $@
 alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
 	$(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables.host.c \
-	$(GEN)/oscPwmWarp.host.h | $(GEN)
+	$(GEN)/oscPwmWarp.host.h $(GEN)/oscChopTables.host.h \
+	$(GEN)/oscChopTables.host.c $(GEN)/AlkalineChop.host.c | $(GEN)
 	$(EX) --src $(ROOT)/Core/DSPAudio/DiodeLadder.h --body --out $(GEN)/DiodeLadder.host.h
 	$(EX) --src $(ROOT)/Core/DSPAudio/DiodeLadder.c --body --out $(GEN)/DiodeLadder.host.c
 	$(EX) --src $(ALK)/AlkalineControl.h --body --out $(GEN)/AlkalineControl.host.h
@@ -450,6 +506,7 @@ alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
 	$(EX) --src $(ALK)/AlkalineSquareTable.c --body --out $(GEN)/AlkalineSquareTable.host.c
 	$(EX) --src $(ALK)/AlkalineVoice.h --body --out $(GEN)/AlkalineVoice.host.h
 	$(EX) --src $(ALK)/AlkalineVoice.c --body --out $(GEN)/AlkalineVoice.host.c
+	$(EX) --src $(ALK)/AlkalineChop.c --body --out $(GEN)/AlkalineChop.host.c
 	$(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object sawTable --out $(GEN)/alk_sawTable.raw.c
 	sed 's/const int16_t sawTable/int16_t sawTable/' $(GEN)/alk_sawTable.raw.c > $(GEN)/alk_sawTable.c
 # S094 P4: the real triangle for the Tri laws (AL-XT, AL-PWW).
@@ -460,6 +517,11 @@ alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
 	$(HOSTCC) $(HOSTFLAGS) -DALK_PWM_READ_FORM=0 $(OSC_HOST_INC) modules/alkaline.c \
 	  $(CAT_HOST_SRC) -o build/alkaline_pwm_ref -lm
 	./build/alkaline_pwm_ref --pwm-render build/alk_pwm_ref.bin
+# S099 P1: the chop read-form reference (ALK_CHOP_READ_FORM 0, every point
+# interpolated) renders build/alk_chop_ref.bin for law AL-CH.
+	$(HOSTCC) $(HOSTFLAGS) -DALK_CHOP_READ_FORM=0 $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_chop_ref -lm
+	./build/alkaline_chop_ref --chop-render build/alk_chop_ref.bin
 	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c $(CAT_HOST_SRC) \
 	  -o build/alkaline -lm
 	./build/alkaline
@@ -542,6 +604,37 @@ alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
 	@if ./build/alkaline_break_tri >/dev/null 2>&1; then \
 	  echo "alkaline_break_tri: FAILED (a Tri read on the Saw row not caught)"; exit 1; \
 	else echo "alkaline_break_tri: caught (law AL-XT fails as expected)"; fi
+# S099 P1 breaks (law AL-CH must fail each): (1) the ramp wrapped at the
+# cycle end (no 2^29 offset); (2) the gate's floor offset missing (chC 0);
+# (3) the gate a sum (sign +1).
+	mkdir -p build/break_alk_chwrap build/break_alk_chc build/break_alk_chsign
+	sed 's/const uint32_t iv = (ph + 0x20000000u) >> 22;/const uint32_t iv = ph >> 22;/' \
+	  $(GEN)/DiodeLadder.host.c > build/break_alk_chwrap/DiodeLadder.host.c
+	@grep -q 'const uint32_t iv = ph >> 22;' build/break_alk_chwrap/DiodeLadder.host.c || \
+	  { echo "alkaline_break_chwrap: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk_chwrap $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break_chwrap -lm
+	@if ./build/alkaline_break_chwrap >/dev/null 2>&1; then \
+	  echo "alkaline_break_chwrap: FAILED (a wrap at the cycle end not caught)"; exit 1; \
+	else echo "alkaline_break_chwrap: caught (law AL-CH fails as expected)"; fi
+	sed 's/const float g = (float)(row\[itg\] - row\[ib\]) + chC;/const float g = (float)(row[itg] - row[ib]);/' \
+	  $(GEN)/DiodeLadder.host.c > build/break_alk_chc/DiodeLadder.host.c
+	@grep -q 'const float g = (float)(row\[itg\] - row\[ib\]);' build/break_alk_chc/DiodeLadder.host.c || \
+	  { echo "alkaline_break_chc: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk_chc $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break_chc -lm
+	@if ./build/alkaline_break_chc >/dev/null 2>&1; then \
+	  echo "alkaline_break_chc: FAILED (a gate without its floor offset not caught)"; exit 1; \
+	else echo "alkaline_break_chc: caught (law AL-CH fails as expected)"; fi
+	sed 's/const float g = (float)(row\[itg\] - row\[ib\]) + chC;/const float g = (float)(row[itg] + row[ib]) + chC;/' \
+	  $(GEN)/DiodeLadder.host.c > build/break_alk_chsign/DiodeLadder.host.c
+	@grep -q 'row\[itg\] + row\[ib\]' build/break_alk_chsign/DiodeLadder.host.c || \
+	  { echo "alkaline_break_chsign: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk_chsign $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break_chsign -lm
+	@if ./build/alkaline_break_chsign >/dev/null 2>&1; then \
+	  echo "alkaline_break_chsign: FAILED (a summed gate not caught)"; exit 1; \
+	else echo "alkaline_break_chsign: caught (law AL-CH fails as expected)"; fi
 
 alkaline_tables:
 	cd $(ROOT) && python3 tools/alkaline/gen_alk_tables.py --check
@@ -584,7 +677,8 @@ COL_GEN := $(GEN)/ColloidTables.host.h $(GEN)/ColloidTables.host.c \
            $(GEN)/ColloidVoice.host.h $(GEN)/ColloidVoice.host.c
 COL_COUNT ?= 10   # S096 P3: COL_OSC_COUNT 10 (was 12)
 colloid: $(GEN)/Oscillator.host.h $(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables.host.c \
-	$(GEN)/oscPwmWarp.host.h | $(GEN)
+	$(GEN)/oscPwmWarp.host.h $(GEN)/oscChopTables.host.h \
+	$(GEN)/oscChopTables.host.c | $(GEN)
 	$(EX) --src $(ALK)/AlkalineControl.h --body --out $(GEN)/AlkalineControl.host.h
 	$(EX) --src $(ALK)/AlkalinePostTables.h --body --out $(GEN)/AlkalinePostTables.host.h
 	$(EX) --src $(ALK)/AlkalinePostTables.c --body --out $(GEN)/AlkalinePostTables.host.c
@@ -621,9 +715,9 @@ colloid: $(GEN)/Oscillator.host.h $(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables
 	  echo "colloid_break_frac: FAILED (a 16-bit fraction not caught)"; exit 1; \
 	else echo "colloid_break_frac: caught (law CO-OSC fails as expected)"; fi
 	mkdir -p build/break_col_sus
-	sed 's/if (!held) { e->stage = COL_EG_RELEASE; break; }/if (0) { e->stage = COL_EG_RELEASE; break; }/' \
+	sed 's/if (!held \&\& e->stage != COL_EG_IDLE)/if (0 \&\& e->stage != COL_EG_IDLE)/' \
 	  $(GEN)/ColloidVoice.host.c > build/break_col_sus/ColloidVoice.host.c
-	@grep -q 'if (0)' build/break_col_sus/ColloidVoice.host.c || \
+	@grep -q 'if (0 && e->stage != COL_EG_IDLE)' build/break_col_sus/ColloidVoice.host.c || \
 	  { echo "colloid_break_sus: sed did not apply"; exit 1; }
 	$(HOSTCC) -Ibuild/break_col_sus $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
 	  $(CAT_HOST_SRC) -o build/colloid_break_sus -lm
@@ -784,17 +878,18 @@ colloid: $(GEN)/Oscillator.host.h $(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables
 	@if ./build/colloid_break_sign >/dev/null 2>&1; then \
 	  echo "colloid_break_sign: FAILED (Saw played as Rec not caught)"; exit 1; \
 	else echo "colloid_break_sign: caught (law CO-PWM fails as expected)"; fi
-	@# S096 P3 C1: the amp attack not extending the gate must fail CO-GATE;
+	@# S099 P1 §15: an attack that outlives the gate (the removed S096 P3
+	@# amp-attack minimum) must fail CO-GATE;
 	@# a roll retrigger resetting the gate must fail CO-ROLLGATE.
 	mkdir -p build/break_col_atk build/break_col_roll
-	sed 's/voice->release, held, 1u);/voice->release, held, 0u);/' \
+	sed 's/if (!held \&\& e->stage != COL_EG_IDLE)/if (!held \&\& e->stage != COL_EG_IDLE \&\& e->stage != COL_EG_ATTACK)/' \
 	  $(GEN)/ColloidVoice.host.c > build/break_col_atk/ColloidVoice.host.c
-	@grep -q 'voice->release, held, 0u);' build/break_col_atk/ColloidVoice.host.c || \
+	@grep -q 'e->stage != COL_EG_ATTACK)' build/break_col_atk/ColloidVoice.host.c || \
 	  { echo "colloid_break_atk: sed did not apply"; exit 1; }
 	$(HOSTCC) -Ibuild/break_col_atk $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
 	  $(CAT_HOST_SRC) -o build/colloid_break_atk -lm
 	@if ./build/colloid_break_atk >/dev/null 2>&1; then \
-	  echo "colloid_break_atk: FAILED (an amp attack cut by the gate not caught)"; exit 1; \
+	  echo "colloid_break_atk: FAILED (an attack that outlives the gate not caught)"; exit 1; \
 	else echo "colloid_break_atk: caught (law CO-GATE fails as expected)"; fi
 	sed 's/if (first)/if (1)/' \
 	  $(GEN)/ColloidVoice.host.c > build/break_col_roll/ColloidVoice.host.c
@@ -816,6 +911,36 @@ colloid: $(GEN)/Oscillator.host.h $(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables
 	@if ./build/colloid_break_scan >/dev/null 2>&1; then \
 	  echo "colloid_break_scan: FAILED (a stepping scan blend not caught)"; exit 1; \
 	else echo "colloid_break_scan: caught (law CO-SCAN fails as expected)"; fi
+# S099 P1 breaks (law CO-CHP must fail each): the ramp wrapped at the cycle
+# end; the gate's floor offset missing; the gate a sum.
+	mkdir -p build/break_col_chwrap build/break_col_chc build/break_col_chsign
+	sed 's/curve\[(p0 + 0x20000000u) >> 22\]/curve[p0 >> 22]/' \
+	  $(GEN)/ColloidOsc.host.c > build/break_col_chwrap/ColloidOsc.host.c
+	@grep -q 'curve\[p0 >> 22\]' build/break_col_chwrap/ColloidOsc.host.c || \
+	  { echo "colloid_break_chwrap: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_chwrap $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_chwrap -lm
+	@if ./build/colloid_break_chwrap >/dev/null 2>&1; then \
+	  echo "colloid_break_chwrap: FAILED (a wrap at the cycle end not caught)"; exit 1; \
+	else echo "colloid_break_chwrap: caught (law CO-CHP fails as expected)"; fi
+	sed 's/ + (int32_t)(((p0 << 1) - q0) >> 16);/;/' \
+	  $(GEN)/ColloidOsc.host.c > build/break_col_chc/ColloidOsc.host.c
+	@! grep -q '((p0 << 1) - q0) >> 16' build/break_col_chc/ColloidOsc.host.c || \
+	  { echo "colloid_break_chc: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_chc $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_chc -lm
+	@if ./build/colloid_break_chc >/dev/null 2>&1; then \
+	  echo "colloid_break_chc: FAILED (a gate without its floor not caught)"; exit 1; \
+	else echo "colloid_break_chc: caught (law CO-CHP fails as expected)"; fi
+	sed 's/- r0\[q0 >> 22\];/+ r0[q0 >> 22];/' \
+	  $(GEN)/ColloidOsc.host.c > build/break_col_chsign/ColloidOsc.host.c
+	@grep -q '+ r0\[q0 >> 22\];' build/break_col_chsign/ColloidOsc.host.c || \
+	  { echo "colloid_break_chsign: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_chsign $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_chsign -lm
+	@if ./build/colloid_break_chsign >/dev/null 2>&1; then \
+	  echo "colloid_break_chsign: FAILED (a summed gate not caught)"; exit 1; \
+	else echo "colloid_break_chsign: caught (law CO-CHP fails as expected)"; fi
 
 colloid_tables:
 	cd $(ROOT) && python3 tools/colloid/gen_col_tables.py --check
@@ -1022,6 +1147,35 @@ elf_p4_check:
 	python3 elf_loopdump.py --elf $(FW_ELF) --sym mixer_calcNextSampleBlock \
 	  --out build/p4_mixer_now.txt
 	python3 elf_hotloops.py --compare $(P4BASE)/mixer.txt build/p4_mixer_now.txt
+
+# ---------------------------------------------------------------------------
+# S099 P1: the engines' loop identity (the Alkaline's B2R wrappers, the
+# Colloid's oscillator and filter loops, the Tetrakt's sync block), against a
+# snapshot taken before the phase. elf_p4_check covers the oscillator and
+# mixer loops; this covers the engines elf_p4_check does not.
+#
+# What:       elf_s099_snapshot writes $(S099BASE)/engines.txt; elf_s099_check
+#             dumps the same symbols from $(FW_ELF) and compares (exit 1 on a
+#             MISSING or GREW).
+# Accessors:  make -C tools/dsp_test elf_s099_snapshot | elf_s099_check
+#             [S099BASE=baselines/s099p1/<phase>].
+S099BASE ?= baselines/s099p1/pre
+S099_SYMS := DiodeLadder_renderB2Osc DiodeLadder_renderB2Osc2 \
+  DiodeLadder_renderB2OscPwm DiodeLadder_renderB2OscPwmWt alk_renderWav alk_renderWtb \
+  col_oscPairStore col_oscPairAdd col_pwmPairStore col_pwmPairAdd col_warpStore \
+  col_warpAdd col_scanPairStore col_scanPairAdd col_renderPar col_renderSer \
+  Colloid_calcVoiceAsync Tetrakt_calcVoiceSyncBlock
+
+elf_s099_snapshot:
+	mkdir -p $(S099BASE)
+	python3 elf_loopdump.py --elf $(FW_ELF) $(foreach s,$(S099_SYMS),--sym $(s)) \
+	  --out $(S099BASE)/engines.txt
+
+elf_s099_check:
+	mkdir -p build
+	python3 elf_loopdump.py --elf $(FW_ELF) $(foreach s,$(S099_SYMS),--sym $(s)) \
+	  --out build/s099_engines_now.txt
+	python3 elf_loopdump.py --compare $(S099BASE)/engines.txt build/s099_engines_now.txt
 
 fold_tables:
 	cd $(ROOT) && python3 tools/plots/gen_fold_tables.py --check
