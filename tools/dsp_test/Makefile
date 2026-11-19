@@ -1124,13 +1124,15 @@ P4_OSC_SYMS := SVF_calcBlockZDF calcFmBlock calcNextOscSampleBlock \
   osc_wtbRingBlendBlock osc_wtbRingBlock osc_wtbSyncBlendBlock osc_wtbSyncBlock \
   transient_calcUserBlock voiceFold_asnLoop voiceFold_chbLoop voiceFold_fd2Loop \
   voiceFold_process voiceFold_sinLoop voiceFold_triLoop busComp_processBlock \
-  osc_pwmDPlainBlock osc_pwmWtPlainBlock osc_pwmWsPlainBlock \
-  osc_pwmDFmBlock osc_pwmWtFmBlock osc_pwmWsFmBlock \
-  osc_pwmDFmRampBlock osc_pwmWtFmRampBlock osc_pwmWsFmRampBlock \
-  osc_pwmDRingBlock osc_pwmWtRingBlock osc_pwmWsRingBlock \
-  osc_pwmDSyncBlock osc_pwmWtSyncBlock osc_pwmWsSyncBlock
+  osc_pwmDPlainBlock osc_pwmWtPlainBlock \
+  osc_pwmDFmBlock osc_pwmWtFmBlock \
+  osc_pwmDFmRampBlock osc_pwmWtFmRampBlock \
+  osc_pwmDRingBlock osc_pwmWtRingBlock \
+  osc_pwmDSyncBlock osc_pwmWtSyncBlock
 # S094 P1 S3: the fifteen PWM loops (.itcm.s094p1) join the gate from the s3
-# snapshot on, so S4/S5 must leave them unchanged.
+# snapshot on, so S4/S5 must leave them unchanged. S099 P1 §15.10: the five
+# WS (pwm Sin) loops left with the form; a baseline that has them reports
+# them MISSING.
 
 elf_p4_snapshot:
 	mkdir -p $(P4BASE)

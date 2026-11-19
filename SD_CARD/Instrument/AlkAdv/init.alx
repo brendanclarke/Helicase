@@ -34,13 +34,10 @@ osc1_position=0
 osc1_type=0
 instrument_drive=0
 alk_tone=127
-chorus_type=1
-chorus_rate=40
-chorus_depth=127
-chorus_mix=64
-chorus_tone=73
-chorus_drive=0
-chorus_width=127
+fx_type=1
+fx_rate=40
+fx_depth=0
+fx_mix=64
 
 [morph]
 osc1_wave=0
@@ -68,10 +65,7 @@ alk_attack=0
 osc1_position=0
 instrument_drive=0
 alk_tone=127
-chorus_rate=40
-chorus_depth=127
-chorus_mix=64
-chorus_tone=73
-chorus_drive=0
-chorus_width=127
+fx_rate=40
+fx_depth=0
+fx_mix=64
 

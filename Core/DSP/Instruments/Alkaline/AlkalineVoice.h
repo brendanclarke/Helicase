@@ -63,14 +63,16 @@
  *             stock triangle rows): ALK_WAVE_COUNT entries. Under typ pwm:
  *             0 Saw (two-saw sum), 1 Sqr (the band-limited pulse: the stock
  *             Rec's pwm form), 2 Tri (the warp form of the triangle), 3 R-S
- *             (the Alpha Juno chopped saw), 4 REx (the same chop on a rising
- *             exponential): ALK_PWM_WAVE_COUNT entries. Under typ wtb the
+ *             (the Alpha Juno chopped saw): ALK_PWM_WAVE_COUNT entries. S099
+ *             P2 (user, 2026-11-19): REx (was 4, the same chop on a rising
+ *             exponential) dropped, too close to R-S by ear; a stored 4
+ *             plays R-S (alk_renderPwm() tests >= ALK_WAVE_RS). Under typ wtb the
  *             same byte is the wavetable index.
  * Why:        S094 P4 (user): Tri only under wav and pwm, no Rec (Sqr is the
- *             pulse), no Sin. S099 P1 (user, 2026-11-19, D-1): R-S and REx
- *             are pwm forms only (pos 0 of R-S is the fixed Saw 2), so the
+ *             pulse), no Sin. S099 P1 (user, 2026-11-19, D-1): R-S (and REx
+ *             until S099 P2) are pwm forms only (pos 0 of R-S is the fixed Saw 2), so the
  *             two lists now have their own sizes. A typ switch from pwm with
- *             R-S or REx to wav clamps to Tri (Alkaline_setOscType()); no
+ *             R-S to wav clamps to Tri (Alkaline_setOscType()); no
  *             stored value changes meaning (a pwm byte of 3 or 4 clamped to
  *             Tri before, and no such byte could be stored).
  * Accessors:  alk_renderWav(), alk_renderPwm(), Alkaline_renderChop(),
@@ -83,15 +85,14 @@
 #define ALK_WAVE_TRI          2u
 #define ALK_WAVE_COUNT        3u   /* Saw Sqr Tri: the wav list */
 #define ALK_WAVE_RS           3u   /* S099 P1: pwm only, the chopped saw */
-#define ALK_WAVE_REX          4u   /* S099 P1: pwm only, the chopped exponential */
-#define ALK_PWM_WAVE_COUNT    5u   /* Saw Sqr Tri R-S REx: the pwm list */
+#define ALK_PWM_WAVE_COUNT    4u   /* Saw Sqr Tri R-S: the pwm list (S099 P2) */
 /*
  * The typ byte (row osc1_type, S093 P8; S094 P1 S5 pwm).
  *
  * What:       the stored and displayed value of the Alkaline typ cell:
  *             0 wav (Saw/Sqr, the 303's VCO; S094 P4 + Tri), 1 wtb (a
  *             wavetable frame), 2 pwm (Saw two-saw sum, Sqr pulse, Tri warp,
- *             and since S099 P1 R-S and REx, the chopped waves; pos = width
+ *             and since S099 P1 R-S, the chopped saw; pos = width
  *             index, 0 = 50 %);
  *             ALK_TYP_COUNT entries (alkTypeNames, MenuText.h).
  *             Alkaline_setOscType() maps it to OSC_TYPE_WAV / OSC_TYPE_WTB /
@@ -221,12 +222,13 @@ typedef struct AlkalineVoiceStruct
 	 * The Advanced Alkaline's chorus (S099 P1 P-E; DRAFT_ADVANCED_BBD_CHORUS.md
 	 * §4.5, §5.2, §7.2).
 	 *
-	 * What:       choUnit: the slot's FxBuffer voice unit while cho is not
-	 *             off, else NULL; the alx rows' bytes: choType cho, choRate
-	 *             crt, choDepth cdp, choMix cmx, choTone cbw (the wet's cutoff,
-	 *             5 .. 14 kHz, still tracking the delay), choDrive cdv (the BBD
-	 *             input x1 .. x4 into a hard clip), choWidth cwd (127 the
-	 *             Juno's opposed sweeps, 0 a mono wet); right: the right output
+	 * What:       choUnit: the slot's FxBuffer voice unit while fx is not
+	 *             off, else NULL; the alx rows' bytes: fxType fx (ADV_FX_*),
+	 *             fxDepth dpt (BBD_DPT_*), fxRate rte, fxMix mix (S099 P2;
+	 *             were cho cdp crt cmx; S099 P2 removed cbw cdv cwd: the
+	 *             wet's cutoff is fixed (BBD_ALK_TONE), the BBD drive follows
+	 *             vcaDrive and the width follows dpt, InstrumentManager.c the
+	 *             alx async case); right: the right output
 	 *             block while the chorus runs (written by the chorus pass:
 	 *             the dry copy, then the right tap).
 	 * Why:        the Alkaline is a mono voice; with the chorus it becomes a
@@ -236,19 +238,15 @@ typedef struct AlkalineVoiceStruct
 	 * RAM:        76 B in the 1,264 B slot reserve (564 -> 640 B, measured at
 	 *             step 0.5): appended, so no existing member moves and no
 	 *             loop's offsets change.
-	 * Accessors:  AlkalineParameters.c (rows 31..37); InstrumentManager.c (the
-	 *             cho writer, the alx async and sync, the right-block table,
+	 * Accessors:  AlkalineParameters.c (rows 31..34); InstrumentManager.c (the
+	 *             fx writer, the alx async and sync, the right-block table,
 	 *             the quiet test); alkalineParameters_cellInactive().
 	 */
 	int16_t *choUnit;
-	uint8_t  choType;
-	uint8_t  choRate;
-	uint8_t  choDepth;
-	uint8_t  choMix;
-	uint8_t  choTone;
-	uint8_t  choDrive;
-	uint8_t  choWidth;
-	uint8_t  choPad;
+	uint8_t  fxType;
+	uint8_t  fxRate;
+	uint8_t  fxDepth;
+	uint8_t  fxMix;
 	int16_t  right[OUTPUT_DMA_SIZE];
 } AlkalineVoice;
 
@@ -289,10 +287,11 @@ void Alkaline_calcVoiceAsync(AlkalineVoice *voice) __attribute__((noinline));
 void Alkaline_calcVoiceSyncBlock(AlkalineVoice *voice, int16_t *buf, uint8_t size)
 	__attribute__((noinline));
 /*
- * One block of typ pwm R-S or REx (S099 P1, fused ladder mode 5).
+ * One block of typ pwm R-S (S099 P1, fused ladder mode 5; S099 P2: REx
+ * dropped, the widths Rec's).
  *
  * What:       the chop's per-block values (gate row min(tableOffset +
- *             OSC_CHOP_LIFT, 10), d = oscPwmDSaw[pos], chC, chDc and the
+ *             OSC_CHOP_LIFT, 10), d = oscPwmDRec[pos], chC, chDc and the
  *             input scale) into DiodeLadder_renderB2OscChop() with the
  *             wave's curve table.
  * Why:        its own translation unit (AlkalineChop.c), compiled -fno-lto:
@@ -322,7 +321,7 @@ uint8_t Alkaline_isQuiet(const AlkalineVoice *voice);
  *
  * What:       maps ALK_TYP_* to osc.oscType (0 wav, 1 wtb, 2 and above pwm);
  *             clamps osc.waveform to the new type's list (wav: Saw Sqr Tri;
- *             pwm: Saw Sqr Tri R-S REx; wtb: the installed tables); clears
+ *             pwm: Saw Sqr Tri R-S; wtb: the installed tables); clears
  *             the bind so the
  *             next block (or trigger) binds; re-anchors positionApplied to
  *             pos. The phase runs on (every type is 2^32 per cycle). An

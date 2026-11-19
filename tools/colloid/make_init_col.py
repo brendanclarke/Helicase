@@ -81,12 +81,13 @@ INIT = {
     "col_noise_width": "127", "col_noise_pan": "63",
 }
 
-# S099 P1: the clx type's rows (after the @advanced-rows marker): cho I
-# (the Juno-60's mode I), crt 40 / cdp 127 (var and dbl only), cmx 64 (dry and
-# wet at -3 dB each), csr L-R; by ear in the D-G6 listening
+# S099 P1: the clx type's rows (after the @advanced-rows marker); S099 P2:
+# the effect's rows: fx chr, dpt 0 (I, the Juno-60's mode I, the S099 P1
+# init's sound), rte 40 (for dpt 3..127), mix 64 (dry and wet at -3 dB each);
+# no csr (S099 P2: the source follows the route); by ear in the D-G6 listening
 INIT_ADV = {
-    "chorus_type": "1", "chorus_rate": "40", "chorus_depth": "127",
-    "chorus_mix": "64", "chorus_source": "0",
+    "fx_type": "1", "fx_rate": "40", "fx_depth": "0",
+    "fx_mix": "64",
 }
 MARKER = "@advanced-rows"
 

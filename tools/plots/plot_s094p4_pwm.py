@@ -26,7 +26,8 @@ import gen_pwm_tables as G
 HERE = os.path.dirname(os.path.abspath(__file__))
 CSV = os.path.join(HERE, "..", "dsp_test", "build", "pwm_dump.csv")
 CYCLE = 512
-WAVES = ["Sin", "Tri", "Saw", "Rec"]
+# S099 P1 §15.10: pwm Sin dropped; pwm_dump writes Tri, Saw, Rec only
+WAVES = ["Tri", "Saw", "Rec"]
 FORM = {"Sin": "warp (WS) on the sine",
         "Tri": "warp (WT) on the triangle row",
         "Saw": "two-read sum (D): saw + delayed saw",

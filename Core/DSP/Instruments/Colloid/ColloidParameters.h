@@ -28,7 +28,7 @@
 #define COLLOID_PARAM_DESCRIPTOR_COUNT 59u
 /* S099 P1: the Advanced Colloid (clx) uses the same table with 64 rows: the
  * 59 above, then cho crt cdp cmx csr (asserted against the enum). */
-#define COLLOID_ADV_PARAM_DESCRIPTOR_COUNT 64u
+#define COLLOID_ADV_PARAM_DESCRIPTOR_COUNT 63u   /* S099 P2: 59 + fx dpt rte mix (csr removed) */
 /* eight sub-pages: the front-panel SELECT1..8 buttons (menu.c) */
 #define COLLOID_MENU_PAGE_COUNT        8u
 /* Basic (C-D1, user 2026-11-12): any slot, any number per Scene, held to
@@ -53,7 +53,7 @@ extern const char colloid_adv_instrument_display_label[];
 #define COL_IDX_COARSE      0u    /* osc1_pitch_coarse */
 #define COL_IDX_SUSTAIN     10u   /* col_sustain */
 #define COL_IDX_INTERVAL_1  12u   /* col_interval_1; in2 13, in3 14 */
-#define COL_IDX_CHORUS_TYPE 59u   /* S099 P1: chorus_type (clx only) */
+#define COL_IDX_FX_TYPE 59u   /* S099 P1: chorus_type (clx only) */
 /*
  * The sus-row test (S096 P3, finding D8).
  *

@@ -66,13 +66,12 @@ INIT = {
     "instrument_drive": "0", "alk_tone": "127",
 }
 
-# S099 P1 (P-E): the alx rows (after the @advanced-rows marker): cho I, crt 40
-# / cdp 127 (var and dbl only), cmx 64 (dry and wet at -3 dB), cbw 73 (9 kHz),
-# cdv 0 (x1), cwd 127 (the Juno's opposed sweeps)
+# S099 P1 (P-E): the alx rows (after the @advanced-rows marker); S099 P2: fx
+# chr, dpt 0 (I), rte 40 (for dpt 3..127), mix 64 (dry and wet at -3 dB); the
+# cbw cdv cwd rows are gone (tone fixed, drive and width derived)
 INIT_ADV = {
-    "chorus_type": "1", "chorus_rate": "40", "chorus_depth": "127",
-    "chorus_mix": "64", "chorus_tone": "73", "chorus_drive": "0",
-    "chorus_width": "127",
+    "fx_type": "1", "fx_rate": "40", "fx_depth": "0",
+    "fx_mix": "64",
 }
 MARKER = "@advanced-rows"
 

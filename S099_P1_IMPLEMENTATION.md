@@ -5609,3 +5609,186 @@ Neither is over.
   §15.4. They stay as historical records.
 - **D-G5:** judge the device probe against `clx-pwm6-par` 449.9 and the
   §15.2 table. C1 is the remaining option if p95 is over.
+
+### 15.8 Flash: where S099 P1's 15 KB went
+
+The user asked why flash went up so much.
+- **This round added only +152 B over the review:** C3's half-rate loops
+  +272, the §15.4 envelope change −120.
+- **S099 P1 as a whole added +14,960 B:** 720,776 → 735,736, against the
+  schedule's estimate of about 14,000 (§12 flash table).
+- **Method:** the pre-implementation commit (`2c889c40`) was rebuilt in a
+  scratch worktree. It reproduced 720,776 B exactly. The two images were
+  then compared symbol by symbol (`arm-none-eabi-nm -S`, flash sections
+  only).
+
+| Item | Bytes | Estimate |
+|---|---:|---:|
+| Chop tables (`oscChopTables.c`: the R-S and REx curves at 2,048 B each, plus the level, DC and release tables) | +6,254 | ≈ 6,250 |
+| Chop code (`DiodeLadder_renderB2OscChop` 1,420, `col_chopBlock` 584, `col_chopPairAdd` 306, `Alkaline_renderChop` 260, `col_chopDcInit` 34) | +2,604 | ≈ 2,500 |
+| Chorus tables (`BbdChorusTables.c`) | +2,120 | ≈ 2,050 |
+| Chorus code (render ×2, control, init) | +1,934 | ≈ 1,800 |
+| Advanced types plumbing (InstrumentManager: the chorus bind, the inactive-cell test, the slot reset; descriptors, pages, MIDI note modes) | +1,966 | ≈ 1,400 |
+| `DiodeLadder.o` out of LTO (`Alkaline_initVoice` no longer inlines the ladder init) | −236 | — |
+| Other (menus, MIDI, LTO reshuffle) | +139 | — |
+| Alignment and literal pools | +179 | — |
+
+- **Most of the overrun is the plumbing,** about 570 B over its estimate.
+- **Headroom is 17,928 B,** which is 1,544 B above `link_budget.py`'s 16 KiB
+  warning.
+
+### 15.9 Flash options, measured (PWM Sin since applied: §15.10)
+
+These were measured, not applied. Each was a trial build in a scratch copy of
+this tree:
+- the copy, unmodified, reproduced 735,736 B exactly;
+- each trial is a minimal edit that cuts the feature's references, and the
+  linker drops the dead code and tables;
+- the wave lists, names and counts were left alone, so a real removal saves
+  a few more bytes (the names, a branch) and needs the law and menu updates
+  besides.
+
+Each figure is that change on its own. The savings do not simply add up
+where two changes share tables.
+
+| Option | Flash saved | ITCM freed | What goes |
+|---|---:|---:|---|
+| **Drop PWM Sin** (the drum family's form WS and the Colloid's pwm Sin) | **2,552** | **856** | `oscPwmSinW/Ra/Rb` (1,536), the five `osc_pwmWs*Block` ITCM loops (860), and part of `osc_pwmPlan` (56) |
+| **Drop REx** (Colloid and Alkaline) | **3,200** | 0 | the REx curve (2,048), level (512), release and DC tables (256 each), and the REx selects in `col_chopBlock` and `Alkaline_renderChop` (132) |
+| **Replace PWM Saw with R-S** (drop Saw; R-S already exists on the Colloid and the Alkaline) | **440** | 0 | `oscPwmLevelSawQ14` (256) and the Saw branches in `col_oscControl` and `osc_pwmPlan` (144) |
+| **Drop the chop from the Alkaline only** (R-S and REx; the Colloid keeps them) | **2,808** | 0 | `DiodeLadder_renderB2OscChop` (1,420), `Alkaline_renderChop` (260), the level tables, which only the Alkaline reads (1,024), and `oscChopSpanF/InvSpanF` (88) |
+
+Notes:
+- **PWM Sin is the only option that frees ITCM.** It would raise ITCM's free
+  space from 96 B to 952 B. The drum family's Sin is a Basic sound, so
+  dropping it removes a sound from every drum engine as well as the Colloid.
+  Dropping it from the Colloid alone saves almost nothing: the Sin tables
+  stay for the drum family, and the warp loops stay for Tri.
+- **PWM Saw shares its code with Rec everywhere:** the drum family's form D,
+  the Colloid's pair loops and the Alkaline's ladder mode 3. Its width table
+  `oscPwmDSaw` is also the chop's width table, so it stays. Only Saw's level
+  table and its branches go.
+  - "Replacing Saw with R-S" in the drum family would add the chop there.
+    That costs flash and cycles: it is the deferred P-F / Q-2.
+- **Dropping the Alkaline's chop saves less than the 2,604 B of chop code.**
+  The Colloid's chop code (924 B) and the shared tables stay. The 2,808
+  includes the Alkaline-only level tables.
+- **REx and the Alkaline chop overlap.** Both remove `oscChopLevelRex`, so
+  `Alkaline_renderChop`'s REx select is also counted in both. Together they
+  would save about 5,430 B (3,200 + 2,808 − 512 − 64), not 6,008.
+
+### 15.10 PWM Sin dropped from every engine (applied)
+
+**Decision (user, 2026-11-19):**
+- drop PWM Sin from all modes;
+- collapse the parameter values down;
+- no migration.
+
+**The new pwm lists.** Under typ pwm the wave byte is now the pwm list's own
+index. In the drum family it is no longer the stock wave id.
+
+| Engine | Before | After |
+|---|---|---|
+| Drum, Snare, Cymbal, HiHat (osc1) | 0 Sin, 1 Tri, 2 Saw, 3 Rec | **0 Tri, 1 Saw, 2 Rec** (`OSC_PWM_TRI/SAW/REC`, `OSC_PWM_WAVE_COUNT` 3) |
+| Colloid, Basic and Advanced | 0 Sin, 1 Tri, 2 Saw, 3 Rec, 4 R-S, 5 REx | **0 Tri, 1 Saw, 2 Rec, 3 R-S, 4 REx** (`COL_PWM_*`, `COL_PWM_WAVE_COUNT` 5) |
+| Alkaline, Basic and Advanced | Saw, Sqr, Tri, R-S, REx | unchanged (its list never had Sin) |
+
+The wav lists are unchanged: Sin is still a wav wave on every engine.
+
+**Stored values are not migrated.** A pwm byte saved before this change now
+plays the next wave up:
+- Drum family: old Sin → Tri, Tri → Saw, Saw → Rec. Old Rec (3) still plays
+  Rec, because `osc_pwmPlan()` sends any value past the list to Rec. The
+  menu shows it blank until the value is edited, since it is out of range.
+- Colloid: old Sin → Tri, Tri → Saw, Saw → Rec, Rec → R-S, R-S → REx.
+  Old REx (5) plays Rec, through the clamp past the list.
+- A wav ↔ pwm switch keeps the byte and clamps it, as before (the S087 r8
+  rule). The wav and pwm lists no longer line up value for value: for
+  example wav Saw (2) becomes pwm Rec (2).
+
+**Code.**
+- **`Oscillator.h`:** added `OSC_PWM_TRI` 0, `OSC_PWM_SAW` 1 and
+  `OSC_PWM_REC` 2; `OSC_PWM_WAVE_COUNT` 4 → 3; the typ and pwm comments are
+  updated.
+- **`Oscillator.c`:**
+  - form WS is gone: `OSC_PWM_FORM_WS`, `osc_pwmReadS()` and the five
+    `osc_pwmWs*Block()` ITCM loops;
+  - `osc_pwmPlan()` switches on `OSC_PWM_TRI` / `OSC_PWM_SAW` / default
+    (Rec);
+  - the five role renderers choose between D and WT only;
+  - the section, plan and `osc_userCount()` comments are updated.
+- **`oscPwmWarp.h`:** the comments now name WT as the only drum warp form.
+- **`oscPwmTables.c/.h`:** regenerated without `oscPwmSinW/Ra/Rb`.
+  `tools/plots/gen_pwm_tables.py` dropped `SIN_W_END`, the Sin split and
+  Sin's T3–T6/T9 checks. `oscChopTables.c/.h` are byte-identical.
+- **`ColloidVoice.h`:**
+  - the `COL_PWM_*` values are renumbered;
+  - `COL_PWM_IS_WARP(w)` is now `w == COL_PWM_TRI`;
+  - the `_Static_assert` against `OSC_PWM_WAVE_COUNT + 2` still holds
+    (5 = 3 + 2).
+- **`ColloidVoice.c`:**
+  - `col_oscControl()`: `isSin` is now
+    `isPwm ? 0u : (!isWtb && wave == COL_WAVE_SIN)`. That spelling is
+    deliberate. The plainer `!isPwm && !isWtb && …` moved the function's
+    register allocation and cost 1 to 5 instructions a block on every
+    Colloid mode, the dearest included. This form costs 5 *fewer*
+    (`colloid_cpu_post3.txt`).
+  - The sync block's warp branch reads `oscPwmTri*` only.
+  - The comments in `ColloidOsc.c/.h` and `ColloidParameters.c` are
+    updated.
+- **Menus:**
+  - `MenuText.h` `colPwmWaveNames` is now {5, Tri, Saw, Rec, R-S, REx};
+  - `menu.c` names a drum pwm value as `waveformNames[TRI + value + 1]`;
+  - the assert text and comments are updated, and so is the
+    `InstrumentManager.c` wave-domain comment.
+
+**Laws, breaks and tools.**
+- **`modules/oscillator.c`:**
+  - every pwm wave now uses `OSC_PWM_*`;
+  - PW1 drops its sine case;
+  - PW6/PW7 run over three waves;
+  - PW8 checks the clamp to `OSC_PWM_REC` and a count of 3;
+  - PW9 drops the Sin tables;
+  - PW10's second half now checks that the Tri peak moves strictly earlier
+    with pos. It was the Sin peak.
+- **`modules/colloid.c`:**
+  - CO-PWM's warp test runs on three Tri rows and the Tri tables;
+  - the form bus loses its Sin branch;
+  - CO-JOIN's warp step uses Tri;
+  - CO-PWG starts at `COL_PWM_TRI`.
+- **`modules/alkaline.c`, AL-PWW:** the unfused reference sets
+  `OSC_PWM_TRI`. It had set the stock id `TRI` (1), which now means Saw, and
+  failed 3 checks until it was fixed.
+- **`modules/pwm_dump.c`** dumps Tri, Saw and Rec.
+  `tools/plots/plot_s094p4_pwm.py` dropped Sin from `WAVES`; the script was
+  not re-run.
+- **The `tools/dsp_test/Makefile` P4 symbol list** dropped the five WS
+  loops. An older baseline reports them MISSING.
+- **Unchanged on purpose:**
+  - `gen_col_tables.py`'s comment ("the first six, Sin/Tri") is written into
+    the generated `ColloidTables.h`, so it is left alone to keep the
+    `--check` byte-exact;
+  - the S095 P5 history notes in `ColloidVoice.h` stay as records.
+- **Init files:** `init.col`/`init.clx` and `init.alk`/`init.alx` set typ
+  wav, so they do not change.
+
+**Measured.**
+
+| Gate | Result |
+|---|---|
+| `make all && make img` | no new warning. Flash **733,144 / 753,664 B** (−2,592; headroom **20,520**). ITCM **15,432 / 16,384** (−856; **952 B free**). |
+| `make -C tools/dsp_test all` | exit 0; every law has 0 failures; 87 breaks caught (break_pwm1–3 included); `pwm tables OK`. |
+| `elf_s099_check` | 15 of 15 exact. |
+| `elf_p4_check P4BASE=baselines/s099p1/p4base` | 73 exact, 13 missing by text: the five WS loops, which are gone, plus the earlier LTO text moves. Per-symbol lengths: 0 longer (`p4_lengths_post3.txt`). Mixer: 58 equal, 0 grew. |
+| Colloid host cost | `colloid_cpu_post3.txt`: every mode −5 instructions a block against `colloid_cpu_post2.txt` (for example `scan6-par` 406.4 → 406.3, `pwm6-par` 402.9 → 402.8); `clx-pwm6-par` 449.8. |
+| Alkaline host cost | unchanged (1,370 a block). |
+| Drum-family cost | no loop longer. Pwm Sin's own loops (WS: plain 22–23, FM 31, FM ramp 32, ring 34, sync 38) are gone. Tri / Saw / Rec are unchanged. |
+
+**Statements now out of date (for the user):**
+- **`MEMORY.md`:**
+  - the pwm lists (drum family Tri Saw Rec, Colloid Tri Saw Rec R-S REx,
+    the byte is the list index);
+  - flash 733,144 B (headroom 20,520);
+  - ITCM 15,432 B (952 B free).
+- **Device notes:** any listening notes or Scenes that use pwm Sin (see
+  "Stored values" above).

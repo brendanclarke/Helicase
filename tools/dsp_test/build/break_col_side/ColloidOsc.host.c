@@ -32,7 +32,8 @@
  * What:       COL_S095P3_SECTION puts col_warpStore() and col_warpAdd() in
  *             .itcm.s095p3, which STM32F765VIHx_FLASH.ld pins after
  *             .itcm.s095p2, so no existing ITCM function moves.
- * Why:        the Sin and Tri pwm forms run per oscillator per sample; ITCM
+ * Why:        the Tri pwm form (Sin until S099 P1 §15.10) runs per
+ *             oscillator per sample; ITCM
  *             runs them without flash wait states. The ITCM growth past the
  *             P2 line is signed off (user, 2026-11-12, Q12: up to +700 B).
  */
@@ -60,7 +61,8 @@
  *             existing ITCM function moves (MEMORY.md ITCM order rule).
  *             col_chopDcInit() stays in flash (6 instructions a sample, once
  *             per block; the draft's plan).
- * Why:        the R-S / REx forms render three pairs per block; ITCM runs
+ * Why:        the R-S form (and REx until S099 P2) renders three pairs per
+ *             block; ITCM runs
  *             them without flash wait states. The S-R draft's spike measured
  *             ≈ 308 B of the 424 B that were free before P-B (now 400 B, the
  *             P-B result); the linked size is gate C-G3.
@@ -271,12 +273,12 @@ __attribute__((noinline, noclone)) void col_chopDcInit(int32_t *bus, int32_t aM,
  *                   w x 65,536, the floor offset, exact and gliding with q;
  *               v = curve[(p + 2^29) >> 22]   the ramp wrapped at 7/8 of the
  *                   cycle (inside the last chopped section for every width)
- *                   read through the wave's curve table (oscChopCurveRs /
- *                   Rex), truncated;
+ *                   read through the wave's curve table (oscChopCurveRs;
+ *                   S099 P2: REx's table dropped), truncated;
  *               y = g x v >> 16   (SMULWB: about 32,767 x c x gate);
  *               busM += y x lv / 65536, busS += y x lp / 65536 (SMLAWB /
  *                   SMLAWT on the pair's packed halves): lv = the oscillator's
- *                   level relative to the wave's largest (oscChopRel*Q15), lp
+ *                   level relative to the wave's largest (oscChopRelRsQ15), lp
  *                   = lv x its stereo position / 2, so the side bus keeps the
  *                   Colloid's S = M x p / 2 rule (L = M + 2S in the filter loop).
  *             B's phase starts at q = 2p - (width0 << 22) and advances by
@@ -292,7 +294,8 @@ __attribute__((noinline, noclone)) void col_chopDcInit(int32_t *bus, int32_t aM,
  *             (two SMLAW per bus per pair, as col_pwmPairAdd()) and one
  *             SMULW per oscillator; the draft's form left a top row's
  *             oscillator up to 7.7 dB loud and could not hold REx's 3.7x
- *             level range across widths with one stack level.
+ *             level range across widths with one stack level (REx dropped
+ *             in S099 P2; R-S spans 1.78 .. 2.00x on Rec's widths).
  * Range:      |D| <= 65,534; (D << 2) x g14 >> 16 <= 66,200 (gen_pwm_tables.py
  *             T12) plus 32,768: g < 2^17; |y| <= g x 32,767 >> 16 < 36,050;
  *             y x lv >> 16 < 18,100 per oscillator; six of them inside int32.
@@ -461,16 +464,17 @@ COL_LOOP void col_pwmPairAdd(const int16_t *const *row, uint32_t *phase,
 }
 
 /*
- * The warp pwm forms, Sin and Tri: one oscillator per pass (S095 P3 F2).
+ * The warp pwm form, Tri: one oscillator per pass (S095 P3 F2; S099 P1
+ * §15.10: Sin dropped).
  *
  * What:       per sample n: psi = osc_pwmWarp(ph, W, ra, rb) (the first
  *             half-cycle of the row plays over [0, W), the second over
  *             [W, 2^32)); s = col_read(row, psi); the store form writes
  *             busM[n] = s and busS[n] = (s x q) >> 16, the add form
  *             accumulates both; ph += inc. q is the oscillator's Q15 stereo
- *             position in the low half of pq. row is sine_table (Sin) or a
- *             triTable octave row (Tri); W, ra, rb are oscPwmSin* /
- *             oscPwmTri*[the oscillator's width index] (oscPwmTables.h).
+ *             position in the low half of pq. row is a triTable octave
+ *             row; W, ra, rb are oscPwmTri*[the oscillator's width index]
+ *             (oscPwmTables.h).
  *             S096 P2 F5: W, ra and rb start at the block's start index's
  *             values and add dW, dRa, dRb per sample, (end - start) / 32,
  *             so a moving width glides instead of moving the half-cycle
@@ -480,14 +484,14 @@ COL_LOOP void col_pwmPairAdd(const int16_t *const *row, uint32_t *phase,
  *             where this one ended (the warp's own precision is 64). The
  *             linear glide keeps W ra = 2^57 only at the ends: between them
  *             the half-cycle boundary is off by at most a quarter of
- *             (dW x 32 / W)^2, 0.3 % of a half-cycle for Sin and 2.2 % for
- *             Tri at the narrowest widths at the full slew, far below the
+ *             (dW x 32 / W)^2, 2.2 % of a half-cycle for Tri at the
+ *             narrowest widths at the full slew, far below the
  *             jump it replaces. Cost: 3 adds per sample.
- * Why:        the platform's WS and WT forms (Oscillator.c osc_pwmWsPlainBlock,
- *             osc_pwmWtPlainBlock): the same warp (oscPwmWarp.h, shared with
- *             the Alkaline) and the same interpolated read (col_read() equals
- *             osc_pwmReadT(); on the sine the wrap reads point 0 where the
- *             platform reads the equal guard point 1,024). One oscillator per
+ * Why:        the platform's WT form (Oscillator.c osc_pwmWtPlainBlock;
+ *             its WS form went in S099 P1 §15.10): the same warp
+ *             (oscPwmWarp.h, shared with the Alkaline) and the same
+ *             interpolated read (col_read() equals osc_pwmReadT()). One
+ *             oscillator per
  *             pass, not a pair: two warps' constants (W, ra, rb x 2) with two
  *             rows, phases and increments would not fit the registers, and
  *             a spill per sample costs more than the second bus pass. Both

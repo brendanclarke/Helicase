@@ -1521,8 +1521,14 @@ static void buttonHandler_selectActiveStep(uint8_t ledNr, uint8_t seqButtonPress
      * Risk: this is UI selection only. Any caller that wants to actually toggle
      * a step must call pat_toggleStep() separately.
      */
-    led_setBlinkLed(selectedStepLed, 0);
-    led_setValue(0, selectedStepLed);
+    /* S099 P3: a previous selected step that is still held keeps flashing
+     * (STEP mode: every held step flashes) */
+    if (selectedStepLed < LED_STEP1 ||
+        (buttonHandler_seqHeldMask() &
+         (uint16_t)(1u << (uint8_t)(selectedStepLed - LED_STEP1))) == 0u) {
+        led_setBlinkLed(selectedStepLed, 0);
+        led_setValue(0, selectedStepLed);
+    }
 
     buttonHandler_selectedStep = buttonHandler_visibleStep(seqButtonPressed);
     selectedStepLed = ledNr;
@@ -1866,6 +1872,73 @@ static void buttonHandler_perfVoiceReleased(uint8_t voiceNr)
     buttonHandler_perfRefreshHeldSceneLeds();
 }
 
+/*
+ * VOICE-mode step edit (S099 P3, user 2026-11-19).
+ *
+ * What:       SHIFT + a step in VOICE mode opens the step edit page (SEQ_PAGE
+ *             subpage 1, the page a STEP-mode step press shows) on that step;
+ *             further steps pressed while it is open (with or without SHIFT)
+ *             join it, and every held step flashes. menu_broadcastStepSpecial()
+ *             writes an edit to every physically held step, as in STEP mode.
+ *             A released step stops flashing; when the last held step is
+ *             released the page the VOICE mode showed before returns and no
+ *             step flashes. The steps' releases never toggle them (the press
+ *             consumed the tap timer).
+ * Why:        the user: the menu is only active while steps are held in VOICE
+ *             mode, and steps flash only while held. Before this, SHIFT + step
+ *             called buttonHandler_selectActiveStep() alone, whose
+ *             menu_showStepEditPage() set subpage 1 of the VOICE page (AEG)
+ *             and left the step flashing after its release.
+ * State:      bh_voiceStepEdit (1 while open), bh_voiceStepPrevPage (the page
+ *             to restore). RAM: 2 B.
+ * Accessors:  buttonHandler_seqButtonPressed(), buttonHandler_seqButtonReleased().
+ */
+static uint8_t bh_voiceStepEdit = 0u;
+static uint8_t bh_voiceStepPrevPage = 0u;
+
+static void buttonHandler_voiceStepEditPress(uint8_t ledNr, uint8_t seqButtonPressed)
+{
+    const uint8_t first = (uint8_t)(bh_voiceStepEdit == 0u);
+
+    if (first) {
+        bh_voiceStepEdit = 1u;
+        bh_voiceStepPrevPage = menu_activePage;
+    }
+    buttonHandler_selectedStep = buttonHandler_visibleStep(seqButtonPressed);
+    selectedStepLed = ledNr;
+    parameter_values[PAR_ACTIVE_STEP] = buttonHandler_selectedStep;
+    led_setBlinkLed(ledNr, 1);
+    if (first) {
+        menu_switchPage(SEQ_PAGE);
+        menu_showStepEditPage();
+    } else {
+        /* a joining step: the cells show its values; the subpage stays */
+        pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(),
+                            buttonHandler_selectedStep);
+        menu_repaintAll();
+    }
+    /* the release is not a tap: it never toggles the step */
+    buttonHandler_buttonTimerStepNr = TIMER_ACTION_OCCURED;
+}
+
+static void buttonHandler_voiceStepEditRelease(uint8_t ledNr, uint8_t seqButtonPressed)
+{
+    const uint16_t still = (uint16_t)(buttonHandler_seqHeldMask() &
+                                      (uint16_t)~(1u << seqButtonPressed));
+
+    led_setBlinkLed(ledNr, 0);
+    if (still == 0u) {
+        uint8_t i;
+
+        bh_voiceStepEdit = 0u;
+        for (i = 0u; i < 16u; i++)
+            led_setBlinkLed((uint8_t)(LED_STEP1 + i), 0);
+        menu_switchPage(bh_voiceStepPrevPage);
+    }
+    buttonHandler_updateSubSteps();
+    buttonHandler_buttonTimerStepNr = TIMER_ACTION_OCCURED;
+}
+
 static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
 {
     uint8_t ledNr = (uint8_t)(seqButtonPressed + LED_STEP1);
@@ -1873,7 +1946,8 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
     if (buttonHandler_getShift()) {
         switch (bh_state.selectButtonMode) {
         case SELECT_MODE_VOICE:
-            buttonHandler_selectActiveStep(ledNr, seqButtonPressed);
+            /* S099 P3: SHIFT + step opens (or joins) the VOICE step edit */
+            buttonHandler_voiceStepEditPress(ledNr, seqButtonPressed);
             break;
         case SELECT_MODE_STEP:
             buttonHandler_setRemoveStep(ledNr, seqButtonPressed);
@@ -1914,6 +1988,12 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
     } else {
         switch (bh_state.selectButtonMode) {
         case SELECT_MODE_VOICE:
+            if (bh_voiceStepEdit) {
+                /* S099 P3: a step pressed while the VOICE step edit is open
+                 * joins it */
+                buttonHandler_voiceStepEditPress(ledNr, seqButtonPressed);
+                break;
+            }
             if (menu_voiceAutoOverlayActive()) {
                 /* An overlay-owned press is not a new tap/hold timer. Reuse
                  * the existing timer sentinel so its release is consumed. */
@@ -1943,7 +2023,13 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
                 (menu_getSubPage() == 1u || menu_getSubPage() == 2u)) {
                 menu_toggleStepEditSubpage();
             } else {
-                led_clearAllBlinkLeds();
+                /* S099 P3: every held step flashes; only a press with no
+                 * other step held clears the old blinks */
+                const uint16_t others = (uint16_t)(buttonHandler_seqHeldMask() &
+                                                   (uint16_t)~(1u << seqButtonPressed));
+
+                if (others == 0u)
+                    led_clearAllBlinkLeds();
                 buttonHandler_selectActiveStep(ledNr, seqButtonPressed);
             }
             break;
@@ -1994,6 +2080,21 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
 static void buttonHandler_seqButtonReleased(uint8_t seqButtonPressed)
 {
     uint8_t ledNr = (uint8_t)(seqButtonPressed + LED_STEP1);
+
+    /* S099 P3: a VOICE step edit step's release (SHIFT held or not): it
+     * stops flashing, and the last one closes the edit */
+    if (bh_voiceStepEdit && bh_state.selectButtonMode == SELECT_MODE_VOICE) {
+        buttonHandler_voiceStepEditRelease(ledNr, seqButtonPressed);
+        return;
+    }
+    /* S099 P3: in STEP mode every held step flashes; a released step that is
+     * not the selected one stops (the selected step keeps flashing, as
+     * before) */
+    if (bh_state.selectButtonMode == SELECT_MODE_STEP &&
+        ledNr != selectedStepLed && !buttonHandler_getShift()) {
+        led_setBlinkLed(ledNr, 0);
+        buttonHandler_updateSubSteps();
+    }
 
     if (buttonHandler_getShift())
         return;
@@ -2069,6 +2170,15 @@ static void buttonHandler_closeLatchedSurfaces(uint8_t restore_page,
     }
     if (menu_chainMenuIsOpen())
         menu_chainMenuClose();
+    /* S099 P3: a mode change ends a VOICE step edit (the new mode's page
+     * replaces it; the held steps' releases then take the new mode's path) */
+    if (bh_voiceStepEdit) {
+        uint8_t i;
+
+        bh_voiceStepEdit = 0u;
+        for (i = 0u; i < 16u; i++)
+            led_setBlinkLed((uint8_t)(LED_STEP1 + i), 0);
+    }
     if (liveRec_mode() == LIVEREC_MODE_ERASE) {
         liveRec_eraseReleaseHeld();
         bh_eraseSeqMask = 0u;

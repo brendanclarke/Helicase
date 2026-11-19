@@ -62,11 +62,10 @@ col_noise_level=0
 col_noise_tone=63
 col_noise_width=127
 col_noise_pan=63
-chorus_type=1
-chorus_rate=40
-chorus_depth=127
-chorus_mix=64
-chorus_source=0
+fx_type=1
+fx_rate=40
+fx_depth=0
+fx_mix=64
 
 [morph]
 osc1_pitch_coarse=48
@@ -119,7 +118,7 @@ col_noise_level=0
 col_noise_tone=63
 col_noise_width=127
 col_noise_pan=63
-chorus_rate=40
-chorus_depth=127
-chorus_mix=64
+fx_rate=40
+fx_depth=0
+fx_mix=64
 

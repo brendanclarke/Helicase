@@ -270,8 +270,8 @@ static const char alkWaveNames[][4] = {
 /*
  * Alkaline pwm waveform names (S099 P1).
  *
- * What:       [0] = count (5), then Saw, Sqr, Tri, R-S, REx: ALK_WAVE_SAW 0 ..
- *             ALK_WAVE_REX 4 under typ pwm.
+ * What:       [0] = count (4), then Saw, Sqr, Tri, R-S: ALK_WAVE_SAW 0 ..
+ *             ALK_WAVE_RS 3 under typ pwm (S099 P2: REx dropped).
  * Why:        under pwm the list has the two chopped waves as well (D-1: pwm
  *             only); menu_formatWaveCell() names it and
  *             instrumentManager_waveDomainMax() limits the range to it. The
@@ -279,7 +279,7 @@ static const char alkWaveNames[][4] = {
  * Accessors:  menu_formatWaveCell() (menu.c).
  */
 static const char alkPwmWaveNames[][4] = {
-    {5}, {"Saw"},{"Sqr"},{"Tri"},{"R-S"},{"REx"},
+    {4}, {"Saw"},{"Sqr"},{"Tri"},{"R-S"},
 };
 /*
  * DTYPE_ON_OFF tags for the Colloid's selectors (S095 P2; S095 P3 F9).
@@ -346,17 +346,18 @@ static const char colWaveNames[][4] = {
 /*
  * The Colloid's pwm wave names (S099 P1).
  *
- * What:       [0] = count (6), then Sin, Tri, Saw, Rec (the platform's pwm
- *             list and order), R-S, REx (the chopped waves): COL_PWM_SIN ..
- *             COL_PWM_REX.
+ * What:       [0] = count (4), then Tri, Saw, Rec (the platform's pwm list
+ *             and order), R-S (the chopped saw): COL_PWM_TRI .. COL_PWM_RS
+ *             (S099 P1 §15.10: Sin dropped, the values collapsed down; S099
+ *             P2: REx dropped).
  * Why:        the shared pwm branch of menu_formatWaveCell() names the drum
- *             engines' four from waveformNames, where index 4 is Noi; the
- *             Colloid's two extra waves need their own list. The count must
+ *             engines' three from waveformNames, which ends at Noi; the
+ *             Colloid's extra wave needs its own list. The count must
  *             equal COL_PWM_WAVE_COUNT (asserted in menu.c).
  * Accessors:  menu_formatWaveCell() (menu.c).
  */
 static const char colPwmWaveNames[][4] = {
-    {6}, {"Sin"},{"Tri"},{"Saw"},{"Rec"},{"R-S"},{"REx"},
+    {4}, {"Tri"},{"Saw"},{"Rec"},{"R-S"},
 };
 /*
  * The Colloid's typ selector (S096 P3 C2c, plan §3.5).
@@ -386,32 +387,34 @@ static const char tktLayerNames[][4] = {
           {"D  "},{"AD "},{"BD "},{"ABD"},{"CD "},{"ACD"},{"BCD"},{"all"},
 };
 /*
- * DTYPE_ON_OFF tags for the Advanced types' chorus (S099 P1).
+ * The DTYPE_ON_OFF tag of the Advanced types' effect (S099 P1; S099 P2: tag 9
+ * is the fx row's; tag 10, the chorus's csr, was removed with the row).
  *
- * What:       ONOFF_TAG_CHO_TYPE 9 (cho, choTypeNames), ONOFF_TAG_CHO_SOURCE
- *             10 (csr, choSrcNames). The rows' dtype byte is DTYPE_ON_OFF |
- *             (tag << 4). Tags 1-3, 5-8 stay; 4 and 11-15 are free.
+ * What:       ONOFF_TAG_FX_TYPE 9 (fx, fxTypeNames). The row's dtype byte is
+ *             DTYPE_ON_OFF | (tag << 4). Tags 1-3, 5-8 stay; 4 and 10-15 are
+ *             free.
  * Why:        every DTYPE_MENU id is taken (S078); menu_onoffTagNames()
  *             resolves the table per tag, so display, clamp, automation range
  *             and the step-edit line follow the count.
- * Accessors:  ColloidParameters.c, AlkalineParameters.c (the chorus rows);
+ * Accessors:  ColloidParameters.c, AlkalineParameters.c (the fx rows);
  *             menu.c menu_onoffTagNames().
- * Affiliates: BBD_MODE_COUNT, BBD_SRC_COUNT (BbdChorus.h): asserted in menu.c.
+ * Affiliates: ADV_FX_COUNT (InstrumentManager.h): asserted in menu.c.
  */
-#define ONOFF_TAG_CHO_TYPE         9u
-#define ONOFF_TAG_CHO_SOURCE       10u
+#define ONOFF_TAG_FX_TYPE          9u
 /*
- * The chorus name tables (S099 P1). [0] = count, then 3-character names.
- * choTypeNames  cho: off, I, II, 1+2 (the Juno-60's three modes), var (the
- *               Alpha Juno's variable rate and depth), dbl (the doubler).
- * choSrcNames   csr: L-R (each side its own channel), mid (one signal into
- *               both lines, the Juno).
+ * The effect and chorus name tables (S099 P1; S099 P2). [0] = count, then
+ * 3-character names.
+ * fxTypeNames  fx: off, chr (the BBD chorus); ADV_FX_* (S099 P2: was the
+ *               chorus's cho list, off I II 1+2 var dbl; the Juno modes, var
+ *               and dbl are now the chorus's dpt values, fxDepthNames).
+ * fxDepthNames dpt 0..2 under chr: I, II, 1+2 (BBD_DPT_I .. BBD_DPT_I_II);
+ *               3..127 display the number.
  */
-static const char choTypeNames[][4] = {
-    {6}, {"off"},{"I  "},{"II "},{"1+2"},{"var"},{"dbl"},
+static const char fxTypeNames[][4] = {
+    {2}, {"off"},{"chr"},
 };
-static const char choSrcNames[][4] = {
-    {2}, {"L-R"},{"mid"},
+static const char fxDepthNames[][4] = {
+    {3}, {"I  "},{"II "},{"1+2"},
 };
 /*
  * Wavefolder type names: the wav cell under WFd (S089 P2).

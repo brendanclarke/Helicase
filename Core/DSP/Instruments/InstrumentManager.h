@@ -286,30 +286,51 @@ typedef enum {
      */
     IM_SPECIAL_LFO_SYNC,
     /*
-     * S099 P1: chorus_type writer (the Advanced types' cho row).
+     * S099 P1: the Advanced types' effect-type writer (S099 P2: the fx row,
+     *             Effect Type, was the chorus's cho row).
      *
-     * What:       IM_SPECIAL_CHORUS_TYPE = 24 (next after IM_SPECIAL_LFO_SYNC,
+     * What:       IM_SPECIAL_FX_TYPE = 24 (next after IM_SPECIAL_LFO_SYNC,
      *             23); IM_SPECIAL_WRITER_COUNT becomes 25 (<= 32, the 5-bit
      *             writer field, asserted below). The writer clamps the byte to
-     *             BBD_MODE_COUNT - 1, stores it in the voice, makes the slot
+     *             ADV_FX_COUNT - 1, stores it in the voice, makes the slot
      *             own one FxBuffer voice unit while it is not off (none while
      *             off), binds and clears the unit on a first bind, and
      *             refreshes the slot's right-block pointer.
-     * Why:        the brief: the chorus's 50 ms unit is held only while its
+     * Why:        the brief: the effect's 50 ms unit is held only while its
      *             type is selected. The row is a selector that is neither
      *             automatable, morphable nor a modulation target, so every
      *             write comes from the foreground (FxBuffer's share callback
      *             is foreground-only).
-     * Inputs:     slot, byte value (0..5; larger values become dbl).
-     * Outputs:    the voice's choType and choUnit; the slot's units.
+     * Inputs:     slot, byte value (ADV_FX_*; larger values become the last).
+     * Outputs:    the voice's fxType and choUnit; the slot's units.
      * Accessors:  instrumentManager_writeSpecialRuntime() switch.
-     * Affiliates: BBD_MODE_* (BbdChorus.h); the chorus_type rows;
+     * Affiliates: ADV_FX_* (below); the fx_type rows;
      *             tools/dsp_test/check_special_tags.py; the diagnostic
      *             classifier.
      */
-    IM_SPECIAL_CHORUS_TYPE,
+    IM_SPECIAL_FX_TYPE,
     IM_SPECIAL_WRITER_COUNT
 } instrument_special_writer_t;
+
+/*
+ * The Advanced types' effect (S099 P2, user 2026-11-19).
+ *
+ * What:       the fx row (Effect Type, the first cell of the Advanced MIX
+ *             page's last screen: fx dpt rte mix): ADV_FX_OFF 0 (no unit, no
+ *             effect work), ADV_FX_CHORUS 1 (chr, the BBD chorus,
+ *             BbdChorus.h). dpt (Effect Depth), rte (Effect Rate) and mix
+ *             (Effect Mix) are the effect's three common rows; the chorus
+ *             reads dpt as its mode and depth (BBD_DPT_*).
+ * Why:        more effects may follow: each takes the next value and gives
+ *             the three rows its own meaning, and the screen stays the same
+ *             four cells on every Advanced type.
+ * Accessors:  instrumentManager_writeFxType(), instrumentManager_unitsWanted(),
+ *             the clx / alx async and sync cases; Colloid/AlkalineParameters.c
+ *             (the rows, the inactive cells); MenuText.h fxTypeNames.
+ */
+#define ADV_FX_OFF        0u
+#define ADV_FX_CHORUS     1u
+#define ADV_FX_COUNT      2u
 
 #define IM_SPECIAL_WRITER_MASK  0x1Fu
 #define IM_SPECIAL_OSC_MASK     0x60u

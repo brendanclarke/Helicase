@@ -25,7 +25,7 @@
  *               1,032 .. 2,055  ring R        2,056  guard R
  *               2,064 ..        BbdChorusState (<= 288 B, asserted)
  *             The pads keep ring R and the state 4-byte aligned.
- * Accessors:  InstrumentManager.c (the cho writer, the clx / alx async and
+ * Accessors:  InstrumentManager.c (the fx writer, the clx / alx async and
  *             sync cases, the quiet test).
  * Affiliates: BbdChorusTables.h; FxBuffer.h; tools/dsp_test modules/chorus.c.
  */
@@ -36,15 +36,52 @@
 
 
 
-/* cho (the chorus type row): off, the three Juno-60 modes, the Alpha Juno's
- * variable rate and depth, a wide doubler (draft §5.1). */
-#define BBD_MODE_OFF      0u
-#define BBD_MODE_I        1u
-#define BBD_MODE_II       2u
-#define BBD_MODE_I_II     3u
-#define BBD_MODE_VAR      4u
-#define BBD_MODE_DBL      5u
-#define BBD_MODE_COUNT    6u
+/*
+ * dpt, the Effect Depth row, under fx chr (S099 P2, user 2026-11-19; it
+ * replaces S099 P1's cho mode list and its cdp depth row).
+ *
+ * What:       0 I, 1 II, 2 1+2: the Juno-60's three modes, each with its own
+ *             fixed rate, centre and depth (rte is ignored);
+ *             3 .. 127: one continuous path through var and dbl, at rte's
+ *             rate (bbdRateHz[]):
+ *               3 .. BBD_DPT_VAR_FULL (65): var (the Alpha Juno's variable
+ *                 chorus), the centre 154.6 samples, the sweep depth rising
+ *                 linearly from 0 to var's full 81.4;
+ *               65 .. 127: the centre rising linearly to the doubler's 662
+ *                 samples and the depth to its 110, so 127 is dbl at full
+ *                 depth.
+ *             Off is the fx row's (Effect Type: off, chr), not this row's.
+ * Why:        the user's layout: one depth control that covers the Juno
+ *             modes and the variable chorus-to-doubler range; the centre's
+ *             step-limited slew (BBD_CENTRE_STEP) and the depth's slew keep
+ *             every move of dpt, automated or not, a glide.
+ * Accessors:  bbdChorus_init(), bbdChorus_control() (bbd_target());
+ *             menu.c (the names of 0 .. 2, menu_formatDtype3()).
+ */
+#define BBD_DPT_I         0u
+#define BBD_DPT_II        1u
+#define BBD_DPT_I_II      2u
+#define BBD_DPT_VAR       3u     /* the first value of the continuous path */
+#define BBD_DPT_VAR_FULL  65u    /* var at full depth: the path's knee */
+
+/*
+ * The Advanced Alkaline's fixed chorus settings (S099 P2, user 2026-11-19:
+ * the cbw, cdv and cwd rows are gone).
+ *
+ * What:       BBD_ALK_TONE: the wet's cutoff byte, bbdKcTone[73] = 9 kHz
+ *             (the removed cbw row's init value; the post pole still tracks
+ *             the delay); the BBD drive is the Alkaline's post-filter drive
+ *             byte (vcaDrive: x1 .. x4 into the clip across the same knob as
+ *             the overdrive); BBD_ALK_WIDTH(dpt) is the width byte from dpt:
+ *             127 (the Juno's opposed sweeps) for the Juno modes, dpt itself
+ *             for 3 .. 127, so the stereo spread grows with the depth (64 an
+ *             unswept right tap, 127 the opposed sweeps).
+ * Why:        "tone doesn't really do much"; drive and width follow the two
+ *             controls they belong with (the user).
+ * Accessors:  InstrumentManager.c (the alx async case).
+ */
+#define BBD_ALK_TONE        73u
+#define BBD_ALK_WIDTH(dpt)  ((uint8_t)(((dpt) < BBD_DPT_VAR) ? 127u : ((dpt) > 127u ? 127u : (dpt))))
 /* csr (the Colloid's source switch, draft §2.5) */
 #define BBD_SRC_LR        0u
 #define BBD_SRC_MID       1u
@@ -163,15 +200,16 @@ _Static_assert((BBD_RING_R_OFS % 2u) == 0u && (BBD_STATE_OFS % 2u) == 0u,
 /*
  * Entry points (S099 P1).
  *
- * bbdChorus_init(unit, mono, mode)
+ * bbdChorus_init(unit, mono, dpt)
  *   What:     clears the whole unit (the FxBuffer contract: owners clear
  *             what they claim) and seeds the state: both sides on their
- *             rings (mono: both on ring L), the centre at the mode's, the
+ *             rings (mono: both on ring L), the centre at dpt's, the
  *             depth 0 (it slews in), the delay ends at the centre, the gains
  *             dry only (until the first control block).
- *   Context:  foreground (the cho writer, a first bind after a slot reset).
- * bbdChorus_control(unit, mode, rate, depth, mix, tone, drive, width, quiet)
- *   What:     the block's control: the LFO step, the depth and centre slew,
+ *   Context:  foreground (the fx writer, a first bind after a slot reset).
+ * bbdChorus_control(unit, dpt, rate, mix, tone, drive, width, quiet)
+ *   What:     the block's control: dpt's target (BBD_DPT_*: rate, centre,
+ *             depth), the LFO step, the depth and centre slew,
  *             each side's delay at the block's end and its read plan
  *             (bbd_sidePlan()), the pole coefficients (tone, and the post
  *             pole's tracking), the gains (mix, drive), the quiet count.
@@ -184,8 +222,8 @@ _Static_assert((BBD_RING_R_OFS % 2u) == 0u && (BBD_STATE_OFS % 2u) == 0u,
  * bbdChorus_tailDone(unit)
  *   What:     1 once the host has been quiet for BBD_TAIL_BLOCKS blocks.
  */
-void bbdChorus_init(int16_t *unit, uint8_t mono, uint8_t mode);
-void bbdChorus_control(int16_t *unit, uint8_t mode, uint8_t rate, uint8_t depth,
+void bbdChorus_init(int16_t *unit, uint8_t mono, uint8_t dpt);
+void bbdChorus_control(int16_t *unit, uint8_t dpt, uint8_t rate,
                        uint8_t mix, uint8_t tone, uint8_t drive, uint8_t width,
                        uint8_t quiet) __attribute__((noinline));
 void bbdChorus_renderColloid(int16_t *unit, int16_t *left, int16_t *right,

@@ -1527,18 +1527,18 @@ static void test_typ(void)
 	if (v.osc.interpStamp != 0u || v.wtbSlot != 0u)
 		fail(G_TY, "a type change keeps the slot", v.osc.interpStamp, v.wtbSlot);
 	/* S094 P1 S5: 2 and above are pwm; S094 P4: pwm clamps wav to its last
-	 * entry; S099 P1: that entry is REx (4, the pwm list's last); the phase
-	 * runs on */
+	 * entry; S099 P1: that entry was REx (4); S099 P2: it is R-S (3, the
+	 * pwm list's last, REx dropped); the phase runs on */
 	v.osc.waveform = 9u;
 	v.osc.phase = 0x0badf00du;
 	Alkaline_setOscType(&v, 7u);
 	if (v.osc.oscType != OSC_TYPE_PWM) fail(G_TY, "7 is pwm", v.osc.oscType, 0);
-	if (v.osc.waveform != ALK_WAVE_REX) fail(G_TY, "pwm clamps to REx", v.osc.waveform, 0);
+	if (v.osc.waveform != ALK_WAVE_RS) fail(G_TY, "pwm clamps to R-S", v.osc.waveform, 0);
 	if (v.osc.phase != 0x0badf00du) fail(G_TY, "the phase runs on (-> pwm)", 0, 0);
-	/* S099 P1: a pwm R-S / REx switched to wav plays Tri (the wav list's last) */
-	v.osc.waveform = ALK_WAVE_REX;
+	/* S099 P1: a pwm R-S switched to wav plays Tri (the wav list's last) */
+	v.osc.waveform = ALK_WAVE_RS;
 	Alkaline_setOscType(&v, ALK_TYP_WAV);
-	if (v.osc.waveform != ALK_WAVE_TRI) fail(G_TY, "pwm REx -> wav Tri", v.osc.waveform, 0);
+	if (v.osc.waveform != ALK_WAVE_TRI) fail(G_TY, "pwm R-S -> wav Tri", v.osc.waveform, 0);
 	/* S094 P4: Tri (2) is in both lists: pwm Tri -> wav stays Tri */
 	v.osc.waveform = ALK_WAVE_TRI;
 	Alkaline_setOscType(&v, ALK_TYP_PWM);
@@ -1918,8 +1918,9 @@ static void test_pwm_wt(void)
 				                             ALK_TRI_SCALE_V * a.driveGain,
 				                             a.iLadEnd, a.iAbcEnd * a.makeup);
 			}
-			/* the drum WT role reads the drum wave enum: Tri is 1 there */
-			b.osc.waveform = TRI;
+			/* the drum WT role reads the pwm list's own index: Tri is
+			 * OSC_PWM_TRI (0) since S099 P1 §15.10 (it was the wave id 1) */
+			b.osc.waveform = OSC_PWM_TRI;
 			osc_pwmRenderPlain(&b.osc, bb, BLK, 1.0f);
 			DiodeLadder_renderB2(&b.ladder, bb, ALK_TRI_SCALE_V * b.driveGain,
 			                     b.iLadEnd, b.iAbcEnd * b.makeup);
@@ -1982,8 +1983,9 @@ static void test_pwm_wt(void)
 }
 
 /* ---------------------------------------------------------------- AL-CH
- * S099 P1: the Alkaline chopped waves R-S and REx (fused mode 5).
- *   - pos 0, 64, 127 under R-S and REx: finite, bounded, sounding;
+ * S099 P1: the Alkaline chopped wave R-S (fused mode 5; S099 P2: REx
+ * dropped, the widths Rec's, 0.39 % at pos 127).
+ *   - pos 0, 64, 127 under R-S: finite, bounded, sounding;
  *   - the width slew and the note snap are the pwm rules (AL-PW's, on R-S);
  *   - the read-form error: this build's render (ALK_CHOP_READ_FORM 2) against
  *     the form-0 reference written by the second bench build
@@ -2006,8 +2008,8 @@ static void ch_render(int16_t *out)
 	gold_pattern(&v, out);
 	gold_voice(&v, ALK_WAVE_SAW, 0u);
 	Alkaline_setOscType(&v, ALK_TYP_PWM);
-	v.osc.waveform = ALK_WAVE_REX;
-	v.osc.position = 96u;
+	v.osc.waveform = ALK_WAVE_RS;   /* S099 P2: REx at 96 until then */
+	v.osc.position = 127u;          /* the narrowest, Rec's 4 points */
 	gold_pattern(&v, out + (size_t)GOLD_PAT_BLOCKS * BLK);
 }
 
@@ -2028,10 +2030,10 @@ static int mode_chopRender(const char *path)
 static void test_chop(void)
 {
 	static const uint8_t pos[3] = { 0u, 64u, 127u };
-	static const uint8_t wave[2] = { ALK_WAVE_RS, ALK_WAVE_REX };
+	static const uint8_t wave[1] = { ALK_WAVE_RS };   /* S099 P2: no REx */
 
 	/* bounds at the width extremes */
-	for (int w = 0; w < 2; w++)
+	for (int w = 0; w < 1; w++)
 		for (int p = 0; p < 3; p++) {
 			static int16_t buf[GOLD_PAT_BLOCKS * BLK];
 			AlkalineVoice v;
@@ -2192,7 +2194,7 @@ int main(int argc, char **argv)
 	test_pwm();
 	/* S094 P4: the Alkaline pwm Tri (fused mode 4) */
 	test_pwm_wt();
-	/* S099 P1: the Alkaline chopped waves R-S and REx (fused mode 5) */
+	/* S099 P1: the Alkaline chopped wave R-S (fused mode 5) */
 	test_chop();
 	/* every group in g_name (S093 P6: fourteen; was a literal 10) */
 	for (g = 0u; g < sizeof g_name / sizeof g_name[0]; g++) {

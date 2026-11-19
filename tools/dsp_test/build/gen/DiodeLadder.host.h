@@ -236,7 +236,8 @@ void DiodeLadder_renderB2OscPwmWt(DiodeLadder *dl, int16_t *buf, const int16_t *
                                   uint32_t wRa, uint32_t wRb, float sScale,
                                   float iLadEnd, float iAbcEnd);
 /*
- * B2R with the chopped pwm waves fused (S099 P1): R-S and REx (mode 5), the
+ * B2R with the chopped pwm wave fused (S099 P1): R-S (mode 5; REx until S099
+ * P2), the
  * gate (a saw-row difference at twice the phase plus chC) times the curve
  * table at the 1x ramp wrapped at 7/8, minus chDc, s = (C G - chDc) x
  * sScale. Contract in DiodeLadder.c.

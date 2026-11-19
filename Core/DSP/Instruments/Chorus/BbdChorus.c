@@ -449,19 +449,23 @@ BBD_LOOP static void bbd_alkB(BbdSide *s, int16_t *x, const uint32_t gk)
 }
 
 /*
- * The modes (S099 P1; draft §1.1, §5.1).
+ * The Juno modes and the var / dbl path (S099 P1; draft §1.1, §5.1; S099 P2:
+ * one dpt row, BbdChorus.h).
  *
- * What:       per cho value, the LFO rate (Hz; 0 = from crt), the centre
- *             delay and the full sweep depth (samples at 44,108 Hz):
+ * What:       bbdJuno[] per dpt 0 .. 2, the LFO rate (Hz), the centre delay
+ *             and the full sweep depth (samples at 44,108 Hz):
  *               I     0.513 Hz, 154.6 +- 81.4  (1.66 .. 5.35 ms, Juno-60)
  *               II    0.863 Hz, the same
  *               1+2   9.75 Hz,  154.4 +- 8.8   (3.3 .. 3.7 ms)
- *               var   crt (0.1 .. 10 Hz), 154.6 +- 81.4 x cdp / 127
- *               dbl   crt, 662 (15 ms) +- 110 x cdp / 127: a wide doubler
- *             off is never rendered (no unit); its row only fills the table.
+ *             The continuous path's ends (dpt 3 .. 127, at rte's rate):
+ *               var   154.6 +- 0 at dpt 3 .. 154.6 +- 81.4 at
+ *                     BBD_DPT_VAR_FULL (65);
+ *               dbl   662 (15 ms) +- 110 at 127: a wide doubler.
  * Why:        the Juno-60's measured table (pendragon-andyh), the Alpha
  *             Juno's variable rate (assumed, D-6), and the doubler that uses
- *             the rest of the 23 ms.
+ *             the rest of the 23 ms. Every point of the path keeps the delay
+ *             inside BBD_D_MIN .. BBD_D_MAX (its lowest, c - depth, rises
+ *             from 73.2 samples at var's full depth).
  */
 typedef struct {
 	float rateHz;
@@ -469,32 +473,69 @@ typedef struct {
 	float depth;
 } bbd_mode_t;
 
-static const bbd_mode_t bbdModes[BBD_MODE_COUNT] = {
-	{ 0.0f,   154.6f, 0.0f   },   /* off */
+static const bbd_mode_t bbdJuno[BBD_DPT_VAR] = {
 	{ 0.513f, 154.6f, 81.4f  },   /* I */
 	{ 0.863f, 154.6f, 81.4f  },   /* II */
 	{ 9.75f,  154.4f, 8.8f   },   /* I+II */
-	{ 0.0f,   154.6f, 81.4f  },   /* var */
-	{ 0.0f,   662.0f, 110.0f },   /* dbl */
 };
+#define BBD_VAR_CENTRE    154.6f
+#define BBD_VAR_DEPTH     81.4f
+#define BBD_DBL_CENTRE    662.0f
+#define BBD_DBL_DEPTH     110.0f
+
+/*
+ * dpt's target (S099 P2): the rate (Hz), the centre and the sweep depth
+ * (samples) for one dpt byte and rte byte, as BbdChorus.h describes. Per
+ * block, a compare and at most two multiply-adds; dpt above 127 reads as 127.
+ */
+static inline __attribute__((always_inline)) void bbd_target(const uint8_t dpt,
+                                                             const uint8_t rate,
+                                                             float *hz, float *centre,
+                                                             float *depth)
+{
+	const uint32_t d = (dpt > 127u) ? 127u : dpt;
+
+	if (d < BBD_DPT_VAR) {
+		*hz = bbdJuno[d].rateHz;
+		*centre = bbdJuno[d].centre;
+		*depth = bbdJuno[d].depth;
+		return;
+	}
+	*hz = bbdRateHz[rate & 127u];
+	if (d <= BBD_DPT_VAR_FULL) {
+		*centre = BBD_VAR_CENTRE;
+		*depth = BBD_VAR_DEPTH * (float)(d - BBD_DPT_VAR)
+		         * (1.0f / (float)(BBD_DPT_VAR_FULL - BBD_DPT_VAR));
+	} else {
+		const float y = (float)(d - BBD_DPT_VAR_FULL)
+		                * (1.0f / (float)(127u - BBD_DPT_VAR_FULL));
+
+		*centre = BBD_VAR_CENTRE + y * (BBD_DBL_CENTRE - BBD_VAR_CENTRE);
+		*depth = BBD_VAR_DEPTH + y * (BBD_DBL_DEPTH - BBD_VAR_DEPTH);
+	}
+}
 
 /* the LFO's phase step per Hz per block: 32 / fs x 2^32 */
 #define BBD_LFO_PH_PER_HZ  ((float)OUTPUT_DMA_SIZE * 4294967296.0f / REAL_FS)
 /* the depth's slew per block (draft §2.2: a jump would blip the pitch) */
 #define BBD_DEPTH_SLEW     0.125f
 /* the centre's largest move per block, samples: at most half a sample per
- * sample, so a mode change between I and dbl glides (about 31 blocks) with
+ * sample, so a dpt change between I and dbl glides (about 31 blocks) with
  * no more than an octave of pitch bend */
 #define BBD_CENTRE_STEP    16.0f
 
-void bbdChorus_init(int16_t *unit, const uint8_t mono, const uint8_t mode)
+void bbdChorus_init(int16_t *unit, const uint8_t mono, const uint8_t dpt)
 {
 	BbdChorusState *const st = bbd_state(unit);
-	const bbd_mode_t *const m = &bbdModes[(mode < BBD_MODE_COUNT) ? mode : BBD_MODE_DBL];
-	const int32_t dc = (int32_t)(m->centre * 65536.0f);
+	float hz, centre, depth;
+	int32_t dc;
 	const uint32_t k = (uint32_t)(uint16_t)bbdKcTone[BBD_COL_TONE];
 	uint32_t i;
 
+	bbd_target(dpt, 0u, &hz, &centre, &depth);
+	(void)hz;
+	(void)depth;
+	dc = (int32_t)(centre * 65536.0f);
 	memset(unit, 0, FXBUF_VOICE_UNIT_BYTES);
 	st->side[0].ring = unit;
 	st->side[1].ring = mono ? unit : unit + BBD_RING_R_OFS;
@@ -502,7 +543,7 @@ void bbdChorus_init(int16_t *unit, const uint8_t mono, const uint8_t mode)
 		st->side[i].dEnd = dc;
 		st->side[i].kk = k | (k << 16);
 	}
-	st->cNow = m->centre;
+	st->cNow = centre;
 	st->gDrv = 8192u;     /* x1 */
 	st->mono = mono;
 	/* the Colloid's rings at half rate (BBD_COL_HALF_RATE); the Alkaline's
@@ -544,17 +585,19 @@ static inline __attribute__((always_inline)) void bbd_sidePlan(BbdSide *s, const
 	s->kk = (uint32_t)(uint16_t)kPre | ((uint32_t)(uint16_t)kPost << 16);
 }
 
-void bbdChorus_control(int16_t *unit, const uint8_t mode, const uint8_t rate,
-                       const uint8_t depth, const uint8_t mix, const uint8_t tone,
+void bbdChorus_control(int16_t *unit, const uint8_t dpt, const uint8_t rate,
+                       const uint8_t mix, const uint8_t tone,
                        const uint8_t drive, const uint8_t width, const uint8_t quiet)
 {
 	/*
 	 * The block's control (S099 P1; draft §2.2, about 34 instructions in the
 	 * spike plus the tables).
 	 *
-	 * What:       the quiet count; the triangle LFO (tri = 1 - 2 |t|, t the
-	 *             phase as -1..1); the depth's 1/8 slew and the centre's
-	 *             step-limited slew toward the mode's; the delays L = c + depth
+	 * What:       dpt's target (bbd_target(): the Juno modes at their own
+	 *             rates, else the var / dbl path at rte's, S099 P2); the quiet
+	 *             count; the triangle LFO (tri = 1 - 2 |t|, t the phase as
+	 *             -1..1); the depth's 1/8 slew and the centre's step-limited
+	 *             slew toward the target's; the delays L = c + depth
 	 *             x tri, R = c - width x depth x tri (width +1 is the Juno's
 	 *             inverted sweep, 0 an unswept R, -1 the same tap: a mono wet;
 	 *             cwd on the Alkaline, fixed +1 on the Colloid); each side's
@@ -563,26 +606,24 @@ void bbdChorus_control(int16_t *unit, const uint8_t mode, const uint8_t rate,
 	 *             (bbdDrvInvQ15) so the drive only adds the clip.
 	 * Why:        everything that shapes the sweep and the tone runs here, per
 	 *             block, so the loops are the same for every mode (constant
-	 *             CPU: a mode never skips work).
-	 * Inputs:     the rows' bytes (each masked to 0..127; mode clamped);
+	 *             CPU: a dpt value never skips work).
+	 * Inputs:     the rows' bytes (each masked to 0..127; dpt clamped);
 	 *             quiet (the host is silent this block).
 	 * Outputs:    the state (sides, gains, LFO, slews, idleBlocks).
 	 */
 	BbdChorusState *const st = bbd_state(unit);
-	const bbd_mode_t *const m = &bbdModes[(mode < BBD_MODE_COUNT) ? mode : BBD_MODE_DBL];
-	const uint8_t user = (uint8_t)(mode >= BBD_MODE_VAR);
-	const float hz = user ? bbdRateHz[rate & 127u] : m->rateHz;
-	const float depthT = user ? m->depth * (float)(depth & 127u) * (1.0f / 127.0f) : m->depth;
+	float hz, centreT, depthT;
 	const float wd = (float)(width & 127u) * (2.0f / 127.0f) - 1.0f;
 	float t, tri;
 
+	bbd_target(dpt, rate, &hz, &centreT, &depthT);
 	st->idleBlocks = quiet ? (uint16_t)((st->idleBlocks < 0xFFFFu) ? st->idleBlocks + 1u : 0xFFFFu)
 	                       : 0u;
 	st->lfoPh += (uint32_t)(hz * BBD_LFO_PH_PER_HZ);
 	t = (float)(int32_t)st->lfoPh * (1.0f / 2147483648.0f);
 	tri = 1.0f - 2.0f * fabsf(t);
 	st->depthNow += (depthT - st->depthNow) * BBD_DEPTH_SLEW;
-	st->cNow += fminf(fmaxf(m->centre - st->cNow, -BBD_CENTRE_STEP), BBD_CENTRE_STEP);
+	st->cNow += fminf(fmaxf(centreT - st->cNow, -BBD_CENTRE_STEP), BBD_CENTRE_STEP);
 	{
 		const float sw = st->depthNow * tri;
 		const int32_t kPre = bbdKcTone[tone & 127u];

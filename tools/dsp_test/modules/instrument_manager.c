@@ -171,9 +171,9 @@ const kit_instrument_slot_t *scene_instrumentSlotConst(uint8_t scene, uint8_t sl
     (void)scene; (void)slot;
     return &g_slot;
 }
-/* S099 P1 law 9: the chorus rows' flags (chorus_type a fixed selector,
- * chorus_source an automatable one); every other field zero, as the plain
- * row */
+/* S099 P1 law 9: the chorus rows' flags (fx_type, S099 P2's Effect Type,
+ * a fixed selector; chorus_source an automatable one); every other field
+ * zero, as the plain row */
 static const ParamDescriptor g_cho_fixed = { .flags = INSTRUMENT_PARAM_FLAG_SELECTOR };
 static const ParamDescriptor g_cho_onoff = {
     .flags = (uint8_t)(INSTRUMENT_PARAM_FLAG_AUTOMATABLE | INSTRUMENT_PARAM_FLAG_SELECTOR) };
@@ -258,7 +258,7 @@ int main(void)
 
     /*
      * 9 (S099 P1): the gate keeps a fixed selector out of automation and
-     * modulation (chorus_type, whose writer claims and releases a voice
+     * modulation (fx_type, whose writer claims and releases a voice
      * unit, a foreground-only operation); an automatable selector
      * (chorus_source) stays step-automatable and is never a modulation
      * target.

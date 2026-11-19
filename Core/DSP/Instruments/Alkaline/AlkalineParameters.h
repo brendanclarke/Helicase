@@ -21,11 +21,12 @@
  * (S093 P8, appended) osc1_type (asserted against alkaline_param_index_t in
  * the .c) */
 #define ALKALINE_PARAM_DESCRIPTOR_COUNT 31u   /* S094 P1 S4: + instrument_drive (29), alk_tone (30) */
-/* S099 P1 (P-E): the Advanced Alkaline (alx) uses the same table with 38
- * rows: the 31 above, then cho crt cdp cmx cbw cdv cwd (asserted). */
-#define ALKALINE_ADV_PARAM_DESCRIPTOR_COUNT 38u
+/* S099 P1 (P-E): the Advanced Alkaline (alx) uses the same table with 35
+ * rows: the 31 above, then fx rte dpt mix (asserted; S099 P2 removed cbw
+ * cdv cwd). */
+#define ALKALINE_ADV_PARAM_DESCRIPTOR_COUNT 35u
 #define ALKALINE_ADV_INSTRUMENT_TYPE_FLAGS  INSTRUMENT_FLAG_ADVANCED
-#define ALK_IDX_CHORUS_TYPE                 31u   /* chorus_type (alx only) */
+#define ALK_IDX_FX_TYPE                 31u   /* fx_type (alx only) */
 /* eight sub-pages: the front-panel SELECT1..8 buttons (menu.c ≈ l. 4608) */
 #define ALKALINE_MENU_PAGE_COUNT        8u
 /* Basic (S093 D2‴): may take any slot without counting towards the

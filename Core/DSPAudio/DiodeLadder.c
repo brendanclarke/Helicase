@@ -345,7 +345,7 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 	 *   4  S094 P4: pwm Tri, the warp: the 1,024-point row (the caller's
 	 *      lifted triTable row) read at psi = osc_pwmWarp(ph, wPh, wRa, wRb),
 	 *      interpolated in float (DiodeLadder_renderB2OscPwmWt()).
-	 *   5  S099 P1: pwm R-S / REx, the chop: the gate (mode 3's
+	 *   5  S099 P1: pwm R-S (REx until S099 P2), the chop: the gate (mode 3's
 	 *      difference on the lifted saw row, read at twice the phase,
 	 *      floored by chC) times the 1x ramp read through the wave's curve
 	 *      table (rowB) at (ph + 2^29) >> 22, minus chDc
@@ -498,7 +498,7 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 			s = (a + fr * (b - a)) * sScale;
 		} else if (fused == 5) {
 			/*
-			 * S099 P1: the Alkaline chopped waves R-S and REx.
+			 * S099 P1: the Alkaline chopped wave R-S (REx until S099 P2).
 			 *
 			 * What:       the gate g = row[2 phi] - row[2 phi - pwD] + chC:
 			 *             mode 3's difference (high first, the shipped Rec
@@ -508,7 +508,7 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 			 *             an octave up), floored at 0 by chC = w x span (w =
 			 *             pwD / 1,024 of each gate cycle passes); the ramp
 			 *             v = rowB[(ph + 2^29) >> 22], the wave's curve table
-			 *             (oscChopCurveRs linear, oscChopCurveRex the
+			 *             (oscChopCurveRs, linear; S099 P2 dropped REx's
 			 *             exponential) on the 1x phase wrapped at 7/8 of the
 			 *             cycle, inside the last chopped section for every
 			 *             width; s = (v x g - chDc) x sScale, chDc the wave's
@@ -788,22 +788,24 @@ __attribute__((noinline)) void DiodeLadder_renderB2OscPwmWt(DiodeLadder *dl, int
 }
 
 /*
- * B2R with the chopped pwm waves fused: R-S and REx (S099 P1, fused mode 5).
+ * B2R with the chopped pwm wave fused: R-S (S099 P1, fused mode 5; S099 P2:
+ * REx dropped).
  *
  * What:       the fused loop with the input s_j = (C(r_j) x G_j - chDc) x
  *             sScale: G_j the gate, the row's difference at twice the phase
  *             and pwD points earlier plus chC; C the curve table read at the
  *             1x ramp wrapped at 7/8 (ALK_CHOP_READ_FORM); the phase advances
  *             by phaseInc per sample and is written back.
- * Why:        the Alkaline's R-S and REx (S-R draft §4.3, stage 1): one more
+ * Why:        the Alkaline's R-S (S-R draft §4.3, stage 1): one more
  *             loop copy in flash, no ITCM. noinline as the other wrappers: its
  *             registers stay out of the caller, and its only loop is the audio
  *             loop (control_cost.py weight 0).
  * Inputs:     dl (the ladder; DiodeLadder_setNet() and DiodeLadder_setPost()
  *             ran this block), buf (output only), row (the gate's sawTable
  *             row, the note's octave + OSC_CHOP_LIFT, clamped to 10), curve
- *             (oscChopCurveRs or oscChopCurveRex), phase (in/out), phaseInc,
- *             pwD (oscPwmDSaw[pos], 512 .. 26 points of the gate's cycle),
+ *             (oscChopCurveRs), phase (in/out), phaseInc,
+ *             pwD (oscPwmDRec[pos], 512 .. 4 points of the gate's cycle;
+ *             S099 P2, was oscPwmDSaw's 512 .. 26),
  *             chC (w x span), chDc (the mean x span), sScale (ALK_CHOP_SCALE_V
  *             x level x drive / span), iLadEnd, iAbcEnd (as the other B2R
  *             wrappers).

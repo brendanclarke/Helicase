@@ -29107,28 +29107,6 @@ void filesystem_tick(void)
     if (status == FS_STATUS_IDLE && !cc_suspended)
         filesystem_settingsWriterSchedule_tick();
     /*
-     * Persist a pending diagnostic batch before an eligible AutoSave drain
-     * claims the one facade after leaving Load/Save.
-     *
-     * Inputs: an idle facade outside Load/Save and any RAM lifecycle records
-     * produced while the foreground Instrument operation owned the card.
-     * Output: at most one existing bounded append starts before the overdue
-     * first full-bank drain; the normal writer starts on the next idle poll.
-     * Why: the former writer-before-trace order let an exit immediately start
-     * a long initial drain, so a power-off during that drain left only an older
-     * S record and concealed the J/I evidence needed to distinguish a missed
-     * publication from an unfinished persistence attempt. This changes only
-     * logging-build diagnostic arbitration: tracing still never starts on a
-     * Load/Save page and neither mask ownership nor writer bytes change.
-     * Affiliates: filesystem_autosaveTraceFlushSchedule_tick(),
-     * filesystem_autosaveWriterSchedule_tick(), and AutosaveTrace.c.
-     */
-    if (status == FS_STATUS_IDLE && !cc_suspended)
-        filesystem_autosaveTraceFlushSchedule_tick();
-    /* PatternTrace is diagnostic-only and runs behind the existing trace gate. */
-    if (status == FS_STATUS_IDLE && !cc_suspended)
-        filesystem_patternTraceFlushSchedule_tick();
-    /*
      * Give deferred Kit/Instrument HCNAMES persistence priority over AutoSave.
      *
      * What: once Menu has left Load/Save, its retained dirty Scene mask is
@@ -29155,14 +29133,21 @@ void filesystem_tick(void)
      */
     filesystem_backgroundBudgetRefill();
     /*
-     * Start the durable AutoSave writer only after settings and, when pending,
-     * its pre-drain diagnostic witness declined the idle facade.
+     * Start the durable AutoSave writer after settings and HCNAMES, and
+     * before every diagnostic trace flush (S099 P3, the user's device report:
+     * nothing autosaved).
      *
      * Inputs: the unchanged writer gate/deadline and an idle facade. Output:
-     * the original parameter-drain state machine owns the card exactly as
-     * before, except that a pending logging-build trace has one append first.
-     * Why: the trace's J/I batch must become durable before a long first drain
-     * can be interrupted by power removal. Affiliate: the scheduler above.
+     * the parameter-drain state machine owns the card exactly as before.
+     * Why: the trace flush used to come first (so a J/I witness batch landed
+     * before a long first drain), but a logging build always has pending
+     * trace records (the cycle probe alone writes 16 every 1.5 s), so the
+     * trace won every idle pass: the writer was armed late or never, and a
+     * due drain waited for tens of seconds or for ever (SD_CARD_ADV_2: no
+     * scalar AutoSave after the first Instrument page visit of a boot; the
+     * previous card already showed 5 to 53 s waits). User data first: the
+     * trace now flushes only in a pass no AutoSave claimant took. Affiliate:
+     * the trace schedulers after the Pattern drains below.
      */
     /*
      * S082 C9/D11: Scene 17 owns the background Pattern region and the
@@ -29183,6 +29168,17 @@ void filesystem_tick(void)
     if (status == FS_STATUS_IDLE && !cc_suspended &&
         !scene_backgroundExists())
         filesystem_autosaveNonSemanticPatternDrainSchedule_tick();
+    /*
+     * The diagnostic trace flushes are the last claimants (S099 P3): a
+     * logging build's AutoSave Trace and PatternTrace append only in a pass
+     * that no settings, HCNAMES or AutoSave work took. Their own gates are
+     * unchanged (never on a Load/Save page or during a command); the ring
+     * keeps accumulating meanwhile and counts what it drops (stage G).
+     */
+    if (status == FS_STATUS_IDLE && !cc_suspended)
+        filesystem_autosaveTraceFlushSchedule_tick();
+    if (status == FS_STATUS_IDLE && !cc_suspended)
+        filesystem_patternTraceFlushSchedule_tick();
 #if DEV_MODE_LOGGING
     filesystem_traceOwnerTransition();   /* S090 P5 F5 */
 #endif

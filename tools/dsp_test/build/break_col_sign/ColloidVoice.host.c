@@ -157,10 +157,11 @@ _Static_assert(COL_PWM_COUNT == 6u, "COL_NORM_PWM is 1 / sqrt(6)");
 /*
  * COL_NORM_PWM_WARP for the six warp oscillators (S095 P5, user 2026-11-14).
  *
- * What:       1 / (full scale x sqrt(6)): pwm Sin and Tri render
- *             COL_PWM_WARP_COUNT (6) oscillators (ColloidVoice.h).
+ * What:       1 / (full scale x sqrt(6)): pwm Tri renders
+ *             COL_PWM_WARP_COUNT (6) oscillators (ColloidVoice.h; S099 P1
+ *             §15.10: pwm Sin, the other warp form, dropped).
  * Why:        the same power rule as COL_NORM_PWM, for the warp count, so a
- *             Sin/Tri <-> Saw/Rec change keeps the stack's level into the
+ *             Tri <-> Saw/Rec change keeps the stack's level into the
  *             drive. The value is the S095 P3 constant (six for every form).
  * Headroom:   six warp oscillators at the same sign: sqrt(6) x 0.5 = 1.22,
  *             inside the drive's +-1.5 clamp.
@@ -872,12 +873,13 @@ static __attribute__((noinline)) void col_scanControl(ColloidVoice *voice, const
  *               inc = f x 2^32 / fs;
 	 *             - row: wtb, the latched frame of the bound table (the last
 	 *               frame if the table shrank); Sin, the 1,024-point sine; pwm,
-	 *               by form: Sin the sine, Tri the triTable octave row lifted by
+	 *               by form (S099 P1 §15.10: no Sin): Tri the triTable octave row lifted by
 	 *               oscPwmTriLift[width], Saw/Rec the sawTable octave row;
 	 *               Saw/Rec/Tri under wav, the octave row of that table;
-	 *               R-S and REx (S099 P1) take the Saw/Rec rows, widths and
-	 *               level here; col_chopBlock() lifts the rows and replaces the
-	 *               widths and the level in the sync block;
+	 *               R-S (S099 P1) takes the Saw/Rec rows, Rec's widths and
+	 *               the Rec level here; col_chopBlock() lifts the rows and
+	 *               replaces the level in the sync block (S099 P2: the widths
+	 *               stay Rec's);
  *             - pwm: the width index slews toward col_pwmTarget() by at most
  *               OSC_PWM_SLEW_STEPS (2) per block, or lands on it when the
  *               oscillator rejoins (S095 P5, as the pitch); Saw/Rec take pwD =
@@ -899,7 +901,7 @@ static __attribute__((noinline)) void col_scanControl(ColloidVoice *voice, const
  *             Lower notes sit nearer the centre and move less (w, C-D14).
  * Inputs:     voice (parameters, osc, the bind, rnd, frame, pitchCur,
  *             oscLive), count (COL_OSC_COUNT, or under pwm
- *             COL_PWM_FORM_COUNT(): 6 Sin/Tri, 8 Saw/Rec), base (log2 Hz),
+ *             COL_PWM_FORM_COUNT(): 6 Tri, 6 Saw/Rec), base (log2 Hz),
  *             step (octaves per block), jump, isPwm, isWtb.
  * Outputs:    pitchCur[], inc[], row[], pwPos[], pwPos0[], pwD[], pwD0[], motPhase[],
  *             posPair[], oscLive (= count). Returns the pwm level factor:
@@ -946,8 +948,8 @@ static __attribute__((noinline)) float col_oscControl(ColloidVoice *voice, const
 	    : ((wave == COL_WAVE_REC) ? (const int16_t (*)[1024])recTable
 	    : ((wave == COL_WAVE_TRI) ? (const int16_t (*)[1024])triTable
 	                              : (const int16_t (*)[1024])sawTable));
-	const uint8_t isSin = (uint8_t)(isPwm ? (form == COL_PWM_SIN)
-	                                      : (!isWtb && wave == COL_WAVE_SIN));
+	/* S099 P1 §15.10: Sin only under wav (pwm Sin dropped) */
+	const uint8_t isSin = (uint8_t)(isPwm ? 0u : (!isWtb && wave == COL_WAVE_SIN));
 	const uint8_t isPwmD = (uint8_t)(isPwm && form >= COL_PWM_SAW);
 	const uint16_t *const dTab = (form == COL_PWM_SAW) ? oscPwmDSaw : oscPwmDRec;
 	const int16_t *const lvTab = (form == COL_PWM_SAW) ? oscPwmLevelSawQ14 : oscPwmLevelRecQ14;
@@ -1268,8 +1270,8 @@ void Colloid_calcVoiceAsync(ColloidVoice *voice)
 	 * The block's oscillator count (S095 P5, user 2026-11-14).
 	 *
 	 * What:       COL_OSC_COUNT (12) under wav and wtb; under pwm
-	 *             COL_PWM_FORM_COUNT(): 6 for the warp forms Sin/Tri, 8 for
-	 *             the pulse forms Saw/Rec (ColloidVoice.h). isWarp also picks
+	 *             COL_PWM_FORM_COUNT(): 6 for the warp form Tri, 6 for the
+	 *             pulse and chop forms (ColloidVoice.h). isWarp also picks
 	 *             the bus normalisation below.
 	 * Why:        the sync block renders the same count from the same test
 	 *             (COL_PWM_IS_WARP()), so the control and the audio agree.
@@ -1408,7 +1410,7 @@ void Colloid_calcVoiceAsync(ColloidVoice *voice)
 	 * COL_HEADROOM (S095 P3: the stack's peaks stay inside the shaper at drv
 	 * 0) times the drive gain 2^(4 drv); under pwm Saw/Rec times the stack's
 	 * mean level (S095 P3 F2). S095 P5: N is the block's count, so pwm uses
-	 * COL_NORM_PWM_WARP (1 / sqrt(6)) for Sin/Tri and COL_NORM_PWM
+	 * COL_NORM_PWM_WARP (1 / sqrt(6)) for Tri and COL_NORM_PWM
 	 * (1 / sqrt(6) since S096 P2 F5) for Saw/Rec. wtb with no table installed is silenced here (the rows
 	 * point at a stock row so the loops still read valid memory). str: the
 	 * right channel's own gain from driveR. Mono: inGainR is the gain into
@@ -1816,7 +1818,8 @@ static __attribute__((noinline)) void col_renderSer(ColloidVoice *voice, int16_t
 }
 
 /*
- * One block of pwm R-S or REx (S099 P1; S-R draft §6.3, §6.4).
+ * One block of pwm R-S (S099 P1; S-R draft §6.3, §6.4; S099 P2: REx
+ * dropped, the widths Rec's).
  *
  * What:       for each of the COL_PWM_COUNT (6) oscillators o, with k =
  *             pwPos[o] (the block's end width index) and k0 = pwPos0[o] (its
@@ -1824,11 +1827,12 @@ static __attribute__((noinline)) void col_renderSer(ColloidVoice *voice, int16_t
  *               - the gate row: the octave row col_oscControl() picked for
  *                 the pulse forms (sawTable[octave], read back from row[o]),
  *                 lifted by OSC_CHOP_LIFT, at most row 10;
- *               - the widths: pwD = oscPwmDSaw[k], pwD0 = oscPwmDSaw[k0]
- *                 (col_oscControl() wrote the Rec table's for every pulse
- *                 form; the chop uses the Saw floor of 2.54 %, D-5);
+ *               - the widths: pwD = oscPwmDRec[k], pwD0 = oscPwmDRec[k0],
+ *                 as col_oscControl() wrote them for every pulse form
+ *                 (S099 P2, user: R-S narrows to Rec's 0.39 %; it used the
+ *                 Saw floor of 2.54 %, D-5, and rewrote both here);
  *               - the pair's packed halves: g14 = oscChopGainQ14[row], rel =
- *                 oscChopRel*Q15[k], rel x position / 2;
+ *                 oscChopRelRsQ15[k], rel x position / 2;
  *               - the stack's mean at the start and end widths, mid and side,
  *                 in bus units (dc x rel >> 16; the side also x position);
  *             then col_chopDcInit() starts both buses at minus that mean,
@@ -1836,7 +1840,7 @@ static __attribute__((noinline)) void col_renderSer(ColloidVoice *voice, int16_t
  *             the three pairs. Finally the bus-to-drive gain: the async set
  *             inGain with the stack's mean Rec level (col_oscControl()'s
  *             return for a pulse form, oscPwmLevelRecQ14 / 16,384 averaged);
- *             the chop's level is rel x OSC_CHOP_LREF_* per oscillator, and
+ *             the chop's level is rel x OSC_CHOP_LREF_RS per oscillator, and
  *             its bus multiplies halve the bus, so inGain (and inGainR in the
  *             stereo route) is scaled by 2 x Lref / that mean: one VDIV per
  *             block, chop forms only.
@@ -1844,30 +1848,27 @@ static __attribute__((noinline)) void col_renderSer(ColloidVoice *voice, int16_t
  *             col_oscControl()'s per-oscillator loop and
  *             Colloid_calcVoiceAsync() keep their code (S096 P3 noise update:
  *             anything added to that loop costs every mode); the values this
- *             pass replaces (row, pwD, pwD0) are rewritten by the next
+ *             pass replaces (row) is rewritten by the next
  *             block's col_oscControl() before anything else reads them.
  *             The mean needs no state: both ends of its glide come from the
  *             widths the voice already holds (S099 P1 deviation §0.3 item 4).
  * Range:      per oscillator dc x rel >> 16 < 6,200; the six summed, x 32
  *             (col_chopDcInit()'s Q5), < 1.2 M.
  * Inputs:     voice (the async ran this block: row, pwPos, pwPos0, posPair,
- *             phase, inc, inGain, inGainR, route), form (COL_PWM_RS or
- *             COL_PWM_REX).
- * Outputs:    busM, busS; phase[0..5]; row, pwD, pwD0 (this block's); inGain,
- *             inGainR.
+ *             phase, inc, inGain, inGainR, route, pwD, pwD0).
+ * Outputs:    busM, busS; phase[0..5]; row (this block's); inGain, inGainR.
  * Cost:       per block: the six-oscillator loop, one VDIV, the init pass
  *             (6 a sample) and the three pairs (≈ 54 a pair a sample).
- * Accessors:  Colloid_calcVoiceSyncBlock() (typ pwm, wav R-S or REx).
+ * Accessors:  Colloid_calcVoiceSyncBlock() (typ pwm, wav R-S).
  * Affiliates: col_chopDcInit(), col_chopPairAdd() (ColloidOsc.c);
  *             oscChopTables.h; law CO-CHP.
  */
-static __attribute__((noinline)) void col_chopBlock(ColloidVoice *voice, const uint8_t form)
+static __attribute__((noinline)) void col_chopBlock(ColloidVoice *voice)
 {
-	const uint8_t rex = (uint8_t)(form == COL_PWM_REX);
-	const int16_t *const curve = rex ? oscChopCurveRex : oscChopCurveRs;
-	const int16_t *const dcTab = rex ? oscChopDcRexQ15 : oscChopDcRsQ15;
-	const int16_t *const relTab = rex ? oscChopRelRexQ15 : oscChopRelRsQ15;
-	const float lref = rex ? OSC_CHOP_LREF_REX : OSC_CHOP_LREF_RS;
+	const int16_t *const curve = oscChopCurveRs;
+	const int16_t *const dcTab = oscChopDcRsQ15;
+	const int16_t *const relTab = oscChopRelRsQ15;
+	const float lref = OSC_CHOP_LREF_RS;
 	int32_t dcM0 = 0, dcM1 = 0, dcS0 = 0, dcS1 = 0;
 	int32_t recSum = 0;
 	uint32_t i;
@@ -1903,7 +1904,6 @@ static __attribute__((noinline)) void col_chopBlock(ColloidVoice *voice, const u
 		for (h = 0u; h < 2u; h++) {
 			const uint32_t o = 2u * i + h;
 			const uint32_t k = (uint32_t)(voice->pwPos[o] & 127u);
-			const uint32_t k0 = (uint32_t)(voice->pwPos0[o] & 127u);
 			const uint32_t half = h ? 16u : 0u;
 			const int32_t pos = (int32_t)(int16_t)(voice->posPair[i] >> half);
 			const int32_t rel = relTab[k];
@@ -1913,8 +1913,6 @@ static __attribute__((noinline)) void col_chopBlock(ColloidVoice *voice, const u
 
 			r = (r + OSC_CHOP_LIFT > 10u) ? 10u : r + OSC_CHOP_LIFT;
 			voice->row[o] = sawTable[r];
-			voice->pwD[o] = oscPwmDSaw[k];
-			voice->pwD0[o] = oscPwmDSaw[k0];
 			gq |= (uint32_t)(uint16_t)oscChopGainQ14[r] << half;
 			lv |= (uint32_t)(uint16_t)rel << half;
 			lp |= (uint32_t)(uint16_t)relPos << half;
@@ -1946,15 +1944,16 @@ void Colloid_calcVoiceSyncBlock(ColloidVoice *voice, int16_t *buf, uint8_t size)
 	 *
 	 * What:       the oscillator loops, the first storing the buses and every
 	 *             further one adding:
-	 *               typ pwm, wav Sin or Tri: col_warpStore/Add per oscillator
+	 *               typ pwm, wav Tri: col_warpStore/Add per oscillator
 	 *                 (COL_PWM_WARP_COUNT, 6 since S095 P5), W/ra/rb from
-	 *                 oscPwmSin* or oscPwmTri*, gliding from the block's start
-	 *                 width index pwPos0 to its end index pwPos (S096 P2 F5);
+	 *                 oscPwmTri* (S099 P1 §15.10: pwm Sin dropped),
+	 *                 gliding from the block's start width index pwPos0 to
+	 *                 its end index pwPos (S096 P2 F5);
 	 *               typ pwm, wav Saw or Rec: col_pwmPairStore/Add per pair
 	 *                 (COL_PWM_COUNT, 6 since S096 P2 F5), sign +1 (Saw) or -1
 	 *                 (Rec), the second read gliding from pwD0 to pwD (S096 P2
 	 *                 F5);
-	 *               typ pwm, wav R-S or REx (S099 P1): col_chopBlock() (the
+	 *               typ pwm, wav R-S (S099 P1): col_chopBlock() (the
 	 *                 mean's start pass and three col_chopPairAdd() calls);
 	 *               typ wts: col_scanPairStore/Add per pair (COL_SCAN_COUNT),
 	 *                 g and dg from pwD0 / pwD (S096 P3);
@@ -1974,9 +1973,9 @@ void Colloid_calcVoiceSyncBlock(ColloidVoice *voice, int16_t *buf, uint8_t size)
 
 	(void)size;   /* the voice always renders OUTPUT_DMA_SIZE */
 	if (isPwm && COL_PWM_IS_WARP(form)) {
-		const uint32_t *const tW  = (form == COL_PWM_SIN) ? oscPwmSinW  : oscPwmTriW;
-		const uint32_t *const tRa = (form == COL_PWM_SIN) ? oscPwmSinRa : oscPwmTriRa;
-		const uint32_t *const tRb = (form == COL_PWM_SIN) ? oscPwmSinRb : oscPwmTriRb;
+		const uint32_t *const tW  = oscPwmTriW;
+		const uint32_t *const tRa = oscPwmTriRa;
+		const uint32_t *const tRb = oscPwmTriRb;
 
 		for (j = 0u; j < COL_PWM_WARP_COUNT; j++) {
 			const uint32_t k = voice->pwPos[j] & 127u;
@@ -2002,7 +2001,7 @@ void Colloid_calcVoiceSyncBlock(ColloidVoice *voice, int16_t *buf, uint8_t size)
 	} else if (isPwm && COL_PWM_IS_CHOP(form)) {
 		/* S099 P1: the chopped waves (the dispatch costs pwm Saw/Rec about 2
 		 * instructions a block, ≈ +0.06 a sample; measured at gate C-G4) */
-		col_chopBlock(voice, form);
+		col_chopBlock(voice);
 	} else if (isPwm) {
 		const int32_t sign = -1;
 
@@ -2126,7 +2125,7 @@ void Colloid_setOscType(ColloidVoice *voice, const uint8_t typ)
 	const uint8_t scan = (uint8_t)(typ == COL_TYP_WTS);
 	const uint8_t type = (typ == COL_TYP_WAV) ? OSC_TYPE_WAV
 	                   : (((typ == COL_TYP_WTB) || scan) ? OSC_TYPE_WTB : OSC_TYPE_PWM);
-	/* the new list's length: Saw..Sin, Sin..REx (S095 P3 F2; S099 P1), or
+	/* the new list's length: Saw..Sin, Tri..R-S (S095 P3 F2; S099 P1/P2), or
 	 * the installed tables */
 	const uint8_t count = (type == OSC_TYPE_WTB) ? sampleMemory_getNumWavetables()
 	                    : ((type == OSC_TYPE_PWM) ? (uint8_t)COL_PWM_WAVE_COUNT

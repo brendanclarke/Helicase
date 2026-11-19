@@ -51,7 +51,8 @@
  *                       depend on the tone state (an exact open tone); drive
  *                       127 changes the output and stays bounded;
  *               CO-PWM  the pair loops (sign -1 Rec, +1 Saw) and the warp
- *                       loops (Sin, Tri) against the laws restated here;
+ *                       loops (Tri; S099 P1 §15.10 dropped pwm Sin) against
+ *                       the laws restated here;
  *                       a Rec voice at pos 0, psp 0: every width
  *                       oscPwmDRec[0] (512); the width moves at most 2
  *                       indices per block; every form's voice bus equals the
@@ -70,10 +71,10 @@
  *                       device between refreshes), the twelve trigger draws
  *                       and the twelve start phases are all distinct;
  *               CO-JOIN (S095 P5, user 2026-11-14) the count follows the pwm
- *                       form (oscLive 8 under Saw/Rec, 6 under Sin/Tri, 12
+ *                       form (oscLive 6 under Saw/Rec, 6 under Tri, 12
  *                       under wav); an oscillator that starts rendering
  *                       again lands on its target pitch and width in its
- *                       first block while the others still slew: pwm Sin ->
+ *                       first block while the others still slew: pwm Tri ->
  *                       Saw (oscillators 6, 7) and pwm -> wav (8..11).
  *                       CO-PWM's form bus sums each form's own count
  *                       (COL_PWM_FORM_COUNT()).
@@ -269,10 +270,11 @@ static void test_osc(int pwm, int32_t sign)
 	}
 }
 
-/* CO-PWM (S095 P3 F2): the warp loops against the restated law, store then add */
+/* CO-PWM (S095 P3 F2): the warp loops against the restated law, store then add
+ * (S099 P1 §15.10: pwm Sin dropped, so all three run on Tri rows and tables) */
 static void test_warp(void)
 {
-	const int16_t *rows[3] = { sine_table, triTable[2], triTable[9] };
+	const int16_t *rows[3] = { triTable[5], triTable[2], triTable[9] };
 	uint32_t ph[3] = { 0x00000000u, 0x7fff1234u, 0xfffff000u };
 	const uint32_t inc[3] = { 0x01234567u, 0x00a00000u, 0x0abcdef1u };
 	const uint32_t k[3] = { 0u, 70u, 127u };
@@ -296,9 +298,9 @@ static void test_warp(void)
 
 		for (o = 0u; o < 3u; o++) {
 			const uint32_t ks = pass ? k0g[o] : k[o];
-			const uint32_t *const tW = o ? oscPwmTriW : oscPwmSinW;
-			const uint32_t *const tA = o ? oscPwmTriRa : oscPwmSinRa;
-			const uint32_t *const tB = o ? oscPwmTriRb : oscPwmSinRb;
+			const uint32_t *const tW = oscPwmTriW;
+			const uint32_t *const tA = oscPwmTriRa;
+			const uint32_t *const tB = oscPwmTriRb;
 
 			W0[o] = tW[ks]; A0[o] = tA[ks]; B0[o] = tB[ks];
 			dW[o] = ((int32_t)(tW[k[o]] - tW[ks])) / 32;
@@ -1197,8 +1199,8 @@ static void check_pwm_form(uint8_t form)
 	memcpy(ph, V.phase, sizeof(ph));
 	Colloid_calcVoiceSyncBlock(&V, L, BLK);
 	if (COL_PWM_IS_CHOP(form)) {
-		const int16_t *const dcT = (form == COL_PWM_REX) ? oscChopDcRexQ15 : oscChopDcRsQ15;
-		const int16_t *const relT = (form == COL_PWM_REX) ? oscChopRelRexQ15 : oscChopRelRsQ15;
+		const int16_t *const dcT = oscChopDcRsQ15;    /* S099 P2: no REx */
+		const int16_t *const relT = oscChopRelRsQ15;
 
 		for (i = 0u; i < COL_PWM_COUNT; i++) {
 			const int32_t rel = relT[V.pwPos[i] & 127u];
@@ -1209,22 +1211,20 @@ static void check_pwm_form(uint8_t form)
 	}
 	for (n = 0u; n < BLK; n++) {
 		int32_t m = 0;
-		/* S095 P5: each form renders its own count (6 Sin/Tri, 6 Saw/Rec
+		/* S095 P5: each form renders its own count (6 Tri, 6 Saw/Rec
 		 * since S096 P2 F5) */
 		for (i = 0u; i < COL_PWM_FORM_COUNT(form); i++) {
 			const uint32_t at = ph[i] + n * V.inc[i];
 			const uint32_t k = V.pwPos[i] & 127u;
 			int32_t v;
-			if (form == COL_PWM_SIN)
-				v = ref_warp(sine_table, at, oscPwmSinW[k], oscPwmSinRa[k], oscPwmSinRb[k]);
-			else if (form == COL_PWM_TRI)
+			if (form == COL_PWM_TRI)
 				v = ref_warp(V.row[i], at, oscPwmTriW[k], oscPwmTriRa[k], oscPwmTriRb[k]);
 			else if (COL_PWM_IS_CHOP(form)) {
 				/* S099 P1: the restated chop; the voice's bus also holds the
 				 * mean's start pass, so the check is the pairs' sum less
 				 * that pass (rebuilt below) */
-				const int16_t *const curve = (form == COL_PWM_REX) ? oscChopCurveRex : oscChopCurveRs;
-				const int16_t *const relT = (form == COL_PWM_REX) ? oscChopRelRexQ15 : oscChopRelRsQ15;
+				const int16_t *const curve = oscChopCurveRs;
+				const int16_t *const relT = oscChopRelRsQ15;
 				const uint32_t r = (uint32_t)(V.row[i] - sawTable[0]) >> 10;
 				const int32_t y = ref_chopY(V.row[i], curve, ph[i], V.inc[i], n,
 				                            V.pwD[i], V.pwD0[i], oscChopGainQ14[r]);
@@ -1630,7 +1630,7 @@ static void test_rnd(void)
  * CO-JOIN (S095 P5, user 2026-11-14): the count per pwm form, and rejoining
  * oscillators landing.
  *
- * What:       a pwm Saw voice settles at note 63 (slw 0); Sin renders 6, so
+ * What:       a pwm Saw voice settles at note 63 (slw 0); Tri renders 6, so
  *             oscillators 6 and 7 stop at that pitch. Then, at a slow slw,
  *             a note an octave up and pos 0 -> 127 start the six slewing;
  *             back to Saw, 6 and 7 must sit exactly on the new target pitch
@@ -1640,7 +1640,7 @@ static void test_rnd(void)
  * Why:        without ColloidVoice.oscLive the rejoining oscillators glided
  *             from where they stopped (the break build colloid_break_join
  *             removes the test and must fail here).
- *             S096 P2 F5: Saw/Rec render 6 again, so Sin -> Saw has no
+ *             S096 P2 F5: Saw/Rec render 6 again, so Tri -> Saw has no
  *             rejoining oscillator (the loop is empty); pwm -> wav rejoins
  *             6..11, measured against oscillator 0's settled pitch.
  */
@@ -1655,23 +1655,23 @@ static void test_join(void)
 	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
 	block(); block();
 	if (V.oscLive != COL_PWM_COUNT) fail(G_JOIN, "Saw count", V.oscLive, COL_PWM_COUNT);
-	V.osc.waveform = COL_PWM_SIN;
+	V.osc.waveform = COL_PWM_TRI;   /* S099 P1 §15.10: Sin until then */
 	block();
-	if (V.oscLive != COL_PWM_WARP_COUNT) fail(G_JOIN, "Sin count", V.oscLive, COL_PWM_WARP_COUNT);
+	if (V.oscLive != COL_PWM_WARP_COUNT) fail(G_JOIN, "Tri count", V.oscLive, COL_PWM_WARP_COUNT);
 	/* an octave up, slowly; the trigger snaps every width, so pos moves after it */
 	V.slew = 120u;
 	Colloid_triggerVoice(&V, 0u, 100u, 75u, 5514u, 1u);
 	V.osc.position = 127u;
 	/* S096 P2 F5: oscillator 0's settled pitch (6 was the first idle one
-	 * while Saw rendered 8 and Sin 6; both render 6 now) */
+	 * while Saw rendered 8 and the warp forms 6; both render 6 now) */
 	want = V.pitchCur[0] + 1.0f;
 	block();
 	V.osc.waveform = COL_PWM_SAW;
 	block();
 	for (i = COL_PWM_WARP_COUNT; i < COL_PWM_COUNT; i++) {
 		const uint8_t w = col_pwmTarget((int32_t)(V.osc.position & 127u), V.rnd[i], col_pwmScale(&V));
-		if (fabsf(V.pitchCur[i] - want) > 1e-5f) fail(G_JOIN, "Sin -> Saw: rejoin pitch", i, V.pitchCur[i] - want);
-		if (V.pwPos[i] != w) fail(G_JOIN, "Sin -> Saw: rejoin width", V.pwPos[i], w);
+		if (fabsf(V.pitchCur[i] - want) > 1e-5f) fail(G_JOIN, "Tri -> Saw: rejoin pitch", i, V.pitchCur[i] - want);
+		if (V.pwPos[i] != w) fail(G_JOIN, "Tri -> Saw: rejoin width", V.pwPos[i], w);
 	}
 	if (fabsf(V.pitchCur[0] - want) < 1e-3f) fail(G_JOIN, "oscillator 0 not still slewing", V.pitchCur[0], want);
 	/* pwm -> wav: 8..11 rejoin */
@@ -1686,7 +1686,8 @@ static void test_join(void)
 /*
  * CO-PWG (S096 P2 F5): a moving pwm width glides, it does not click.
  *
- * What:       for each pwm form (Sin, Tri, Saw, Rec) a low note (31) with the
+ * What:       for each pwm form (Tri, Saw, Rec, R-S; Sin until S099 P1
+ *             §15.10, REx until S099 P2) a low note (31) with the
  *             filter off, 2,400 blocks after 400 to settle: once with the
  *             width still (pos 100), once swept by a slow sine (0.4 Hz over
  *             the whole range) and once at the full slew (pos 0 <-> 127 every
@@ -1741,7 +1742,7 @@ static void test_pwg(void)
 {
 	uint8_t form;
 
-	for (form = COL_PWM_SIN; form <= COL_PWM_REX; form++) {
+	for (form = COL_PWM_TRI; form <= COL_PWM_RS; form++) {
 		const float still = pwg_run(form, 0);
 		const float lim = 3.0f * still + 0.002f;
 		const float swept = pwg_run(form, 1);
@@ -1756,7 +1757,8 @@ static void test_pwg(void)
  * buses, on random rows, phases, widths and levels; then a voice-level
  * check: an R-S stack at psp 0, pos 0 and 127, has a mean of the mid bus
  * within 0.3 % of one oscillator's full scale (the start pass removes the
- * mean), and every oscillator's gate row is the octave row + 2. */
+ * mean), every oscillator's gate row is the octave row + 2, and (S099 P2)
+ * every width is Rec's, oscPwmDRec[pos] (0.39 % at 127; REx dropped). */
 static void test_chop(void)
 {
 	uint32_t s = 0x5EEDu;
@@ -1768,7 +1770,7 @@ static void test_chop(void)
 		uint32_t ph[2], inc[2], ph0[2];
 		uint16_t w[2], w0[2];
 		int16_t g14[2], rel[2], rp[2];
-		const int16_t *const curve = (t & 1u) ? oscChopCurveRex : oscChopCurveRs;
+		const int16_t *const curve = oscChopCurveRs;   /* S099 P2: no REx */
 		uint32_t gq, lv, lp;
 
 		for (unsigned o = 0u; o < 2u; o++) {
@@ -1780,8 +1782,8 @@ static void test_chop(void)
 			rows[o] = sawTable[r];
 			ph0[o] = ph[o] = golden_rand(&s);
 			inc[o] = golden_rand(&s) >> 6;
-			w[o] = oscPwmDSaw[k];
-			w0[o] = oscPwmDSaw[k0];
+			w[o] = oscPwmDRec[k];      /* S099 P2: Rec's widths */
+			w0[o] = oscPwmDRec[k0];
 			g14[o] = oscChopGainQ14[r];
 			rel[o] = (int16_t)(golden_rand(&s) & 0x7FFFu);
 			rp[o] = (int16_t)((int32_t)(golden_rand(&s) & 0xFFFFu) - 32768);
@@ -1806,7 +1808,7 @@ static void test_chop(void)
 		if (ph[0] != ph0[0] + BLK * inc[0]) fail(G_CHP, "chop phase advance", ph[0], 0);
 	}
 	/* the voice: the mean is removed, the rows are lifted */
-	for (unsigned form = COL_PWM_RS; form <= COL_PWM_REX; form++) {
+	for (unsigned form = COL_PWM_RS; form <= COL_PWM_RS; form++) {
 		static const uint8_t posv[2] = { 0u, 127u };
 
 		for (unsigned pi = 0u; pi < 2u; pi++) {
@@ -1831,6 +1833,8 @@ static void test_chop(void)
 
 				if (r < OSC_CHOP_LIFT && r != 10u)
 					fail(G_CHP, "gate row not lifted", i, r);
+				if (V.pwD[i] != oscPwmDRec[V.pwPos[i] & 127u])
+					fail(G_CHP, "R-S width is not Rec's", V.pwD[i], V.pwPos[i]);
 			}
 		}
 	}

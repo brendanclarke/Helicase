@@ -66,7 +66,7 @@
 #include "Oscillator.h"
 #include "AlkalineVoice.h"     /* S094 P4: ALK_WAVE_COUNT (the name assert) */
 #include "ColloidVoice.h"      /* S095 P2: COL_WAVE_COUNT, the COL_* counts (the name asserts) */
-#include "BbdChorus.h"         /* S099 P1: BBD_MODE_COUNT, BBD_SRC_COUNT (the name asserts) */
+#include "BbdChorus.h"         /* S099 P2: BBD_DPT_VAR (the dpt names and their assert) */
 #include "TetraktVoice.h"      /* S096 P1: TKT_LAYER_MASK_COUNT (the name assert) */
 #include "transientGenerator.h"   /* S087 P3: transient list with user one-shots */
 #include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* (name asserts) */
@@ -146,6 +146,16 @@ static uint8_t menu_loadSaveCommandActive = 0u;
  */
 static uint8_t menu_loadSaveOkRetry = 0u;
 #define MENU_LS_OK_ATTEMPTS 4u
+/* Load/Save click outcomes for the DEV trace, stage 'k' (S097 P3; see
+ * menu_loadSaveTraceClick()). */
+#define MENU_LS_CLICK_ACCEPTED       0u
+#define MENU_LS_CLICK_COMMAND_ACTIVE 1u
+#define MENU_LS_CLICK_NAME_BLANK     2u
+#define MENU_LS_CLICK_COPY_HELD      3u
+#define MENU_LS_CLICK_REFUSED        4u
+#define MENU_LS_CLICK_EDIT           5u
+#define MENU_LS_CLICK_HELD           6u
+#define MENU_LS_CLICK_RETRY          7u
 static uint8_t menu_deferSelectionRequest = 0;
 /*
  * Load/Save selection-coordinate generation.
@@ -1452,7 +1462,8 @@ static const Name valueNames[NUM_NAMES] = {
     {SHORT_BUS_COMP_GR,CAT_SCENE,LONG_BUS_COMP_GR},
     /* S078 per-track run mode: run / Track / RunMode (S078 P4 relabel). */
     {SHORT_PLAY_MODE,CAT_TRACK,LONG_PLAY_MODE},
-    /* S079 step specials: cdn/tim/rol/rtm/rfl on the STEP page. */
+    /* S079 step specials: cdn/tim/rol/rtm/rfl on the STEP page (S099 P3: rfl
+     * shows as fil, Step Fill, on the first step screen). */
     {SHORT_CONDITION,CAT_STEP,LONG_CONDITION},
     {SHORT_MICROTIMING,CAT_STEP,LONG_MICROTIMING},
     {SHORT_ROLL_RATE,CAT_STEP,LONG_ROLL_RATE},
@@ -3418,6 +3429,14 @@ static uint8_t __attribute__((noinline))
 menu_formatDtype3(uint8_t dtype, uint8_t value, char *out)
 {
     switch (dtype & 0x0fu) {
+    case DTYPE_0B127:
+        /* S099 P2: the Effect Depth (dpt) names 0..2, the Juno modes; every
+         * other 0..127 value, and every untagged row, prints its number */
+        if ((uint8_t)(dtype >> 4) == DTYPE_TAG_FX_DEPTH && value < BBD_DPT_VAR) {
+            memcpy(out, fxDepthNames[1u + value], 3);
+            return 1u;
+        }
+        return 0u;
     case DTYPE_PM63:
         numtostrps(out, (int8_t)(value - 63));
         return 1u;
@@ -10039,6 +10058,11 @@ static void menu_instrumentLoadStepType(int8_t inc)
     }
 }
 
+/* S099 P2: defined with the Load/Save click bookkeeping below (S097 P3). */
+static void menu_loadSaveDropClick(uint8_t outcome);
+static void menu_loadSaveTraceClick(uint8_t outcome);
+static uint8_t menu_loadSaveOkRowHoldable(void);
+
 static void menu_instrumentSaveRequestSelection(void)
 {
     uint8_t accepted;
@@ -10065,6 +10089,27 @@ static void menu_instrumentSaveRequestSelection(void)
                                 menu_instrumentSaveName);
     if (accepted) {
         menu_beginLoadSaveCommand();
+        menu_loadSaveTraceClick(MENU_LS_CLICK_ACCEPTED);
+    } else {
+        /*
+         * A refused root Instrument Save (S099 P2, the device report: OK
+         * "froze" the Instrument Save page).
+         *
+         * What:       restores the click's edit-mode toggle and holds the
+         *             press for replay (menu_loadSaveRetryOk() calls
+         *             menu_handleLoadSaveMenu() again once storage and
+         *             Preset are idle, up to MENU_LS_OK_ATTEMPTS times), as
+         *             the top-level Load/Save OK rows have done since S097 P3.
+         * Why:        filesystem_requestSaveInstrumentMode() refuses while the
+         *             filesystem is busy (a trace flush, an AutoSave drain, a
+         *             name read). Before this the refusal was silent and the
+         *             toggled flag left the OK row in edit mode, where the
+         *             encoder does nothing: the page looked frozen until a
+         *             mode change, and no save was ever requested.
+         */
+        menu_loadSaveDropClick(MENU_LS_CLICK_REFUSED);
+        if (menu_loadSaveOkRowHoldable())
+            menu_loadSaveOkRetry = MENU_LS_OK_ATTEMPTS;
     }
 }
 
@@ -12453,7 +12498,8 @@ static void menu_formatUserShortName(char prefix, uint8_t index, char *buf)
  * What:       the 8-character name and the 3-character code of the entry a
  *             wave value selects:
  *             - osc1 under wav: the stock name, no code;
- *             - osc1 under pwm: Sin/Tri/Saw/Rec, without a compact code;
+ *             - osc1 under pwm: Tri/Saw/Rec (S099 P1 §15.10), without a
+ *               compact code;
  *             - osc1 under smp/slp/wtb: the item's catalogue name and
  *               sNN/lNN/wNN; both blank when the type has no item at that
  *               value;
@@ -12494,7 +12540,7 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
     memset(codeDst, ' ', 3u);
     /*
      * S093 P8: an Alkaline slot's osc1 under wav lists Saw, Sqr, Tri; S099
-     * P1: under pwm Saw, Sqr, Tri, R-S, REx.
+     * P1: under pwm Saw, Sqr, Tri, R-S (S099 P2: REx dropped).
      *
      * What:       value -> the list's name (alkWaveNames under wav,
      *             alkPwmWaveNames under pwm), copied to the name and
@@ -12502,7 +12548,7 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
      *             as a Drum value past its list.
      * Why:        the stock list (waveformNames: Sin, Tri, ...) is not the
      *             Alkaline's; the voice plays Saw for 0, Sqr for 1, Tri for 2
-     *             and (pwm) R-S for 3 and REx for 4. Under wtb the Alkaline
+     *             and (pwm) R-S for 3. Under wtb the Alkaline
      *             cell takes the shared branch below (wNN, the table name).
      * Accessors:  menu_formatWaveValue3() (compact cells, overlays, the voice
      *             automation display), the single-parameter painter.
@@ -12535,8 +12581,9 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
     }
     /*
      * S095 P2 (C-D20): a Colloid slot's osc1 under wav lists Saw, Rec, Tri,
-     * Sin (colWaveNames); S099 P1: under pwm its own list Sin, Tri, Saw, Rec,
-     * R-S, REx (colPwmWaveNames, the branch below); under wtb the shared
+     * Sin (colWaveNames); S099 P1: under pwm its own list Tri, Saw, Rec,
+     * R-S (colPwmWaveNames, the branch below; §15.10: no Sin; S099 P2: no
+     * REx); under wtb the shared
      * catalogue branch (wNN, the table name).
      */
     if (isOsc1 && type == OSC_TYPE_WAV &&
@@ -12548,13 +12595,14 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
         return;
     }
     /*
-     * S099 P1: a Colloid slot's osc1 under pwm (Sin Tri Saw Rec R-S REx).
+     * S099 P1: a Colloid slot's osc1 under pwm (Tri Saw Rec R-S; §15.10:
+     * Sin dropped; S099 P2: REx dropped).
      *
      * What:       value 0..COL_PWM_WAVE_COUNT - 1 -> colPwmWaveNames; any
      *             other value names nothing. No compact code (the shared pwm
      *             branch has none either).
      * Why:        the shared branch below names the drum engines' four from
-     *             waveformNames, where index 4 is Noi; the drum family has no
+     *             waveformNames, which ends at Noi; the drum family has no
      *             chopped waves (plan P-F, deferred).
      */
     if (isOsc1 && type == OSC_TYPE_PWM &&
@@ -12564,18 +12612,20 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
         return;
     }
     /*
-     * S094 P1 S3: osc1 under pwm names Sin, Tri, Saw, Rec.
+     * S094 P1 S3: osc1 under pwm names Tri, Saw, Rec.
      *
-     * What:       value 0..OSC_PWM_WAVE_COUNT - 1 maps to a stock name; an
+     * What:       value 0..OSC_PWM_WAVE_COUNT - 1 maps to the stock name
+     *             TRI + value (S099 P1 §15.10: pwm Sin dropped, the pwm byte
+     *             is the pwm list's own index, OSC_PWM_TRI 0); an
      *             out-of-range value remains blank. PWM has no compact code.
-     * Why:        under pwm the wav byte selects one of four stock waves with
+     * Why:        under pwm the wav byte selects one of three stock waves with
      *             a pulse-width form. The catalogue branch below would read
      *             the same value as a sample or wavetable index.
      * Accessors:  menu_formatWaveValue3() and the single-parameter painter.
      */
     if (isOsc1 && type == OSC_TYPE_PWM) {
         if (value < OSC_PWM_WAVE_COUNT)
-            memcpy(nameDst, waveformNames[value + 1u], 3u);
+            memcpy(nameDst, waveformNames[TRI + value + 1u], 3u);
         return;
     }
     if (isOsc1 && type != OSC_TYPE_WAV) {
@@ -12778,8 +12828,7 @@ static const char (*menu_onoffTagNames(uint8_t tag))[4]
     case ONOFF_TAG_COL_FILT_TYPE:  return colFiltTypeNames;
     case ONOFF_TAG_COL_TYPE:       return colTypeNames;      /* S096 P3 */
     case ONOFF_TAG_TKT_LAYERS:     return tktLayerNames;      /* S096 P1 */
-    case ONOFF_TAG_CHO_TYPE:       return choTypeNames;       /* S099 P1 */
-    case ONOFF_TAG_CHO_SOURCE:     return choSrcNames;        /* S099 P1 */
+    case ONOFF_TAG_FX_TYPE:        return fxTypeNames;        /* S099 P1/P2 */
     default:                    return oscRunNames;
     }
 }
@@ -12931,11 +12980,11 @@ _Static_assert((sizeof(voiceChainNames) / sizeof(voiceChainNames[0])) - 1u ==
 _Static_assert((sizeof(alkWaveNames) / sizeof(alkWaveNames[0])) - 1u ==
                    ALK_WAVE_COUNT,
                "alkWaveNames must list Saw, Sqr and Tri");
-/* S099 P1: the Alkaline pwm list names every pwm value: Saw, Sqr, Tri, R-S,
- * REx (ALK_PWM_WAVE_COUNT, AlkalineVoice.h). */
+/* S099 P1: the Alkaline pwm list names every pwm value: Saw, Sqr, Tri, R-S
+ * (S099 P2: REx dropped; ALK_PWM_WAVE_COUNT, AlkalineVoice.h). */
 _Static_assert((sizeof(alkPwmWaveNames) / sizeof(alkPwmWaveNames[0])) - 1u ==
                    ALK_PWM_WAVE_COUNT,
-               "alkPwmWaveNames must list Saw, Sqr, Tri, R-S and REx");
+               "alkPwmWaveNames must list Saw, Sqr, Tri and R-S");
 /* S093 P8 / S094 P1: the Alkaline typ list is wav, wtb, pwm (ALK_TYP_COUNT,
  * AlkalineVoice.h) */
 _Static_assert((sizeof(alkTypeNames) / sizeof(alkTypeNames[0])) - 1u == 3u,
@@ -12947,7 +12996,7 @@ _Static_assert((sizeof(colWaveNames) / sizeof(colWaveNames[0])) - 1u == COL_WAVE
 /* S099 P1: the Colloid's pwm list names every pwm value (COL_PWM_WAVE_COUNT). */
 _Static_assert((sizeof(colPwmWaveNames) / sizeof(colPwmWaveNames[0])) - 1u ==
                    COL_PWM_WAVE_COUNT,
-               "colPwmWaveNames must list Sin, Tri, Saw, Rec, R-S and REx");
+               "colPwmWaveNames must list Tri, Saw, Rec and R-S");
 _Static_assert((sizeof(colRouteNames) / sizeof(colRouteNames[0])) - 1u == COL_RTE_COUNT,
                "colRouteNames must list str and every filter type (S095 P3)");
 _Static_assert((sizeof(colFiltTypeNames) / sizeof(colFiltTypeNames[0])) - 1u == COL_FT_COUNT,
@@ -12959,10 +13008,11 @@ _Static_assert((sizeof(colTypeNames) / sizeof(colTypeNames[0])) - 1u == COL_TYP_
 _Static_assert((sizeof(tktLayerNames) / sizeof(tktLayerNames[0])) - 1u == TKT_LAYER_MASK_COUNT,
                "tktLayerNames must list the 16 layer sets");
 /* S099 P1: the chorus lists name every stored value (BbdChorus.h). */
-_Static_assert((sizeof(choTypeNames) / sizeof(choTypeNames[0])) - 1u == BBD_MODE_COUNT,
-               "choTypeNames must list off I II 1+2 var dbl");
-_Static_assert((sizeof(choSrcNames) / sizeof(choSrcNames[0])) - 1u == BBD_SRC_COUNT,
-               "choSrcNames must list L-R and mid");
+_Static_assert((sizeof(fxTypeNames) / sizeof(fxTypeNames[0])) - 1u == ADV_FX_COUNT,
+               "fxTypeNames must list off and chr (ADV_FX_*)");
+/* S099 P2: dpt names its first three values, the Juno modes (BBD_DPT_*). */
+_Static_assert((sizeof(fxDepthNames) / sizeof(fxDepthNames[0])) - 1u == BBD_DPT_VAR,
+               "fxDepthNames must name dpt 0 .. BBD_DPT_VAR - 1 (I II 1+2)");
 _Static_assert((sizeof(foldTypeNames) / sizeof(foldTypeNames[0])) - 1u ==
                    VOICE_FOLD_COUNT &&
                (sizeof(foldTypeLongNames) / sizeof(foldTypeLongNames[0])) - 1u ==
@@ -15636,6 +15686,10 @@ static void menu_repaintGeneric(void)
                 if (menu_getS080StaticName(&cell, value,
                                            &editDisplayBuffer[1][13]))
                     break;
+                /* S099 P2: the Effect Depth's Juno-mode names (0..2) */
+                if (menu_formatDtype3(menu_cellDtype(&cell), (uint8_t)value,
+                                      &editDisplayBuffer[1][13]))
+                    break;
                 /* Per-track play mode shows its 0..5 name (S078 §4.1). */
                 if (cell.kind == MENU_CELL_STATIC &&
                     cell.static_param == PAR_TRACK_PLAY_MODE) {
@@ -16321,14 +16375,8 @@ static void menu_paintTypeStepWhileBusy(void)
  * Inputs: outcome (MENU_LS_CLICK_*). Outputs: editModeActive restored for
  * every outcome except ACCEPTED and EDIT.
  */
-#define MENU_LS_CLICK_ACCEPTED       0u
-#define MENU_LS_CLICK_COMMAND_ACTIVE 1u
-#define MENU_LS_CLICK_NAME_BLANK     2u
-#define MENU_LS_CLICK_COPY_HELD      3u
-#define MENU_LS_CLICK_REFUSED        4u
-#define MENU_LS_CLICK_EDIT           5u
-#define MENU_LS_CLICK_HELD           6u
-#define MENU_LS_CLICK_RETRY          7u
+/* MENU_LS_CLICK_*: defined with MENU_LS_OK_ATTEMPTS (S099 P2 moved them up
+ * for the nested Instrument Save refusal path). */
 
 static void menu_loadSaveTraceClick(uint8_t outcome)
 {
@@ -16349,16 +16397,18 @@ static void menu_loadSaveDropClick(uint8_t outcome)
     menu_loadSaveTraceClick(outcome);
 }
 
-/* Nonzero while the cursor is on a top-level Load/Save OK row that a held
- * press may replay (numbered and test types; not Glo/Samples, not nested
- * Instrument Load/Save, not while a command runs). */
+/* Nonzero while the cursor is on a Load/Save OK row that a held press may
+ * replay (numbered and test types; not Glo/Samples, not while a command
+ * runs). Nested Instrument Load is excluded; nested Instrument Save is
+ * included since S099 P2 (its OK posts one request, as the top-level rows'). */
 static uint8_t menu_loadSaveOkRowHoldable(void)
 {
     return (uint8_t)(
         (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
         menu_saveOptions.state == SAVE_STATE_OK &&
         menu_saveOptions.what < SAVE_TYPE_GLO &&
-        !menu_instrumentLoadActive &&
+        (!menu_instrumentLoadActive ||
+         (menu_instrumentSaveMode && menu_activePage == SAVE_PAGE)) &&
         !menu_loadSaveCommandActive);
 }
 

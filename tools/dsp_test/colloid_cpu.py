@@ -19,12 +19,13 @@ What:       for each mode, from the linked ELF (the space_cpu.py method,
               loop's entry/exit path.
             Modes: plain (COL_OSC_COUNT oscillators, from --count), pwm (the
             Saw/Rec pair loops, COL_PWM_COUNT) and pwmw (S095 P3: the
-            Sin/Tri warp loops, one oscillator per loop, COL_PWM_WARP_COUNT), each
+            warp loops, Tri since S099 P1 §15.10 dropped pwm Sin, one
+            oscillator per loop, COL_PWM_WARP_COUNT), each
             stereo (rte str, `par`, the dearest) and mono (`ser`); S096 P3
             adds scan (the wts two-frame pair loops, COL_SCAN_COUNT), which
             also charges col_scanControl() (the frame positions: its loop x
-            the count + its straight path); S099 P1 adds chop (the R-S / REx
-            form: col_chopDcInit() a sample, three col_chopPairAdd() pairs,
+            the count + its straight path); S099 P1 adds chop (the R-S
+            form, REx until S099 P2: col_chopDcInit() a sample, three col_chopPairAdd() pairs,
             and col_chopBlock()'s six-oscillator pass per block).
 Why:        the device run is the gate (S094 P2: measured cycles per block,
             cold, dearest, stereo send, against the Basic 19,620); these
@@ -51,7 +52,8 @@ FRAMES = 32
 # S095 P5 (user, 2026-11-14): the pwm counts are read from ColloidVoice.h,
 # not repeated here, so these counts follow the firmware: COL_PWM_COUNT (8)
 # for the Saw/Rec pair loops (`pwm` modes) and COL_PWM_WARP_COUNT (6) for the
-# Sin/Tri warp loops (`pwmw` modes); before S095 P5 both were 6. The plain
+# warp loops (`pwmw` modes; Tri only since S099 P1 §15.10); before S095 P5
+# both were 6. The plain
 # count is still --count (it can be overridden with -DCOL_OSC_COUNT; the pwm
 # counts cannot).
 def _voice_define(name):

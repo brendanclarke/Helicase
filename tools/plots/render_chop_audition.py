@@ -3,8 +3,8 @@
 
 What:       writes 16-bit mono 44,108 Hz WAV files into --out (default: the
             path given; nothing is written into the tree):
-              <wave>_<f>Hz_<form>.wav for wave in rs, rexk4, rexk5, rexk6,
-              rec (the shipped Rec, the shipped D form) and rs-lowfirst (the
+              <wave>_<f>Hz_<form>.wav for wave in rs (S099 P2: the rexk4..6
+              files went with REx; the widths are Rec's, oscPwmDRec), rec (the shipped Rec, the shipped D form) and rs-lowfirst (the
               other gate orientation, D-4); f in 55, 110, 440, 1760; form in
               T (both gate points truncated, the Colloid's form T) and I (both
               interpolated, the reference). Each file is 1 s at pos 0, 24, 48
@@ -13,14 +13,14 @@ What:       writes 16-bit mono 44,108 Hz WAV files into --out (default: the
             The gate is the shipped two-read on the sawTable row lifted by
             OSC_CHOP_LIFT, read at twice the phase (osc_pwmReadD(), sign -1),
             floored by w; the curve is the table law of gen_pwm_tables.py
-            (rex_s with k 4/5/6), read truncated (form T) or interpolated
+            (c(x) = x), read truncated (form T) or interpolated
             (form I); the DC is removed and the peak kept (the level law).
 Why:        D-11 (k by ear), D-4 (orientation), and the form T low-note
             question (S-R draft §6.3) can be heard before any firmware work.
 Inputs:     --out DIR (required).
 Outputs:    the WAV files and a one-line summary each (RMS, peak).
 Accessors:  python3 tools/plots/render_chop_audition.py --out <scratchpad>.
-Affiliates: gen_pwm_tables.py (saw_rows(), curve_fns(), d_saw()).
+Affiliates: gen_pwm_tables.py (saw_rows(), curve_fns(), d_rec()).
 """
 import argparse
 import math
@@ -55,10 +55,8 @@ def read_d(row, p, d, interp):
 
 def render(wave_name, f, form, k):
     rows = G.saw_rows()
-    d_saw = G.d_saw()
-    if wave_name.startswith("rex"):
-        G.CHOP_REX_K = k
-    curve_wave = "rs" if wave_name.startswith("rs") else "rex"
+    d_saw = G.d_rec()   # S099 P2: R-S runs on Rec's widths (name kept)
+    curve_wave = "rs"
     curve = G.chop_curve(curve_wave)
     dcs, levels = G.chop_dc_level(curve_wave, d_saw)
     r = min(octave(f) + 2, 10)
@@ -146,9 +144,6 @@ def main():
             write(os.path.join(a.out, "rs_%dHz_%s.wav" % (f, form)), render("rs", f, form, 0))
             write(os.path.join(a.out, "rs-lowfirst_%dHz_%s.wav" % (f, form)),
                   render("rs-lowfirst", f, form, 0))
-            for k in (4, 5, 6):
-                write(os.path.join(a.out, "rexk%d_%dHz_%s.wav" % (k, f, form)),
-                      render("rexk%d" % k, f, form, float(k)))
 
 
 if __name__ == "__main__":

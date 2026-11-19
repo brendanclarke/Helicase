@@ -22,9 +22,9 @@
  *                 so a moving width never steps (it was a whole-point
  *                 offset sharing the first read's fraction, held per block);
  *               col_warpStore / col_warpAdd  one oscillator per pass: a
- *                 1,024-point row (sine_table or a triTable octave row) read
- *                 at the warped phase osc_pwmWarp(ph, W, ra, rb) (the shipped
- *                 WS / WT forms; S095 P3 F2), its position in pq's low half.
+ *                 1,024-point row (a triTable octave row) read at the
+ *                 warped phase osc_pwmWarp(ph, W, ra, rb) (the shipped WT
+ *                 form; S095 P3 F2; S099 P1 §15.10: pwm Sin dropped), its position in pq's low half.
  *                 S096 P2 F5: W, ra and rb glide by dW, dRa, dRb per sample
  *                 from the block's start values toward its end values.
  * Why:        S095 P2 draft §2.1/§2.4: a pair per pass is the cheapest form
@@ -89,7 +89,7 @@ void col_scanPairAdd(const int16_t *const *row, uint32_t *phase,
                      const int32_t *dg, uint32_t posPair,
                      int32_t *bus);
 /*
- * S099 P1: the Colloid's chopped pwm waves R-S and REx.
+ * S099 P1: the Colloid's chopped pwm wave R-S (S099 P2: REx dropped).
  *
  * What:       col_chopDcInit() writes both buses (mid then side, one 64-word
  *             array) with minus the stack's mean, gliding from the block's

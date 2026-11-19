@@ -23,10 +23,11 @@
  *               CH-MIX0  cmx 0: both forms' output equals the input exactly,
  *                        every sample; at cmx 64 the output equals the
  *                        restated x gd + wet gw (break: gn's sign);
- *               CH-SLEW  a cdp step 0 -> 127 under var moves the delay by at
- *                        most 1/8 of the step plus one LFO step per block; a
- *                        cho change I -> dbl moves the centre <= 16 samples a
- *                        block;
+ *               CH-SLEW  a dpt step 3 -> 65 (var, depth 0 -> full) moves
+ *                        the delay by at most 1/8 of the step plus one LFO
+ *                        step per block; dpt -> 127 (dbl) moves the centre
+ *                        <= 16 samples a block (S099 P2: dpt replaces cho
+ *                        and cdp);
  *               CH-SRC   both csr forms leave both rings holding the selected
  *                        source's last 1,024 pre-pole samples; break: no
  *                        ring-R mirror store in pass A (mid -> L-R fails);
@@ -46,7 +47,12 @@
  *                        partial (all printed: regression guards on the C3
  *                        design; the sound is judged by ear);
  *               CH-INIT  bbdChorus_init() clears all 4,416 bytes and sets the
- *                        sides' rings (mono: both on ring L).
+ *                        sides' rings (mono: both on ring L);
+ *               CH-DPT   (S099 P2) the Effect Depth row: dpt 0..2 the Juno
+ *                        modes at their own rates (rte ignored), 3 var at
+ *                        depth 0, 65 var at full depth, 127 dbl at full
+ *                        depth, 3..127 at rte's rate, the centre and depth
+ *                        never falling and the delay inside its range.
  *             Built twice (Makefile): the default (BBD_COL_HALF_RATE 1, the
  *             Colloid half rate) and -DBBD_COL_HALF_RATE=0 (the full-rate
  *             Colloid), so both forms stay proven through
@@ -74,9 +80,10 @@
 
 #define BLK OUTPUT_DMA_SIZE
 
-enum { G_TAP, G_GUARD, G_LAW, G_MIX0, G_SLEW, G_SRC, G_ALK, G_INIT, G_HALF, G_N };
+enum { G_TAP, G_GUARD, G_LAW, G_MIX0, G_SLEW, G_SRC, G_ALK, G_INIT, G_HALF, G_DPT, G_N };
 static const char *g_name[G_N] = { "CH-TAP", "CH-GUARD", "CH-LAW", "CH-MIX0",
-                                   "CH-SLEW", "CH-SRC", "CH-ALK", "CH-INIT", "CH-HALF" };
+                                   "CH-SLEW", "CH-SRC", "CH-ALK", "CH-INIT", "CH-HALF",
+                                   "CH-DPT" };
 static unsigned g_fail[G_N];
 
 static void fail(int g, const char *what, double a, double b)
@@ -216,10 +223,10 @@ static void test_law(void)
 	uint32_t w = 0u;
 	int32_t prev = 0;
 
-	bbdChorus_init(unit, 0u, BBD_MODE_I);
+	bbdChorus_init(unit, 0u, BBD_DPT_I);
 	prev = bbd_state(unit)->side[0].dEnd;
 	for (uint32_t b = 0u; b < 200u; b++) {
-		bbdChorus_control(unit, BBD_MODE_I, 0u, 0u, 64u, BBD_COL_TONE, 0u, 127u, 0u);
+		bbdChorus_control(unit, BBD_DPT_I, 0u, 64u, BBD_COL_TONE, 0u, 127u, 0u);
 		/* the plan's rp is exact at the block edge */
 		/* in ring samples: the half-rate Colloid halves the delay */
 		if (bbd_state(unit)->side[0].rp != (w << 16) - ((uint32_t)prev >> bbd_state(unit)->half))
@@ -240,7 +247,7 @@ static void test_law(void)
 	/* the delay extremes and the pitch swing over one cycle */
 	{
 		static const double cents[3] = { 6.5, 11.0, 13.4 };
-		static const uint8_t modes[3] = { BBD_MODE_I, BBD_MODE_II, BBD_MODE_I_II };
+		static const uint8_t modes[3] = { BBD_DPT_I, BBD_DPT_II, BBD_DPT_I_II };
 
 		for (unsigned m = 0u; m < 3u; m++) {
 			double slope = 0.0;
@@ -256,13 +263,13 @@ static void test_law(void)
 				/* the first 120 blocks are the depth's slew, not the LFO */
 				if (b > 160u && s > slope) slope = s;
 				prevd = now;
-				bbdChorus_control(unit, modes[m], 0u, 0u, 64u, BBD_COL_TONE, 0u, 127u, 0u);
+				bbdChorus_control(unit, modes[m], 0u, 64u, BBD_COL_TONE, 0u, 127u, 0u);
 				bbd_state(unit)->w += BLK;
 			}
 			{
 				const double sw = fabs(1200.0 * log(1.0 / (1.0 + slope)) / log(2.0));
 
-				printf("CH-LAW: mode %u max delay slope %.4f a sample, swing %.2f cents (table %.1f)\n",
+				printf("CH-LAW: dpt %u max delay slope %.4f a sample, swing %.2f cents (table %.1f)\n",
 				       modes[m], slope, sw, cents[m]);
 				if (fabs(sw - cents[m]) > 0.05 * cents[m]) fail(G_LAW, "pitch swing", sw, cents[m]);
 			}
@@ -275,7 +282,7 @@ static void test_mix0(void)
 {
 	static int16_t l[BLK], r[BLK], l0[BLK], r0[BLK];
 
-	bbdChorus_init(unit, 0u, BBD_MODE_II);
+	bbdChorus_init(unit, 0u, BBD_DPT_II);
 	for (unsigned src = 0u; src < 2u; src++) {
 		for (uint32_t b = 0u; b < 8u; b++) {
 			for (uint32_t n = 0u; n < BLK; n++) {
@@ -284,7 +291,7 @@ static void test_mix0(void)
 				l0[n] = l[n];
 				r0[n] = r[n];
 			}
-			bbdChorus_control(unit, BBD_MODE_II, 0u, 0u, 0u, BBD_COL_TONE, 0u, 127u, 0u);
+			bbdChorus_control(unit, BBD_DPT_II, 0u, 0u, BBD_COL_TONE, 0u, 127u, 0u);
 			bbdChorus_renderColloid(unit, l, r, (uint8_t)src);
 			for (uint32_t n = 0u; n < BLK; n++)
 				if (l[n] != l0[n] || r[n] != r0[n])
@@ -303,23 +310,23 @@ static void test_mix0(void)
 		}
 		/* dry only, then wet only, then both: the same ring state is needed, so
 		 * each run reseeds the unit with the same block */
-		bbdChorus_init(unit, 0u, BBD_MODE_I);
-		bbdChorus_control(unit, BBD_MODE_I, 0u, 0u, 64u, BBD_COL_TONE, 0u, 127u, 0u);
+		bbdChorus_init(unit, 0u, BBD_DPT_I);
+		bbdChorus_control(unit, BBD_DPT_I, 0u, 64u, BBD_COL_TONE, 0u, 127u, 0u);
 		gk = bbd_state(unit)->gk;
 		memcpy(work, in, sizeof(in));
 		memcpy(r, rin, sizeof(rin));
 		bbd_state(unit)->gk = (uint32_t)(uint16_t)(gk & 0xFFFFu);
 		bbdChorus_renderColloid(unit, work, r, BBD_SRC_LR);
 		memcpy(dry, work, sizeof(dry));
-		bbdChorus_init(unit, 0u, BBD_MODE_I);
-		bbdChorus_control(unit, BBD_MODE_I, 0u, 0u, 64u, BBD_COL_TONE, 0u, 127u, 0u);
+		bbdChorus_init(unit, 0u, BBD_DPT_I);
+		bbdChorus_control(unit, BBD_DPT_I, 0u, 64u, BBD_COL_TONE, 0u, 127u, 0u);
 		memcpy(work, in, sizeof(in));
 		memcpy(r, rin, sizeof(rin));
 		bbd_state(unit)->gk = gk & 0xFFFF0000u;
 		bbdChorus_renderColloid(unit, work, r, BBD_SRC_LR);
 		memcpy(wet, work, sizeof(wet));
-		bbdChorus_init(unit, 0u, BBD_MODE_I);
-		bbdChorus_control(unit, BBD_MODE_I, 0u, 0u, 64u, BBD_COL_TONE, 0u, 127u, 0u);
+		bbdChorus_init(unit, 0u, BBD_DPT_I);
+		bbdChorus_control(unit, BBD_DPT_I, 0u, 64u, BBD_COL_TONE, 0u, 127u, 0u);
 		memcpy(work, in, sizeof(in));
 		memcpy(r, rin, sizeof(rin));
 		bbdChorus_renderColloid(unit, work, r, BBD_SRC_LR);
@@ -338,32 +345,87 @@ static void test_mix0(void)
 	}
 }
 
-/* --------------------------------------------------------------- CH-SLEW */
+/* --------------------------------------------------------------- CH-SLEW
+ * S099 P2: dpt 3 (var at depth 0) -> 65 (var at full depth): the depth slews
+ * by 1/8 a block; -> 127 (dbl at full depth): the centre moves at most
+ * BBD_CENTRE_STEP (16 samples) in a block. */
 static void test_slew(void)
 {
 	int32_t prev;
 
-	bbdChorus_init(unit, 0u, BBD_MODE_VAR);
+	bbdChorus_init(unit, 0u, BBD_DPT_VAR);
 	bbd_state(unit)->w = 0u;
-	bbdChorus_control(unit, BBD_MODE_VAR, 64u, 0u, 64u, BBD_COL_TONE, 0u, 127u, 0u);
+	bbdChorus_control(unit, BBD_DPT_VAR, 64u, 64u, BBD_COL_TONE, 0u, 127u, 0u);
 	prev = bbd_state(unit)->side[0].dEnd;
 	for (uint32_t b = 0u; b < 40u; b++) {
-		bbdChorus_control(unit, BBD_MODE_VAR, 64u, 127u, 64u, BBD_COL_TONE, 0u, 127u, 0u);
+		bbdChorus_control(unit, BBD_DPT_VAR_FULL, 64u, 64u, BBD_COL_TONE, 0u, 127u, 0u);
 		{
 			const int32_t now = bbd_state(unit)->side[0].dEnd;
 			const double step = fabs((double)(now - prev)) / 65536.0;
 
 			/* 1/8 of the full sweep (81.4) plus one LFO step (<= 1 sample) */
-			if (step > 81.4 / 8.0 + 1.0) fail(G_SLEW, "cdp slew", step, 81.4 / 8.0);
+			if (step > 81.4 / 8.0 + 1.0) fail(G_SLEW, "dpt depth slew", step, 81.4 / 8.0);
 			prev = now;
 		}
 		bbd_state(unit)->w += BLK;
 	}
-	bbdChorus_control(unit, BBD_MODE_DBL, 64u, 127u, 64u, BBD_COL_TONE, 0u, 127u, 0u);
+	bbdChorus_control(unit, 127u, 64u, 64u, BBD_COL_TONE, 0u, 127u, 0u);
 	{
 		const double c = (double)bbd_state(unit)->cNow;
 
 		if (fabs(c - 154.6) > 16.01) fail(G_SLEW, "the centre jumps", c, 154.6);
+	}
+}
+
+/* ---------------------------------------------------------------- CH-DPT
+ * S099 P2 (user, 2026-11-19): the Effect Depth row. After 600 blocks (every
+ * slew settled): dpt 0, 1, 2 are the Juno modes (centre, depth and LFO rate
+ * fixed: rte 0 and rte 127 give the same phase step); dpt 3 is var at depth
+ * 0; 65 var at full depth (154.6 +- 81.4); 127 dbl at full depth (662 +-
+ * 110); every dpt 3..127 follows rte, and the centre and depth never fall as
+ * dpt rises (one smooth path). */
+static void dpt_settle(uint8_t dpt, uint8_t rte, double *c, double *d, uint32_t *step)
+{
+	uint32_t ph;
+
+	bbdChorus_init(unit, 0u, dpt);
+	for (uint32_t b = 0u; b < 600u; b++) {
+		bbdChorus_control(unit, dpt, rte, 64u, BBD_COL_TONE, 0u, 127u, 0u);
+		bbd_state(unit)->w += BLK;
+	}
+	ph = bbd_state(unit)->lfoPh;
+	bbdChorus_control(unit, dpt, rte, 64u, BBD_COL_TONE, 0u, 127u, 0u);
+	*step = bbd_state(unit)->lfoPh - ph;
+	*c = bbd_state(unit)->cNow;
+	*d = bbd_state(unit)->depthNow;
+}
+
+static void test_dpt(void)
+{
+	static const double juno[3][2] = { { 154.6, 81.4 }, { 154.6, 81.4 }, { 154.4, 8.8 } };
+	double c, d, c0, d0, cp = 0.0, dp = -1.0;
+	uint32_t s0, s1;
+
+	for (uint8_t m = 0u; m < BBD_DPT_VAR; m++) {
+		dpt_settle(m, 0u, &c, &d, &s0);
+		dpt_settle(m, 127u, &c0, &d0, &s1);
+		if (fabs(c - juno[m][0]) > 0.01 || fabs(d - juno[m][1]) > 0.01)
+			fail(G_DPT, "a Juno mode's centre / depth", m, c);
+		if (s0 != s1) fail(G_DPT, "a Juno mode follows rte", m, (double)s1);
+	}
+	dpt_settle(BBD_DPT_VAR, 64u, &c, &d, &s0);
+	if (fabs(c - 154.6) > 0.01 || d > 0.01) fail(G_DPT, "dpt 3 is var at depth 0", c, d);
+	dpt_settle(BBD_DPT_VAR_FULL, 64u, &c, &d, &s0);
+	if (fabs(c - 154.6) > 0.01 || fabs(d - 81.4) > 0.01) fail(G_DPT, "dpt 65 is var at full depth", c, d);
+	dpt_settle(127u, 64u, &c, &d, &s0);
+	if (fabs(c - 662.0) > 0.05 || fabs(d - 110.0) > 0.05) fail(G_DPT, "dpt 127 is dbl at full depth", c, d);
+	dpt_settle(127u, 0u, &c0, &d0, &s1);
+	if (s0 == s1) fail(G_DPT, "dpt 127 ignores rte", (double)s0, (double)s1);
+	for (uint32_t v = BBD_DPT_VAR; v <= 127u; v += 4u) {
+		dpt_settle((uint8_t)v, 64u, &c, &d, &s0);
+		if (c < cp - 0.01 || d < dp - 0.01) { fail(G_DPT, "the path falls", v, c); break; }
+		if (c - d < BBD_D_MIN || c + d > BBD_D_MAX) { fail(G_DPT, "the delay leaves its range", v, c); break; }
+		cp = c; dp = d;
 	}
 }
 
@@ -379,7 +441,7 @@ static void test_src(void)
 		const int32_t wantL = (src == BBD_SRC_MID) ? 1500 : 1000;
 		const int32_t wantR = (src == BBD_SRC_MID) ? 1500 : 2000;
 
-		bbdChorus_init(unit, 0u, BBD_MODE_I);
+		bbdChorus_init(unit, 0u, BBD_DPT_I);
 		bbd_state(unit)->side[0].kk = 0u;     /* transparent: ring = the input */
 		bbd_state(unit)->side[1].kk = 0u;
 		bbd_state(unit)->gk = 0u;
@@ -406,7 +468,7 @@ static void test_alk(void)
 	static int16_t l[BLK], r[BLK];
 
 	/* gk 0: both sides are the dry input */
-	bbdChorus_init(unit, 1u, BBD_MODE_I);
+	bbdChorus_init(unit, 1u, BBD_DPT_I);
 	bbd_state(unit)->gk = 0u;
 	for (uint32_t n = 0u; n < BLK; n++)
 		l[n] = (int16_t)(1500 - 9 * (int)n);
@@ -415,7 +477,7 @@ static void test_alk(void)
 		if (r[n] != (int16_t)(1500 - 9 * (int)n))
 			fail(G_ALK, "right is not the dry", r[n], n);
 	/* cdv 0: the ring holds the input (a transparent pre pole) */
-	bbdChorus_init(unit, 1u, BBD_MODE_I);
+	bbdChorus_init(unit, 1u, BBD_DPT_I);
 	bbd_state(unit)->side[0].kk = 0u;
 	bbd_state(unit)->gDrv = 8192u;
 	for (uint32_t n = 0u; n < BLK; n++)
@@ -425,7 +487,7 @@ static void test_alk(void)
 		if (bbd_state(unit)->side[0].ring[n] != (int16_t)(500 + n))
 			fail(G_ALK, "cdv 0 ring", bbd_state(unit)->side[0].ring[n], 500 + n);
 	/* cdv 127: a full-scale input clips */
-	bbdChorus_init(unit, 1u, BBD_MODE_I);
+	bbdChorus_init(unit, 1u, BBD_DPT_I);
 	bbd_state(unit)->side[0].kk = 0u;
 	bbd_state(unit)->gDrv = (uint32_t)(uint16_t)bbdDrvQ13[127];
 	for (uint32_t n = 0u; n < BLK; n++)
@@ -448,7 +510,7 @@ static void test_alk(void)
 		BbdChorusState *st;
 		double got, want;
 
-		bbdChorus_init(unit, 1u, BBD_MODE_I);
+		bbdChorus_init(unit, 1u, BBD_DPT_I);
 		st = bbd_state(unit);
 		st->side[0].dEnd = st->side[1].dEnd = (int32_t)(154.0f * 65536.0f);
 		for (uint32_t b2 = 0u; b2 < 800u; b2++) {
@@ -548,13 +610,13 @@ static void test_init(void)
 {
 	for (uint32_t n = 0u; n < FXBUF_VOICE_UNIT_SAMPLES; n++)
 		unit[n] = (int16_t)0x5A5A;
-	bbdChorus_init(unit, 0u, BBD_MODE_II);
+	bbdChorus_init(unit, 0u, BBD_DPT_II);
 	for (uint32_t n = 0u; n < BBD_STATE_OFS; n++)
 		if (unit[n] != 0) { fail(G_INIT, "the unit is not cleared", n, unit[n]); break; }
 	if (bbd_state(unit)->side[0].ring != unit ||
 	    bbd_state(unit)->side[1].ring != unit + BBD_RING_R_OFS)
 		fail(G_INIT, "the stereo rings", 0, 0);
-	bbdChorus_init(unit, 1u, BBD_MODE_I);
+	bbdChorus_init(unit, 1u, BBD_DPT_I);
 	if (bbd_state(unit)->side[1].ring != unit)
 		fail(G_INIT, "the mono ring", 0, 0);
 }
@@ -572,6 +634,7 @@ int main(void)
 	test_alk();
 	test_init();
 	test_half();
+	test_dpt();
 	for (g = 0u; g < G_N; g++) {
 		printf("chorus %-8s failures: %u\n", g_name[g], g_fail[g]);
 		total += g_fail[g];

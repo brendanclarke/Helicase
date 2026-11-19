@@ -40,8 +40,9 @@ const char shortNames[][4] = {
      * settings. Accessor: valueNames[TEXT_TRACK_PLAY_MODE] (menu.c).
      */
     {"run"},
-    /* S079 step-special compact labels: cdn/tim/rol/rtm/rfl (fix 2, P2). */
-    {"cdn"},{"tim"},{"rol"},{"rtm"},{"rfl"},
+    /* S079 step-special compact labels: cdn/tim/rol/rtm/rfl (fix 2, P2);
+     * S099 P3: rfl is fil ("Step" "Fill"). */
+    {"cdn"},{"tim"},{"rol"},{"rtm"},{"fil"},
     /* S080 E4/G10: BAR overlay, scene globals, and chain labels. The S080 F2
      * duplicate "pcr" was removed in S080 P2 (Defect 5); index 63 above is the
      * only pcr label. */
@@ -74,10 +75,9 @@ const char shortNames[][4] = {
     {"p3"},{"den"},{"lng"},{"bal"},{"dmp"},{"xfb"},{"deg"},{"wow"},{"hld"},
     {"rev"},{"hed"},{"dck"},{"siz"},{"dcy"},{"dif"},{"lsh"},{"lsf"},{"hsh"},
     {"hsf"},{"frz"},{"shm"},{"int"},{"e>r"},{"bln"},
-    /* S099 P1: the chorus rows */
-    {"cho"},{"crt"},{"cdp"},{"cmx"},{"csr"},
-    /* S099 P1 (P-E): cbw cdv cwd (alx) */
-    {"cbw"},{"cdv"},{"cwd"},
+    /* S099 P1: the chorus rows; S099 P2: fx rte dpt mix (the effect's; csr,
+     * cbw, cdv and cwd removed) */
+    {"fx "},{"rte"},{"dpt"},{"mix"},
 };
 
 /*
@@ -119,8 +119,6 @@ const char catNames[][9] = {
     {"Amp EG"},{"Pitch"},{"Unison"},{"Filt EG"},{"Pitch EG"},{"Sample"},
     {"Envelope"},{"Space"},{"Tone"},{"Effect"},{"Bits"},{"CrumpBit"},
     {"Grain"},{"Reverb"},{"Delay"},{"Shimmer"},{"Echo"},{"Plate"},
-    /* S099 P1: the chorus rows */
-    {"Chorus"},
 };
 
 const char longNames[][10] = {
@@ -151,7 +149,7 @@ const char longNames[][10] = {
      * match the FX sequencer's RunMode). */
     {"RunMode"},
     /* S079 step-special long names (fix 2: Conditin, % Delay; P2: Rhythm). */
-    {"Conditin"},{"% Delay"},{"RollRate"},{"Rhythm"},{"RollFill"},
+    {"Conditin"},{"% Delay"},{"RollRate"},{"Rhythm"},{"Fill"},
     /* S080 E4/F4/G10: overlay, scene-global, and chain long names. */
     {"BtnStat<"},{"BtnNote<"},{"BtnStat>"},{"BtnNote>"},
     {"ChngDiv"},{"QueDiv"},{"QueActn"},

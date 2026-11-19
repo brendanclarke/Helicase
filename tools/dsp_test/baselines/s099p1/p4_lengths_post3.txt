@@ -1,0 +1,13 @@
+symbol	before	after
+osc_pwmWsFmBlock	[31]	None
+osc_pwmWsFmRampBlock	[32]	None
+osc_pwmWsPlainBlock	[23]	None
+osc_pwmWsRingBlock	[34]	None
+osc_pwmWsSyncBlock	[38]	None
+osc_pwmWtFmBlock	[32]	[30, 32]
+osc_pwmWtFmRampBlock	[33]	[31, 33]
+osc_pwmWtRingBlock	[35]	[33, 35]
+osc_pwmWtSyncBlock	[39]	[36, 38]
+osc_smpFmBlock	[43]	[42]
+osc_smpFmRampBlock	[44]	[43]
+loops longer: 0

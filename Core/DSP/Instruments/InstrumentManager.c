@@ -306,7 +306,7 @@ static InstrumentRuntimeSlot runtime_slots[INSTRUMENT_SLOT_COUNT];
  *             Alkaline while its chorus runs) or NULL. Set by
  *             instrumentManager_slotRightUpdate() wherever the runtime type or
  *             a chorus unit changes (runtimeInit, resetRuntimeSlotFromScene,
- *             the cho writer); instrumentManager_slotRight() reads it.
+ *             the fx writer); instrumentManager_slotRight() reads it.
  * Why:        the Advanced Alkaline is stereo only while its chorus runs, so
  *             "stereo" is no longer a property of the type alone; one table
  *             read is also shorter than the type tests it replaces (a gain on
@@ -535,7 +535,7 @@ static TetraktVoice *instrumentManager_tetraktRuntime(uint8_t slot)
  * Why:        the reset claims what the incoming sound will use, so a Scene
  *             change into an Advanced slot with its chorus on reseats the
  *             Effect once (here), not twice (a release at the reset and a
- *             claim at the cho apply).
+ *             claim at the fx apply).
  * Inputs:     incoming (the Scene's slot, or NULL).
  * Accessors:  instrumentManager_runtimeInit(),
  *             instrumentManager_resetRuntimeSlotFromScene().
@@ -548,11 +548,11 @@ static uint8_t instrumentManager_unitsWanted(const kit_instrument_slot_t *incomi
     case INSTRUMENT_TYPE_TKT:
         return 1u;
     case INSTRUMENT_TYPE_CLX:
-        return (uint8_t)(incoming->parameter_images.instrument_parameters[COL_IDX_CHORUS_TYPE]
-                         != BBD_MODE_OFF);
+        return (uint8_t)(incoming->parameter_images.instrument_parameters[COL_IDX_FX_TYPE]
+                         != ADV_FX_OFF);
     case INSTRUMENT_TYPE_ALX:
-        return (uint8_t)(incoming->parameter_images.instrument_parameters[ALK_IDX_CHORUS_TYPE]
-                         != BBD_MODE_OFF);
+        return (uint8_t)(incoming->parameter_images.instrument_parameters[ALK_IDX_FX_TYPE]
+                         != ADV_FX_OFF);
     default:
         return 0u;
     }
@@ -570,7 +570,7 @@ static uint8_t instrumentManager_unitsWanted(const kit_instrument_slot_t *incomi
  * Why:        the FxBuffer contract: units belong to the slot's runtime. A
  *             Tetrakt's unit is claimed at type assignment; an Advanced type's
  *             follows its chorus_type row (Q-8), also at type assignment here
- *             and then at every cho write (instrumentManager_chorusBind()).
+ *             and then at every fx write (instrumentManager_chorusBind()).
  *             With six Tetrakts, or four plus two Advanced choruses, six of
  *             the twelve units are owned.
  * Inputs:     slot, wanted (0 or 1).
@@ -1172,7 +1172,7 @@ static uint8_t instrumentManager_descriptorSupportsModulationRange(
  * What:       osc1_wave: the last entry of osc1's current type (wav:
  *             OSC_STOCK_LAST; an Alkaline under wav: ALK_WAVE_COUNT - 1
  *             (Saw Sqr Tri), under pwm ALK_PWM_WAVE_COUNT - 1 (Saw Sqr Tri
- *             R-S REx, S099 P1); smp/slp: samples - 1; wtb: tables - 1; 0
+ *             R-S, S099 P1/P2); smp/slp: samples - 1; wtb: tables - 1; 0
  *             when none); a modulator wave row: the last entry of the flat
  *             list (osc_userListCount() - 1). Any other row: OSC_STOCK_LAST.
  * Why:        LFO and velocity ranges, the menu clamp and the automation
@@ -1206,7 +1206,7 @@ static uint8_t instrumentManager_waveDomainMax(uint8_t slot,
             const OscInfo *osc = instrumentManager_osc(slot, "osc1_wave");
 
             /* S093 P8 / S094 P4: an Alkaline slot lists Saw, Sqr, Tri under
-             * wav; S099 P1: Saw, Sqr, Tri, R-S, REx under pwm. The
+             * wav; S099 P1: Saw, Sqr, Tri, R-S under pwm (P2: no REx). The
              * LFO/velocity range, menu clamp, edit count and typ switch clamp
              * all take it from here. */
             if (osc && instrumentManager_typeEngine(instrumentManager_slotType(slot))
@@ -1217,9 +1217,10 @@ static uint8_t instrumentManager_waveDomainMax(uint8_t slot,
                     return (uint8_t)(ALK_PWM_WAVE_COUNT - 1u);
             }
             /* S095 P2 (C-D20): a Colloid slot lists Saw Rec Tri Sin under
-             * wav and (S095 P3 F2) Sin Tri Saw Rec under pwm; S099 P1: pwm
-             * ends at REx (Sin..REx). Under wtb the shared count below (the
-             * installed tables) applies. */
+             * wav and (S095 P3 F2) Tri Saw Rec under pwm; S099 P1: pwm
+             * ends at R-S (Tri..R-S; §15.10: pwm Sin dropped; P2: REx
+             * dropped). Under wtb the shared count below (the installed
+             * tables) applies. */
             if (osc && instrumentManager_typeEngine(instrumentManager_slotType(slot))
                            == INSTRUMENT_TYPE_COL) {
                 if (osc->oscType == OSC_TYPE_WAV)
@@ -1991,7 +1992,7 @@ void instrumentManager_runtimeInit(void)
             break;
         case INSTRUMENT_TYPE_ALX:   /* S099 P1: the Alkaline engine; its chorus
                                      * unit is claimed here when the resident
-                                     * image's cho is on */
+                                     * image's fx is on */
             (void)instrumentManager_slotVoiceUnits(slot, instrumentManager_unitsWanted(instrument));
             /* fall through */
         case INSTRUMENT_TYPE_ALK:
@@ -1999,8 +2000,8 @@ void instrumentManager_runtimeInit(void)
             break;
         case INSTRUMENT_TYPE_CLX:   /* S099 P1: the Colloid engine; its chorus
                                      * unit is claimed here when the resident
-                                     * image's cho is on, and bound at the boot
-                                     * apply's cho write */
+                                     * image's fx is on, and bound at the boot
+                                     * apply's fx write */
             (void)instrumentManager_slotVoiceUnits(slot, instrumentManager_unitsWanted(instrument));
             /* fall through */
         case INSTRUMENT_TYPE_COL:   /* S095 P2 */
@@ -2319,10 +2320,10 @@ void instrumentManager_resetRuntimeSlotFromScene(uint8_t slot,
         incoming ? incoming->type : INSTRUMENT_TYPE_UNKNOWN;
     /*
      * S096 P1 SD11: the slot owns exactly the voice units its incoming type
-     * uses (a Tetrakt one; S099 P1: an Advanced type one while its stored cho
+     * uses (a Tetrakt one; S099 P1: an Advanced type one while its stored fx
      * is on; every other type none). This is the only tagged-member
      * replacement point, so it is the only place units change owner after
-     * boot apart from the cho writer. Foreground (the Preset activation
+     * boot apart from the fx writer. Foreground (the Preset activation
      * worker, between render blocks), as the FxBuffer share callback
      * requires.
      */
@@ -2352,7 +2353,7 @@ void instrumentManager_resetRuntimeSlotFromScene(uint8_t slot,
         break;
     case INSTRUMENT_TYPE_COL:   /* S095 P2 */
     case INSTRUMENT_TYPE_CLX:   /* S099 P1: the Colloid engine (the chorus
-                                 * binds at its cho apply) */
+                                 * binds at its fx apply) */
         Colloid_initVoice(instrumentManager_colloidRuntime(slot));
         break;
     default:
@@ -2766,17 +2767,19 @@ void instrumentManager_calcSlotAsync(uint8_t slot)
     case INSTRUMENT_TYPE_ALX: {   /* S099 P1 (P-E): the Advanced Alkaline */
         /*
          * S099 P1 (P-E): the Advanced Alkaline: the Alkaline's control, then
-         * the chorus's with the alx rows (tone cbw, drive cdv, width cwd). The
-         * quiet count follows Alkaline_isQuiet() (gate closed, OTA current
+         * the chorus's (S099 P2: the tone fixed at BBD_ALK_TONE, the BBD
+         * drive the post-filter drive vcaDrive, the width from dpt,
+         * BBD_ALK_WIDTH(); the cbw cdv cwd rows are gone). The quiet count
+         * follows Alkaline_isQuiet() (gate closed, OTA current
          * below 1e-7 A).
          */
         AlkalineVoice *const alk = instrumentManager_alkalineRuntime(slot);
 
         Alkaline_calcVoiceAsync(alk);
         if (alk->choUnit)
-            bbdChorus_control(alk->choUnit, alk->choType, alk->choRate, alk->choDepth,
-                              alk->choMix, alk->choTone, alk->choDrive, alk->choWidth,
-                              Alkaline_isQuiet(alk));
+            bbdChorus_control(alk->choUnit, alk->fxDepth, alk->fxRate,
+                              alk->fxMix, BBD_ALK_TONE, alk->vcaDrive,
+                              BBD_ALK_WIDTH(alk->fxDepth), Alkaline_isQuiet(alk));
         break; }
     case INSTRUMENT_TYPE_ALK:   /* S093 P4: control rate; the audio loop is the sync block */
         Alkaline_calcVoiceAsync(instrumentManager_alkalineRuntime(slot));
@@ -2787,7 +2790,7 @@ void instrumentManager_calcSlotAsync(uint8_t slot)
          * S099 P1: the Advanced Colloid: the Colloid's control, then the
          * chorus's (the LFO, the sweep, the read plans, the coefficients and
          * gains, the quiet count; bbdChorus_control(), noinline, flash). With
-         * cho off there is no unit and no chorus work: a mode (constant CPU);
+         * fx off there is no unit and no chorus work: a mode (constant CPU);
          * the slot is budgeted for chorus on, L-R. The Colloid has no cbw,
          * cdv or cwd row: its wet cutoff is BBD_COL_TONE (9 kHz, by ear), no
          * BBD drive, the Juno's inverted sweep (width 127).
@@ -2796,8 +2799,8 @@ void instrumentManager_calcSlotAsync(uint8_t slot)
 
         Colloid_calcVoiceAsync(col);
         if (col->choUnit)
-            bbdChorus_control(col->choUnit, col->choType, col->choRate, col->choDepth,
-                              col->choMix, BBD_COL_TONE, 0u, 127u, Colloid_isQuiet(col));
+            bbdChorus_control(col->choUnit, col->fxDepth, col->fxRate,
+                              col->fxMix, BBD_COL_TONE, 0u, 127u, Colloid_isQuiet(col));
         break; }
     case INSTRUMENT_TYPE_COL:   /* S095 P2: control rate; the audio loops are the sync block */
         Colloid_calcVoiceAsync(instrumentManager_colloidRuntime(slot));
@@ -2883,8 +2886,9 @@ void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
         /*
          * S099 P1: the Advanced Colloid: the Colloid's block (left into buf,
          * right into voice->right), then the chorus pass in place on both
-         * (bbdChorus_renderColloid(): csr L-R two side passes, csr mid the
-         * mid form; DRAFT_ADVANCED_BBD_CHORUS.md §2). Pre-volume and pre-pan,
+         * (bbdChorus_renderColloid(): L-R two side passes, mid the mid form;
+         * DRAFT_ADVANCED_BBD_CHORUS.md §2; S099 P2: chosen by the route, no
+         * csr row). Pre-volume and pre-pan,
          * as the mixer expects; the mixer's stereo path reads right through
          * instrumentManager_slotRight() as for a Colloid.
          */
@@ -2892,7 +2896,11 @@ void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
 
         Colloid_calcVoiceSyncBlock(col, buf, size);
         if (col->choUnit)
-            bbdChorus_renderColloid(col->choUnit, buf, col->right, col->choSrc);
+            /* S099 P2: the source follows the route: L-R with the stereo
+             * filters (rte str), mid with a mono serial route */
+            bbdChorus_renderColloid(col->choUnit, buf, col->right,
+                                    (col->route == COL_RTE_STR || col->route >= COL_RTE_COUNT)
+                                        ? BBD_SRC_LR : BBD_SRC_MID);
         break; }
     case INSTRUMENT_TYPE_TKT:
         /*
@@ -4693,29 +4701,29 @@ void instrumentManager_updateLfoAdapters(uint8_t source_slot,
 }
 
 /*
- * Bind or release the slot's chorus unit (S099 P1).
+ * Bind or release the slot's effect unit (S099 P1; S099 P2: by fx type).
  *
- * What:       mode off: release the slot's unit (fxbuf_voiceRelease(): the
+ * What:       fx off: release the slot's unit (fxbuf_voiceRelease(): the
  *             share callback may grow the Effect's share) and clear the
- *             voice's pointer. Any other mode: claim one unit if the slot owns
+ *             voice's pointer. Any other fx (chr): claim one unit if the slot owns
  *             none (fxbuf_voiceAcquire(), which cannot fail: at most one unit
  *             per slot, twelve for six slots); then, if the unit differs from
  *             the voice's pointer (a new claim, or the first bind after a slot
  *             reset left the pointer NULL), clear and seed it
- *             (bbdChorus_init()) and store the pointer. A change between two
- *             modes that are both on keeps the unit and its rings (the
- *             chorus's centre and depth slew to the new mode).
+ *             (bbdChorus_init() at the voice's dpt) and store the pointer.
+ *             A dpt change never rebinds: the chorus's centre and depth slew
+ *             to the new target.
  * Why:        the brief: the unit is held while the effect type is selected
  *             and released when it is not.
- * Inputs:     slot, mode (clamped), unit (&voice->choUnit), mono (1 for the
- *             Alkaline's one-ring form).
+ * Inputs:     slot, fx (clamped, ADV_FX_*), dpt (the voice's fxDepth), unit
+ *             (&voice->choUnit), mono (1 for the Alkaline's one-ring form).
  * Context:    foreground only (the FxBuffer share callback).
- * Accessors:  instrumentManager_writeChorusType().
+ * Accessors:  instrumentManager_writeFxType().
  */
-static void instrumentManager_chorusBind(uint8_t slot, uint8_t mode, int16_t **unit,
-                                         uint8_t mono)
+static void instrumentManager_chorusBind(uint8_t slot, uint8_t fx, uint8_t dpt,
+                                         int16_t **unit, uint8_t mono)
 {
-    if (mode == BBD_MODE_OFF) {
+    if (fx == ADV_FX_OFF) {
         if (fxbuf_voiceUnitCount(slot))
             fxbuf_voiceRelease(slot);
         *unit = 0;
@@ -4727,16 +4735,16 @@ static void instrumentManager_chorusBind(uint8_t slot, uint8_t mode, int16_t **u
         int16_t *const u = fxbuf_voiceUnit(slot, 0u);
 
         if (u && u != *unit)
-            bbdChorus_init(u, mono, mode);
+            bbdChorus_init(u, mono, dpt);
         *unit = u;
     }
 }
 
 /*
- * The chorus_type writer (S099 P1, Q-8). Contract: IM_SPECIAL_CHORUS_TYPE
- * (InstrumentManager.h).
+ * The fx_type writer (S099 P1, Q-8; S099 P2: the Effect Type row, was
+ * chorus_type). Contract: IM_SPECIAL_FX_TYPE (InstrumentManager.h).
  *
- * What:       clamps the byte to BBD_MODE_COUNT - 1, stores it in the slot's
+ * What:       clamps the byte to ADV_FX_COUNT - 1, stores it in the slot's
  *             Advanced voice, binds or releases the chorus unit, then refreshes
  *             the slot's right-block pointer. A slot whose live type has no
  *             chorus row returns 0 (the generic store then has no member to
@@ -4747,28 +4755,28 @@ static void instrumentManager_chorusBind(uint8_t slot, uint8_t mode, int16_t **u
  *             no AUTOMATABLE, MORPHABLE or MODULATABLE flag), so its writes
  *             come from a menu edit, a MIDI write (a menu edit, Q1), an
  *             Instrument Load or a Scene apply (preset_applyKitVoiceSelectors()):
- *             all foreground. A cho toggle during play reseats the bus
+ *             all foreground. An fx toggle during play reseats the bus
  *             Effect, the path a Tetrakt type assignment already takes.
  * Inputs:     slot, value (the descriptor byte).
- * Outputs:    choType, choUnit; the slot's units; the right-block pointer.
- * Accessors:  instrumentManager_writeSpecialRuntime() (IM_SPECIAL_CHORUS_TYPE).
+ * Outputs:    fxType, choUnit; the slot's units; the right-block pointer.
+ * Accessors:  instrumentManager_writeSpecialRuntime() (IM_SPECIAL_FX_TYPE).
  */
-static uint8_t instrumentManager_writeChorusType(uint8_t slot, uint8_t value)
+static uint8_t instrumentManager_writeFxType(uint8_t slot, uint8_t value)
 {
-    const uint8_t mode = (value >= BBD_MODE_COUNT) ? (uint8_t)(BBD_MODE_COUNT - 1u) : value;
+    const uint8_t fx = (value >= ADV_FX_COUNT) ? (uint8_t)(ADV_FX_COUNT - 1u) : value;
 
     switch (instrumentManager_slotType(slot)) {
     case INSTRUMENT_TYPE_CLX: {
         ColloidVoice *const col = instrumentManager_colloidRuntime(slot);
 
-        col->choType = mode;
-        instrumentManager_chorusBind(slot, mode, &col->choUnit, 0u);
+        col->fxType = fx;
+        instrumentManager_chorusBind(slot, fx, col->fxDepth, &col->choUnit, 0u);
         break; }
     case INSTRUMENT_TYPE_ALX: {
         AlkalineVoice *const alk = instrumentManager_alkalineRuntime(slot);
 
-        alk->choType = mode;
-        instrumentManager_chorusBind(slot, mode, &alk->choUnit, 1u);
+        alk->fxType = fx;
+        instrumentManager_chorusBind(slot, fx, alk->fxDepth, &alk->choUnit, 1u);
         break; }
     default:
         return 0u;
@@ -5014,9 +5022,9 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         if (!lfo) return 0u;
         lfo_setSync(lfo, byteValue);
         return 1u; }
-    case IM_SPECIAL_CHORUS_TYPE:
-        /* S099 P1: the Advanced types' cho row (claims / releases the unit) */
-        return instrumentManager_writeChorusType(slot, byteValue);
+    case IM_SPECIAL_FX_TYPE:
+        /* S099 P1: the Advanced types' fx row (claims / releases the unit) */
+        return instrumentManager_writeFxType(slot, byteValue);
     case IM_SPECIAL_OSC_TYPE: {
         /*
          * osc1_type writer (S087 stage B; S093 P8 Alkaline dispatch).
@@ -5216,8 +5224,8 @@ static uint8_t instrumentManager_classifySpecialKey(instrument_type_t type,
      */
     if (strcmp(key, "lfo_sync") == 0) return IM_SPECIAL_LFO_SYNC;
     /* S099 P1: the Advanced types' chorus type claims its unit through
-     * IM_SPECIAL_CHORUS_TYPE */
-    if (strcmp(key, "chorus_type") == 0) return IM_SPECIAL_CHORUS_TYPE;
+     * IM_SPECIAL_FX_TYPE */
+    if (strcmp(key, "chorus_type") == 0) return IM_SPECIAL_FX_TYPE;
     return IM_SPECIAL_NONE;
 }
 

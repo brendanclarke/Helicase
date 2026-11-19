@@ -210,8 +210,6 @@ enum catNamesEnum {
     CAT_SAMPLE, CAT_ENVELOPE, CAT_SPACE, CAT_TONE, CAT_EFFECT, CAT_BITS,
     CAT_CRUMPBIT, CAT_GRAIN, CAT_REVERB, CAT_DELAY, CAT_SHIMMER, CAT_ECHO,
     CAT_PLATE,
-    /* S099 P1: the Advanced types' chorus rows ("Chorus") */
-    CAT_CHORUS,
     CAT_LABEL_COUNT
 };
 
@@ -351,10 +349,9 @@ enum shortNamesEnum {
     SHORT_REV, SHORT_HED, SHORT_DCK, SHORT_SIZ, SHORT_DCY, SHORT_DIF,
     SHORT_LSH, SHORT_LSF, SHORT_HSH, SHORT_HSF, SHORT_FRZ, SHORT_SHM,
     SHORT_INT, SHORT_E_TO_R, SHORT_BLN,
-    /* S099 P1: the chorus rows: cho crt cdp cmx csr (clx, alx) */
-    SHORT_CHO, SHORT_CRT, SHORT_CDP, SHORT_CMX, SHORT_CSR,
-    /* S099 P1 (P-E): cbw cdv cwd (alx) */
-    SHORT_CBW, SHORT_CDV, SHORT_CWD,
+    /* S099 P1: the chorus rows; S099 P2: the effect's fx rte dpt mix (were
+     * cho crt cdp cmx; csr, cbw, cdv and cwd removed) */
+    SHORT_FX, SHORT_FXR, SHORT_FXD, SHORT_FXM,
     SHORT_LABEL_COUNT
 };
 
@@ -457,6 +454,23 @@ enum Datatypes {
     DTYPE_0B15,
     DTYPE_1B128,
 };
+
+/*
+ * A tagged DTYPE_0B127 (S099 P2): the Advanced types' Effect Depth (dpt).
+ *
+ * What:       DTYPE_0B127 with the high nibble DTYPE_TAG_FX_DEPTH: a plain
+ *             0..127 row (range, clamp, edit, automation and modulation as
+ *             DTYPE_0B127: every dtype switch masks the low nibble or treats
+ *             its default as 0..127) whose 0, 1, 2 display "I", "II", "1+2"
+ *             (the chorus's Juno modes, BBD_DPT_*); 3..127 display the number.
+ * Why:        one row for the chorus's mode and depth (the user's layout)
+ *             without a new dtype for every switch: menu_formatDtype3() and
+ *             the single-parameter painter name the three values.
+ * Accessors:  ColloidParameters.c, AlkalineParameters.c (fx_depth);
+ *             menu.c menu_formatDtype3(), the painter.
+ */
+#define DTYPE_TAG_FX_DEPTH   1u
+#define DTYPE_0B127_FX_DEPTH ((uint8_t)(DTYPE_0B127 | (DTYPE_TAG_FX_DEPTH << 4)))
 
 typedef struct PageStruct {
     uint8_t  top1, top2, top3, top4, top5, top6, top7, top8;

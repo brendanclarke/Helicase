@@ -73,8 +73,8 @@
  *
  * What:       OSC_TYPE_WAV 0 (stock waves), OSC_TYPE_SMP 1 (one-shot sample),
  *             OSC_TYPE_SLP 2 (looped sample), OSC_TYPE_WTB 3 (wavetable),
- *             OSC_TYPE_PWM 4 (S094 P1: pulse-width forms of Sin/Tri/Saw/Rec,
- *             pos = width), OSC_TYPE_COUNT 5. OSC_TYPE_MODLIST 5 is not a typ
+ *             OSC_TYPE_PWM 4 (S094 P1: pulse-width forms of Tri/Saw/Rec,
+ *             pos = width; S099 P1 §15.10: Sin dropped), OSC_TYPE_COUNT 5. OSC_TYPE_MODLIST 5 is not a typ
  *             value: it marks a modulator (Drum osc2, Cymbal/HiHat osc2/osc3),
  *             whose wav list is stock waves followed by s01.., l01.., w01..
  *             (S087 P0 §12.4). It moved from 4 to 5 in S094 P1; it is set at
@@ -108,9 +108,13 @@ _Static_assert(OSC_TYPE_MODLIST >= OSC_TYPE_COUNT,
 /*
  * PWM constants (S094 P1 S3).
  *
- * What:       OSC_PWM_WAVE_COUNT 4: under pwm the wav list is Sin, Tri, Saw,
- *             Rec (0..3; a stored value past 3 clamps to Rec, the S087 r8
- *             rule). OSC_PWM_SLEW_STEPS 2: the most the applied width moves
+ * What:       OSC_PWM_WAVE_COUNT 3: under pwm the wav byte is OSC_PWM_TRI 0,
+ *             OSC_PWM_SAW 1, OSC_PWM_REC 2 (a stored value past 2 clamps to
+ *             Rec, the S087 r8 rule). The byte is the pwm list's own index,
+ *             not the stock wave id (TRI .. REC): S099 P1 §15.10 (user,
+ *             2026-11-19) dropped pwm Sin and collapsed the values down, so
+ *             a byte stored before plays the next wave up (no migration).
+ *             OSC_PWM_SLEW_STEPS 2: the most the applied width moves
  *             toward pos per block (P-D7; S094 P4: the full 127 steps take
  *             about 46 ms, 64 blocks, since pos 0 is a width of its own).
  * Why:        width changes arrive at block rate; slew avoids waveform steps,
@@ -118,7 +122,10 @@ _Static_assert(OSC_TYPE_MODLIST >= OSC_TYPE_COUNT,
  * Accessors:  osc_userCount(), osc_typedPositionApply(), menu.c
  *             menu_formatWaveCell(), AlkalineVoice.c (the Alkaline slew).
  */
-#define OSC_PWM_WAVE_COUNT   4u
+#define OSC_PWM_TRI          0u
+#define OSC_PWM_SAW          1u
+#define OSC_PWM_REC          2u
+#define OSC_PWM_WAVE_COUNT   3u
 #define OSC_PWM_SLEW_STEPS   2
 
 /*
