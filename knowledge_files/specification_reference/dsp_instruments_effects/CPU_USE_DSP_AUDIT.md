@@ -1403,6 +1403,43 @@ most expensive choice an oscillator can make.
 100. **IMPLEMENTED (S095 P4): Colloid device measurements.** Worst case
      17,433 cycles/block (wtb 12, stereo filter). 1.37–1.41 cycles/instr.
      Within Basic budget.
+101. **IMPLEMENTED (S096 P1): Tetrakt instrument (7th type, Basic).** Four-layer
+     sample player with fused read (§19), per-layer chain
+     read → decay × velocity → drive → SRR → tone → level → pan/send, W2 allpass
+     width, S1 50 ms space delay. Worst block 382.7 instructions (gate 390).
+     Device median 19,995 cycles (final settings); highest window 21,893 cycles
+     (flash read variance). CPI 1.52 (1.41..1.63), higher than Colloid due to
+     four simultaneous flash reads. ITCM 0 B after §19 (fused read eliminated
+     `osc_renderTyped()` ITCM section). Voice struct 1,064 B. FxBuffer: 1 unit
+     per voice (2,208 × int16 delay line). Flash +~15 K net P1.
+102. **IMPLEMENTED (S096 P2): Six instrument fixes.** Delay/Echo linear
+     interpolation (hermite → lerp, matches CrumpBit `dly`), Colloid filter
+     envelope range widened, UBP and off filter types added to Colloid, Tetrakt
+     spatializer range corrections, Colloid PWM gliding fix, compressor sidechain
+     duck easing. No net CPU change.
+103. **IMPLEMENTED (S096 P3a): Colloid gate (C1).** Real note gate based on step
+     length, length special, sustain, Scene/track change. Stage machine replaces
+     the S095 sus-only model; constant CPU.
+104. **IMPLEMENTED (S096 P3b): Colloid pitch envelope (C2a).** Third ADSR
+     envelope, ±24 semitones (0.38 semitone per pam step). Added to the existing
+     colEgK[] table family.
+105. **IMPLEMENTED (S096 P3c): Colloid noise source (C2b).** Hardware RNG per
+     sample, one-pole HP + TPT SVF, tone/width/pan shaping. New oscillator type
+     `nos` (COL_OSC_NOISE). Dedicated loop, no ITCM.
+106. **IMPLEMENTED (S096 P3d): Colloid wavetable scan (C2c).** New `wts` type,
+     COL_SCAN_COUNT 6, interpolated frames that glide while note plays. Shares
+     the wtb pair loops; scan index advances per block.
+107. **IMPLEMENTED (S096 P3e): MIDI note-mode module (M).** `MidiNoteModes.c/h`
+     owns all special note modes (normal, layer4, paraphonic, later polyphonic).
+     ~2,380 B SRAM1 fixed pools. Paraphonic: Colloid on own channel gets
+     interval assignment. Layer TX: four MIDI notes per Tetrakt track via
+     MidiNoteMap wide tracks. Channel pressure Learn: new MIDI Learn sources
+     (pressure, note, velocity), delta/absolute modes, overlay system (72 B).
+108. **IMPLEMENTED (S096 P3f): Basic-share acceptance.** After B1-B6
+     optimisation, all Colloid modes fit 19,620 cycles/block on device.
+     Oscillator count changes: 10 for wav/wtb, 6 for pwm/wts. Colloid voice
+     struct grew to 1,236 B. 59 parameter rows (was 50). Flash 743,016 B
+     (headroom 10,648 B). ITCM 15,976 B (408 B free). SRAM1 .bss 288,900 B.
 
 ---
 

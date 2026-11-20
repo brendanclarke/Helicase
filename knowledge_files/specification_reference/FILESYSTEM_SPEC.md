@@ -203,6 +203,64 @@ Session 095 (Space effects, Colloid instrument, compressor improvements;
 - **P2:** Sine table reduced from 4,096 to 1,024 points. Readers >> 22,
   fraction mask 0x3fffff.
 
+Session 096 (Tetrakt instrument, Colloid extensions, MIDI note modes;
+`096_SESSION_HANDOFF_LOG.md`):
+
+- **P1:** Tetrakt instrument type added (`tkt`, `.tkt`,
+  `/Instrument/Tetrakt/`). 64 descriptor keys, 8 pages. Basic class (7th
+  instrument type). `SD_CARD/Instrument/Tetrakt/init.tkt` ships with the
+  card image. Leading-part `.hcnames` headers accepted (same K11 rule as
+  Alkaline). The `#types` header gains `tkt` as the 7th token.
+- **P3:** Colloid descriptor table expanded to 59 rows (was 50). New
+  oscillator types `wts` (wavetable scan) and `nos` (noise).
+
+Session 097 (filesystem baseline fixes; `097_SESSION_HANDOFF_LOG.md`):
+
+- **P3 §8:** `preset_startLoadApply(scene_mask)` replaces
+  `preset_startDrumsetApply()` for runtime Loads — only applies the active
+  Scene when the Load's destinations include it.
+- **P3 §8.2:** `menu_loadSaveDropClick()` toggles `editModeActive` back on
+  every OK drop; `menu_loadSaveOkRetry` holds and replays a refused OK
+  (4 attempts, dropped by any user action).
+- **P3 §9.2:** `filesystem_patternRealignPlayingTracks(scene_mask)` after
+  Scene/Pattern/Bank Load prevents timing drift. Since S098 P2, a running
+  Menu Scene, Pattern or Bank Load moves played tracks onto Scene 17 first,
+  so the realign finds no track to adjust; it stays as a backstop for Loads
+  posted while stopped and for the copy/clear reload job.
+- **P3 §13:** Bank Save masks (`op_bank_save_written_mask`,
+  `op_bank_scene_empty_mask`) set after `filesystem_start()`, not before.
+- **P3 §14.3:** `menu_lcdOverlayRoom()` draws boot notices without blocking
+  after audio starts (was 63 underruns from `lcd_waitForIdle()`).
+- **P3 §14:** Background budget 25 → 30 µs/ms (3 % while playing).
+- **P1:** `filesystem_saveGlobals_tick()` and `filesystem_saveMidiLearn_tick()`
+  merged into `filesystem_safeTextWrite_tick(const fs_safe_text_write_t *w)`
+  with two `static const` descriptors. Wrappers preserve the dispatcher.
+  `filesystem_blockOpen()` / `blockOpenLfn()` / `blockOpenDirLfn()` →
+  `filesystem_blockOpenMode(name, mode)`.
+
+Session 099 (Advanced instrument types, chopped PWM, AutoSave trace fix;
+`099_SESSION_HANDOFF_LOG.md`):
+
+- **P1:** Advanced Colloid (`clx`, `.clx`, `/Instrument/ColAdv/`) and
+  Advanced Alkaline (`alx`, `.alx`, `/Instrument/AlkAdv/`) instrument types
+  added. `INSTRUMENT_TYPE_CLX` 7 (8th type, Advanced class) and
+  `INSTRUMENT_TYPE_ALX` 8 (9th type, Advanced class). The `#types` header
+  gains `clx` and `alx` as the 8th and 9th tokens. Engine map routes each to
+  its Basic counterpart's engine. `SD_CARD/Instrument/ColAdv/init.clx` (63
+  rows) and `SD_CARD/Instrument/AlkAdv/init.alx` (35 rows) ship with the
+  card image. Colloid descriptors: 64 → 63 rows (after §10 simplification).
+  Alkaline descriptors: 38 → 35 rows. Keys: `fx_type`, `fx_depth`,
+  `fx_rate`, `fx_mix` (the old `chorus_*` keys no longer load).
+- **P2 §3:** Nested Instrument Save freeze fixed. On refusal (filesystem
+  busy), `menu_loadSaveDropClick(MENU_LS_CLICK_REFUSED)` restores
+  `editModeActive`; `menu_loadSaveOkRowHoldable()` now admits nested
+  Instrument Save. Same fix as S097 P3 for top-level Load/Save rows.
+- **P3:** AutoSave trace starvation: three root causes fixed. Trace flush
+  no longer runs ahead of the AutoSave writer in the background scheduler
+  ladder. The AutoSave 5 s debounce + 128 B CRC chunk latency reduced.
+  Diagnostic priority rule §0 established (binding, permanent; see
+  `DEV_MODES.md`).
+
 AutoSave's hidden-record format, dirty ownership, and background writer are
 authoritative only in `AUTOSAVE.md`. Development flags and diagnostic files are
 authoritative only in `DEV_MODES.md`; this document names those facilities only
@@ -1238,7 +1296,7 @@ mutually exclusive (`BankData.c`):
 #### Bank Save
 
 - **Request** (`filesystem_requestSaveBank()`):
-  - Save mask: the save mask is filtered against the present mask (empty Scenes never overwrite a slot child). `op_bank_save_written_mask` = the written set W; `op_bank_scene_empty_mask` = `empty & ~W` (the children to remove).
+  - Save mask: the save mask is filtered against the present mask (empty Scenes never overwrite a slot child). `op_bank_save_written_mask` = the written set W; `op_bank_scene_empty_mask` = `empty & ~W` (the children to remove). Both masks are set **after** `filesystem_start()` (S097 P3 §13 fix: setting them before `start()` cleared them, so removed children were never visited and their folders stayed on the card).
   - Staged edit-mask entries: a written Scene's is `(ram & W) | self`; a removed child's is self; untouched entries are completed after reading the slot (Merge).
   - Manifest `active_scene`: the RAM active Scene (the home Scene while Scene 17 is active, D20), or the first written child when the active Scene is removed.
 - **Phases 61–64** (Merge with untouched children and an existing slot directory):
@@ -1289,10 +1347,13 @@ Cancellation (the Load/Save Slot Scrolling Policy, `MEMORY.md`):
 DEV trace `b` (`AUTOSAVE_TRACE_STAGE_BANK_PREVIEW`) records `present |
 content << 16`, with the elapsed time in 64 ms units in `flags`.
 
-#### Background Bank Load and Scene 17 (filesystem side)
+#### Background Bank, Scene and Pattern Load and Scene 17 (filesystem side)
 
-A Menu or MIDI Bank Load runs through `preset_requestBackgroundBankLoad()`
-(`MODULE_INTERCHANGE_SPEC.md`, "Background Bank load"). For the filesystem:
+A Menu or MIDI Bank Load runs through `preset_requestBackgroundBankLoad()`;
+since S098 P2 a Menu Scene or Pattern Load runs through
+`preset_requestBackgroundSceneLoad()`.  Both use the same background
+state machine (`MODULE_INTERCHANGE_SPEC.md`, "Background loads").
+For the filesystem:
 
 - **AutoSave gives way.**
   - Phase 2 of the request sets `filesystem_setAutosaveYield(1)` (`fs_autosave_yield`). Both AutoSave schedulers decline new drains while it is set.
@@ -1301,7 +1362,7 @@ A Menu or MIDI Bank Load runs through `preset_requestBackgroundBankLoad()`
   - The Pattern drain aborts in phases 3–8 except 7 (a seek may be in progress).
   - **Never abort a phase whose AsyncFATFS callback is outstanding:** the late callback writes `op_file`/`op_file_ready`/`op_remove_done` into the *next* operation, or a second `fclose()` hangs the close-down.
 - **AutoSave is suspended while Scene 17 exists** (`scene_backgroundExists()` gates both schedulers; D11). `settings.cfg` keeps writing (D24). The yield is released only when the load ends (`preset_bgEnd()`).
-- **Nothing loads into Scene 17:** Bank Load writes `scenes[0..15]` and `pat_regions[0..15]` directly while playback reads Scene 17's own record and `pat_background_region`. Every other load targets the home Scene (`scene_backgroundHomeIndex()`).
+- **Nothing loads into Scene 17:** Bank Load writes `scenes[0..15]` and `pat_regions[0..15]` directly while playback reads Scene 17's own record and `pat_background_region`. Scene and Pattern Loads also write their destinations in place. Every other load targets the home Scene (`scene_backgroundHomeIndex()`).
 - **Idle-time servicing (S082 P2):** while a background load runs, the codec is live, the facade is BUSY and both audio render slots are full, `main_serviceBackgroundLoadIdle()` calls `filesystem_tickUncounted()` for up to `BG_LOAD_IDLE_FS_BUDGET_US` (200 µs), re-testing the queue before every step.
   - Those ticks set `fs_stall_poll_uncounted` (DEV) so the poll-count stall observers neither count nor reset.
   - SD driver timeouts are time-based, so extra polls cannot shorten them.
@@ -1930,8 +1991,28 @@ targets); the LFO voices are `self`, the target selectors `255`
 `SD_CARD/Instrument/Colloid/init.col`. It uses the writer's exact form:
 `format`, `version=1`, `type=col`, `[params]` with all descriptor keys in
 table order and `[morph]` with the MORPHABLE rows. The 6th instrument type;
-Basic class. See `COLLOID_MODULE_REFERENCE.md` for the parameter table (50
-rows, 8 pages).
+Basic class. See `COLLOID_MODULE_REFERENCE.md` for the parameter table (63
+rows after S099, 8 pages).
+
+**Tetrakt (S096 P1).** Token `tkt`, extension `.tkt`, folder
+`/Instrument/Tetrakt/`. 64 descriptor keys, 8 pages. Basic class (7th
+instrument type). See `TETRAKT_MODULE_REFERENCE.md`.
+
+**Advanced Colloid (S099 P1).** Token `clx`, extension `.clx`, folder
+`/Instrument/ColAdv/` (six characters). `INSTRUMENT_TYPE_CLX` 7, the 8th
+instrument type, Advanced class. Engine map routes `clx` to the Colloid
+engine. The card image carries `SD_CARD/Instrument/ColAdv/init.clx` (63
+rows). `format`, `version=1`, `type=clx`. Keys include the four `fx_*`
+effect rows (`fx_type`, `fx_depth`, `fx_rate`, `fx_mix`); the old
+`chorus_*` keys no longer load. `tools/init/make_init_col.py` generates
+`init.clx`. See `COLLOID_MODULE_REFERENCE.md`.
+
+**Advanced Alkaline (S099 P1).** Token `alx`, extension `.alx`, folder
+`/Instrument/AlkAdv/` (six characters). `INSTRUMENT_TYPE_ALX` 8, the 9th
+instrument type, Advanced class. Engine map routes `alx` to the Alkaline
+engine. The card image carries `SD_CARD/Instrument/AlkAdv/init.alx` (35
+rows). `tools/init/make_init_alk.py` generates `init.alx`. See
+`ALKALINE_MODULE_REFERENCE.md`.
 
 **The type registry is the schema authority.** `storage_instrumentTypeToText()`
 reads the registry row's token, and the `.hcnames` header walks the type
@@ -1967,6 +2048,15 @@ Current descriptor counts:
 - HiHat: 43 descriptors.
 - Alkaline: 30 descriptors (S094 P1 S4; `instrument_drive` 29 and
   `alk_tone` 30 appended after the 28 of S093 P6).
+- Colloid: 63 descriptors (S099; was 59 Basic / 64 with chorus rows, then
+  §10 simplified to 63). Advanced Colloid (`clx`) uses the same table.
+- Tetrakt: 64 descriptors (S096 P1).
+- Advanced Colloid (`clx`): 63 descriptors (same table as Basic Colloid
+  plus `fx_type`, `fx_depth`, `fx_rate`, `fx_mix`; `csr`/`cbw`/`cdv`/`cwd`
+  removed in §10).
+- Advanced Alkaline (`alx`): 35 descriptors (same base as Basic Alkaline
+  plus `fx_type`, `fx_depth`, `fx_rate`, `fx_mix`; `cbw`/`cdv`/`cwd`
+  removed in §10).
 
 Descriptor key lookup is type-local. The same key may exist in multiple
 instrument types but resolves against the loaded slot type.
@@ -2234,10 +2324,22 @@ Boot library/index and initial-load path:
     them.
 
 Runtime kit loads use the same Scene-owned apply logic, but the post-load apply
-is chunked through `preset_startDrumsetApply()` /
-`preset_tickDrumsetApply()` to avoid foreground bursts after audio is running.
+is chunked through `preset_startLoadApply(scene_mask)` (S097 P3; was
+`preset_startDrumsetApply()`) / `preset_tickDrumsetApply()` to avoid foreground
+bursts after audio is running. `preset_startLoadApply` applies the active Scene
+only when the Load's destinations include it; otherwise it re-arms only the
+slots whose tracks play a loaded Scene. Every other caller (Bank, All/
+Performance, Kit Morph, copy/clear, boot) passes `MENU_SOUND_APPLY_ALL_SCENES`.
 The worker remains active through its final all-source rebind; reaching a zero
 slot-pending mask does not by itself mean Scene activation is complete.
+
+After a Scene or Pattern Load into a playing Scene, `filesystem_patternRealign
+PlayingTracks(scene_mask)` calls `seq_refreshTrackEffectiveParams()` then
+`seq_realignTrackToMasterClock(track)` for each track whose played Scene is in
+the mask. This prevents Pattern timing drift when a region's defaults
+(length 16, default scale) are picked up by `presetMorph_tick()` before the
+header extension is read. Sites: Scene Load phase 52, Pattern Load phase 14
+(success and error), Bank Load phase 17 (empty Scenes).
 
 Current production boot also contains four pre-audio SD pacing boundaries:
 250 ms before `SD_init()`, 1 ms between ACMD41 attempts with a one-second

@@ -1,17 +1,36 @@
 # Instruments DSP Reference
 
-How the six instrument voices are rendered, how their parameters reach the
+How the nine instrument voices are rendered, how their parameters reach the
 DSP, how modulation (LFO, velocity, Morph, step automation) works, what each
 part costs, and how to change or extend it.
 
-- **Current as of:** Session 095 (2026-11-20). S095 P2 added the Colloid
-  instrument (6th type, Basic, §5.6): 12 free-running oscillators with
-  integer pair loops, division-free TPT SVF, ADSR with sustain switch,
-  mid/side stereo positioning. S095 P2 step 0 reduced the sine table from
-  4,096 to 1,024 points across all engines (`TABLESIZE` 1024, readers
-  `>> 22`, fraction `0x3fffff`; −6,144 B flash). S095 P3 added 4 Colloid
-  PWM forms, pitch slew, intervals, filter redesign, post drive/tone.
-  See `COLLOID_MODELLING_REFERENCE.md` and `COLLOID_MODULE_REFERENCE.md`.
+- **Current as of:** Session 099 (2026-11-20). S099 P1/P2 added the
+  Advanced Colloid (`clx`, 8th type) and Advanced Alkaline (`alx`, 9th
+  type): same engines as their Basic counterparts plus a BBD chorus pass.
+  Chopped PWM wave R-S added to Colloid and Alkaline. PWM Sin removed from
+  all engines. Colloid amp-attack minimum removed. Effect page fx/dpt/rte/mix
+  for Advanced types. See `COLLOID_MODULE_REFERENCE.md` and
+  `ALKALINE_MODULE_REFERENCE.md` (both updated).
+  S096 P1 added the Tetrakt
+  instrument (7th type, Basic, four-layer sample player): fused per-layer
+  sample read, per-layer decay/drive/SRR/tone chain, space stage S1+W2,
+  one FxBuffer voice unit, 64 rows / 8 pages, bit-cell layer switch. See
+  `TETRAKT_MODELLING_REFERENCE.md` and `TETRAKT_MODULE_REFERENCE.md`.
+  S096 P2: Delay/Echo linear interpolation, Colloid filter envelope range,
+  UBP/off filter types, Tetrakt spatializer ranges, PWM gliding fix,
+  compressor duck easing. S096 P3: Colloid gate (C1), pitch envelope
+  (C2a), noise source (C2b), wavetable scan `wts` (C2c), MIDI note-mode
+  module, paraphonic, channel pressure Learn, Tetrakt MIDI layers; Colloid
+  wav/wtb now 10 oscillators, pwm/wts 6; all Colloid modes fit Basic share
+  after B1–B6 optimisation. See `COLLOID_MODULE_REFERENCE.md` (updated).
+  S095 P2 added the Colloid instrument (6th type, Basic): 12 free-running
+  oscillators with integer pair loops, division-free TPT SVF, ADSR with
+  sustain switch, mid/side stereo positioning. S095 P2 step 0 reduced the
+  sine table from 4,096 to 1,024 points across all engines (`TABLESIZE`
+  1024, readers `>> 22`, fraction `0x3fffff`; −6,144 B flash). S095 P3
+  added 4 Colloid PWM forms, pitch slew, intervals, filter redesign, post
+  drive/tone. See `COLLOID_MODELLING_REFERENCE.md` and
+  `COLLOID_MODULE_REFERENCE.md`.
   S094 added VCA overdrive and tone to Alkaline (§5.5), PWM oscillator
   type (`ALK_TYP_PWM`, §5.5; `OSC_TYPE_PWM`, §6.1), Tri waveform for
   both `wav` and `pwm`, LFO sync fix and `lfoRateHz[128]` table (§7.1),
@@ -47,8 +66,13 @@ part costs, and how to change or extend it.
     control path, sequencing rules, cost and extension guide (S093);
   - `COLLOID_MODELLING_REFERENCE.md`: oscillator pair loops, TPT SVF,
     ADSR, signal path design for the Colloid instrument (S095);
+  - `TETRAKT_MODELLING_REFERENCE.md`: layer chain DSP, space stage, trigger/fade,
+    tables for the Tetrakt four-layer sample player (S096);
+  - `TETRAKT_MODULE_REFERENCE.md`: Tetrakt firmware module layout, files,
+    registry, parameter table, cost and extension guide (S096);
   - `COLLOID_MODULE_REFERENCE.md`: Colloid firmware module layout, files,
-    registry, parameter table, cost and extension guide (S095);
+    registry, parameter table, cost and extension guide (S095; updated S096
+    with gate, pitch envelope, noise, wts scan, Basic-share results);
   - `MIXER_SYSTEM_DSP_REFERENCE.md`: what happens to a voice block after it
     leaves the instrument (decimation, mixer, FX bus, output);
   - `EFFECTS_MODULES_DSP_REFERENCE.md`: each Effect module's DSP, binding
@@ -201,11 +225,14 @@ tap is foreground-only, like the rest of the funnel.
 - **Borrowing rule:** `instrumentManager_runtimeInstance(slot)` and the
   private per-type accessors return a pointer for immediate use only. Never
   keep one across a Scene or Instrument change.
-- **Type limits:** each type has flags: Drum, Snare, Alkaline and Colloid
-  are Basic; Cymbal and HiHat are Basic (since S094 P2; were Advanced).
-  HiHat is also Choke. A Scene may hold at most two Advanced instruments
-  (`instrumentManager_typeSelectableForSceneSlot()`); currently no type is
-  Advanced.
+- **Type limits:** each type has flags: Drum, Snare, Alkaline, Colloid and
+  Tetrakt are Basic; Cymbal and HiHat are Basic (since S094 P2; were
+  Advanced). HiHat is also Choke. Advanced Colloid (`clx`) and Advanced
+  Alkaline (`alx`) are Advanced (S099). A Scene may hold at most two
+  Advanced instruments (`instrumentManager_typeSelectableForSceneSlot()`).
+  Advanced types run the same engine as their Basic counterparts plus a
+  BBD chorus pass. The engine map (`instrumentManager_typeEngine()`) routes
+  `clx` to the Colloid engine and `alx` to the Alkaline engine.
 
 ### 3.2 Dispatch functions
 
@@ -256,7 +283,7 @@ parameter cell (Drum 39 rows, Snare 38, Cymbal 39, HiHat 39):
 | Field | Meaning |
 |---|---|
 | `file_key` | Card key, e.g. `filter_freq` |
-| `short_name`, `long_name`, `category` | Menu text (3 characters, 8 characters, category label) |
+| `short_id`, `long_id`, `cat_id` | `uint8_t` indexes into `shortNames[]`, `longNames[]`, `catNames[]` label pools in `MenuLabels.c` (S097 P1; were `const char *` pointers before S097) |
 | `dtype` | Display/edit type (`DTYPE_0B127`, `DTYPE_PM63`, `DTYPE_MENU` with a menu table, target selectors, ...) |
 | `flags` | `MORPHABLE`, `MODULATABLE`, `AUTOMATABLE` |
 | `mod_domain` | `{min, max, flags}` in descriptor units: the legal range for LFO and velocity overlays (`INSTRUMENT_MOD_DOMAIN_NONE` = not a continuous target) |
@@ -266,9 +293,14 @@ parameter cell (Drum 39 rows, Snare 38, Cymbal 39, HiHat 39):
   row's own domain. Target selector rows store compact tokens (0xFF = off).
 - **Menu pages** are also in the parameter file (`*_menu_pages[]`, 16 cells
   per sub-page, shown as four-cell screens).
+- **Label access:** `menuLabel_short(id)`, `menuLabel_cat(id)`,
+  `menuLabel_long(id)` return `const char *` from the pools.  The `file_key`
+  pointer stays (it is the storage key).  Scene mod-target descriptors and
+  CrumpBit per-sub-type overrides keep pointer labels (not pool indexes).
 - **Layout guards:** `sizeof(instrument_runtime_binding_t) == 6` and
-  `sizeof(ParamDescriptor) == 28` are `_Static_assert`s, so adding a field
-  cannot silently grow every table.
+  `sizeof(ParamDescriptor) == 20` are `_Static_assert`s, so adding a field
+  cannot silently grow every table.  (Was 28 B before S097 P1 label
+  compaction.)
 - **Row macros** (in each parameter file): `ROW` (normal image parameter,
   offset binding), `ROW_SPECIAL` (with a writer tag), `ROW_MENU` and
   `ROW_MENU_SPECIAL` (named menu dtype), `ROW_NOBIND` (supplemental selector
@@ -809,7 +841,7 @@ function's per-sample loops with a P2 baseline and fails if one grew.
   | `smp` (1) | `OSC_TYPE_SMP` | one-shot sample reader (`osc_smp*Block`, §6.1.4) |
   | `slp` (2) | `OSC_TYPE_SLP` | looped sample reader (`osc_slp*Block`, §6.1.4) |
   | `wtb` (3) | `OSC_TYPE_WTB` | wavetable reader with frame blending (§6.1.5) |
-  | `pwm` (4) | `OSC_TYPE_PWM` | S094 P1 S3: pulse-width modulation; `OSC_TYPE_MODLIST` 4 -> 5 (never stored); `OSC_BIND_PWM` 3. Hybrid mechanism: warp (W) for Sin/Tri, two-read (D) for Saw/Rec. Integer Q15/Q14 interpolation. 15 ITCM loops. |
+  | `pwm` (4) | `OSC_TYPE_PWM` | S094 P1 S3: pulse-width modulation; `OSC_TYPE_MODLIST` 4 -> 5 (never stored); `OSC_BIND_PWM` 3. Hybrid mechanism: warp (W) for Tri, two-read (D) for Saw/Rec. Integer Q15/Q14 interpolation. S099: Sin removed (form WS loops dropped, freeing 856 B ITCM); drum family pwm list now Tri/Saw/Rec (`OSC_PWM_WAVE_COUNT` 3). Colloid adds R-S chop (`COL_PWM_WAVE_COUNT` 4); Alkaline adds R-S chop (`ALK_PWM_WAVE_COUNT` 4). REx tried and removed by ear. |
 
   S094 P4: PWM position law fix. Old: pos 64 = unmodified, mirror-symmetric.
   New: pos 0 = 50 %, pos 127 = narrowest. Position-indexed tables.

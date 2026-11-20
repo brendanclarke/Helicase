@@ -1183,12 +1183,14 @@ Live record never uses shuffle for placement; it applies only at playback
 `seq_trackPlayState[7]`: bit 0 `SEQ_PLAY_STATE_STOPPED`, bit 1
 `SEQ_PLAY_STATE_PIP_REV` (pip needs no cycle counter: direction bit plus
 index). A stopped once-track advances no further. **Retrigger** (STOPPED
-cleared): global Scene change (`seq_selectActivePattern()`,
-`seq_alignActivePatternToScene()`), per-track Scene reassignment of that
-track (`seq_setTrackPlayedScene()`; voice 6 reassigns tracks 6 and 7
-together), transport start/stop and Pattern boundaries
-(`seq_setStepIndexToStart()`). **Not** retriggered by the double-click
-realign or a reassignment of another track. The DDA decides **when** a step
+cleared): a whole-Scene change resets only changed tracks (S098 P1:
+`seq_selectActivePattern()` with `keep_mask`); a kept track stays stopped.
+`seq_alignActivePatternToScene()` resets all tracks.
+Per-track Scene reassignment of that track (`seq_setTrackPlayedScene()`;
+voice 6 reassigns tracks 6 and 7 together), transport start/stop and Pattern
+boundaries (`seq_setStepIndexToStart()`) also retrigger.
+**Not** retriggered by the double-click realign or a reassignment of another
+track. The DDA decides **when** a step
 fires; the run mode decides **where** the index goes.
 
 **Step automation of track timing.** Scene targets 405..425 (§4) apply
@@ -1305,10 +1307,10 @@ position — the reason the looper does not resume through
 | `seq_loopUpdateDivision(div, mod)` | single-byte stores; anchors untouched |
 | `seq_loopableTrackMask()` | bit N set unless track N's played Scene region has the exclude bit |
 
-**Scene changes** (`seq_selectActivePattern()`,
-`seq_alignActivePatternToScene()`, `seq_chainRepeatSelf()`): after
-`seq_refreshTrackEffectiveParams()`, one PRIMASK section runs
-`seq_realignActivePatternToMasterClock()` and
+**Scene changes** (`seq_selectActivePattern()` — which since S098 P1 realigns
+only changed tracks — `seq_alignActivePatternToScene()`,
+`seq_chainRepeatSelf()`): after `seq_refreshTrackEffectiveParams()`, one
+PRIMASK section runs `seq_realignActivePatternToMasterClock()` and
 `seq_loopRefreshSceneSnapshots()`: anchors are kept and each snapshot becomes
 the incoming Scene's canonical pre-advance position at `anchor − 1`
 (`seq_loopCanonicalPreAdvance()`: the realign mapping of §6.4; anchor 0 →
@@ -1388,8 +1390,9 @@ executor and queue actions are in `MODULE_INTERCHANGE_SPEC.md` (menu).
 `seq_selectActivePattern()`: master clock, bar counter and every cursor
 restart (and the looper rebases, §6.5). Direct and chain changes reset when
 pcr (`PAR_BAR_RESET_MODE`) is on; queued changes ignore pcr and reset only
-for qac `res`, `u+r`, `o+r`, `mmr`, `r+r`. Non-resetting changes realign to
-the running master clock (`seq_selectActivePattern()` never resets).
+for qac `res`, `u+r`, `o+r`, `mmr`, `r+r`. Non-resetting changes realign
+only the **changed** tracks to the running master clock (S098 P1); kept
+tracks keep their position.
 
 **Scene chaining.** Per Scene, `chain_condition[2]` (0..78) and
 `chain_next[2]` (0..43) in `scene_settings_t`

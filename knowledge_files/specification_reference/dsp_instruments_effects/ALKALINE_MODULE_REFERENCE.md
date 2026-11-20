@@ -8,9 +8,13 @@ see `ALKALINE_MODELLING_REFERENCE.md`; for the instrument's place in the
 DSP pipeline alongside the other five types, see
 `INSTRUMENTS_DSP_REFERENCE.md` §5.5.
 
-- **Sessions:** S092 (design), S093 P3–P6 (implementation), S094.
-- **Type:** `INSTRUMENT_TYPE_ALK`, Basic class (may take any of the six
-  slots without counting towards the Advanced limit).
+- **Sessions:** S092 (design), S093 P3–P6 (implementation), S094, S099
+  P1/P2 (R-S chopped PWM wave, Advanced Alkaline `alx` with BBD chorus,
+  REx tried and removed, R-S width narrowed, effect page rework).
+- **Type:** `INSTRUMENT_TYPE_ALK` (Basic) and `INSTRUMENT_TYPE_ALX`
+  (Advanced Alkaline, S099). The Basic Alkaline may take any of the six
+  slots without counting towards the Advanced limit. The Advanced Alkaline
+  (`alx`) runs the same engine plus a BBD chorus pass with stereo output.
 
 ---
 
@@ -19,7 +23,8 @@ DSP pipeline alongside the other five types, see
 | File | Role |
 |---|---|
 | `Core/DSP/Instruments/Alkaline/AlkalineVoice.c/.h` | Voice struct, init, trigger, async (control rate), sync-block (audio rate) |
-| `Core/DSP/Instruments/Alkaline/AlkalineParameters.c/.h` | Parameter descriptor table (28 rows, 8 sub-pages), label, flags |
+| `Core/DSP/Instruments/Alkaline/AlkalineChop.c` | Fused ladder mode 5 for R-S chopped PWM (`Alkaline_renderChop`, `DiodeLadder_renderB2OscChop`); compiled `-fno-lto` (S099) |
+| `Core/DSP/Instruments/Alkaline/AlkalineParameters.c/.h` | Parameter descriptor table (28 rows Basic / 35 rows Advanced alx after S099; was 28 after S094), label, flags |
 | `Core/DSP/Instruments/Alkaline/AlkalineControl.c/.h` | Control-rate path: expo converter, MEG, accent network, VEG, prewarp |
 | `Core/DSPAudio/DiodeLadder.c/.h` | The diode-ladder filter: `DiodeLadder_renderB2Osc()` (fused oscillator + B2R ladder), `DiodeLadder_setNet()`, `dl_slowUpdate()` |
 | `Core/DSPAudio/AlkalineSquareTable.c` | Generated per-octave Q8 square table (`alkSqrTable[]`) |
@@ -75,6 +80,13 @@ Stays a table wave (S093 P3):
 - S094 P4: `pwm` gains Tri (index 2). Waves under `pwm`: Saw (two-saw
   sum/difference pulse) and Sqr. Sqr scaled 1.40× (303 square RMS
   1.41–1.43× flat pulse).
+- S099 P1: `pwm` gains R-S (chopped ramp, index 3; `ALK_WAVE_RS`,
+  `ALK_PWM_WAVE_COUNT` 4). Fused ladder mode 5
+  (`DiodeLadder_renderB2OscChop()` in `AlkalineChop.c`, compiled `-fno-lto`).
+  REx tried at index 4 and removed by ear (S099 P2 §1). R-S width narrowed
+  from `oscPwmDSaw` (2.54% floor) to `oscPwmDRec` (0.39% floor, 4 points
+  at pos 127; S099 P2 §2). Mode 5 cost: 262.8 per sample (≤ 263.7 target).
+  Waves under `pwm` after S099: Saw, Sqr, Tri, R-S.
 - Pitch is computed at control rate from `midiFreq` (coarse) + note + fine
   byte, plus Tuning (±700 cents centred at byte 63) and slide lag (22 ms
   one-pole in log2 Hz). `osc_setTableFreq()` sets `phaseInc`/`tableOffset`
@@ -311,21 +323,33 @@ rows. LFO voices are `self`, target selectors `255`.
 
 ## 7. Cost
 
-### 7.1 Measured (S093 P6, S094, G3–G5)
+### 7.1 Measured (S093 P6, S094, S099 G3–G5)
 
 | Configuration | Cost |
 |---|---|
 | wav/wtb, no slot held (with tone) | 263.7 per sample |
 | wtb, slot held | 276.7 per sample |
-| pwm | 256.6 per sample |
+| pwm Saw/Sqr/Tri | 256.6 per sample |
+| pwm R-S (chop mode 5, S099) | 262.8 per sample |
 | **Drum ceiling (frozen, P4 re-measured)** | **261.3 per sample** |
-
-Note: AS-2 (remove tone) open at S094 close.
+| **Alkaline per-block (S099)** | **1,370 instructions** (+5 from `-fno-lto`) |
 
 The `pos` bend adds +13 per block. `Alkaline_isQuiet()` is used for Scene
-swap only, not for CPU saving (constant-CPU rule).
+swap only, not for CPU saving (constant-CPU rule). The per-block rise of +5
+(S099) comes from `DiodeLadder.o` leaving the LTO unit (`-fno-lto`), so
+`DiodeLadder_setNet()` is now a call, not inlined. This keeps the Drum
+loops exact.
 
 Basic class: may take any slot. `slotUsesSrr()` returns 0 (no SRR, D4).
+
+**Advanced Alkaline (`alx`, S099):** the Basic engine plus a BBD chorus
+pass with stereo output via `right[32]`. `bbdChorus_renderAlkaline()` runs
+the mono-in chorus form at full rate (not half-rate). AlkalineVoice 640 B
+(was 564 B; still inside the 1,264 B union slot). 35 rows, with tone/drive/width
+derived (tone fixed at `BBD_ALK_TONE` 73 / 9 kHz; drive follows post-filter
+drive byte; width from `BBD_ALK_WIDTH(dpt)`). Effect page (fx/dpt/rte/mix)
+on page 4 (5th SELECT click). Estimated Advanced cost: ≈18,900–19,670
+cycles/block (depending on CPI), well inside the 21,803 Advanced cap.
 
 ### 7.2 Budget rules
 
@@ -345,6 +369,12 @@ The engine render `Alkaline_calcVoiceSyncBlock()` is **not** inlined into
 `mixer_calcNextSampleBlock()` (marked `noinline`). This prevents a fifth
 engine render from changing register allocation for the other four inlined
 loops (S086 F1). The one call per block costs nothing measurable.
+
+S099: `DiodeLadder.o`, `AlkalineChop.o`, `oscChopTables.o`, `BbdChorus.o`
+and `BbdChorusTables.o` are compiled `-fno-lto` (the S095 P2 rule, extended).
+This prevents the Drum loops from growing when the Alkaline's new files join
+the LTO unit. The cost is +5 instructions per block on every Alkaline mode
+(§7.1).
 
 If a future change removes the `noinline`, gate it on `elf86_mixer_check`:
 the check compares per-sample loops with the P2 baseline and fails if one

@@ -1,7 +1,7 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-095 (S081 documented after S082; S083 MIDI in "Core/MIDI"), including typed HCNAMES, `.fx` Effect storage, AutoSave boot restore, typed Instrument-index
+099 (S081 documented after S082; S083 MIDI in "Core/MIDI"), including typed HCNAMES, `.fx` Effect storage, AutoSave boot restore, typed Instrument-index
 repair, AsyncFATFS directory publication, the Phase 4 dynamic Pattern storage
 system, step automation editing/playback (Session 065), the VOICE-page
 held-step automation overlay (Session 066), the Pattern Stack Service with
@@ -201,10 +201,83 @@ compressor improvements; `095_SESSION_HANDOFF_LOG.md`):
   −20 dBFS (was −12), filter drive floor 1.0 (was 0.4), half makeup on
   voice distortion (`distortion_makeup[128]`, 512 B flash), live GR readout.
 
+and the Session 096 additions (Tetrakt instrument, instrument fixes, Colloid
+extensions, MIDI note modes; `096_SESSION_HANDOFF_LOG.md`):
+
+- **P1:** Tetrakt instrument (`Core/DSP/Instruments/Tetrakt/`):
+  `TetraktVoice.c/.h` (voice render, 1,064 B), `TetraktParameters.c` (64
+  descriptors, 8 pages), `TetraktTables.c` (flash tables). Registered in
+  `InstrumentManager` as 7th type, Basic class. Token `tkt`, extension
+  `.tkt`, folder `/Instrument/Tetrakt/`. FxBuffer: 1 voice unit per voice.
+  Fused sample read (§19): 0 B ITCM.
+- **P2:** Six instrument fixes: Delay/Echo linear interpolation, Colloid
+  filter envelope range, UBP and off filter types, Tetrakt spatializer
+  ranges, Colloid PWM gliding fix, compressor sidechain duck easing.
+- **P3a-d:** Colloid extensions: C1 real note gate, C2a pitch envelope,
+  C2b noise source (`nos`), C2c wavetable scan (`wts`). Voice struct
+  1,236 B; 59 parameter rows. Oscillator count 10/6.
+- **P3e:** MIDI note-mode module (`Core/MIDI/MidiNoteModes.c/.h`): normal,
+  layer4, paraphonic modes. ~2,380 B SRAM1. Wide tracks for Tetrakt.
+  Channel pressure Learn sources.
+- **P3f:** Basic-share acceptance: B1-B6 optimisation. Flash 743,016 B.
+  ITCM 15,976 B. SRAM1 .bss 288,900 B.
+
+and the Session 097 additions (program flash refactor, filesystem baseline
+fixes; `097_SESSION_HANDOFF_LOG.md`):
+
+- **P0:** SOM generator archived to `archive/som/` (dead code:
+  `seq_SomModeActive` was never set). `som_init()` removed from `main.c`
+  boot. `SELECT_MODE_SOM_GEN` removed from buttonHandler. SOM_PAGE blanked
+  but id kept.
+- **P1:** `ParamDescriptor` 28 → 20 B: `short_name`/`long_name`/`category`
+  pointers replaced by `uint8_t` pool indexes (`short_id`/`long_id`/
+  `cat_id`). New `Core/Menu/MenuLabels.c` owns `shortNames[]` (224),
+  `catNames[]` (48), `longNames[]` (178). `MenuText.h` exports `extern`
+  declarations and `menuLabel_short/cat/long()` accessors. `menuPages` →
+  `menuStaticPages[6][8]` + `menuStaticPageSlot[17]`; `menu_pageRow()`
+  accessor. `filesystem_saveGlobals_tick()` + `saveMidiLearn_tick()` merged
+  into `filesystem_safeTextWrite_tick()`.
+- **P2:** Makefile: `OS_SRCS` for 5 cold files at `-Os`; `COLD_LAST` link
+  order for DSP isolation; `FS_OS` switch (default 0). Flash 714,980 B.
+- **P3:** `preset_startLoadApply(scene_mask)` replaces
+  `preset_startDrumsetApply()` for runtime Loads.
+  `filesystem_patternRealignPlayingTracks(scene_mask)` after Load.
+  `menu_loadSaveDropClick()` and `menu_loadSaveOkRetry` for OK retry.
+  Bank Save mask ordering fix. Boot notice non-blocking draw.
+  Background budget 25 → 30 µs/ms. DEV trace stages `'f'` and `'k'`.
+
+and the Session 099 additions (Advanced instrument types, chopped PWM,
+AutoSave trace fix; `099_SESSION_HANDOFF_LOG.md`):
+
+- **P1:** Advanced Colloid (`clx`, `INSTRUMENT_TYPE_CLX` 7, Advanced class)
+  and Advanced Alkaline (`alx`, `INSTRUMENT_TYPE_ALX` 8, Advanced class).
+  Engine map: `instrumentManager_typeEngine()` routes each Advanced type to
+  its Basic counterpart's engine. `INSTRUMENT_FLAG_ADVANCED` on the
+  registry row. `instrumentManager_typeSelectableForSceneSlot()` enforces
+  the any-Basic / two-Advanced replacement policy. `IM_SPECIAL_FX_TYPE`
+  (special writer 24): claims/releases a voice's BBD chorus unit via
+  `instrumentManager_slotRight()` (per-slot pointer table, 24 B SRAM1).
+  `instrumentManager_unitsWanted()` returns the unit count.
+  `instrumentManager_rightBlock()` (24 B SRAM1) holds the per-block right
+  channel output for stereo chorus forms.
+- **P1:** R-S chopped PWM wave added to Colloid and Alkaline. Alpha Juno
+  ramp chopped by a band-limited pulse at +1 octave. `col_chopPairAdd()`
+  placed in ITCM (`.itcm.s099p1`, 306 B). Sin wave removed from Colloid
+  PWM (freed 856 B ITCM). Colloid `oscPwmDRec` DP ratio 0.44 → 0.39 %.
+- **P2:** `DTYPE_0B127_FX_DEPTH` tagged dtype for the effect `dpt` row.
+  `menu_getMenuIndex()` / `menu_restoreMenuIndex()` for step edit cursor
+  save/restore. `menu_loadSaveDropClick(MENU_LS_CLICK_REFUSED)` on nested
+  Instrument Save refusal. Step edit screen order: vel/nte/tim/fil then
+  cdn/rol/rtm. `rfl` renamed `fil`.
+- **P3:** AutoSave trace starvation fixed (three root causes). Diagnostic
+  priority rule §0 (binding, permanent): diagnostics must never take
+  priority over core system functions. See `DEV_MODES.md`.
+
 The DSP internals behind these APIs are described in
 `INSTRUMENTS_DSP_REFERENCE.md`, `MIXER_SYSTEM_DSP_REFERENCE.md`,
 `EFFECTS_MODULES_DSP_REFERENCE.md`, `SPACE_GROUP_EFFECTS_MODULE_REFERENCE.md`,
-`COLLOID_MODULE_REFERENCE.md`, and their modelling counterparts.
+`COLLOID_MODULE_REFERENCE.md`, `ALKALINE_MODULE_REFERENCE.md`,
+`TETRAKT_MODULE_REFERENCE.md`, and their modelling counterparts.
 Historical migrations belong in session logs; this document states which live
 module owns each call, state transition, and retained object.
 
@@ -567,13 +640,67 @@ flags from `menu_queueActionFlags()`: mute → `seq_setMute(7, 0)` +
 reload → deferred) and `menu_perfSceneChangeExecute(target, qac reset bit)`;
 chain fire to the playing Scene → `seq_chainRepeatSelf(pcr)`; otherwise
 `menu_perfSceneChangeExecute(target, pcr)`. It always ends with
-`menu_syncQueuedSceneLed()`. `menu_perfSceneChangeExecute()` selects the
-Scene (SceneData, BankData edit mask, shown pattern, `seq_selectActivePattern()`),
-calls `seq_cancelPendingDirectChange()` (a queued change survives), runs
-`seq_resetToPatternStart()` when `restart`, then `preset_startDrumsetApply()`,
-the Scene LED refresh and a repaint. Direct presses go through
+`menu_syncQueuedSceneLed()`. Direct presses go through
 `menu_perfModeSceneButtonPressed()` (instant or stopped → execute with pcr,
 else `seq_requestSceneChange()`).
+
+**Per-track identity-based switching (S098 P1).**
+`menu_perfSceneChangeExecute()` runs four steps for every executed
+whole-Scene change (PERF, MIDI PC, deferred, queued and chain-fired):
+
+1. **Decide.** `preset_sceneSwitchKeepMask(target, &effect_same)` compares,
+   per track, what the track plays now with what Scene `target` holds for it,
+   using the shared X-macro field lists (`PRESET_TRACK_REGION_FIELDS`,
+   `PRESET_TRACK_REGION_BITS`, `PRESET_TRACK_SETTINGS_FIELDS`,
+   `PRESET_SLOT_SETTINGS_FIELDS`, `PRESET_SLOT6_KIT_FIELDS`). Bit `t` set in
+   the returned `keep_mask` means track `t` and its voice slot are identical.
+   Tracks 5 and 6 are decided as a pair. `effect_same` compares the Effect
+   record and `effect_morph_amount`. The same field lists guard Scene 17
+   copies; three `_Static_assert`s protect struct size changes. Two
+   `PAT_RAW_BLOCK_MAX` (136 B) stack buffers hold the step comparison. DEV
+   trace stage `'x'` records the keep mask, Effect decision, both Scenes, and
+   the compare time per executed change.
+2. **Carry.** `preset_prepareSceneSwitch(target, keep_mask)` copies
+   `morph_interpolation[]` of the kept slots into the target. It also calls
+   `presetMorph_retargetScene()`, which moves the Morph worker's Scene index
+   to `target` and drops the changed slots from the worker's current
+   request/pass bits.
+3. **Switch the sequencer.** `seq_selectActivePattern(target, keep_mask,
+   effect_same)`:
+   - every track reads `target`;
+   - **changed tracks** get the per-track reset (`seq_resetTrackForSceneChange`:
+     play state, repeat/random/condition counters, roll, length window, menu
+     override, ramp break, epoch bump, live-record mark, trigger drop, MIDI
+     note-off), realign to the master clock (`seq_realignTrackPosition`),
+     change mark and Scene-automation dirty clear for changed parts
+     (`seq_clearSceneAutomationDirtyFor`);
+   - **kept tracks** keep everything — no reset, no realign, no mark;
+   - the FX sequence clock, overlays and `fxm` override are reset only when
+     the Effect changed.
+4. **Apply the voices.** `preset_startSceneSwitchApply(keep_mask,
+   effect_same)`:
+   - **changed slots:** LFO phase captured, step overrides cleared, Morph pass
+     requested, and the drumset worker commits them at quiet or trigger, as
+     before;
+   - the modulation graph is prepared only where it touches a changed slot or
+     a changed Effect (`instrumentManager_prepareModulationForSlotChange`),
+     and the rebind cursor revisits only those sources
+     (`drumset_apply_rebind_mask`);
+   - if an Instrument or Kit apply is in flight when the switch starts a
+     rebind, the mask is widened to all six sources (F1 guard:
+     `instrument_apply_active && rebind != 0`);
+   - an identical Effect is rebound (`effects_rebindSourceScene`); a changed
+     Effect is activated (`effects_activateScene`);
+   - PERF mirrors are synced.
+
+An entirely identical Scene is the case where `keep_mask` is all seven and
+`effect_same` is true: no reset, no apply, only the Scene index changes.
+`seq_chainRepeatSelf(pcr)` is unchanged (no DSP apply).
+
+Host test `scene_identity` (`tools/dsp_test/`) covers three laws:
+pool-offset-independent step compare (law 1), byte/trigger/block-less
+sensitivity (law 2), derived-image exclusion and endpoint sensitivity
+(law 3), with a break proof (pool-offset compare must fail law 1).
 
 ### Settings and storage owned by this surface
 
@@ -1203,7 +1330,7 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 | `seq_automationHoldsParameter(slot, local)` | S075 F3: nonzero while step automation holds that descriptor's runtime value (its `seq_automation_dirty[slot]` bit). Read-only; foreground only. The guard behind "automation always wins". | `presetMorph_writeRuntimeBase()` |
 | `seq_restoreAllAutomation()` | Walk all 6 slots' 64-bit dirty bitmaps and restore each dirty descriptor index from `morph_interpolation[]` via `instrumentManager_writeRuntime()`. Called from `seq_setStepIndexToStart()` before `seq_clearAutomationDirty()` (Session 070). | Sequencer transport restart |
 | `seq_restoreAllSceneAutomation()` | Walk `seq_scene_automation_dirty` (uint32_t) bitmap and restore each dirty Scene target from its retained SceneData getter. Clears morph step overrides, slot6 decay step state, and audio routing. Called from `seq_setStepIndexToStart()` (Session 070). | Sequencer transport restart |
-| `seq_clearSceneAutomationDirty()` | Clear the `seq_scene_automation_dirty` bitmap. Rule B: called from `seq_selectActivePattern()` and `seq_alignActivePatternToScene()` so a Scene activation starts with a clean overlay state. (S076 P1) | Sequencer Scene activation paths |
+| `seq_clearSceneAutomationDirty()` | Clear the `seq_scene_automation_dirty` bitmap. Rule B: called from `seq_alignActivePatternToScene()` so a Scene activation starts with a clean overlay state. (S076 P1). Since S098 P1, `seq_selectActivePattern()` uses `seq_clearSceneAutomationDirtyFor()` to clear only the bits belonging to changed parts; `seq_alignActivePatternToScene()` still clears all. | Sequencer Scene activation paths |
 | `seq_switchToBackgroundScene()` | S082: move playback to Scene 17 without a sound change. Under PRIMASK: active, pending and every per-track Scene = 16, `seq_perTrackActive = 0`, looper re-snapshot (anchors kept); then pending direct/queued/chain changes are cleared and the effective track cache refreshed. **No** realign, roll/condition/epoch reset, PC, note-off or LED notify; the live-record take continues (D35). | Preset background tick phase 3 (fresh build) |
 | `seq_moveTracksToBackgroundScene(track_mask)` | S082 P1 E4.6: under PRIMASK, move selected tracks (7-bit mask) to play from Scene 17's Pattern region; recompute `seq_perTrackActive` and re-snapshot the looper; clear pending changes; refresh the effective cache. Used by the rebuild-in-place path (D19/D31); the view is never moved (D28). | presetManager |
 | Scene 17 release (S082, in `seq_selectActivePattern()`) | The first whole-Scene change to a resident Scene (SEQ press, MIDI PC, queued or chain change) calls `scene_backgroundRelease()` after publishing; per-track moves never release (D10). `seq_sendProgChg()` refuses index ≥ 16; `seq_chainResolveNext()` refuses cur ≥ 16 (17 has no chain). | Menu executor, MIDI |
@@ -1482,8 +1609,10 @@ voices, the Scene namespace, and the Effect namespace (`fx`, value 8).
 
 | API | Use | Usual callers / clients |
 |---|---|---|
-| `instrumentManager_registryEntry()` / `registryCount()` / `registryEntryAt()` / `typeDisplayLabel()` / `typeFlags()` | Immutable type metadata: token, extension, label, Basic/Advanced/Choke flags, descriptor and menu tables. | Menu, storage/filesystem, converter-aligned tooling |
+| `instrumentManager_registryEntry()` / `registryCount()` / `registryEntryAt()` / `typeDisplayLabel()` / `typeFlags()` | Immutable type metadata: token, extension, label, Basic/Advanced/Choke flags, descriptor and menu tables. 9 types through S099: drm, snr, cym, hat, alk, col, tkt, clx, alx. | Menu, storage/filesystem, converter-aligned tooling |
 | `instrumentManager_typeSelectableForSceneSlot(scene, slot, type)` | Enforce any-Basic/two-Advanced replacement policy. | Instrument Load type browser |
+| `instrumentManager_typeEngine(type)` | Engine map: returns the Basic engine identity for an Advanced type (clx → Colloid, alx → Alkaline); identity for Basic types. (S099 P1) | Voice render, `InstrumentManager` |
+| `instrumentManager_slotRight(slot)` | Per-slot right-channel pointer table (24 B SRAM1). Non-NULL while a slot's BBD chorus is active. `instrumentManager_rightBlock()` holds the per-block right output (24 B SRAM1). (S099 P1) | mixer, chorus render |
 | `instrumentManager_chokeDescriptorIndexForBase(type, base, out)` | Resolve `<base>_choke` sibling within one type. | Menu VOICE7 resolver |
 | `instrumentManager_runtimeInstance()` / trigger/filter/async/sync/pan/volume/LFO dispatch family | Resolve the runtime object for the current active Scene slot type. Engines render pre-volume; `instrumentManager_runtimeVolume()` supplies the channel volume that the mixer applies after decimation (Session 072 step 2). | mixer, MIDI/Sequencer trigger paths, Preset |
 | `instrumentManager_clearAllRuntimeModulationTargets()` | Restore/clear both LFO pairs and velocity target for every outgoing current source before a slot type changes. | Preset staged Instrument commit |
@@ -2049,11 +2178,12 @@ Removed from live API surface:
 
 Historical logs may still mention these names. In current code, they should
 only appear in comments, documentation, or old session logs.
-## Background Bank load (S082)
+## Background loads: Bank, Scene and Pattern (S082; S098 P2)
 
-How a Bank Load from the Menu (OK on Load:[Bank]) or from MIDI CC0 (S083)
-runs without interrupting playback, and how the user can keep working while
-it loads. Decision history: `082_SESSION_HANDOFF_LOG.md` §4–§6. File-level
+How a Bank Load from the Menu (OK on Load:[Bank]) or from MIDI CC0 (S083),
+and since S098 P2 a Menu Scene or Pattern Load, run without interrupting
+playback.  Decision history: `082_SESSION_HANDOFF_LOG.md` §4–§6
+(Bank); `098_SESSION_HANDOFF_LOG.md` (Scene/Pattern).  File-level
 detail: `FILESYSTEM_SPEC.md` "Current Bank behavior".
 
 ### Why
@@ -2067,7 +2197,7 @@ detail: `FILESYSTEM_SPEC.md` "Current Bank behavior".
 
 **What it is:**
 - A 17th Scene: `scene_background` (`scene_t`) plus `pat_background_region` (its Pattern), addressed as index 16 (`SCENE_BACKGROUND_INDEX`) through `scene_get*()` and `pat_regionFor()` while `scene_backgroundExists()`.
-- It is built only when the transport runs and the load replaces or empties a played Scene (the active Scene or any `seq_perTrackPattern[t]`).
+- It is built when the transport runs and a Bank, Scene or Pattern Load replaces or empties a played Scene (the active Scene or any `seq_perTrackPattern[t]`).
 
 **Build** (`preset_buildBackgroundScene()`):
 - the active Scene's Scene-level state, with the chain cleared;
@@ -2092,22 +2222,31 @@ detail: `FILESYSTEM_SPEC.md` "Current Bank behavior".
 
 ### The state machine (`preset_tickBackgroundBankLoad()`, from `menu_pollPresetStatus()`)
 
+Three kinds share the same phases: `pm_bg_kind` (+1 B SRAM1, `.bss`)
+distinguishes `PRESET_BG_KIND_BANK` (0), `PRESET_BG_KIND_SCENE` (1) and
+`PRESET_BG_KIND_PATTERN` (2).  Bank Loads enter through
+`preset_requestBackgroundBankLoad()` (Menu or MIDI CC0); Scene and Pattern
+Loads enter through `preset_requestBackgroundSceneLoad(slot, scene_mask,
+kind)`, called from the Menu Scene and Pattern Load OK paths.
+
 | Phase | What happens |
 |------:|--------------|
-| 0 | Idle. A pending MIDI request (one slot, latest wins) starts when Preset, the facade and the Menu are idle: `menu_backgroundBankLoadUiBegin()` takes the UI to Load:[Bank] (closing everything, D39) → 6. |
-| 6 | MIDI only: wait for the slot's preview, then act as OK (Replace, all 16) → 1, or FAILED for a missing slot. |
-| 1 | Decide Scene 17 (`PM_BG_NEEDED`). |
-| 2 | Drop queued copy/clear jobs (`ccSvc_dropQueued()`), yield AutoSave (abort at the next safe phase), wait for the running copy/clear job, an idle facade and a free Pattern snapshot; Replace discards the outgoing dirty mask (Merge keeps it). |
+| 0 | Idle. A pending MIDI Bank request (one slot, latest wins) starts when Preset, the facade and the Menu are idle: `menu_backgroundBankLoadUiBegin()` takes the UI to Load:[Bank] (closing everything, D39) → 6. |
+| 6 | MIDI Bank only: wait for the slot's preview, then act as OK (Replace, all 16) → 1, or FAILED for a missing slot. |
+| 1 | Decide Scene 17 (`PM_BG_NEEDED`). A Scene/Pattern Load that does not need Scene 17 skips to phase 4 (a Bank always quiesces). |
+| 2 | Bank: drop queued copy/clear jobs (`ccSvc_dropQueued()`). Scene/Pattern: leave them queued (the `ccSvc_busy()` wait lets them finish first). Yield AutoSave (abort at the next safe phase), wait for the running copy/clear job, an idle facade and a free Pattern snapshot; Replace discards the outgoing dirty mask (Merge keeps it). |
 | 3 | Scene 17 needed: build (or rebuild) and switch (or move). |
-| 4 | `preset_loadBank()`; retry while the facade is busy. A load on Scene 17 or a running direct load is posted **progressive** and sets `PM_BG_UNLOCKED`. |
-| 5 | Wait for the filesystem; Menu handles `PRESET_OP_BANK_LOAD`; then `preset_bgEnd()` releases the yield and ends the availability session. |
+| 4 | Bank: `preset_loadBank()`; a load on Scene 17 or a running direct load is posted **progressive** and sets `PM_BG_UNLOCKED`. Scene/Pattern: `preset_loadSceneForScenes()` or `preset_loadPatternForScenes()` with the destination mask; when the transport runs, `bank_beginLoadAvailability()` marks destinations unavailable until the Load ends; the panel is never unlocked. |
+| 5 | Wait for the filesystem; Menu handles `PRESET_OP_BANK_LOAD` / `PRESET_OP_SCENE_LOAD` / `PRESET_OP_PATTERN_LOAD`; then `preset_bgEnd()` releases the yield and ends the availability session. The completion callbacks (`on_scene_load_complete`, `on_pattern_load_complete`) also call `bank_endLoadAvailability()`. |
 
 - Waits in phases 2, 4 and 6 end FAILED after 20 s.
-- The result for MIDI is read once with `preset_takeBackgroundBankLoadResult()`.
-- While any phase runs:
+- The MIDI CC0 result is read once with `preset_takeBackgroundBankLoadResult()` (Bank kind only).
+- `preset_backgroundBankLoadRunning()`, `…Locked()` and `…Unlocked()` remain Bank-only: a Scene/Pattern Load does not filter MIDI, lock the panel or unlock it.
+- While any Bank phase runs:
   - MIDI other than realtime, notes and CC (not CC0/CC32) is not acted on;
   - a further MIDI Bank request is dropped;
   - chains do not evaluate.
+- A Scene/Pattern Load keeps today's Load-page hold (the refused-OK replay mechanism applies).
 
 ### Working while it loads (S082 P3)
 
@@ -2121,7 +2260,7 @@ detail: `FILESYSTEM_SPEC.md` "Current Bank behavior".
   - `Load:[Bank    ]`, the slot, the captured Bank name, live `NN.` (1-based);
   - SEQ LEDs as PERF;
   - no interaction, no Load↔Save toggle.
-- **Mode LED.** `LED_MODE4` fast-blinks while the panel is not in Load/Save mode.
+- **Mode LED.** `LED_MODE4` fast-blinks while the panel is not in Load/Save mode (and whenever Scene 17 exists, in every mode; S098 T3).
 - **Availability.**
   - Each child becomes available (present, selectable, a fan-out member) the moment it finishes loading, so the PERF row fills left to right.
   - Pending, in-progress, emptied and failed Scenes are dark and refused.

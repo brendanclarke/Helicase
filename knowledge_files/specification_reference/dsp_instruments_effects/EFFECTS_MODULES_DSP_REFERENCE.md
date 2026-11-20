@@ -3,10 +3,16 @@
 Each Effect module's DSP, binding rules, arena use and cost. Part I is the
 system framework every module shares; Part II has one section per Effect type.
 
-- **Current as of:** Session 095 P4 (2026-11-20). S095 P1 added the Space
+- **Current as of:** Session 099 (2026-11-20). S099 P1/P2 added the BBD
+  chorus kernel (`BbdChorus.h/.c`) used by the Advanced Colloid (`clx`)
+  and Advanced Alkaline (`alx`) instrument types. The chorus is an
+  instrument-level effect (runs inside the voice, not the bus Effect
+  chain) using one FxBuffer voice unit per slot while `fx` ≠ off.
+  S096 P2 changed Delay/Echo tap interpolation from Hermite to linear
+  (lerp), matching CrumpBit `dly` tap reads. S095 P1 added the Space
   group effects (Delay, Reverb, Echo) with the arena prefix, elastic
-  seating, feed-through handover, and drain-into-OFF. S095 P4 removed
-  the StereoFilter and renumbered effect type IDs: OFF 0, CrumpBit 1,
+  seating, feed-through handover, and drain-into-OFF. S095 P4 removed the
+  StereoFilter and renumbered effect type IDs: OFF 0, CrumpBit 1,
   Delay 2, Reverb 3, Echo 4, count 5. S094 P2 restored the TPT SVF on
   `grn`/`rvb` and raised the CrumpBit cap to 181 instructions/frame.
   S091 expanded CrumpBit to five sub-types. S074 added CrumpBit.

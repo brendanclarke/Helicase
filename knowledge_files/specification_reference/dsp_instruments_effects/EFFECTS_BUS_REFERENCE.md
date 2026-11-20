@@ -184,7 +184,7 @@ FX-send step override. The fader never changes the stored send.
 
 | Field | Meaning | Why |
 |---|---|---|
-| `base` (`ParamDescriptor`) | file key, short/long/category labels, dtype, flags MORPHABLE/MODULATABLE/AUTOMATABLE, `mod_domain` | shared with Menu, target pickers and storage, so Effect rows behave like Instrument rows |
+| `base` (`ParamDescriptor`, 20 B) | file key, `short_id`/`long_id`/`cat_id` label pool indexes (S097 P1; were pointers), dtype, flags MORPHABLE/MODULATABLE/AUTOMATABLE, `mod_domain` | shared with Menu, target pickers and storage, so Effect rows behave like Instrument rows |
 | `default_value` | the single default for both endpoints on a type change | F3: one default, no separate Morph default |
 | `max_value` | inclusive retained/runtime clamp | every writer clamps to it |
 | `effect_flags` | `EFFECT_PARAM_FLAG_WIDE8` (0..255 domain), `EFFECT_PARAM_FLAG_BUFFER_DEPENDENT` | automation expansion; runtime-only buffer clamp |
@@ -412,9 +412,18 @@ for each descriptor i:
   margin is 3,712 B.
 - It is never zeroed or cleared by the system (A31).
 - **Voice units:** 2,208 samples × 2 B = 4,416 B (50.06 ms at 44,108 Hz);
-  12 in total, at most 2 per slot. They are allocated from the top. No
-  instrument claims them yet; the diagnostic knob
-  `DEV_FXBUF_FORCE_VOICE_UNITS` can.
+  12 in total, at most 2 per slot. They are allocated from the top.
+  **Tetrakt (S096 P1)** is the first instrument to claim voice units: one
+  unit per voice for its S1 space stage (50 ms delay line), so a six-slot
+  Tetrakt Scene claims 6 of 12 units. **Advanced Colloid `clx` and Advanced
+  Alkaline `alx` (S099)** each claim one unit per slot while `fx` ≠ off
+  (`IM_SPECIAL_FX_TYPE` fixed selector; `instrumentManager_unitsWanted()`).
+  The unit holds the BBD chorus's ring buffer. Unlike the Tetrakt, the
+  chorus claim is dynamic: the unit is acquired when `fx` is set to `chr`
+  and released when `fx` is set to `off`, changing the FxBuffer rule from
+  "claimed at type assignment, never at a row change" to include this
+  selector-driven claim. The diagnostic knob
+  `DEV_FXBUF_FORCE_VOICE_UNITS` forces claims without an instrument.
 - **The Effect share** is contiguous from the bottom: the arena minus the
   claimed units. With all twelve units claimed it is **73,600 B**. A type
   must work at that minimum.
@@ -1023,6 +1032,8 @@ Scene switches, how time changes behave, and RAM (the union has 20 B spare).
 2. **Descriptors.**
    - Start with `EFFECT_COMMON_ROWS(out, vol, pan flags)`, then
      `EFFECT_ROW(...)` / `EFFECT_ROW_MENU(...)` for rows 3..
+   - `EFFECT_ROW` arguments 2–4 are `uint8_t` label pool indexes (short, long,
+     cat) into `MenuLabels.c` pools, not string pointers (S097 P1).
    - Reuse the voice keys and dtypes when the meaning matches, as `flt` does
      with `filter_freq` etc.
    - Give each row one `default_value` ≤ `max_value`.
@@ -1144,10 +1155,27 @@ all registry-driven.
    `effects_activateScene()` and the all-source LFO rebind.
 6. Optional `DEV_EFFECT_FORCE_TYPE` (diagnostic builds only).
 
-### 16.2 Scene activation (`effects_activateScene()`)
+### 16.2 Scene activation (`effects_activateScene()`) and rebind
 
 Called from `preset_sendDrumsetParameters()` (pre-audio) and
-`preset_startDrumsetApply()` (every Scene switch and Scene/Bank load apply).
+`preset_startDrumsetApply()` (pre-S098) or
+`preset_startSceneSwitchApply()` (S098 P1, every Scene switch).
+
+Since S098 P1, `preset_startSceneSwitchApply()` decides per Scene:
+- **Effect changed** (`!effect_same`): `effects_activateScene()` runs as
+  before — type switch or same-type refresh, FX clock invalidated, overlays
+  cleared, serial bumped.
+- **Effect identical** (`effect_same`): only `effects_rebindSourceScene(target)`
+  moves the Effect's cached source Scene index. The FX clock, overlays and
+  `fxm` override are **not** reset, so the FX sequence keeps its position and
+  the tails ring uninterrupted. `effects_rebindSourceScene()` refuses a type
+  mismatch; if that happens, `preset_startSceneSwitchApply()` falls back to
+  `effects_activateScene()`.
+
+Bank and other Load applies still call `effects_activateScene()` through
+`preset_startDrumsetApply()`.
+
+**`effects_activateScene()` detail:**
 
 - A different type goes through `effects_switchRuntime()`:
   1. handoff `BeginExit` → exited type and channels → `export_handoff`;

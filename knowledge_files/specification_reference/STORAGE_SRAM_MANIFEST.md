@@ -4,11 +4,104 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 095 (2026-11-20),
-  `dev-ph7-alkaline`, HEAD `dd81f19c`. Flash: 720,084 B of 753,664 B
-  (**headroom ~33,580 B**). ITCM 15,232 / 16,384 B (93.0 %); SRAM1 free
-  ~87,388 B (DEV link, +16 B handoff); FXBUF 126,656 B unchanged.
+- **Current as of:** Session 099 (2026-11-20),
+  `dev-ph7-alkaline`. Flash (FS_OS=0, default): **730,296 B** after P2 §9
+  (730,936 B after P3; headroom ≈22,728). ITCM **15,432 / 16,384 B**
+  (94.2 %, 952 B free). SRAM1: `ColloidVoice` 1,224 B, `AlkalineVoice`
+  640 B (both inside existing 1,264 B union slot). No new SRAM1 bytes.
+  `instrumentManager_rightBlock[6]` 24 B .bss. DTCM: voice units from
+  existing FxBuffer arena. FXBUF 126,656 B unchanged.
   The entries below run newest first.
+- **S099 changes (2026-11-19/20):** Chopped PWM waves (R-S), Advanced
+  types (clx, alx) with BBD chorus, PWM Sin removal, amp-attack removal,
+  effect page rework, chorus simplification, step editing, AutoSave trace
+  starvation fix.
+  - **Flash:** 720,776 B (start of S099) → 733,144 B (end of P1 §15.10)
+    → 730,232 B (end of P2 §10/§11) → 730,296 B (after P2 §9) →
+    730,936 B (end of P3). Net: +10,160 B from start of S099.
+  - **ITCM:** 15,960 B → 16,288 B (after P-C, +306 B `col_chopPairAdd`
+    in `.itcm.s099p1`) → 15,432 B (after PWM Sin removal, −856 B from
+    five `osc_pwmWs*Block` loops). Net: −528 B.
+  - **SRAM1:** `ColloidVoice` 1,236 → 1,224 B (−12). `AlkalineVoice`
+    564 → 640 B (+76). Both inside the 1,264 B union slot (unchanged).
+    `instrumentManager_rightBlock[6]` 24 B .bss (per-slot stereo pointer
+    table for `instrumentManager_slotRight()`).
+  - **DTCM:** no new allocations. Voice units (4,416 B each) claimed from
+    existing FxBuffer arena per clx/alx slot while fx ≠ off.
+  - **RAM (AutoSave, P3):** no new bytes. Fix 2 reuses existing cache
+    variables. Fix 3 adds only code and compile-time constants.
+- **S098 changes (2026-11-18):** Scene switch corrections: per-track
+  identity-based switching (T1), Scene/Pattern Loads through Scene 17 (T2),
+  Scene 17 mode LED (T3).
+  - **Added (S098 P1):** `drumset_apply_rebind_mask` 1 B `.bss`
+    (`presetManager.c`), `instrument_apply_rebind_mask` 1 B `.data`
+    (`presetManager.c`). `seq_clearSceneAutomationDirtyFor()`,
+    `seq_resetTrackForSceneChange()`, `seq_realignTrackPosition()`,
+    `instrumentManager_prepareModulationForSlotChange()`,
+    `presetMorph_retargetScene()`, identity test and Scene switch apply
+    functions. Host test `scene_identity`. DEV trace stage `'x'`.
+  - **Added (S098 P2):** `pm_bg_kind` 1 B `.bss` (`presetManager.c`).
+    `preset_requestBackgroundSceneLoad()`, availability session for
+    Scene/Pattern Loads. Scene 17 LED fast-blink. Realign backstop
+    comment updated.
+  - **Assessment:** F1 carry_rebind guard (+24 B flash), F2 comment fix.
+  - **RAM:** +3 B SRAM1 total (approved 2026-11-18). Absorbed by linker
+    section padding; `.bss` and `.data` section totals do not move.
+  - **Flash (FS_OS=1):** 679,952 → 684,160 B (+4,208 B from start-of-S098
+    baseline, which was 432 B below S097 P3 §11; true growth against S097
+    P3 is about 3,776 B). Headroom 69,504 B.
+  - **Flash (FS_OS=0):** 720,320 B, headroom 32,912 B.
+  - **ITCM, DTCM:** unchanged.
+- **S097 changes (2026-11-17/18):** Program flash refactor: SOM archive
+  (−8,536 B), five source refactors (−7,504 B), cold-source `-Os` and
+  cold-last link order (−11,676 B). Filesystem baseline fixes (Scene Load
+  apply mask, OK retry, Pattern realign, Bank Save masks, boot notice).
+  `FS_OS=1` tried (−36,240 B from P2 baseline) and reverted.
+  - **Removed (S097 P0):** SOM generator (`SomGenerator.c/.h`,
+    `SomData.c/.h`) archived to `archive/som/`. −8,536 B flash, −32 B
+    `.bss`. ITCM unchanged.
+  - **Changed (S097 P1):** `ParamDescriptor` 28 → 20 B (three `const char *`
+    display fields replaced by three `uint8_t` pool indexes). New file
+    `Core/Menu/MenuLabels.c` (label pools: 224/48/178 entries). `menuPages`
+    3,264 B → `menuStaticPages` 1,152 B + 17 B slot index. Name table widths
+    trimmed. Value formatters and filesystem clone families merged. Net
+    −7,504 B flash.
+  - **Changed (S097 P2):** `OS_SRCS` Makefile rule adds `-Os` to five
+    boot/install/FAT sources (`asyncfatfs.c`, `SampleInstall.c`,
+    `sampleFlash.c`, `flashImage.c`, `SplashAnimation.c`). `COLD_LAST` link
+    order isolates DSP code generation from cold changes. `FS_OS` switch
+    (default 0) for `filesystem.c` at `-Os`. Net −11,676 B flash (default).
+  - **Changed (S097 P3):** `config.h` background budget 25 → 30 µs/ms
+    (3 % while playing). DEV probe stages `'f'` and `'k'` add 20 B DEV
+    `.bss`. Five baseline filesystem fixes (no significant size change).
+  - **Flash budget:** headroom recovered to 38,684 B, above the 16 KiB
+    threshold. `FS_OS=1` would give 74,924 B but is off by default.
+  - **ITCM, SRAM1, DTCM:** unchanged from S096.
+- **S096 changes (2026-11-15/20):** Tetrakt instrument (7th type), six
+  instrument fixes, Colloid/Tetrakt MIDI extensions (gate, pitch envelope,
+  noise, wts scan, MIDI note-mode module, paraphonic, pressure Learn,
+  Tetrakt layers), Basic-share optimisation pass.
+  - **Added (S096 P1):** `Core/DSP/Instruments/Tetrakt/` (TetraktVoice,
+    TetraktParameters, TetraktTables). `TetraktVoice` 1,064 B inside the
+    existing tagged runtime slot. One FxBuffer voice unit per Tetrakt
+    (2,208 × int16 for S1 delay). Shared work area 384 B `.bss` (approved).
+    `menu_instrumentLoadIndex` +2 B `.bss`. ITCM: 15,232 B after §19
+    (returned to pre-S096 level after fused read dropped `osc_renderTyped()`
+    section). Flash: 728,436 B.
+  - **Added (S096 P2):** Delay/Echo linear interpolation, Colloid filter
+    types (UBP, off), PWM gliding. ITCM 15,368 B (+136 B from PWM warp).
+  - **Added (S096 P3):** `Core/MIDI/MidiNoteModes.h/.c` (note-mode module).
+    SRAM1 `.bss` +2,576 B: `midiNoteMode_group` 2,328 B,
+    `instrumentManager_overlay` 72 B, `midiNoteMode_voice` 48 B,
+    `voiceTriggerRing` +32 B, `seq_lenWindow` 14 B, `liveRec_layerTick`
+    14 B, masks 7+7+7+7+6+3 B. Colloid scan loops in `.itcm.s096p3`
+    (+608 B ITCM → 15,976 B). `ColloidVoice` 1,236 B (28 B spare).
+    `ColloidParameters` 59 rows (was 50). Flash: 743,016 B after fixes.
+  - **ITCM total after S096:** 15,976 / 16,384 B (408 B free).
+    Subsection order: `.itcm.s089` → `.itcm.s089p3` → `.itcm.s094p1` →
+    `.itcm.s095p2` → `.itcm.s095p3` → `.itcm.s096p3`.
+  - **Flash budget risk (resolved in S097):** headroom was 10,648 B, below
+    the `link_budget.py` 16,384 B threshold.
 - **S095 changes (2026-11-12/20):** Space effects (Delay/Reverb/Echo),
   Colloid instrument (6th type), StereoFilter removal, compressor
   improvements, 1,024-point sine.
@@ -564,16 +657,24 @@ edit relinks without `make clean`.
 
 ### 3.6 If flash runs short again
 
-Ranked growth paths (S072 study):
+Ranked growth paths (S072 study, updated S097):
 
-1. `-Os` for cold control modules (`menu.c`, `filesystem.c`,
-   `presetManager.c`, `storageTypes.c`) through per-file Makefile rules;
-   several KiB; needs UI and filesystem timing checks.
+1. **`-Os` for cold control modules (partially done, S097 P2).** Five
+   boot/install/FAT sources (`asyncfatfs.c`, `SampleInstall.c`,
+   `sampleFlash.c`, `flashImage.c`, `SplashAnimation.c`) are built at `-Os`
+   via `OS_SRCS`. `COLD_LAST` link order isolates DSP code from cold changes.
+   `FS_OS=1` adds `filesystem.c` to `-Os` (−36 KiB, device-tested clean with
+   P3 fixes but off by default; stumble root cause not identified). Remaining
+   candidates: `menu.c` (−21 KB but TIM3 repaints; still moves 9 mixer
+   loops), CopyClear (−10 KB; moves 3 PWM loops), `buttonHandler.c` +
+   `ledHandler.c` (−6 KB; ISR code). `presetManager.c` (−4 KB; mixer gains a
+   call). None are gate-clean today.
 2. Large constant tables (`crashSample`, the wavetables, `transientData`) as
    data installed into the sample region; up to about 124 KiB; needs an
    install path and a reserved span.
-3. Dead legacy code: the Euklid and SOM generators are compiled in although
-   `ENABLE_EUKLID_PAGE 0` hides their page.
+3. Dead legacy code: the Euklid generator is compiled in although
+   `ENABLE_EUKLID_PAGE 0` hides its page. The SOM generator was archived
+   in S097 P0.
 4. **Grow the application window into sector 7** (S086 study): app 736 →
    992 KiB, sample flash 1,280 → 1,024 KiB. Every table stays an ordinary
    `const` array (no code or CPU change). Changes: the linker `FLASH`

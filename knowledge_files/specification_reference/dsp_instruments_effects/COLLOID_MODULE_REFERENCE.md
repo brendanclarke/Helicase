@@ -7,9 +7,30 @@ For the DSP design rationale and equations, see
 `COLLOID_MODELLING_REFERENCE.md`; for the instrument's place in the DSP
 pipeline alongside the other five types, see `INSTRUMENTS_DSP_REFERENCE.md`.
 
-- **Sessions:** S095 P2 (core implementation), S095 P3 (follow-ups).
-- **Type:** `INSTRUMENT_TYPE_COLLOID`, Basic class (may take any of the
-  six slots without counting towards the Advanced limit).
+- **Sessions:** S095 P2 (core implementation), S095 P3 (follow-ups),
+  S096 P2 (instrument fixes), S096 P3 (gate, pitch envelope, noise,
+  wavetable scan, MIDI note modes, Basic-share acceptance), S099 P1/P2
+  (chopped PWM R-S wave, Advanced Colloid `clx` with BBD chorus, PWM Sin
+  removed, amp-attack minimum removed, effect page rework).
+- **Type:** `INSTRUMENT_TYPE_COLLOID` (Basic) and `INSTRUMENT_TYPE_CLX`
+  (Advanced Colloid). The Basic Colloid may take any of the six slots
+  without counting towards the Advanced limit. The Advanced Colloid (`clx`)
+  runs the same engine plus a BBD chorus pass.
+- **S099 changes:** Chopped PWM wave R-S added (`COL_PWM_RS` 3,
+  `col_chopDcInit()` + `col_chopPairAdd()` in ITCM `.itcm.s099p1`);
+  REx tried and removed by ear; PWM Sin removed from all engines
+  (`COL_PWM_WAVE_COUNT` 5→4: Tri/Saw/Rec/R-S); R-S width narrowed
+  to 0.39% floor (`oscPwmDRec`); amp-attack minimum removed (all
+  envelopes run plain ADSR from gate); Advanced Colloid type `clx`
+  (BBD chorus kernel, half-rate wet `BBD_COL_HALF_RATE`, 63 rows);
+  effect page fx/dpt/rte/mix on page 4; `csr` derived from route.
+  Voice struct 1,224 B (was 1,236 B after S096, was 1,112 B after S095 P3).
+- **S096 changes:** C1 real note gate, C2a pitch envelope (third ADSR),
+  C2b noise source (`nos`), C2c wavetable scan (`wts`), oscillator count
+  10 for wav/wtb and 6 for pwm/wts (was 12/6), UBP and off filter types,
+  filter envelope range widened, PWM gliding fix, Basic-share B1-B6
+  optimisation, voice struct 1,236 B (was 1,112 B), 59 parameter rows
+  (was 50).
 
 ---
 
@@ -17,9 +38,9 @@ pipeline alongside the other five types, see `INSTRUMENTS_DSP_REFERENCE.md`.
 
 | File | Role |
 |---|---|
-| `Core/DSP/Instruments/Colloid/ColloidVoice.h/.c` | Voice struct (1,112 B), init, trigger, async (control rate), sync-block (audio rate), parameter apply |
-| `Core/DSP/Instruments/Colloid/ColloidOsc.h/.c` | Integer pair-loop oscillator engine: `col_read()`, `col_pulse()`, four loop functions in ITCM |
-| `Core/DSP/Instruments/Colloid/ColloidParameters.h/.c` | Parameter descriptor table (50 rows, 8 pages), labels, format helpers, cell-inactive predicates |
+| `Core/DSP/Instruments/Colloid/ColloidVoice.h/.c` | Voice struct (1,224 B after S099; was 1,236 B after S096, 1,112 B after S095 P3), init, trigger, gate machine (C1), pitch envelope (C2a), noise source (C2b), async (control rate), sync-block (audio rate), chop block (`col_chopDcInit`, `col_chopPairAdd` in ITCM, `col_chopBlock`), parameter apply. S099: amp-attack minimum removed; all envelopes run plain ADSR from gate |
+| `Core/DSP/Instruments/Colloid/ColloidOsc.h/.c` | Integer pair-loop oscillator engine: `col_read()`, `col_pulse()`, four loop functions in ITCM; noise loop (C2b, no ITCM); wavetable scan loops (C2c). S099: PWM Sin form WS loops removed |
+| `Core/DSP/Instruments/Colloid/ColloidParameters.h/.c` | Parameter descriptor table (59 rows Basic / 63 rows Advanced clx after S099; was 59 after S096, 50 after S095 P3), 8 pages (Basic) / 8+ pages (clx), labels, format helpers, cell-inactive predicates |
 | `Core/DSP/Instruments/Colloid/ColloidTables.h/.c` | Position tables (PWM width indexed by pos), interval tables, format lookup tables |
 | `Core/DSPAudio/AlkalinePostTables.c/.h` | Shared post-FX tables (tanh drive, tone); also used by Alkaline |
 | `SD_CARD/Instrument/Colloid/init.col` | Default instrument file |
@@ -33,13 +54,13 @@ rule; parameters in normal sources (`-O2`); tables in normal sources.
 
 | Field | Value |
 |---|---|
-| Enum | `INSTRUMENT_TYPE_COLLOID` (before `INSTRUMENT_TYPE_UNKNOWN`) |
+| Enum | `INSTRUMENT_TYPE_COLLOID` (before `INSTRUMENT_TYPE_TKT`; was before `INSTRUMENT_TYPE_UNKNOWN` prior to S096) |
 | Token | `col` (3 characters, as required by the storage format) |
 | Extension | `.col` |
 | Directory | `/Instrument/Colloid` (FAT 8.3-safe) |
 | Display label | `Colloid ` (fits 8 LCD cells) |
 | Flags | `INSTRUMENT_FLAG_BASIC` |
-| Struct | `ColloidVoice` in the `InstrumentRuntimeSlot` union (1,112 B, fits the reserve) |
+| Struct | `ColloidVoice` in the `InstrumentRuntimeSlot` union (1,224 B after S099; was 1,236 B after S096, 1,112 B after S095 P3) |
 
 The registry row is designated (`[INSTRUMENT_TYPE_COLLOID] = { ... }` in
 `instrument_registry[]`). The type was appended (never inserted), so the
@@ -47,7 +68,7 @@ The registry row is designated (`[INSTRUMENT_TYPE_COLLOID] = { ... }` in
 
 ---
 
-## 3. Voice Struct (`ColloidVoice`, 1,112 B after P3)
+## 3. Voice Struct (`ColloidVoice`, 1,224 B after S099; was 1,236 B after S096, 1,112 B after S095 P3)
 
 Key fields:
 
@@ -62,9 +83,12 @@ Key fields:
 | `busS[32]` | `int32_t[32]` | Side bus accumulator |
 | `right[32]` | `int16_t[32]` | Right-channel output block |
 | `svf[2]` | `ColSvf` | Two TPT SVF filter states |
-| `eg[2]` | `ColEg` | Two envelope generators (AEG + modulation EG) |
+| `eg[3]` | `ColEg` | Three envelope generators: AEG, modulation EG, pitch EG (C2a, S096) |
 | `lfo` | `Lfo` | LFO state |
-| `oscInfo` | `OscInfo` | Oscillator configuration (count, type, wave, pwm mode) |
+| `oscInfo` | `OscInfo` | Oscillator configuration (count, type, wave, pwm mode); count 10 for wav/wtb, 6 for pwm/wts (S096) |
+| `gateState` | `uint8_t` | Gate machine state: IDLE/ATTACK/HOLD/RELEASE (C1, S096) |
+| `noiseState` | (struct) | Noise source state: RNG, HP, SVF, tone/width/pan (C2b, S096) |
+| `scanIndex` | `float` | Wavetable scan position for `wts` type (C2c, S096) |
 | `parameters` | (various) | Cached parameter values from Scene image |
 | `state` | `uint8_t` | Voice state (idle/attack/decay/sustain/release) |
 
@@ -91,7 +115,13 @@ runs once per 32-sample block:
      `SMLAWT`, accumulates into `busM[]` and `busS[]`.
    - PWM Rec/Saw: `col_pwmPairStore` / `col_pwmPairAdd` with sign
      parameter.
-   - PWM Sin/Tri: warp pair loops in `.itcm.s095p3`.
+   - PWM Tri: warp pair loops in `.itcm.s095p3` (Sin removed S099).
+   - PWM R-S (chopped ramp, S099): `col_chopPairAdd` in `.itcm.s099p1`
+     (306 B). Preceded by `col_chopDcInit()` (flash) which computes the
+     DC correction per block from start/end widths. Two-pass
+     `col_chopBlock()`: pass 1 computes six-oscillator mean, pass 2
+     normalises each pair's gate with packed Q14 gain and applies per-osc
+     level through the existing bus multiplies.
 
 3. **Normalisation**: `busM` and `busS` scaled by `COL_NORM_WAV` (plain)
    or `COL_NORM_PWM` (PWM), which is `1/√N` by ear (decision C-D12).
@@ -153,17 +183,26 @@ the sync block:
 
 ---
 
-## 6. Trigger and Release
+## 6. Trigger, Gate and Release
 
 **Trigger** (`Colloid_trigger`):
-- Resets envelopes to attack state
+- Resets envelopes to attack state (AEG, mod EG, pitch EG)
 - Does NOT reset oscillator phases (free-running, decision C-D2 context)
 - Latches wavetable frames for wavetable oscillator types (C-D4)
+- Latches scan start frame for `wts` scan type (C2c, S096)
 - If `sus` switch is on and transport is running, envelope will hold at
   sustain level
 
+**Gate (C1, S096):**
+- Real note gate based on step length, length special, sustain switch, and
+  Scene/track change. Stage machine: IDLE → ATTACK → HOLD → RELEASE.
+- Gate length is the step's trigger length (or the length special value).
+- `sus` on + transport running: gate holds indefinitely (the S095 behaviour).
+- Scene change or track reassignment forces release.
+- Constant CPU: the gate machine runs every block regardless of state.
+
 **Release** (implicit):
-- Envelope enters release stage
+- Envelope enters release stage when gate ends
 - Voice goes idle when envelope reaches zero
 
 **Transport stop**:
@@ -172,7 +211,7 @@ the sync block:
 
 ---
 
-## 7. Parameter Table (50 Rows, 8 Pages)
+## 7. Parameter Table (59 Rows after S096, 8 Pages)
 
 ### Page layout
 
@@ -191,8 +230,8 @@ the sync block:
 
 | Row | Dtype | Range | Notes |
 |-----|-------|-------|-------|
-| `typ` | MENU | wav/smp/slp/wtb/pwm | Oscillator type selector (flag SELECTOR, not morphable) |
-| `wav` | MENU | depends on typ | Waveform: Saw/Rec/Tri/Sin/wavetable for wav; sample list for smp/slp; wavetable list for wtb; Rec/Saw/Sin/Tri for pwm |
+| `typ` | MENU | wav/smp/slp/wtb/pwm/wts/nos | Oscillator type selector (flag SELECTOR, not morphable); `wts` = wavetable scan (C2c, S096), `nos` = noise (C2b, S096) |
+| `wav` | MENU | depends on typ | Waveform: Saw/Rec/Tri/Sin/wavetable for wav; sample list for smp/slp; wavetable list for wtb; Tri/Saw/Rec/R-S for pwm (Sin removed S099, REx tried and removed S099); wavetable list for wts; fixed for nos |
 | `pos` | 0B127 | 0..127 | Wave position / PWM pulse width (128 distinct widths after S094 P4 fix) |
 | `psp` | 0B127 | 0..127 | Wave position spread across oscillators (psp^1.393 curve, ×5 range) |
 | `in1`/`in2`/`in3` | PM63 | −63..+63 | Interval semitones, applied by o mod 4 grouping |
@@ -204,6 +243,14 @@ the sync block:
 | `fro` | PM63 | −63..+63 | Filter₂ frequency offset from filter₁ |
 | `drv` | 0B127 | 0..127 | Post-filter OTA tanh drive amount |
 | `ton` | 0B127 | 0..127 | Post-filter one-pole tone |
+| `pta` | 0B127 | 0..127 | Pitch EG attack (C2a, S096) |
+| `ptd` | 0B127 | 0..127 | Pitch EG decay (C2a, S096) |
+| `pam` | PM63 | −63..+63 | Pitch EG amount ±24 semitones, 0.38 st/step (C2a, S096) |
+| `ntn` | 0B127 | 0..127 | Noise tone (C2b, S096) |
+| `nwd` | 0B127 | 0..127 | Noise width (C2b, S096) |
+| `npn` | PM63 | −63..+63 | Noise pan (C2b, S096) |
+| `scn` | 0B127 | 0..127 | Wavetable scan speed (C2c, S096) |
+| `cnt` | MENU | — | Oscillator count selector (10/6; S096 B1-B6) |
 
 ### Cell-inactive predicates
 
@@ -220,24 +267,56 @@ the sync block:
 | Section | Content | Size (approx.) |
 |---------|---------|----------------|
 | `.itcm.s095p2` | `col_oscPairStore`, `col_oscPairAdd`, `col_pwmPairStore`, `col_pwmPairAdd` | ~600 B |
-| `.itcm.s095p3` | PWM Sin/Tri warp pair loops (store and add variants) | ~350 B |
+| `.itcm.s095p3` | PWM Tri warp pair loops (store and add variants; Sin loops removed S099) | ~350 B (was ~350 B; Sin loops freed 856 B total ITCM) |
+| `.itcm.s096p3` | Colloid noise loop (C2b) | — |
+| `.itcm.s099p1` | `col_chopPairAdd` (R-S chop loop, S099) | 306 B |
 
-Total ITCM after S095: 15,232 / 16,384 B (93.0 %).
+Total ITCM after S099: 15,432 / 16,384 B (94.2 %; 952 B free). Was 15,976 after S096,
+16,288 after S099 P1 P-C (before PWM Sin removal), 15,232 after S095.
 
 ---
 
 ## 9. Cost
 
-### 9.1 Device measurements (P4 §7)
+### 9.1 Device measurements
+
+After B1-B6 optimisation (S096), all Basic Colloid modes fit the Basic share
+(19,620 cycles/block). Oscillator count: 10 for wav/wtb, 6 for pwm/wts/nos.
 
 | Configuration | Cycles/block | Within budget? |
 |---------------|-------------|----------------|
-| plain 12, stereo filter | ~12,227 | Yes (Basic = 19,620) |
-| pwm 6, Saw/Rec | ~10,371 | Yes |
-| pwm 6, Sin/Tri | ~10,435 | Yes |
-| **Worst case** (wtb 12, stereo) | **17,433** | Yes |
+| wav 10, stereo filter | ≤ 19,620 | Yes (Basic = 19,620) |
+| pwm 6, Saw/Rec | ≤ 19,620 | Yes |
+| pwm 6, Tri (Sin removed S099) | ≤ 19,620 | Yes |
+| pwm 6, R-S (chop, S099) | ≤ 19,620 | Yes (host: chop6-par 387.8, below pwm6-par) |
+| wts 6, wavetable scan | ≤ 19,620 | Yes |
+| nos 6, noise | ≤ 19,620 | Yes |
+| **Basic worst case** | **≤ 19,620** | Yes |
+
+**Advanced Colloid (`clx`, S099):** the Basic engine plus a BBD chorus pass.
+Device measurements from `SD_CARD_ADV/asavetrc.bin` (slot 3 as clx):
+
+| Measure | Value | Cap |
+|---------|-------|-----|
+| Median | 21,034 | 21,803 (Advanced) |
+| p95 | 22,397 | 21,803 |
+| Max | 23,076 | — |
+
+The Advanced step costs +2,026 cycles at the median (instruction model: 2,025
+at CPI 1.4). The p95 exceedance comes from the Colloid engine itself (its
+Basic p95 20,267 was already above the Basic share). Host: `clx-pwm6-par`
+449.8 instructions/sample (chorus 47.0, with half-rate wet `BBD_COL_HALF_RATE`).
 
 Cost per instruction: 1.37–1.41 cycles/instr.
+
+### 9.3 Note length (S099)
+
+The Colloid note is as long as the step (or the length special's window). All
+three envelopes (amp, filter, pitch) run a plain ADSR from the gate. The S096
+P3 amp-attack minimum is removed: a step shorter than the amp attack now
+releases mid-attack from the level it reached. `col_egStep()` takes no
+`isAmp` argument. `heldFP` is removed. Every Colloid mode's per-block cost
+fell by 56 instructions as a result.
 
 ### 9.2 Cost breakdown (approximate)
 
@@ -266,14 +345,14 @@ Cost per instruction: 1.37–1.41 cycles/instr.
 
 ### Changing the oscillator count
 
-The oscillator count is `COL_OSC_COUNT` (12 for plain, 6 for PWM). To
-change it:
-1. Update `COL_OSC_COUNT` and the corresponding `COL_NORM_WAV`/
-   `COL_NORM_PWM` normalisation factors.
+The oscillator count is per-type: 10 for wav/wtb, 6 for pwm/wts/nos
+(S096 B1-B6). To change it:
+1. Update the per-type count constants and the corresponding
+   `COL_NORM_WAV`/`COL_NORM_PWM` normalisation factors.
 2. Verify that the voice struct still fits within the tagged runtime slot
-   (1,176 B reserve).
+   (1,264 B reserve).
 3. Device-measure the new cost against the Basic budget (19,620 cycles).
-4. The pair-loop count in the sync block is `COL_OSC_COUNT / 2`.
+4. The pair-loop count in the sync block is count / 2.
 
 ### Adding a filter mode
 

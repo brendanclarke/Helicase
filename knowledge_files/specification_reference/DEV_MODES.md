@@ -13,9 +13,23 @@ Scene-follow-up build, the Session 057 stall-detection expansion
 (`DEV_STALL_DETECTION`, ten `X`/`PHASE_STALL` sites), Session 061's
 `Q` AutoSave boot-reader decisions, Session 067's PatternTrace stage codes
 (see PatternTrace section below), Session 068's `U`/`K` AutoSaveTrace
-stage codes, and Session 075's copy/clear stage `c` (layouts in
-`COPYCLEAR_UTILITIES.md` §15). Plans and failed working-tree experiments
-that mention a unified `/devlog.bin` are not implemented state.
+stage codes, Session 075's copy/clear stage `c` (layouts in
+`COPYCLEAR_UTILITIES.md` §15), and Session 098's Scene switch trace stage
+`'x'`. Plans and failed working-tree experiments that mention a unified
+`/devlog.bin` are not implemented state.
+
+**Session 099 P3 (2026-11-20) — AutoSave trace starvation rule (binding,
+permanent):** development logging, tracing, probes and every other
+diagnostic must NEVER take priority over a core system function (AutoSave,
+settings/MIDI Learn/HCNAMES, Load/Save, audio, sequencer, UI). Six
+sub-rules: (1) last in every queue; (2) never block/delay/reorder core
+work; (3) a logging build must behave like a release build for core
+functions; (4) review every new diagnostic against 1–3 before shipping;
+(5) core persistence is designed against a 5 s deadline; (6) a diagnostic
+must not even start while core work is pending. This rule outranks any
+earlier diagnostic design note (the S048 "pre-drain diagnostic witness"
+ordering is removed). See `099_SESSION_HANDOFF_LOG.md` P3 §0 for the full
+text.
 
 Session 072 Step 4 adds the screen-only EffectsManager registry self-check
 code and the `DEV_EFFECT_FORCE_TYPE` boot test knob described below. Session
@@ -312,8 +326,9 @@ stage:u8, flags:u8, tick16:u16, value:u32
 Integer fields are little-endian. Stage bytes are uppercase
 `D I J N L R W F G B S A V M C P T X O E Q U K Z H` (plus the retired `Y`),
 and their meanings/values are owned by `AutosaveTrace.h`. **All 26 uppercase
-letters are now taken**, so a new event must extend an existing stage's flag
-bits rather than add a letter. S074 did exactly that for torn records
+letters are now taken**; lowercase stages `c d f k m s w x` are also assigned.
+A new event must extend an existing stage's flag bits rather than add a
+letter. S074 did exactly that for torn records
 (`V` bits 4..5, below). `X`, `O`, and `E` were added in Session 054 while
 chasing the recursive-delete `ScnS05` defect (see
 `knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md`); a fourth stage,
@@ -364,6 +379,63 @@ repaired or failed directory during the boot-time FAT directory tail trim
 subdirectories) | status bits. `value` = live entry count | deleted entries
 cut << 16. The decoder's stage-`d` branch is in
 `tools/diagnostic_tools/decode_devlogs.py`. 0 B of state (boot only, stack).
+
+S097 P3 adds lowercase `f` (`AUTOSAVE_TRACE_STAGE_FS_PASS`): filesystem pass
+timing from the DEV probe in `filesystem_tick()`. `filesystem_tickBody()` is
+wrapped by TIM2 reads. Records:
+
+| flags | Record | When |
+|------:|--------|------|
+| 0 | slow pass | `filesystem_tick()` call ≥ 1,000 µs |
+| 1 | operation maximum | when the entered operation changes |
+| 2 | underrun | every rise of `audioCodec_underrunCount` |
+| 3 | main-loop gap | once per second: longest gap between two `filesystem_tick()` starts |
+
+Rules: nothing recorded before `audioCodec_isInitialized()`; nothing recorded
+for trace flush or boot-log operations (a record must not start the next
+flush). Cost: two TIM2 reads and a few compares per pass; at most one record
+per second. RAM: 20 B DEV `.bss` (filesystem.c, SRAM1). Decoder:
+`tools/diagnostic_tools/decode_devlogs.py` stage-`f` branch.
+
+S097 P3 adds lowercase `k` (`AUTOSAVE_TRACE_STAGE_LOADSAVE_CLICK`):
+Load/Save page OK click outcomes. Records the disposition of every OK press
+and replay on the Load/Save pages:
+
+| flags | Outcome |
+|------:|---------|
+| 0 | accepted |
+| 1 | dropped: command running |
+| 2 | dropped: blank name |
+| 3 | dropped: copy held |
+| 4 | refused |
+| 5 | edit-mode toggle |
+| 6 | held (busy gate) |
+| 7 | replayed |
+
+The held-OK replay mechanism (`menu_loadSaveOkRetry`) holds a refused OK and
+replays it at `menu_pollPresetStatus()` when storage, Preset and filesystem
+are idle, the cursor is still on the OK row, and attempts remain
+(`MENU_LS_OK_ATTEMPTS` = 4). Dropped by any encoder turn or click, leaving
+the row or page, or attempts used up. 0 B new state (uses existing menu
+variables). Decoder: `tools/diagnostic_tools/decode_devlogs.py` stage-`k`
+branch.
+
+S098 P1 adds lowercase `x` (`AUTOSAVE_TRACE_STAGE_SCENE_SWITCH`):
+one record per executed whole-Scene change, recording what the per-track
+identity compare decided and how long it took.
+
+| field | Encoding |
+|------:|----------|
+| flags bits 0..6 | the keep mask: bit `t` = track `t` continued untouched |
+| flags bit 7 | 1 = the Effect was identical (rebound, not reset) |
+| value bits 0..7 | target Scene (0-based; 16 = Scene 17) |
+| value bits 8..15 | outgoing active Scene (0-based; 16 = Scene 17) |
+| value bits 16..31 | identity compare time in microseconds (saturated at 0xFFFF) |
+
+Producer: `preset_sceneSwitchKeepMask()` (`presetManager.c`).
+Consumer: `tools/diagnostic_tools/decode_devlogs.py` stage-`x` branch.
+An all-identical switch (keep = 0x7F, Effect kept) is audibly silent; a
+partial keep preserves the kept tracks and resets the changed ones.
 
 The S075 value vocabulary is:
 

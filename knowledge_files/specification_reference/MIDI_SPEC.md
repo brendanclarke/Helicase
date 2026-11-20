@@ -1,12 +1,18 @@
 # MIDI Specification and Code Reference
 
-> **Current as of Session 093 close (2026-11-10), branch
+> **Current as of Session 096 close (2026-11-20), branch
 > `dev-ph7-alkaline`.** The S083 MIDI implementation is
 > hardware-checked; the S084 changes (overlay rolls and flams on the master
 > tick, 15 overlay types, external clock interpolation) are built and
 > host-checked, hardware pending. S093 P4/P6 added the Alkaline (TB-303)
 > instrument: velocity 101–127 accents, gate 7/12 step, 28 NRPN rows
-> (§4.3, §5.1). Where this document and the code disagree, the code wins;
+> (§4.3, §5.1). S096 P3e added `MidiNoteModes.c/h`, which owns the
+> special note modes (normal, layer4, paraphonic); S096 T1 added wide
+> tracks for Tetrakt (four MIDI notes per track via `MidiNoteMap`);
+> S096 C3 added paraphonic note handling for Colloid on its own channel;
+> S096 C4 added channel pressure Learn (new MIDI Learn sources: pressure,
+> note, velocity; delta/absolute modes; overlay system, 72 B).
+> Where this document and the code disagree, the code wins;
 > fix this document in the same change.
 
 The LXR-02 MIDI interface:
@@ -307,6 +313,19 @@ at +64.
 Alkaline note's gate ends by its own step length, so a note-off does not end
 it (B-6).
 
+**Tetrakt wide tracks (S096 T1):** a Tetrakt track receives four MIDI
+notes simultaneously via `MidiNoteMap` wide tracks. Each incoming note is
+striped across the four Tetrakt layers, so a chord of four notes fills all
+layers of one track. The wide-track resolution is handled by
+`MidiNoteModes` in `layer4` mode.
+
+**Colloid paraphonic (S096 C3):** when a Colloid voice is on its own
+channel (not G), `MidiNoteModes` activates paraphonic note handling. Each
+new note is assigned to an interval slot across the oscillator bank; the
+assignment distributes incoming notes as pitch intervals on the existing
+voice rather than retriggering. The mode is automatic when the instrument
+type is Colloid and the track has its own MIDI channel.
+
 **Recording:**
 - Each trigger is reported to LiveRecord (source MIDI), with the overlay
   kind where one applies.
@@ -396,6 +415,14 @@ is `pv<`/`pv>` (§2.3).
   in that block. `alk_wave` is a selector (0 `Saw`, 1 `Sqr`), `alk_tuning` is
   0–127 with 63 centre (±700 cents), `alk_slide` is 0/1; S093 P6 appended
   `alk_attack` (26) and `osc1_position` (27).
+- **Colloid (S095 P2/P3, S096 P2/P3)** has 59 rows (0–58); 59–63 unused.
+  Includes oscillator type selector (`typ`: wav/wtb/rec/saw/sin/tri/pwm,
+  plus S096 `wts`/`nos`), pitch envelope (`pta`/`ptd`/`pam`), noise
+  shaping (`ntn`/`nwd`/`npn`), wavetable scan (`scn`/`cnt`), and filter
+  types LP/BP/HP/Notch/UBP/off. See `COLLOID_MODULE_REFERENCE.md`.
+- **Tetrakt (S096 P1)** has 64 rows (0–63), filling the entire voice block.
+  Four-layer sample player with per-layer decay, drive, SRR, tone (2-pole
+  bipolar SVF), level, pan/send. See `TETRAKT_MODULE_REFERENCE.md`.
 - **Unused IDs** are ignored and the message is forwarded.
 - **Channels:**
   - Every ID works on G.
@@ -609,6 +636,22 @@ token.
 
 Details: `FILESYSTEM_SPEC.md` "`midilrn.cfg`".
 
+### 6.5 Channel pressure Learn (S096 C4)
+
+S096 C4 added three new MIDI Learn sources beyond CC: **channel pressure**
+(aftertouch), **note number** and **note velocity**. Each source can
+operate in **delta** or **absolute** mode:
+
+- **Absolute:** the incoming value replaces the parameter's current value
+  (the same behaviour as CC Learn).
+- **Delta:** the incoming value is an offset from the parameter's stored
+  value, applied as an overlay.
+
+The overlay system uses 72 B of SRAM1. A pressure Learn entry follows the
+same rules as a CC Learn entry (§6.2): one parameter → at most one source,
+type-matched, slot-specific for voice targets, and stored in
+`midilrn.cfg`.
+
 ---
 
 ## 7. Program change and Bank change
@@ -812,6 +855,7 @@ prefix.
 | `MidiProgram.c/h` | `midiProgram_` | PC and CC0 receive | Foreground |
 | `MidiOut.c/h` | `midiOut_` | Every port write: framing, forwarding, realtime, notes with per-track note-off, PC, parameter TX, CC0 after a load | Foreground and TIM3 |
 | `MidiPitch.h` | `midiPitch_` | Default note 63, note-frequency table, detune helper | — |
+| `MidiNoteModes.c/h` | `midiNoteModes_` | Special note modes: normal, layer4, paraphonic (S096 P3e); owns fixed pools ~2,380 B SRAM1 | Foreground |
 | `MidiVoiceControl.c/h` | `voiceControl_` | Trigger funnel into the audio render (S081 pending-reset mask) | Producer any; consumer audio render |
 
 `valueShaper.h` is DSP code in `Core/DSPAudio/`.
@@ -824,6 +868,8 @@ prefix.
 - Only `MidiOut` writes ports.
 - `MidiNoteMap` depends on nothing but a Scene-settings read in
   `midiNoteMap_load()`.
+- `MidiNoteModes` depends on `MidiNoteMap` (wide-track resolution) and
+  Scene settings (instrument type per slot).
 
 ### 12.2 Receive flow
 
@@ -1178,7 +1224,33 @@ for the current type.
 - The static `midiOut_cc()` masks the channel to 4 bits and the data to 7
   bits.
 
-### 13.12 `MidiPitch.h` and `MidiVoiceControl`
+### 13.12 `MidiNoteModes.c/h` (S096 P3e)
+
+Owns the special note modes that run on top of the standard note map:
+
+- **Normal:** the default; `MidiNotes` triggers one voice per note as
+  before.
+- **Layer4 (Tetrakt):** when a Tetrakt track receives a note,
+  `MidiNoteModes` distributes four MIDI notes across the track's four
+  sample layers via `MidiNoteMap` wide tracks. Each layer receives its own
+  pitch.
+- **Paraphonic (Colloid):** when a Colloid voice is on its own channel,
+  incoming notes are assigned to oscillator-bank intervals rather than
+  retriggering. The first note triggers normally; subsequent held notes add
+  pitch intervals to the existing voice. Note-off removes an interval; the
+  last note-off releases.
+
+**RAM:** ~2,380 B SRAM1 in fixed pools (interval assignment tables, held
+note state per slot). See §18.
+
+**API:**
+- `midiNoteModes_noteOn(track, ch, note, vel)`: called by `MidiNotes`
+  after note-map resolution; dispatches to the active mode.
+- `midiNoteModes_noteOff(track, ch, note)`: releases a layer or interval.
+- The mode is selected automatically per track based on the slot's
+  instrument type and channel configuration.
+
+### 13.13 `MidiPitch.h` and `MidiVoiceControl`
 
 - **`MidiPitch.h`:** `MIDI_DEFAULT_TRIGGER_NOTE` 63, the note-frequency
   table and `midiPitch_detune()` (used by `Oscillator.c`).
@@ -1547,6 +1619,8 @@ Run with RXF/TXF = `all` and a DAW plus a DIN loopback.
 | Per-track overlay table 7 × 4 B (S084; was 7 × 8 B) | 28 | `buttonHandler` |
 | Live overlay engine + mailbox (S084): 6 × 7 B state, rhythm 1 B, 7 hit counts, flam mask 1 B, 7 × 4 B stamps | 79 | Sequencer |
 | External clock owed ticks (S084) | 1 | Sequencer |
+| Note-mode fixed pools: interval tables, held-note state per slot (S096 P3e) | ~2,380 | `MidiNoteModes` |
+| Channel pressure Learn overlay system (S096 C4) | 72 | `MidiLearn` |
 | NRPN RX contexts 2 × 8 × 3 B | 48 | `MidiControl` |
 | Parameter TX: NRPN key cache 2 × 2 B, pending 2 B, last send 2 B | 8 | `MidiOut` |
 | TX note-off record 7 × 2 B | 14 | `MidiOut` |
@@ -1593,6 +1667,14 @@ listed needs a new acknowledgement.
 - Overlay hits fire in TIM3; LiveRecord is called only from the foreground
   drain. An external clock edge runs only the first tick of its period;
   never run a period's ticks back to back (S084).
+- Note-mode selection is automatic: the instrument type and channel
+  configuration determine the mode; there is no user setting (S096 P3e).
+- Tetrakt wide tracks consume four notes per track; a fifth note on the
+  same track is ignored (S096 T1).
+- Paraphonic intervals are released on note-off and cleared on retrigger
+  (S096 C3).
+- Channel pressure Learn overlays are cleared on parameter edit and on
+  Scene change (S096 C4).
 
 ---
 
@@ -1637,6 +1719,10 @@ in `083_SESSION_HANDOFF_LOG.md` §4.
 | S084 Q3, Q6, Q9 | Overlay roll repeats and the flam main run on the master tick, spaced from the press; while stopped under external sync they follow the measured tempo. |
 | S084 Q7, Q8 | Every held overlay/MIDI roll records as a span; the `pv` rhythm is recorded into the step `rtm`. |
 | S084 A1 | External clock ticks are interpolated between edges. |
+| S096 T1 | Tetrakt wide tracks: four MIDI notes per track, striped via `MidiNoteMap`. |
+| S096 C3 | Colloid paraphonic: own-channel Colloid tracks get interval assignment instead of retrigger. |
+| S096 C4 | Channel pressure Learn: new MIDI Learn sources (pressure, note, velocity), delta/absolute modes, 72 B overlay system. |
+| S096 P3e | `MidiNoteModes.c/h` owns normal/layer4/paraphonic mode selection; ~2,380 B SRAM1 fixed pools. |
 
 **Accepted limits:**
 - a hanging downstream note after a mid-note map change (R9);

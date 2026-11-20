@@ -73,8 +73,9 @@ This requirement is satisfied.
 Why:
 1. `PAR_OSC_WAVE_INTERP` is in the global parameter domain.
 2. The strict keyed settings.cfg schema writes and reads the allowlisted key
-   `osc_wave_interp` in filesystem_saveGlobals_tick() and
-   filesystem_loadGlobals_tick().
+   `osc_wave_interp` in `filesystem_safeTextWrite_tick()` (formerly
+   `filesystem_saveGlobals_tick()`, merged S097 P1) and
+   `filesystem_loadGlobals_tick()`.
 3. On apply, menu global application calls menu_parseGlobalParam() for the
    loaded value, which re-applies the modulation runtime toggle.
 

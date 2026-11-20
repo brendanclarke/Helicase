@@ -4,7 +4,7 @@
 
 This is the authoritative reference for the menu system, LCD display, LED
 management, button handling, and endless-pot controls, **current as of
-Session 094** (2026-11-13, `dev-ph7-alkaline`).
+Session 099** (2026-11-20, `dev-ph7-alkaline`).
 
 This document covers the UI framework: page structure, cell resolution, the
 dtype system, display and LED rendering, input handling, parameter commit flow,
@@ -14,9 +14,13 @@ and the Morph views.  Module boundary contracts (full API tables) live in
 controls are in `PERFORMANCE_RECORD_SPEC.md`.
 
 Source files: `Core/Menu/menu.c/.h` (page system, cell resolution, edit
-dispatch, parameter commit, repaint), `Core/Menu/menuPages.h` (static page
-table), `Core/Menu/menuEffects.c/.h` (Effect page), `Core/Menu/MenuText.h`
-(label strings), `Core/Menu/Cc2Text.c` (`modTargets[]`),
+dispatch, parameter commit, repaint, Load/Save OK retry), `Core/Menu/menuPages.h`
+(static-page table: 6 table pages × 8 sub-pages + per-page slot index),
+`Core/Menu/menuEffects.c/.h` (Effect page), `Core/Menu/MenuText.h`
+(extern label pool declarations + `menuLabel_short/cat/long()` accessors),
+`Core/Menu/MenuLabels.c` (label pools: `shortNames` 224, `catNames` 48,
+`longNames` 178 entries; 217 descriptor-only labels, S097 P1),
+`Core/Menu/Cc2Text.c` (`modTargets[]`),
 `Core/Hardware/frontPanel/buttonHandler.c/.h` (event ring, mode switching, SHIFT
 state), `Core/Hardware/frontPanel/ledHandler.c/.h` (LED layers, blink/pulse/flash,
 chase), `Core/Hardware/frontPanel/lcd.c/.h` (LCD queue, TIM7 driver),
@@ -29,9 +33,12 @@ chase), `Core/Hardware/frontPanel/lcd.c/.h` (LCD queue, TIM7 driver),
 
 ### 1.1 Page table
 
-The static page table is `menuPages[NUM_PAGES][NUM_SUB_PAGES]` in
-`menuPages.h`.  Each cell in a sub-page is a `(TEXT_*, PAR_*)` pair.
-`TEXT_EMPTY` / `PAR_NONE` terminates the sub-page.
+The static page table (S097 P1) uses `menuStaticPages[6][NUM_SUB_PAGES]`
+for the six pages with editable cells plus `menuStaticPageSlot[NUM_PAGES]`
+(1-based index; 0 = not a table page).  `menu_pageRow(page, subPage)`
+returns the row or the shared all-zero `menu_emptyPageRow`.  Each cell in a
+sub-page is a `(TEXT_*, PAR_*)` pair.  `TEXT_EMPTY` / `PAR_NONE` terminates
+the sub-page.  Source: `Core/Menu/menuPages.h`.
 
 | Page index | Name | Content |
 |---|---|---|
@@ -44,7 +51,7 @@ The static page table is `menuPages[NUM_PAGES][NUM_SUB_PAGES]` in
 | 12 | `EUKLID_PAGE` | Euclidean generator |
 | 13 | `PATTERN_SETTINGS_PAGE` | Chain editor (`cn1 nx1 cn2 nx2`) |
 | 14 | `RECORDING_PAGE` | SHIFT+REC settings (overlay types, rhythms, `qnt`, `rtk`) |
-| 15 | `SOM_PAGE` | SOM generator |
+| 15 | `SOM_PAGE` | Unused (SOM archived S097 P0; id kept so EFFECT_PAGE keeps its value) |
 | 16 | `EFFECT_PAGE` | Registry-driven (resolved by `menuEffects.c`, not from static table) |
 
 ### 1.2 Sub-page navigation
@@ -118,6 +125,36 @@ The LFO rate table `lfoRateHz[128]`: frq 0 = stopped (DC), frq 1 = 100 s
 period (0.01 Hz), semitone grid from index 63 to 127 (musical rate
 quantisation above the midpoint).
 
+#### 2.1.4 Advanced instrument pages (S099)
+
+Advanced types (`clx`, `alx`) present the same descriptor pages as their
+Basic counterparts plus an effect page (page 4, the 5th SELECT click) with
+four cells: `fx` / `dpt` / `rte` / `mix`.  Colloid Advanced (`clx`) has 63
+descriptor rows across 8+ pages; Alkaline Advanced (`alx`) has 35 rows.
+
+The effect page keys are `fx_type`, `fx_depth`, `fx_rate`, `fx_mix`
+(category `CAT_EFFECT`).  `fx` is a fixed selector (`IM_SPECIAL_FX_TYPE`);
+its writer claims or releases the voice's BBD chorus unit.  `dpt` uses the
+tagged dtype `DTYPE_0B127_FX_DEPTH` (`DTYPE_0B127` with high-nibble tag
+`DTYPE_TAG_FX_DEPTH`): values 0–2 display I / II / 1+2 (Juno modes); 3–127
+display the number and follow rate.  `rte` is 0–127 (`bbdRateHz[]`,
+0.1–10 Hz).  Every cell except `fx` is blank when `fx` = off.
+
+#### 2.1.5 Step editing (S099)
+
+Step edit screen order: `vel` / `nte` / `tim` / `fil` (screen 1), `cdn` /
+`rol` / `rtm` (screen 2).  `rfl` renamed to `fil` (category "Step", long
+name "Fill"); behaviour unchanged.
+
+**VOICE mode SHIFT+step:** opens the step edit page (`SEQ_PAGE` sub-page 1);
+further steps join the selection; every held step flashes; edits apply to
+every held step; released steps stop flashing; last release returns to the
+VOICE page that was showing.  `bh_voiceStepEdit` stores `menuIndex + 1` on
+open and restores on last release.  A mode change closes the edit.
+
+**STEP mode:** every held step now flashes (not just the selected one).
+`led_clearAllBlinkLeds()` runs only when no other step is held.
+
 ### 2.2 Effect page (registry-driven)
 
 Effect cells are resolved through `menuEffects_resolveCell()`.  Layout screens
@@ -127,8 +164,11 @@ commit to `menuEffects_*`.  Full specification: `EFFECTS_BUS_REFERENCE.md` §8.
 
 ### 2.3 Static pages
 
-Global, STEP, PERF, RECORDING, PATTERN_SETTINGS, EUKLID, SOM pages use the
-static `menuPages` table.  Cell identity comes from the `PAR_*` constant.
+Global (MENU_MIDI), STEP (SEQ), PERF, RECORDING, PATTERN_SETTINGS and EUKLID
+are the six table pages in `menuStaticPages`.  SOM_PAGE is unused (S097 P0
+archive; its first row is blanked).  Cell identity comes from the `PAR_*`
+constant.  `menu_pageRow(page, subPage)` returns the all-zero empty row for
+any non-table page, so callers do not need to check the slot.
 
 ### 2.4 Parameter commit flow
 
@@ -297,6 +337,14 @@ A slot that starts while the other runs joins its phase.
 `led_clearAllBlinkLeds()`, `led_setMode2()` and `led_setValue()` cannot disturb
 the fast layer.  `led_clearAll()` frees both slots (the owner re-asserts them
 next tick).
+
+**Scene 17 LED (S098 T3).** `menu_syncQueuedSceneLed()` fast-blinks
+`LED_MODE4` on the `BANK_LOAD` slot whenever `scene_backgroundExists()`, in
+every mode, transport running or stopped.  This covers Bank, Scene and
+Pattern Loads through the background machine.  The existing unlocked Bank
+Load blink (the panel not in Load/Save mode) is a second condition on the
+same slot, so the LED stays lit for whichever lasts longer.  It clears when
+Scene 17 is released by the first whole-Scene change away from it.
 
 ### 6.5 PERF SEQ LEDs
 

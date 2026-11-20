@@ -73,6 +73,69 @@ be performed when the opportunity arises, not blocking items for current work.
   - CrumpBit `rvb` damping: `toneK[ton >> 1]` across full row (126/127
     both flat)
   - Flash: 720,084 B; ITCM: 15,232 / 16,384 B
+- **S096 P1–P3 Tetrakt, Colloid extensions, MIDI note modes
+  (open — needs device test):**
+  - Tetrakt: boot with `init.tkt`; Instrument Load listing; all 8 pages;
+    four layers audible; layer switch `lon` stops; fused sample read; space
+    stage S1 delay (FxBuffer voice unit claim); W2 allpass width; R1
+    fade-then-start retrigger; CPU worst case (Basic budget); pan/send per
+    layer; SRR and tone per layer
+  - Colloid gate C1: real note gate based on step length / sustain / Scene
+    change; verify gate off silences, gate on sustains
+  - Colloid pitch envelope C2a: ±24 semitone sweep, ADSR shape, pam
+    resolution (0.38 st per step)
+  - Colloid noise C2b: hardware RNG source, one-pole HP + TPT SVF, tone/
+    width/pan shaping; verify `nos` type appears in oscillator type selector
+  - Colloid wavetable scan C2c: `wts` type, 6-frame interpolated scan;
+    verify scan glides while note plays
+  - Colloid filter: UBP and off types; filter envelope range widened
+  - Colloid oscillator counts: 10 for wav/wtb, 6 for pwm/wts/nos
+  - MidiNoteModes: Tetrakt layer4 mode (four MIDI notes per track);
+    Colloid paraphonic mode on own channel; normal mode on other types
+  - Channel pressure Learn: pressure/note/velocity sources, delta/absolute
+    modes
+  - Instrument fixes P2: Delay/Echo linear interpolation (hermite → lerp),
+    Colloid filter envelope range, Tetrakt spatializer ranges, Colloid PWM
+    gliding fix, compressor sidechain duck easing
+  - Flash: 743,016 B (headroom 10,648 B); ITCM: 15,976 / 16,384 B
+  - IM-OVL: overlay interaction with Tetrakt layer triggers
+  - LR-VAL: LiveRecord validation for Tetrakt four-note triggers
+  - CO-NOISE: Colloid noise spectra verification (host test gap)
+- **S097 P2/P3 program flash refactor, filesystem fixes
+  (open — needs device test):**
+  - Flash budget: 714,980 B (headroom 38,684 B, above 16 KiB warning);
+    with FS_OS=1: 678,740 B (headroom 74,924 B)
+  - ParamDescriptor compaction: verify all instrument pages display
+    correct short/long/category labels via pool accessors
+  - menuStaticPages / menu_pageRow(): page navigation unchanged
+  - OS_SRCS / COLD_LAST: boot, play, save/load — no regression from
+    link-order change; LTO jitter on DSP loops within ±1 instruction
+  - Bank Save mask fix (§13): perform a Bank Save and verify the
+    correct Scenes are written (masks now set after `filesystem_start()`)
+  - Boot notice non-blocking overlay: boot with `DEV_MODE_LOGGING 1`
+    and verify the boot notice draws while background tasks run;
+    background budget now 30 µs/ms (3 % while playing)
+  - Scene Load apply: load a Scene and verify patterns realign
+    (`preset_startLoadApply(scene_mask)` +
+    `filesystem_patternRealignPlayingTracks(scene_mask)`)
+  - Held OK replay: hold OK during a save, verify it retries on
+    completion (`menu_loadSaveOkRetry`)
+  - DEV trace stages `'f'` and `'k'`: enable and confirm records appear
+    in `asavetrc.bin`
+- **S098 P1/P2 Scene Switch Corrections (open — needs device test):**
+  - P1 matrix (`S098_P0_SCENE_SWITCH_CORRECTIONS.md` §8): per-track
+    identity-based Scene switching; verify identical-Scene switch is
+    inaudible, partial-match switch resets only changed tracks, DEV
+    trace `'x'` records appear with correct keep masks
+  - P2 matrix: Scene and Pattern Loads through Scene 17; verify played
+    Scene moves to 17 before the Load writes, LED_MODE4 flashes while
+    17 exists, Scene switch back after Load uses per-track identity
+  - Assessment F1 guard: trigger MIDI PC during an in-flight Instrument
+    apply and confirm all LFO/velocity bindings reinstall
+  - Flash: FS_OS=1: 684,160 B (headroom 69,504 B); FS_OS=0: 720,320 B
+    (headroom 32,912 B). ITCM unchanged
+  - Copy SD cards to `SD_CARD_S098_P1` / `SD_CARD_S098_P2`; decode
+    `'x'` records with `decode_devlogs.py`
 - **S089 P3 Drum FM ramp efficiency H1–H6 (open):**
   - H1: boot and play Drum `fm` with `slp`/`smp`/`wtb` — sounds correct
   - H2: A/B against the P2 image with `fm` carriers — no audible difference

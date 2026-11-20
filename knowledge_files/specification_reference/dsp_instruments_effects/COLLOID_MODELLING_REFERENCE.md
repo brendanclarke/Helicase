@@ -7,9 +7,16 @@ design, and stereo positioning model. For the firmware implementation, see
 `COLLOID_MODULE_REFERENCE.md`; for the instrument's place in the DSP
 pipeline, see `INSTRUMENTS_DSP_REFERENCE.md`.
 
-- **Sessions:** S095 P2 (core implementation), S095 P3 (follow-ups).
+- **Sessions:** S095 P2 (core implementation), S095 P3 (follow-ups),
+  S096 P2 (instrument fixes), S096 P3 (gate, pitch envelope, noise,
+  wavetable scan, Basic-share acceptance).
 - **Design origin:** `S095_P2_DRAFT_COLLOID.md` (the plan, deleted after
   logging) and its decisions C-D1..C-D21.
+- **S096 extensions:** C1 real note gate, C2a pitch envelope (third ADSR,
+  ±24 semitones), C2b noise source (hardware RNG, one-pole HP + TPT SVF),
+  C2c wavetable scan (`wts`, COL_SCAN_COUNT 6, interpolated frames),
+  oscillator count reduced to 10/6 for Basic-share acceptance (B1-B6),
+  UBP and off filter types, filter envelope range widened.
 
 ---
 
@@ -38,8 +45,8 @@ runtime voice slot.
 
 | ID | Decision | Why |
 |----|----------|-----|
-| C-D1 | Basic class | Measured at 17,433 worst case; fits 19,620 |
-| C-D2 | 12 plain / 6 PWM | Device measurement set the count |
+| C-D1 | Basic class | Measured at 17,433 worst case (S095); all modes within 19,620 after S096 B1-B6 |
+| C-D2 | 10 plain / 6 PWM (S096; was 12/6) | B1-B6 optimisation reduced wav/wtb count to fit Basic share |
 | C-D8 | Sustain switch, not gate length | Automatable, drum-machine ergonomics |
 | C-D10 | 1,024-point sine (all engines) | −6,144 B flash, perceptually transparent |
 | C-D13 | Linear mid/side pan law | No sqrt per sample |
@@ -379,19 +386,24 @@ These values were set by ear on the device.
 
 ### 8.1 CPU cost
 
-| Configuration | Instr/sample | Cycles/block (est.) |
-|---------------|-------------|---------------------|
-| plain 12, stereo filter | 382.1 | ~12,227 |
-| pwm 6, Saw/Rec | 324.1 | ~10,371 |
-| pwm 6, Sin/Tri | 326.1 | ~10,435 |
-| **Worst case** (wavetable 12, stereo) | — | **17,433** |
+After S096 B1-B6 optimisation, oscillator counts are 10 for wav/wtb and
+6 for pwm/wts/nos. All modes fit the Basic share (19,620 cycles/block).
 
-All configurations within the Basic budget of 19,620 cycles/block.
+| Configuration | Cycles/block | Within budget? |
+|---------------|-------------|----------------|
+| wav 10, stereo filter | ≤ 19,620 | Yes |
+| pwm 6, Saw/Rec | ≤ 19,620 | Yes |
+| pwm 6, Sin/Tri | ≤ 19,620 | Yes |
+| wts 6, wavetable scan | ≤ 19,620 | Yes |
+| nos 6, noise | ≤ 19,620 | Yes |
+
+(S095 P4 measurements before B1-B6: plain 12 stereo 12,227 cycles, pwm 6
+Saw/Rec 10,371, pwm 6 Sin/Tri 10,435, worst case wtb 12 stereo 17,433.)
 
 ### 8.2 Memory
 
 | Resource | Size |
 |----------|------|
-| Voice struct (after P3) | 1,112 B |
-| Flash contribution (net P2+P3) | +8,352 B |
-| ITCM (pair loops) | +1,200 B (across .itcm.s095p2 and .itcm.s095p3) |
+| Voice struct (after S096) | 1,236 B (was 1,112 B after S095 P3) |
+| Flash contribution (cumulative) | Part of 743,016 B total |
+| ITCM (pair loops + noise) | Part of 15,976 B total |
