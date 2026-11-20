@@ -180,3 +180,170 @@ checked the same way.
   edited `MEMORY.md` (the project rule).
 - **The S090 P5 / S097 P3 notes on trace-before-writer ordering** (the
   removed "pre-drain diagnostic witness") are superseded by §4.
+
+## 9. Second failure (`SD_CARD_ATS_3`, 2026-11-20): the fixed order was not enough
+
+**The user's test:**
+1. boot;
+2. set slide on voice 4 to on;
+3. change one step's velocity;
+4. wait 5 s;
+5. power off.
+
+Neither change survived.
+
+**Image:** the card holds the §4 build (`cmp`-identical).
+
+**What the trace shows:**
+- **The §4 fix worked:** the writer now arms. The edits were marked dirty
+  (Scene 4, instrument slot 2, parameters 28, 0 and 27, with the knob
+  still turning up to tick 17,261). The writer armed at tick 14,188, the
+  first edit, with its deadline at 19,188.
+- **The trace stops at tick 17,261.** The next record is the next boot.
+  Records made after the last flush before power-off are lost, because the
+  ring is in RAM. That includes the step edit.
+- **At the next boot** the reader merged a clean on-card mask (M dirty=0):
+  the drain never committed anything.
+
+**Root cause 2: a save took far longer than 5 s.** Measured on the earlier
+cards, from drain admitted (A) to published (P):
+
+| Part | Time | Why |
+|---|---:|---|
+| Debounce | 5,000 ms from the **first** change | `AUTOSAVE_WRITER_INTERVAL_MS 5000u` |
+| Validation of both `.hcprms` records (phases 1–5) | ≈ 3.7 s | 2 × 34,768 B at `AUTOSAVE_CRC_BYTES_PER_TICK 128u` = 544 main-loop passes; the "winner cached" shortcut was cleared after every clean drain, so it applied only to continuations |
+| Copy, CRC and commit (phases 10–22) | ≈ 4.8 s | 272 passes of 128 B, then sync |
+| **Total, first edit to durable** | **≈ 13–14 s** | |
+
+An edit followed by "wait 5 s, power off" could not survive under any
+filesystem order. The design never met "an edit is saved within 5 s".
+
+**Fix 2 (`config.h`, `filesystem.c`):**
+1. **`AUTOSAVE_CRC_BYTES_PER_TICK` 128 → 512,** the whole `staging_buf`; the
+   existing `_Static_assert` still holds.
+   - Every caller reads into `staging_buf` or works byte by byte (checked).
+   - The CRC is bitwise CRC32C at about 30 cycles a byte, so a pass gains
+     about 70 µs, against main-loop passes of 2–6 ms.
+   - This makes validation, copy, boot validation and recovery 4× fewer
+     passes.
+2. **The validated-winner cache is kept after a clean drain**
+   (`filesystem_autosaveWriterCompleted()`). The next save skips the
+   dual-record validation:
+   - after a drain that published, the cache is the new target
+     (`winner ^ 1`, generation + 1, probe + 1);
+   - after a drain that published nothing, it is the winner just validated;
+   - "Published" is `stream_offset >= AUTOSAVE_RECORD_BYTES`. The workspace
+     is zeroed at phase 0 and `stream_offset` advances only in the copy. A
+     capture with no live patch still publishes, so `patch_count` is not
+     used.
+   - Every lifecycle invalidation path still clears the cache: AutoSave OFF,
+     Bank loss or change, error, setup, recovery without a winner.
+3. **`AUTOSAVE_WRITER_INTERVAL_MS` 5,000 → 2,000 ms.** The debounce runs
+   from the first change, and the save takes time after it, so a 5 s
+   debounce alone exceeded the user's 5 s.
+   - The same constant also spaces the retry after an error (now 2 s).
+   - The 250 ms continuation is unchanged.
+
+**Expected after fix 2 (to be measured on the device):**
+- first edit → debounce 2 s;
+- cached validation ≈ 0;
+- capture plus copy of 68 passes and the commit ≈ 1–1.5 s;
+- **≈ 3–4 s from an edit to durable.** Edits made while a drain runs go
+  into the 250 ms continuation (≈ +1.5 s).
+
+**The Pattern side** (the step velocity) is a separate drain:
+- a 250 ms quiet window and a 5 s ceiling (`AUTOSAVE_PATTERN_*`);
+- it writes without the CRC chunk limit;
+- on the earlier cards it published within about 1 s of an edit.
+
+The trace could not show it this time (see above). Re-check it on the next
+card.
+
+**Build:** `make img` writes 730,368 B; `make -C tools/dsp_test all`
+exits 0, 87 breaks caught. There is no AutoSave host test in the suite, so
+the device test is the gate:
+1. Edit one parameter, wait 5 s, power off, and check it is back.
+2. Repeat for a step edit.
+3. Repeat after visiting the Instrument Load/Save page.
+
+**The S097 filesystem optimisation is not the cause, and rolling it back
+would not fix this:**
+- all three causes predate S097 by about 325 commits:
+  - trace-first ordering: session 048, commit 599b992b;
+  - the 128 B CRC chunk: commit aca846aa;
+  - the 5 s debounce: commit 8008ddba;
+- S097 P2 is commit 04c5c004;
+- its `-Os` filesystem build (`FS_OS=1`) is opt-in. `FS_OS ?= 0` is the
+  Makefile default, and every image built this session used `FS_OS=0`.
+
+**Rule §0, extended:** core persistence must be designed for its real
+deadline, *edit → durable within 5 s*, and measured against it. A cap that
+protects audio must be sized from measured cost. 128 B per pass was about
+18 µs of work, and it made saves take 13 s.
+
+## 10. Third failure (`SD_CARD_ATS_4`, 2026-11-20): still about 14 s per save
+
+**Image:** the card holds the fix-2 build (730,384 B, `cmp`-identical).
+
+**What the trace shows.** Fix 2 worked as far as it went:
+- the writer armed;
+- the cache hit (V flags 0x0b, cached=1, validation 0 ms);
+- generation 2827 was published, and the next boot read it.
+
+The save itself still took 14.2 s:
+
+| Step | Tick | Gap | Cause |
+|---|---:|---:|---|
+| Edit (D) | 17,414 | | |
+| Writer armed (S) | 18,676 | 1.26 s | `AUTOSAVE_TRACE_FLUSH` owned the facade (pass probe "at FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH phase 1") |
+| Deadline | 20,676 | 2.0 s | debounce |
+| Admitted (A) | 23,909 | **3.2 s late** | the trace flush again ("…TRACE_FLUSH phase 2") |
+| Captured (C) | 24,466 | 0.56 s | phase 56 walked all 30,848 mask bits one at a time, about 180 per pass under the 50 µs budget cap |
+| Published (P) | 31,666 | **7.2 s** | phase 13 copy: one `afatfs_poll()` per main-loop pass, and the bit-banged SD driver moves **16 bytes per poll**, so 32 passes per 512 B sector |
+
+The last session on the card changed `normal[4]` at tick 41,321, then the
+trace ends. Nothing armed before power-off, and that edit was lost.
+
+**Root cause 3:**
+1. Moving the trace flush to the end of the ladder (§4) was not enough. It
+   still **started** whenever the facade was idle and had trace records,
+   every 500 ms, and each flush (a seek in the multi-megabyte
+   `asavetrc.bin`, one poll per pass) held the facade for most of that
+   interval. The writer could arm or start only in the short gaps.
+2. The core drain was paced at one SD poll per pass, which is 16 bytes.
+
+**Fix 3:**
+1. **No trace flush starts while any save is pending.** The new
+   `filesystem_coreSavePending()` (DEV only) checks:
+   - scalar mask dirty;
+   - writer armed or recovering;
+   - Pattern or non-semantic Pattern mask dirty;
+   - `settings.cfg` dirty;
+   - resident names dirty.
+
+   Both `filesystem_autosaveTraceFlushSchedule_tick()` and
+   `filesystem_patternTraceFlushSchedule_tick()` return while it is true.
+   Trace records may be dropped. Saves may not (§0).
+2. **Full-rate SD polling for core storage.** `AUTOSAVE_DRAIN_POLL_BUDGET_US
+   1000u` (`config.h`): while `AUTOSAVE_PARAMETER_DRAIN`,
+   `AUTOSAVE_PATTERN_DRAIN` or `FLUSH_FINISH` owns the facade,
+   `filesystem_tick()` repeats `afatfs_poll()` for up to 1 ms a pass, about
+   one sector.
+   - A trace flush already in flight when an edit arrives gets the same
+     rate, only so it releases the facade sooner.
+   - The op `_tick()` still runs once a pass.
+   - SD protocol timeouts are in milliseconds, not polls (`sdcard_lxr02.c`).
+   - Audio runs from DMA interrupts and is not affected.
+3. **Phase 56 skips clean mask bytes.** It uses `autosave_maskByteClean()`
+   (Autosave.c/.h), a lock-free one-byte read, and takes 8 offsets in one
+   step. A bit set just after the read stays dirty for the continuation,
+   the same as a bit set after the scan has passed it.
+4. **`AUTOSAVE_WRITER_INTERVAL_MS` 2,000 → 1,000 ms.**
+
+**Expected:** edit → armed at once (at worst after one in-flight trace
+flush, now at full poll rate) → 1 s → capture in tens of ms → copy and
+commit ≈ 0.5–1 s. **About 2 s from an edit to durable.** A device test is
+still the gate.
+
+**Build:** `make img` writes `build/LXRV2_lxr02.img`, 730,952 B on disk.
+`make -C tools/dsp_test all` exits 0.

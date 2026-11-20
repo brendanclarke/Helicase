@@ -798,6 +798,8 @@ void menu_toggleStepEditSubpage(void);
 void menu_enterStepTrackAutomationOverlay(uint8_t voiceNr);
 void menu_resetActiveParameter(void);
 uint8_t menu_getSubPage(void);
+uint8_t menu_getMenuIndex(void);
+void menu_restoreMenuIndex(uint8_t index);
 /*
  * Repaint the PERF SELECT row from looper state (S080 A5, P2 Defect 4).
  *

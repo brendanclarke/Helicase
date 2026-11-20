@@ -1727,6 +1727,9 @@ static void filesystem_autosaveTraceCaptured(uint8_t budget_exhausted);
 static void filesystem_patternTraceFlush_tick(void);
 static void filesystem_patternTraceFlushSchedule_tick(void);
 #if DEV_MODE_LOGGING
+static uint8_t filesystem_coreSavePending(void);
+#endif
+#if DEV_MODE_LOGGING
 static void filesystem_patternTraceFlushCompleted(void);
 #endif
 static void filesystem_autosaveSetupCompleted(void);
@@ -6266,6 +6269,9 @@ static void filesystem_patternTraceFlushSchedule_tick(void)
 
     if (menu_isLoadSaveCommandActive() || patternTrace_pendingCount() == 0u)
         return;
+    /* S099 P3 §10 / §0: no diagnostic flush while a save is pending. */
+    if (filesystem_coreSavePending())
+        return;
     now = time_sysTick;
     if (fs_pattern_trace_next_due_tick == 0u)
         fs_pattern_trace_next_due_tick = now;
@@ -9609,6 +9615,18 @@ static void filesystem_autosaveParameterDrain_tick(void)
                     slice_start_us, FS_BUDGET_CLASS_SCALAR);
                 op_phase = 10u;
                 return;
+            }
+            /*
+             * S099 P3 §10: skip a clean mask byte in one step. The bitwise
+             * walk over 30,848 offsets took 557 ms of the save on device.
+             */
+            if ((payload_offset & 7u) == 0u &&
+                payload_offset + 8u <= AUTOSAVE_PAYLOAD_BYTES &&
+                autosave_maskByteClean(payload_offset)) {
+                op_autosave_writer.payload_scan_offset =
+                    (uint16_t)(payload_offset + 8u);
+                examined = (uint16_t)(examined + 8u);
+                continue;
             }
             op_autosave_writer.payload_scan_offset++;
             examined++;
@@ -27483,10 +27501,44 @@ static void filesystem_autosaveWriterCompleted(void)
             fs_autosave_writer_armed = 1u;
         } else {
             /*
-             * A clean terminal drain has no continuation consumer. Clear the
-             * cache so a later unrelated mutation cannot reuse an old target.
+             * A clean terminal drain (S099 P3: the cache is now kept).
+             *
+             * What: the next drain may skip the dual-record validation, as a
+             * continuation does. If this drain published (its copy reached
+             * the end of the record: stream_offset is zeroed at phase 0 and
+             * advances only in the copy, phases 12-13; the shared final sync
+             * made the target durable, or the status would be ERROR; a
+             * capture with no live patch still publishes), the cached
+             * winner is that new target (winner ^ 1, generation + 1, probe
+             * + 1). If it published nothing (an empty capture, e.g. the boot
+             * settle), the cached winner is the record this drain just
+             * validated in full (unchanged on the card).
+             * Why: clearing the cache here meant the first save after every
+             * pause re-read and CRC-checked both 34,768-byte records (about
+             * 3.7 s at the old CRC chunk), so an edit followed by a power-off
+             * a few seconds later was lost (the user's device test). Only
+             * this writer writes the records; card removal while powered is
+             * outside the product contract (the continuation path's rule).
+             * Every lifecycle invalidation path (AutoSave OFF, Bank loss or
+             * change, error, setup) still clears the cache.
              */
-            fs_autosave_winner_cached = 0u;
+            if (op_autosave_writer.have_winner) {
+                const uint8_t published = (uint8_t)(op_autosave_writer.stream_offset >=
+                                                    AUTOSAVE_RECORD_BYTES);
+
+                fs_autosave_cached_winner_index = published
+                    ? (uint8_t)(op_autosave_writer.winner_index ^ 1u)
+                    : op_autosave_writer.winner_index;
+                fs_autosave_cached_winner_generation = published
+                    ? op_autosave_writer.winner_generation + 1u
+                    : op_autosave_writer.winner_generation;
+                fs_autosave_cached_winner_probe = published
+                    ? (uint8_t)(op_autosave_writer.winner_probe + 1u)
+                    : op_autosave_writer.winner_probe;
+                fs_autosave_winner_cached = 1u;
+            } else {
+                fs_autosave_winner_cached = 0u;
+            }
             fs_autosave_writer_armed = 0u;
         }
     } else {
@@ -28124,6 +28176,28 @@ static void filesystem_autosaveTraceFlushCompleted(void)
  * is initialized from the current tick before unsigned deadline comparison so
  * a first edit long after boot cannot wait for the 16-bit clock to wrap.
  */
+#if DEV_MODE_LOGGING
+/*
+ * Report whether any core persistence work is waiting for the facade.
+ *
+ * What: nonzero while scalar AutoSave bits are dirty, the writer is armed or
+ * recovering, a Pattern AutoSave mask is dirty, settings.cfg is dirty, or the
+ * resident name cache awaits its deferred write. Why (S099 P3 §10, §0): the
+ * diagnostic trace flushes must not take the facade while a save waits.
+ * Inputs: the owners' dirty state. Output: predicate only; no state changes.
+ */
+static uint8_t filesystem_coreSavePending(void)
+{
+    return (uint8_t)(autosave_maskHasDirty() ||
+                     fs_autosave_writer_armed ||
+                     fs_autosave_recovery_pending ||
+                     autosave_patternDirtyMask() != 0u ||
+                     autosave_nonSemanticPatternDirtyMask() != 0u ||
+                     fs_settings_dirty ||
+                     menu_hasResidentNameDirtyMask());
+}
+#endif
+
 static void filesystem_autosaveTraceFlushSchedule_tick(void)
 {
 #if DEV_MODE_LOGGING
@@ -28165,6 +28239,15 @@ static void filesystem_autosaveTraceFlushSchedule_tick(void)
     }
 
     if (autosaveTrace_pendingCount() == 0u)
+        return;
+    /*
+     * S099 P3 §10 / §0: no diagnostic flush while any save is pending. Each
+     * flush seeks a multi-megabyte asavetrc.bin and held the one facade for
+     * most of every 500 ms interval, so the AutoSave writer armed 1.3 s late
+     * and started 3.2 s late (device trace SD_CARD_ATS_4). Trace records may
+     * be lost; saves may not.
+     */
+    if (filesystem_coreSavePending())
         return;
     now = time_sysTick;
     if (fs_autosave_trace_next_due_tick == 0u)
@@ -29049,6 +29132,26 @@ void filesystem_tick(void)
 
         for (pass = 0u; pass < passes; pass++)
             afatfs_poll();
+        /*
+         * S099 P3 §10: core AutoSave storage polls for up to
+         * AUTOSAVE_DRAIN_POLL_BUDGET_US per pass. One poll per pass moved
+         * 16 bytes, so the parameter copy took seconds and edits were lost
+         * at power-off. A trace flush already in flight when an edit arrives
+         * gets the same rate only so it releases the facade sooner; no new
+         * flush starts while a save is pending (§0).
+         */
+        if (status == FS_STATUS_BUSY &&
+            (current_op == FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN ||
+             current_op == FS_INTERNAL_OP_AUTOSAVE_PATTERN_DRAIN ||
+             current_op == FS_INTERNAL_OP_FLUSH_FINISH ||
+             current_op == FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH ||
+             current_op == FS_INTERNAL_OP_PATTERN_TRACE_FLUSH)) {
+            const uint32_t poll_start_us = timebase_tim2Now();
+
+            while (timebase_tim2Delta(timebase_tim2Now(), poll_start_us) <
+                   AUTOSAVE_DRAIN_POLL_BUDGET_US)
+                afatfs_poll();
+        }
     } else {
         uint16_t now = time_sysTick;
         if ((uint16_t)(now - fs_last_idle_poll_tick) >= FS_IDLE_POLL_MS) {

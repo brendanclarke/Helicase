@@ -1889,8 +1889,11 @@ static void buttonHandler_perfVoiceReleased(uint8_t voiceNr)
  *             called buttonHandler_selectActiveStep() alone, whose
  *             menu_showStepEditPage() set subpage 1 of the VOICE page (AEG)
  *             and left the step flashing after its release.
- * State:      bh_voiceStepEdit (1 while open), bh_voiceStepPrevPage (the page
- *             to restore). RAM: 2 B.
+ * State:      bh_voiceStepEdit (0 closed; else the menu cursor to restore
+ *             + 1, which fits: menuIndex <= 63), bh_voiceStepPrevPage (the page
+ *             to restore). RAM: 2 B. The user: releasing the edit must return
+ *             to the subpage they were on, not the AEG subpage the step edit
+ *             leaves in menuIndex.
  * Accessors:  buttonHandler_seqButtonPressed(), buttonHandler_seqButtonReleased().
  */
 static uint8_t bh_voiceStepEdit = 0u;
@@ -1901,7 +1904,7 @@ static void buttonHandler_voiceStepEditPress(uint8_t ledNr, uint8_t seqButtonPre
     const uint8_t first = (uint8_t)(bh_voiceStepEdit == 0u);
 
     if (first) {
-        bh_voiceStepEdit = 1u;
+        bh_voiceStepEdit = (uint8_t)(menu_getMenuIndex() + 1u);
         bh_voiceStepPrevPage = menu_activePage;
     }
     buttonHandler_selectedStep = buttonHandler_visibleStep(seqButtonPressed);
@@ -1929,11 +1932,15 @@ static void buttonHandler_voiceStepEditRelease(uint8_t ledNr, uint8_t seqButtonP
     led_setBlinkLed(ledNr, 0);
     if (still == 0u) {
         uint8_t i;
+        const uint8_t prev_index = (uint8_t)(bh_voiceStepEdit - 1u);
 
         bh_voiceStepEdit = 0u;
         for (i = 0u; i < 16u; i++)
             led_setBlinkLed((uint8_t)(LED_STEP1 + i), 0);
         menu_switchPage(bh_voiceStepPrevPage);
+        /* back to the subpage and column shown before the edit opened */
+        if (menu_activePage == bh_voiceStepPrevPage)
+            menu_restoreMenuIndex(prev_index);
     }
     buttonHandler_updateSubSteps();
     buttonHandler_buttonTimerStepNr = TIMER_ACTION_OCCURED;

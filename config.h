@@ -556,8 +556,33 @@
  * write that carries dirty bits forward uses the shorter continuation cadence
  * below instead. Neither cadence is a synchronous deadline: Load/Save pages
  * and ordinary filesystem work may defer the next background start.
+ * S099 P3 (user's device test, 2026-11-20: edit, wait 5 s, power off, the
+ * edit was lost): 5,000 -> 2,000 ms. The interval runs from the FIRST change,
+ * and the save itself takes time after it, so a 5 s debounce could never make
+ * an edit durable within 5 s. With 2 s and the faster drain
+ * (AUTOSAVE_CRC_BYTES_PER_TICK, the kept winner cache) an edit is on the card
+ * about 3-4 s after it is made. S099_P3_AUTOSAVE_TRACE_FIX.md §9.
+ * S099 P3 §10 (device trace SD_CARD_ATS_4: still 14 s): 2,000 -> 1,000 ms,
+ * with the trace flush held off while a save is pending and the drain polled
+ * at full SD rate (AUTOSAVE_DRAIN_POLL_BUDGET_US).
  */
-#define AUTOSAVE_WRITER_INTERVAL_MS 5000u
+#define AUTOSAVE_WRITER_INTERVAL_MS 1000u
+
+/*
+ * Lower-layer SD poll time per main-loop pass for core AutoSave storage work.
+ *
+ * What: while the AutoSave parameter drain, an AutoSave Pattern drain, or the
+ * final sync after any operation owns the facade, filesystem_tick() repeats
+ * afatfs_poll() until this many microseconds have passed, instead of polling
+ * once. Why (S099 P3 §10, device trace SD_CARD_ATS_4): the bit-banged SD
+ * driver clocks 16 bytes per poll, so a 512-byte sector takes 32 polls; at one
+ * poll per 4-24 ms main-loop pass the 34,768-byte parameter copy took 7.2 s
+ * and an edit was lost at power-off. About 1 ms moves one sector per pass.
+ * A trace flush gets it only when already in flight, to free the facade
+ * sooner; none starts while a save is pending (§0). Inputs: TIM2 time.
+ * Outputs: SD progress only. RAM: none (compile-time).
+ */
+#define AUTOSAVE_DRAIN_POLL_BUDGET_US 1000u
 
 /*
  * Short pause between bounded writes while a durable backlog still exists.
@@ -655,8 +680,14 @@
  * an SD transfer delay, timer interval, or filesystem pacing mechanism.
  * Affiliates: Autosave.c's bounded initial-image updater and filesystem.c's
  * AutoSave ensure/writer state machines.
+ * S099 P3: 128 -> 512 bytes (the whole staging_buf, asserted in filesystem.c).
+ * At 128 a 34,768-byte record took 272 passes: validating two candidates took
+ * about 3.7 s and the copy about 4.8 s, so a save needed 8-9 s after its
+ * debounce. The CRC is about 30 cycles a byte (bitwise CRC32C), so 512 bytes
+ * is about 70 us of a pass that already runs 2-6 ms: audio keeps its main-loop
+ * opportunities. S099_P3_AUTOSAVE_TRACE_FIX.md §9.
  */
-#define AUTOSAVE_CRC_BYTES_PER_TICK 128u
+#define AUTOSAVE_CRC_BYTES_PER_TICK 512u
 
 /*
  * Retained autosave-trace capacity. The default is 64 records (512 bytes);

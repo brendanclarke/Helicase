@@ -20737,6 +20737,25 @@ void menu_setActiveVoice(uint8_t v)
 }
 uint8_t menu_areMuteLedsShown(void){ return menu_muteModeActive; }
 uint8_t menu_getSubPage(void)      { return (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT); }
+/*
+ * Read / restore the exact menu cursor (S099 P3).
+ *
+ * What: menu_getMenuIndex() returns the subpage/column cursor; menu_restoreMenuIndex()
+ * puts a saved one back (no screen cycling, unlike menu_switchSubPage()) and
+ * repaints. Why: the VOICE step edit borrows SEQ_PAGE subpage 1; closing it
+ * must return to the subpage the user was on, not leave menuIndex at subpage 1
+ * (the voice AEG page). Caller: buttonHandler_voiceStepEditRelease().
+ */
+uint8_t menu_getMenuIndex(void)    { return menuIndex; }
+void menu_restoreMenuIndex(uint8_t index)
+{
+    lockPotentiometerFetch();
+    editModeActive = 0;
+    menuIndex = index;
+    menu_endlessPotMappingChanged();
+    va_refreshAutomationLeds();
+    menu_repaintAll();
+}
 void menu_setVoiceModeShowMorph(uint8_t onOff)
 {
     /*
