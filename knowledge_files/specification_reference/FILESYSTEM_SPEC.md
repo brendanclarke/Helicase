@@ -188,6 +188,21 @@ Session 094 (voice DSP adjustments, SRAM D-cache fix, cycle budget;
 - **P4:** PWM position law fix (position-indexed tables; `pos` 0 = 50 %,
   `pos` 127 = narrowest). Alkaline `wav` and `pwm` gain Tri (index 2).
 
+Session 095 (Space effects, Colloid instrument, compressor improvements;
+`095_SESSION_HANDOFF_LOG.md`):
+
+- **P1:** Space effect types added: `dly` (Delay), `rvb` (Reverb), `ech`
+  (Echo). All stored as `.fx` with the shared Space parameter keys.
+- **P2/P3:** Colloid instrument type added (`col`, `.col`,
+  `/Instrument/Colloid/`). 50 descriptor keys, 8 pages. Basic class (6th
+  instrument type). `SD_CARD/Instrument/Colloid/init.col` ships with the
+  card image.
+- **P4 T3:** StereoFilter (`flt`) removed. Effect type IDs renumbered:
+  CrumpBit 1, Delay 2, Reverb 3, Echo 4 (`EFFECT_TYPE_COUNT` = 5). Old
+  `flt` files on card are parsed but map to `off`.
+- **P2:** Sine table reduced from 4,096 to 1,024 points. Readers >> 22,
+  fraction mask 0x3fffff.
+
 AutoSave's hidden-record format, dirty ownership, and background writer are
 authoritative only in `AUTOSAVE.md`. Development flags and diagnostic files are
 authoritative only in `DEV_MODES.md`; this document names those facilities only
@@ -1603,11 +1618,21 @@ and `d/4` (CC 120) have no token and are written as decimals, as is every
 non-stop CC. The parser also accepts a decimal CC; the writer emits the token when one exists, else the decimal value. Old
 `.fx` files therefore need no migration.
 
-Registered `type` tokens are `off`, `flt` (StereoFilter) and `cbt`
-(CrumpBit, S074). A `cbt` file's `[params]` use the common keys plus
+Registered `type` tokens are `off`, `cbt` (CrumpBit, S074; id moved from
+2 to 1 in S095 P4), `dly` (Delay, S095 P1), `rvb` (Reverb, S095 P1) and
+`ech` (Echo, S095 P1). StereoFilter (`flt`) was removed in S095 P4; its
+files are still parseable (id unrecognised → treated as `off`).
+
+A `cbt` file's `[params]` use the common keys plus
 `crump_bit_off`, `crump_bit_invert` (0..255 masks), `crump_mix`,
 `crump_feedback`, `crump_rate`, `crump_subtype` (0 only), `crump_sync` and
 `crump_dly_pan`. Its lanes are written as `lane.<key>=` with the same keys.
+
+A `dly`/`rvb`/`ech` file's `[params]` use the shared Space parameter keys
+(see `SPACE_GROUP_EFFECTS_MODULE_REFERENCE.md` §5). Parameter visibility
+and formatting vary by type through predicates. All three types share one
+descriptor table in `SpaceParameters.c`.
+
 Keys and tokens are permanent once saved (`EFFECTS_BUS_REFERENCE.md` §4.2a).
 
 The parser clamps descriptor values to their registry maxima, copies `[params]`
@@ -1900,6 +1925,14 @@ targets); the LFO voices are `self`, the target selectors `255`
 `tools/alkaline/make_init_alk.py --check` (run by
 `make -C tools/dsp_test special_tags`) byte-compares it with the table.
 
+**Colloid (S095 P2/P3).** Token `col`, extension `.col`, folder
+`/Instrument/Colloid/` (seven characters). The card image carries
+`SD_CARD/Instrument/Colloid/init.col`. It uses the writer's exact form:
+`format`, `version=1`, `type=col`, `[params]` with all descriptor keys in
+table order and `[morph]` with the MORPHABLE rows. The 6th instrument type;
+Basic class. See `COLLOID_MODULE_REFERENCE.md` for the parameter table (50
+rows, 8 pages).
+
 **The type registry is the schema authority.** `storage_instrumentTypeToText()`
 reads the registry row's token, and the `.hcnames` header walks the type
 values until it returns NULL. Registry rows are designated by type, one per
@@ -1924,6 +1957,7 @@ The physical SD-card key vocabulary lives in each instrument descriptor table:
 - `Core/DSP/Instruments/Cymbal/CymbalParameters.c`
 - `Core/DSP/Instruments/HiHat/HiHatParameters.c`
 - `Core/DSP/Instruments/Alkaline/AlkalineParameters.c`
+- `Core/DSP/Instruments/Colloid/ColloidParameters.c`
 
 Current descriptor counts:
 

@@ -30,15 +30,24 @@
 │   │   ├── FILESYSTEM_SPEC.md         ← authoritative product filesystem, kit/instrument files, Scene/Bank storage, and save/load target spec
 │   │   ├── EFFECTS_BUS_REFERENCE.md   ← as-built Effect system: registry, resolution, page, FX sequencer, storage, add-a-type tutorial
 │   │   ├── MIXER_SYSTEM_DSP_REFERENCE.md  ← mixer, FX bus handoff, output pipeline, master bus compressor, costs (S073)
-│   │   ├── EFFECTS_MODULES_DSP_REFERENCE.md ← Effect module DSP, arena framework, binding rules, per-type reference (S074)
-│   │   ├── INSTRUMENTS_DSP_REFERENCE.md ← instrument DSP, parameters, modulation/LFO, costs, how to extend (S073)
+│   │   ├── EFFECTS_MODULES_DSP_REFERENCE.md ← Effect module DSP, arena framework, binding rules, per-type reference (S074; S095 Space, StereoFilter removed)
+│   │   ├── INSTRUMENTS_DSP_REFERENCE.md ← instrument DSP, parameters, modulation/LFO, costs, how to extend (S073; S095 Colloid, sine table)
 │   │   ├── MENU_UI_SPEC.md                ← menu system, LCD, LEDs, buttons, endless pots, Morph views, dtype, automation underline search
-│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map through Session 078
+│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map through Session 095
 │   │   ├── OSC_INTERP_AUDIT.md        ← oscillator waveform interpolation implementation, persistence, runtime behavior, risks, and validation
 │   │   ├── PATTERN_DYNAMIC_STACK.md   ← dynamic Pattern storage, PAT4, Pattern Stack Service, step automation encoding and drain
 │   │   ├── PERFORMANCE_RECORD_SPEC.md ← PERF surface, BAR overlay trigger engine, live record/erase, looper control, scene change flow
 │   │   ├── REPOSITORY_LAYOUT.md       ← this file
-│   │   └── STORAGE_SRAM_MANIFEST.md   ← flash, sample flash and RAM map, linker guards, image check, reservation/approval policy (S073)
+│   │   ├── STORAGE_SRAM_MANIFEST.md   ← flash, sample flash and RAM map, linker guards, image check, reservation/approval policy (S073)
+│   │   └── dsp_instruments_effects/   ← per-type DSP and firmware references (paired modelling + module docs)
+│   │       ├── ALKALINE_MODELLING_REFERENCE.md / ALKALINE_MODULE_REFERENCE.md  ← Alkaline (S093)
+│   │       ├── COLLOID_MODELLING_REFERENCE.md / COLLOID_MODULE_REFERENCE.md    ← Colloid (S095 P2/P3)
+│   │       ├── SPACE_GROUP_EFFECTS_MODELLING_REFERENCE.md / …MODULE_REFERENCE.md ← Space effects (S095 P1/P4)
+│   │       ├── CPU_USE_DSP_AUDIT.md   ← DSP cost audit and ordered optimization record
+│   │       ├── EFFECTS_MODULES_DSP_REFERENCE.md ← (also listed above)
+│   │       ├── INSTRUMENTS_DSP_REFERENCE.md     ← (also listed above)
+│   │       ├── EFFECTS_BUS_REFERENCE.md         ← (also listed above)
+│   │       └── MIXER_SYSTEM_DSP_REFERENCE.md    ← (also listed above)
 │   ├── hardware_archive/
 │   │   ├── HARDWARE_MAP.md         ← full confirmed pin table, IRQ numbers and priorities
 │   │   ├── AVR_TO_F765_MIGRATION.md ← architectural notes, sequencer ISR design baseline
@@ -127,16 +136,19 @@
     ├── DSP/
     │   ├── Effects/
     │   │   ├── EffectTypes.h          ← retained 420 B Effect record contract, block-7 target IDs
-    │   │   ├── EffectsManager.c/h     ← registry (off/flt), per-block resolution, edit API + fan-out, FX-seq, automation/LFO overlays
+    │   │   ├── EffectsManager.c/h     ← registry (off/cbt/dly/rvb/ech), drain logic, slot-lock API, per-block resolution, edit API + fan-out, FX-seq, automation/LFO overlays
     │   │   ├── EffectParamRows.h      ← common/type descriptor row macros
-    │   │   ├── FxBuffer.c/h           ← DTCM `.dtcm_fxbuf` arena, voice units, Effect share, handoff record
-    │   │   └── StereoFilter/          ← `flt` descriptors (…Parameters.c/h) and runtime/ops (…Effect.c/h, -Ofast)
+    │   │   ├── FxBuffer.c/h           ← DTCM `.dtcm_fxbuf` arena, voice units, Effect share, handoff record (196 B)
+    │   │   ├── CrumpBit/              ← `cbt` descriptors, layout/page hooks, runtime, ops, Rate/Sync helpers (S074)
+    │   │   └── Space/                 ← `dly`/`rvb`/`ech` shared DSP primitives (SpaceKit), per-type init/process (SpaceEffect), shared parameters (SpaceParameters), flash tables (SpaceTables) (S095 P1)
     │   └── Instruments/
     │       ├── InstrumentManager.c/h ← descriptor registry, VOICE menu lookup, Scene-to-DSP apply bridge
     │       ├── Drum/                 ← Drum descriptor keys, flags, menu layout, runtime metadata
     │       ├── Snare/                ← Snare descriptor keys, flags, menu layout, runtime metadata
     │       ├── Cymbal/               ← Cymbal descriptor keys, flags, menu layout, runtime metadata
-    │       └── HiHat/                ← HiHat/open-hat descriptor keys, flags, menu layout, runtime metadata
+    │       ├── HiHat/                ← HiHat/open-hat descriptor keys, flags, menu layout, runtime metadata
+    │       ├── Alkaline/             ← `alk` TB-303 instrument: voice, parameters (30 rows), post tables, wavetable reader (S093)
+    │       └── Colloid/              ← `col` 12-oscillator additive: voice, osc bank, parameters (50 rows, 8 pages), tables (S095 P2/P3)
     ├── SampleRom/
     │   ├── SampleMemory.c/h         ← sample flash metadata/runtime cache, 128 entries, catalogue v2 flags
     │   └── sampleFlash.c/h          ← guarded F765 sector 7-11 erase/program helpers

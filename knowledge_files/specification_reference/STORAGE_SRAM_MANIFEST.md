@@ -4,13 +4,29 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 094 (2026-11-12),
-  `dev-ph7-alkaline`. DEV link: `text=695,560`, `data=420`,
-  `bss=413,280`; flash payload 695,980 B of 753,664 B
-  (**headroom 44,556 B**). ITCM 13,984 / 16,384 B; SRAM1 free 87,404 B
-  (DEV link); FXBUF 126,656 B at `0x20001140` (margin 3,776 B).
+- **Current as of:** Session 095 (2026-11-20),
+  `dev-ph7-alkaline`, HEAD `dd81f19c`. Flash: 720,084 B of 753,664 B
+  (**headroom ~33,580 B**). ITCM 15,232 / 16,384 B (93.0 %); SRAM1 free
+  ~87,388 B (DEV link, +16 B handoff); FXBUF 126,656 B unchanged.
   The entries below run newest first.
-  *(S093 P8 flash/bss figures preserved; exact S094 build figures TBD.)*
+- **S095 changes (2026-11-12/20):** Space effects (Delay/Reverb/Echo),
+  Colloid instrument (6th type), StereoFilter removal, compressor
+  improvements, 1,024-point sine.
+  - **Added (S095 P1):** `Core/DSP/Effects/Space/` (SpaceKit, SpaceEffect,
+    SpaceParameters, SpaceTables). Arena prefix 512 B (SK_PREFIX_BYTES).
+    `fxbuf_handoff_t` grew from 180 B to 196 B (+16 B SRAM1). +19,932 B
+    flash.
+  - **Added (S095 P2):** `Core/DSP/Instruments/Colloid/` (ColloidVoice,
+    ColloidOsc, ColloidParameters, ColloidTables). `ColloidVoice` 1,032 B
+    (1,112 B after P3) inside the existing tagged runtime slot. ITCM
+    14,880 B after P2 (`.itcm.s095p2`). Sine table 4,096 → 1,024 points
+    (−6,144 B flash). Net P2: +5,784 B flash, +848 B ITCM.
+  - **Added (S095 P3):** 4 PWM warp loops in `.itcm.s095p3` (+352 B ITCM).
+    Flash +2,568 B. ITCM 15,232 B. Voice 1,112 B.
+  - **Removed (S095 P4):** StereoFilter (4 files, −3.7 KB flash). Added
+    `distortion_makeup[128]` table (512 B flash). Net P4: ~−3.2 KB flash.
+  - **ITCM total after S095:** 15,232 / 16,384 B. Headroom: 1,152 B.
+  - **Handoff after S095:** `fxbuf_handoff_t` 196 B (was 180 B).
 - **S093 P8 changes (2026-11-10):** Alkaline (TB-303) instrument,
   catalogue v3, 8-bit removal, wavetable reassessment.
   - **Added (S093 P4, approved):** `AlkalineVoice` (**548 B** after P6)
@@ -909,7 +925,7 @@ byte, including alignment and small variables omitted here.
 | `buttonHandler.c`: `evt_ring` | 64 | Sixty-four one-byte front-panel events; producer/consumer and overflow state are additional bytes. |
 | `lcd.c`: `lcd_queue` | 384 | LCD command queue. |
 | `FxBuffer.c`: `fxbuf_state` | 28 | Linker arena base/size, twelve unit owners, count, and share callback. |
-| `FxBuffer.c`: `fxbuf_handoffRecord` | 180 | Effect/voice handoff metadata and arena-relative positions. |
+| `FxBuffer.c`: `fxbuf_handoffRecord` | 196 | Effect/voice handoff metadata and arena-relative positions. Grew from 180 B in S095 P1 (+16 B for Space feed-through state). |
 | `EffectsManager.c`: `effects_state` | 80 | Active type/Scene, force flag, 64-byte last-applied image, FX step/selection state, sequence signature, and common runtime values (84 B before S081 removed the held-Morph latch). |
 | `CrumpBitEffect.c`: `crumpBit_dataLines`, `crumpBit_dataLinesKey` | 260 | 256 B stage 1 data-line table (`(c & keep) ^ invert` per ADC code) plus a 4 B key (`bit_off | bit_invert << 8`; a `0xFFFFFFFF` sentinel forces the first build). Rebuilt only on a `bof`/`biv` change; owner `CrumpBitEffect.c` (S091 P5 X2, approved Q4, 2026-11-05). |
 | `EffectsManager.c`: `effects_automation` | 120 | Effect Pattern overlays (active/value), `menuHold` (`u64`) + `menuHoldMorph`, `fxm` override, and 6 × 2 base-independent LFO contribution entries (184 B before S081 removed the owner/end masks). |

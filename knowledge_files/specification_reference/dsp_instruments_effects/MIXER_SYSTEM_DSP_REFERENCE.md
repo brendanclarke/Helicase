@@ -5,15 +5,18 @@ gain, pan and routing, the FX bus and the Effect handoff, the Effect return,
 the master bus compressor, and the path to the two DACs. It covers the
 arithmetic, the number formats, what each stage costs, and how to change it.
 
-- **Current as of:** Session 091 P6 close (2026-11-06). S088 added
-  block-rate fader smoothing in `mixer_faderGains()` (§3), itp slot
-  accounting before `modNode_resetTargets()`, and the `* 256.0f` direct
-  float-to-24-bit mixer conversion. S074 added the master bus compressor
-  (§4), the `xfd` fader mode (§3.2) and the `off`-branch return-ramp reset
-  (§3.3 item 6).
+- **Current as of:** Session 095 P4 (2026-11-20). S095 P4 T4 retuned the
+  master bus compressor (§4): deeper threshold curve (C1), filter drive
+  floor 1.0 (C2), half makeup on voice distortion (C3), live GR readout
+  (C5). S088 added block-rate fader smoothing in `mixer_faderGains()` (§3),
+  itp slot accounting before `modNode_resetTargets()`, and the `* 256.0f`
+  direct float-to-24-bit mixer conversion. S074 added the master bus
+  compressor (§4), the `xfd` fader mode (§3.2) and the `off`-branch
+  return-ramp reset (§3.3 item 6).
 - **Scope split with `EFFECTS_MODULES_DSP_REFERENCE.md`:** that document
   covers each Effect module's DSP, binding rules, arena use, costs, and the
-  arena framework. CrumpBit, StereoFilter and future types live there.
+  arena framework. CrumpBit, the Space group (Delay/Reverb/Echo) and future
+  types live there. StereoFilter was removed in S095 P4.
 - **Scope split with `EFFECTS_BUS_REFERENCE.md`:** that document is the
   authority for the Effect system's control side: the type registry,
   parameters and resolution order, the Effect page, the FX sequencer,
@@ -338,24 +341,38 @@ per block: `k(τ) = T_b/(τ + T_b/2)` (bilinear, within 0.2 % of
 | Control | Range | Default | Effect |
 |---|---|---|---|
 | `cmp` | `off` / `St1` / `St2` | off | target pair |
-| `cam` | 0..127 | 48 | threshold `T = −3 − 27a` dBFS; ratio `R = 1 + 3a + 4a³`; makeup `M = −GR(−12 dBFS)·(1 − 0.3a)`; drive `d = 1 + 0.5a²` |
+| `cam` | 0..127 | 48 | threshold `T = −8 − 32a` dBFS (S095 P4 C1; was `−3 − 27a`); ratio `R = 1 + 3a + 4a³`; makeup `M = −GR(−20 dBFS)·(1 − 0.3a)` (ref −20; was −12); drive `d = 1 + 0.5a²` |
 | `ctm` | 0..127 | 48 | attack `5 + 10t` ms; fast release `60 + 540t²` ms; memory release `500 + 4,500t²` ms |
 | `csc` | `off` / `1`..`6` | off | sidechain voice; track 7 counts as voice 6 (BC11, unconfirmed) |
 
 Worked values at the −12 dBFS reference:
 
-| `cam` | T | R | Static GR | Makeup | `d` | Cubic ceiling `1/d` |
-|---:|---:|---:|---:|---:|---:|---:|
-| 0 | −3.0 | 1.00 | 0 | 0 dB | 1.00 | 0 dBFS |
-| 48 | −13.2 | 2.35 | −1.2 dB | +1.1 dB | 1.07 | −0.6 dBFS |
-| 64 | −16.6 | 3.02 | −3.1 dB | +2.7 dB | 1.13 | −1.0 dBFS |
-| 96 | −23.4 | 5.00 | −9.1 dB | +7.1 dB | 1.29 | −2.2 dBFS |
-| 127 | −30.0 | 8.00 | −15.8 dB | +11.0 dB | 1.50 | −3.5 dBFS |
+| `cam` | T | R | Makeup | `d` | Cubic ceiling `1/d` |
+|---:|---:|---:|---:|---:|---:|
+| 0 | −8.0 | 1.00 | 0 dB | 1.00 | 0 dBFS |
+| 32 | −16.1 | 1.59 | +0.1 dB | 1.03 | −0.3 dBFS |
+| 48 | −20.1 | 2.35 | +0.8 dB | 1.07 | −0.6 dBFS |
+| 64 | −24.1 | 3.02 | +2.4 dB | 1.13 | −1.0 dBFS |
+| 96 | −32.2 | 5.00 | +7.5 dB | 1.29 | −2.2 dBFS |
+| 127 | −40.0 | 8.00 | +12.2 dB | 1.50 | −3.5 dBFS |
 
 At `cam` 0 the compressor applies no gain change; only the sidechain duck
-and the full-scale ceiling remain. Tuning revision 1 (user, after the first
-listen) reduced the top-end makeup (it was the full `−GR`, +15.8 dB at 127)
-and raised the drive from `0.4a²`.
+and the full-scale ceiling remain.
+
+**Tuning history:**
+- Revision 1 (S074): reduced top-end makeup and raised drive from `0.4a²`.
+- Revision 2 (S095 P4 C1): threshold `−3 − 27a` → `−8 − 32a` dBFS
+  (−8..−40 instead of −3..−30); makeup reference −20 dBFS (was −12).
+  Clean kit now gets 3–6 dB reduction at `cam` 48 without drive.
+- S095 P4 C2: filter drive floor `0.4 + 6x²` → `1.0 + 5.4x²`
+  (`ResonantFilter.c`, `SVF_setDrive()`); every filtered voice is +8 dB
+  at `drv` 0, closing the gap between filter off and on.
+- S095 P4 C3: half makeup on the voice distortion stage.
+  `distortion_makeup[128]` flash table (512 B); `Distortion.inv_shape`
+  (unused) becomes `out_gain` = makeup × (1 + k). Distortion no longer the
+  only way to bring material into compressor range.
+- S095 P4 C5: live gain-reduction and detector readout on the compressor
+  page (foreground, two floats via getter; +8 B SRAM1 peak-hold state).
 
 ### 4.3 Per block (control path)
 

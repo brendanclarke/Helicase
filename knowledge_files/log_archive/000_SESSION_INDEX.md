@@ -108,6 +108,8 @@ it belongs in the summary or the log, not here.
 | 091 | 2026-11-04/06 | `dev-ph7-voice_expansion`, uncommitted on `5c9a92f9` | CrumpBit sub-type expansion (dly/cmb/pit/grn/rvb), granular rework, efficiency pass to 170-cap, labels hook, parameter cleanup |
 | 092 | 2026-11-07/08 | `dev-ph7-voice_expansion`, HEAD `3abaece5` (no code changes) | Alkaline (TB-303) pre-implementation: plan (P0), ngspice circuit models of VCO/Q8 (P1), VCF diode ladder (P2), VCA/VEG (P3), control network + end-to-end run (P4), DSP equations with golden and real-time solvers validated against SPICE (P6) |
 | 093 | 2026-11-08/10 | `dev-ph7-alkaline`, HEAD `1ea13d41` | Alkaline (TB-303) firmware implementation: C engine from DSP model (P0), overhead reductions B-R/B2R (P1/P2), kernel + control prep Re3/Sw3 removal (P3), firmware integration phases 1–2 (P4/P5), parameter tweaks attack/decay/resonance×1.5/drive×16/pos (P6), FAILED wavetable+samples (P7), wavetable reassessment with catalogue v3 8-bit removal and interpolation-slot blend (P8); device-tested and passing |
+| 094 | 2026-11-11/12 | `dev-ph7-alkaline`, HEAD `264c1e34` | Voice DSP adjustments (crash removal, PWM osc type, Alkaline VCA overdrive/tone, LFO sync fix), SRAM D-cache discovery (MPU S-bit), cycle budget, memory allocation speed-ups, PWM position law fix |
+| 095 | 2026-11-12/20 | `dev-ph7-alkaline`, HEAD `dd81f19c` | P1: Space group effects (Delay/Reverb/Echo) with elastic seating, feed-through, drain-into-OFF, slot lock; P2: Colloid instrument (6th type, Basic, 12 oscillators, pair loops, TPT SVF); P3: Colloid follow-ups (filesystem fix, 4 PWM forms, pitch slew, intervals, filter redesign, post drive/tone); P4: StereoFilter removal, Space mix removal, compressor/drive improvements |
 
 ---
 
@@ -587,6 +589,23 @@ Session 065 delivered the first working end-to-end step automation path: the exi
 | `osc_modulatorTrigger()` restarts a modulator's sample at start on every hit for `s` entries. Called from Drum and HiHat triggers; stock waves and `l`/`w` return immediately | 087 |
 | Transient click sample list: Snp, Ofs, 12 built-in clicks, then s01..sNN. New sample loop 20 instr/sample; built-in click stays at 22. No worst-case CPU increase | 087 |
 | v1 sample loops and dormant `wav` interpolation removed in S087 P1 (`osc_interp_a/b`, `osc_syncWaveform()`, v1 cache, four dispatcher entries, `stub_silence_buffer`); ITCM dropped from 15,032 to 12,640 | 087 |
+| Sine table is 1,024 points (`TABLESIZE` 1024); readers `>> 22`, fraction mask `0x3fffff`; was 4,096 / `>> 20` / `0xfffff` before S095 P2 | 095 |
+| FxBuffer arena prefix: first 512 B (`SK_PREFIX_BYTES`) reserved for 64 B control block (`sk_ctl_t`) + 448 B type state header; usable ring starts after the prefix | 095 |
+| Effect type enumeration after S095 P4: OFF 0, CrumpBit 1, Delay 2, Reverb 3, Echo 4, count 5. StereoFilter removed | 095 |
+| Space effects are 100% wet send bus (no mix parameter); dry path kept for handoff only; `vol` stays 127 | 095 |
+| Feed-through handover: on effect type change, old tail is read from old ring and injected into new effect's loop via `sk_feedBegin()`/`sk_feedRead()` compiled loop variants; slot lock reserves one interpolation slot during feed | 095 |
+| Drain into OFF: outgoing effect keeps rendering with muted input until tail reaches −80 dBFS or 6 s ceiling; EffectsManager owns the logical/physical type split | 095 |
+| Reverb runs at half sample rate (22.05 kHz) with 11-tap halfband decimator/interpolator; always 64 KB ring | 095 |
+| Colloid is the 6th instrument type, Basic class: 12 free-running oscillators (or 6 PWM) with integer pair loops, division-free TPT SVF filters, mid/side stereo positioning, ADSR with sustain switch; voice struct 1,112 B after P3; 50 rows, 8 pages | 095 |
+| Colloid `sus` (sustain switch) holds only while transport runs (`susOn = sus && seq_isRunning()`); transport stop releases all Colloid voices | 095 |
+| Colloid pair loops in ITCM: `.itcm.s095p2` (plain/PWM Rec), `.itcm.s095p3` (PWM Sin/Tri/Saw warp loops) | 095 |
+| `fbk` unity for Space effects is parameter value 100 (not 106); `fbk` range 0..1.20 | 095 |
+| Compressor threshold −8..−40 dBFS (was −3..−30); makeup reference −20 dBFS (was −12); filter drive floor 1.0 (was 0.4); half makeup on voice distortion via `distortion_makeup[128]` table | 095 |
+| Handoff record `fxbuf_handoff_t` is 196 B (+16 B from S095 P1 feed-through fields) | 095 |
+| Flash after S095: 720,084 B; ITCM: 15,232 / 16,384 B; CPU budget: Basic 19,620, Advanced 21,803, Effect 16,634, shared mixer 12,784 | 095 |
+| Elastic seating (`sk_seat()`): arena divided between Effect and voice units; growth happens at the wrap point when write head crosses old end; `sk_feedCut()` aborts a feed if a share change removes coverage | 095 |
+| Colloid pitch slew (P3 F3): per-oscillator `pitchCur[o]` slewed in log2 Hz, `alk_exp2f` per oscillator; `por`/`pmd`/`lgt` removed | 095 |
+| Colloid intervals (P3 F4): `in1`/`in2`/`in3` are PM63 semitones; `o mod 4` grouping; `colIntervals`/`colMember`/`colRatio` removed | 095 |
 
 ---
 
@@ -2398,3 +2417,29 @@ Session 094 implemented voice DSP adjustments (crash wave removal, PWM oscillato
   `OSC_INTERP_AUDIT.md` (PWM no slot, crash removal pool 90→84),
   `DEV_MODES.md` (cycle probe),
   `MODULE_INTERCHANGE_SPEC.md` (IM_SPECIAL_LFO_SYNC, instrument_drive Alkaline branch).
+
+### 095 — Space Group Effects (Delay/Reverb/Echo), Colloid Instrument, And Effects Bus Tweaks (2026-11-12/20)
+
+Session 095 delivered four phases across the Space effects, the Colloid instrument, and effects/compressor refinements. Branch `dev-ph7-alkaline`, HEAD `dd81f19c`. Device-tested across multiple hardware runs.
+
+**P1 — Space group effects (Delay/Reverb/Echo).** New folder `Core/DSP/Effects/Space/` with four files: `SpaceKit.h/.c` (shared DSP primitives and seating/feed API), `SpaceEffect.c` (init/process for all three types), `SpaceParameters.c` (registry, parameter table, labels, format), and `SpaceTables.c` (delay-time curve, halfband coefficients, pitch-shifter tables). Effect type enumeration: OFF 0, CrumpBit 1, Delay 2, Reverb 3, Echo 4 (count 5). Arena layout: 126,656 B DTCM with a **512 B prefix** (`SK_PREFIX_BYTES`) reserved for a 64 B control block (`sk_ctl_t`) and a 448 B type state header; the rest is elastic ring memory. Delay is a stereo 16-bit tape with varispeed (`dly` time curve from CrumpBit, `fbk` 0..1.20 with unity at parameter 100, Hermite-interpolated reads, two-head pitch shifter for `hed` with per-head gains, optional reverse via negative ratio, freeze writes zeros, ducking envelope). Reverb is a Dattorro figure-8 plate running at **half sample rate** (22.05 kHz) with an 11-tap halfband decimator/interpolator, four allpass stages, two cross-coupled delay lines, shimmer via two pitch shifters (octave up, octave+fifth), freeze holds feedback at 1.0 and mutes input, `dmp` damping one-pole, `shm` shimmer amount; always 64 KB ring. Echo is a mono tape feeding into a plate: the tape delay feeds a simplified reverb tail, with `dmp` damping across both. **Feed-through handover** (`sk_feedBegin`/`sk_feedRead`): on type change, the old effect's tail audio is read from its ring and injected into the new effect's loop via compiled feed/no-feed loop variants; segments are folded mono/stereo, optionally packed to a window, and span is computed around the feed region. **Drain into OFF**: an outgoing effect keeps rendering with muted input until its tail reaches −80 dBFS or a 6 s ceiling. **Slot lock**: one of two interpolation slots is locked during a feed, paid for by the Advanced budget. `sk_seat()` performs elastic seating: the arena is divided between the Effect and voice units, and growth happens at the wrap point. +19,932 B flash, +16 B SRAM1 (handoff record `fxbuf_handoff_t` grew from 180 B to 196 B). CPU budget: 16,634 cycles/block effect share.
+
+**P2 — Colloid instrument.** The 6th instrument type, Basic class. New folder `Core/DSP/Instruments/Colloid/` with files: `ColloidVoice.h/.c` (voice struct 1,032 B, pair-loop render, filter, envelope), `ColloidOsc.h/.c` (integer pair loops in ITCM `.itcm.s095p2`, `col_read()` interpolated read, `col_pulse()` PWM two-read, four loop functions `col_oscPairStore/Add` and `col_pwmPairStore/Add` with `SMULWB`/`SMLAWB`/`SMLAWT` for stereo position), `ColloidParameters.h/.c` (parameter table, registry, labels), and `ColloidTables.h/.c` (position tables, interval tables). Stack of 12 free-running oscillators (or 6 PWM) with integer pair loops, division-free TPT SVF filters, mid/side stereo positioning, ADSR envelopes with automatable sustain switch (`sus` holds only while transport runs). **1,024-point sine** (`TABLESIZE` reduced from 4,096 to 1,024 across all engines): readers shift `>> 22` instead of `>> 20`, fraction mask `0x3fffff`; saves 6,144 B flash. Net P2 flash: +5,784 B (−6,144 sine + 2,536 step 1 + 9,392 step 2). ITCM: 14,880 B after P2 (was 14,032 at P2 start).
+
+**P3 — Colloid follow-ups.** Eleven items (F1–F11). F1: `filesystem_createBootIndex_tick()` case 6 uninitialised `entry` read fix; `filesystem_scanInstruments_tick()` case 0 `op_close_status` set. F2: four PWM waveforms (Rec/Saw share two-read loop with sign param; Sin/Tri share warp pair loops in ITCM `.itcm.s095p3`). F3: pitch slew replaces portamento (per-oscillator `pitchCur[o]` slewed in log2 Hz via `alk_exp2f`; removed `por`, `pmd`, `lgt`). F4: three intervals `in1`/`in2`/`in3` (PM63 semitones, `o mod 4` groups; removed `colIntervals`/`colMember`/`colRatio`). F5: detune ×5 (`COL_DETUNE_MAX_LN` ±250 cents). F6: spread/motion ×5 with soft-edge position law. F7: `psp` ×5 with `psp^1.393` curve. F8: AEG page `atk dec slv rel`; MOD page `dst amt sus slw`. F9: one filter with offsets (`frq res typ rte fro reo eno dro`); `str` = stereo parallel, others = mono series. F10: post-filter OTA tanh drive and one-pole tone (Alkaline's tables). F11: 50 rows, 8 pages (OSC, AEG, MOD, FM, Click, FILTER, LFO, MIX). Measurements: flash 720,084 B (+2,568 over P2, 856 past P2 budget line); ITCM 15,232 B; voice 1,112 B. CPU: plain12 stereo 382.1 instr/sample; pwm6 Saw/Rec 324.1; pwm6 Sin/Tri 326.1. Device results: clipping fix (`COL_HEADROOM` ×0.35, `COL_MAKEUP` ×1.43); `init.col` defaults rebased.
+
+**P4 — Effects bus tweaks.** T1: Space types lose the mix parameter (100% wet send bus; dry path kept for handoff only; `vol` stays 127). T2: 17 rows go plain; `fbk` unity at 100 (was 106 on Space); CrumpBit `rvb` damping 0..127; `hed`/`frz`/`rtg` stepped. T3: **StereoFilter removed** (four files deleted, Makefile changes, ids renumbered: CrumpBit 1, Delay 2, Reverb 3, Echo 4, count 5; −3.7 KB flash). T4: **Compressor improvements** — C1 threshold −8..−40 dBFS (was −3..−30), makeup reference −20 dBFS (was −12); C2 filter drive floor raised to 1.0 (was 0.4), curve `5.4x²` (was `6x²`); C3 half makeup on voice distortion (`distortion_makeup[128]` table from `gen_dist_makeup.py`); C5 live GR readout. §7: Colloid device measurements (17,433 cycles/block worst case wtb 12 str; 1.37–1.41 cycles/instr).
+
+**Bug fixes:** F1 filesystem uninitialised read (boot index case 6, scan instruments case 0); Colloid clipping (headroom/makeup); `init.col` defaults rebased; ATS fixes (HEAD `dd81f19c`).
+
+- **Find here**: [095_SESSION_HANDOFF_LOG.md](095_SESSION_HANDOFF_LOG.md),
+  `COLLOID_MODELLING_REFERENCE.md` (oscillator pair loops, TPT SVF, ADSR, signal path design),
+  `COLLOID_MODULE_REFERENCE.md` (firmware module: files, registry, signal path, control, cost),
+  `SPACE_GROUP_EFFECTS_MODELLING_REFERENCE.md` (Delay/Reverb/Echo DSP design, seating, feed-through),
+  `SPACE_GROUP_EFFECTS_MODULE_REFERENCE.md` (firmware module: files, registry, arena, drain, slot lock),
+  `INSTRUMENTS_DSP_REFERENCE.md` (§ Colloid, 1024-point sine),
+  `EFFECTS_MODULES_DSP_REFERENCE.md` (Space effects, StereoFilter removal),
+  `CPU_USE_DSP_AUDIT.md` (Colloid cost, Space cost, compressor changes),
+  `STORAGE_SRAM_MANIFEST.md` (flash 720,084, ITCM 15,232, handoff +16 B),
+  `FILESYSTEM_SPEC.md` (`.col` file, Colloid keys, Space keys, StereoFilter removed),
+  `MODULE_INTERCHANGE_SPEC.md` (Colloid registry, Space parameter IDs).

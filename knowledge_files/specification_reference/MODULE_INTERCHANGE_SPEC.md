@@ -1,7 +1,7 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-084 (S081 documented after S082; S083 MIDI in "Core/MIDI"), including typed HCNAMES, `.fx` Effect storage, AutoSave boot restore, typed Instrument-index
+095 (S081 documented after S082; S083 MIDI in "Core/MIDI"), including typed HCNAMES, `.fx` Effect storage, AutoSave boot restore, typed Instrument-index
 repair, AsyncFATFS directory publication, the Phase 4 dynamic Pattern storage
 system, step automation editing/playback (Session 065), the VOICE-page
 held-step automation overlay (Session 066), the Pattern Stack Service with
@@ -181,9 +181,30 @@ engine"):
   `liveRec_rollRateChange(track, idx, rhythm)`, `liveRec_trigger_t.rhythm`;
   `pat_record_spec_t.rhythm`.
 
+and the Session 095 additions (Space effects, Colloid instrument,
+compressor improvements; `095_SESSION_HANDOFF_LOG.md`):
+
+- **P1:** Space effects module (`Core/DSP/Effects/Space/`): `SpaceKit.c/.h`
+  (shared DSP primitives, control block, seating/feed API),
+  `SpaceEffect.c` (per-type init/process), `SpaceParameters.c` (shared
+  descriptor table), `SpaceTables.c` (flash tables). EffectsManager: drain
+  logic (logical/physical type), slot-lock API
+  (`effects_setFeedSlotLock`), `fxbuf_handoff_t` grew to 196 B.
+- **P2/P3:** Colloid instrument (`Core/DSP/Instruments/Colloid/`):
+  `ColloidVoice.c/.h` (voice render), `ColloidOsc.c` (oscillator bank),
+  `ColloidParameters.c` (50 descriptors, 8 pages), `ColloidTables.c`
+  (flash tables). Registered in `InstrumentManager` as 6th type, Basic
+  class (1,112 B voice struct). Sine table 4,096 → 1,024 points.
+- **P4 T3:** StereoFilter removed (4 files deleted, −3.7 KB flash). Effect
+  type IDs renumbered: OFF 0, CrumpBit 1, Delay 2, Reverb 3, Echo 4.
+- **P4 T4:** Compressor: threshold `−8 − 32a` (was `−3 − 27a`), makeup ref
+  −20 dBFS (was −12), filter drive floor 1.0 (was 0.4), half makeup on
+  voice distortion (`distortion_makeup[128]`, 512 B flash), live GR readout.
+
 The DSP internals behind these APIs are described in
-`INSTRUMENTS_DSP_REFERENCE.md`, `MIXER_SYSTEM_DSP_REFERENCE.md` and
-`EFFECTS_MODULES_DSP_REFERENCE.md`.
+`INSTRUMENTS_DSP_REFERENCE.md`, `MIXER_SYSTEM_DSP_REFERENCE.md`,
+`EFFECTS_MODULES_DSP_REFERENCE.md`, `SPACE_GROUP_EFFECTS_MODULE_REFERENCE.md`,
+`COLLOID_MODULE_REFERENCE.md`, and their modelling counterparts.
 Historical migrations belong in session logs; this document states which live
 module owns each call, state transition, and retained object.
 

@@ -105,6 +105,15 @@ interaction) and §11 (invariants). Internal engine maths:
   `EFFECTS_MODULES_DSP_REFERENCE.md` §6 (DSP and sub-type detail) and §6.2
   (binding rules: sub-type dispatch, lane maps, labels hook, dly delay time
   table, grn model, fin row, 170-cap, runtime 100 B, 24 rows, CB1–CB23).
+- **Space effects (S095 P1/P4):** Delay, Reverb, Echo in the Space group.
+  IDs: OFF 0, CrumpBit 1, Delay 2, Reverb 3, Echo 4 (`EFFECT_TYPE_COUNT` 5).
+  StereoFilter removed in P4. Arena prefix 512 B (`SK_PREFIX_BYTES`): 64 B
+  `sk_ctl_t` control block + 448 B type state header. Feed-through on type
+  change (`sk_feedBegin`/`sk_feedRead`); drain into OFF at −80 dBFS or 6 s.
+  Slot lock during feed, charged to Advanced budget. Shared parameter table
+  in `SpaceParameters.c`. Full reference:
+  `SPACE_GROUP_EFFECTS_MODELLING_REFERENCE.md` and
+  `SPACE_GROUP_EFFECTS_MODULE_REFERENCE.md`.
 - **R13, Effect page, invariants:** `EFFECTS_BUS_REFERENCE.md` §6 (R13
   resolution), §8 (Effect page), §9 (invariants).
 
@@ -194,9 +203,14 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   polls per pass.
 - **AutoSave (S074):** validators probe exact length; AsyncFATFS stores
   cluster-rounded size while open; self-recovering failures → trace only.
-- **Bus compressor (S074):** St1 (panel) = `output2` = DAC1; St2 (panel) =
-  `output` = DAC2. Settings page last (`MENU_GLOBAL_SCENE_SUBPAGE` 3, `+`);
-  `PAR_BUS_COMP_*` never commit through `menu_parseGlobalParam()`.
+- **Bus compressor (S074; S095 P4 retune):** St1 (panel) = `output2` = DAC1;
+  St2 (panel) = `output` = DAC2. Settings page last
+  (`MENU_GLOBAL_SCENE_SUBPAGE` 3, `+`); `PAR_BUS_COMP_*` never commit
+  through `menu_parseGlobalParam()`. S095 P4: threshold `−8 − 32a` dBFS
+  (was `−3 − 27a`), makeup ref −20 dBFS (was −12), filter drive floor
+  `1.0 + 5.4x²` (was `0.4 + 6x²`), half makeup on voice distortion
+  (`distortion_makeup[128]`, 512 B flash), live GR readout (+8 B SRAM1).
+  `MIXER_SYSTEM_DSP_REFERENCE.md` §4.
 - **Blank names:** `none.drm`/`none.fx`; empty stem → `inst`.
 - **One pan rule (S075):** 0..127, display − 63 (`DTYPE_PM63`), stored 63 =
   centre. Stereo/mono laws may differ; display and default must match.
@@ -254,6 +268,17 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   `instrument_drive` and 30 `alk_tone` appended (30 total). Mix page:
   vol pan ton drv. Post-filter overdrive: `OVD_OCT` 5.0, `OVD_MAKEUP_OCT`
   −2.5. Accepted worst case ≈263.7 per sample (no slot).
+- **Colloid (S095 P2/P3, binding):** 6th instrument type, Basic class.
+  Token `col`, extension `.col`, folder `/Instrument/Colloid/`. 12
+  free-running oscillators with integer pair-loop table reads. Division-free
+  TPT SVF. Mid/side stereo. ADSR with sustain switch. 1,112 B voice struct
+  in the existing tagged runtime slot. 50 descriptors, 8 pages. ITCM:
+  pair-loop readers in `.itcm.s095p2`, 4 PWM warp loops in `.itcm.s095p3`.
+  Full reference: `COLLOID_MODELLING_REFERENCE.md` and
+  `COLLOID_MODULE_REFERENCE.md`.
+- **Sine table 1,024 points (S095 P2, binding):** reduced from 4,096.
+  Readers >> 22, fraction mask 0x3fffff. All existing readers updated.
+  −6,144 B flash.
 - **Alkaline knob vs feedback (S093 P6, binding):** the C side takes the Res
   **knob** (0..1); the model and SPICE take the effective feedback
   `k_eff = ALK_RES_KMAX x knob` (`ALK_RES_KMAX` 1.5, a wiper transformer
@@ -276,12 +301,14 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
 - **Drum FM ramp twins (S089 P3):** `osc_renderTypedFmRamp()` dispatches
   ramped FM copies for `slp`/`smp`/`wtb` in Drum `fm` only. Stock carriers
   keep the S088 pass. Originals are untouched (Cymbal/HiHat still use them).
-  ITCM **13,984** / 16,384 B after S094 (was 12,128 at S093 P8; crash
-  removal −≈540 B, PWM 15 loops in `.itcm.s094p1` +≈2,400 B).
+  ITCM **15,232** / 16,384 B after S095 (was 13,984 at S094; Colloid pair
+  loops in `.itcm.s095p2` +848 B, PWM warp loops in `.itcm.s095p3` +352 B;
+  headroom 1,152 B).
 - **ITCM subsection order (S089):** linker script pins `.itcm.s089` then
-  `.itcm.s089p3` then `.itcm.s094p1`. New ITCM code goes in a new
-  `.itcm.sNNN` subsection after the last one. Never edit an existing ITCM
-  function's section attribute.
+  `.itcm.s089p3` then `.itcm.s094p1` then `.itcm.s095p2` then
+  `.itcm.s095p3`. New ITCM code goes in a new `.itcm.sNNN` subsection
+  after the last one. Never edit an existing ITCM function's section
+  attribute.
 - **Oscillator run modes (S088, `osc1_run`):** `rst` must stay bit-identical.
   `fre` never resets the carrier phase; `itp` resets it and crossfades the
   old carrier (`OscCarrierSnapshot`, 28 B) for 132 samples, rendered plain
@@ -318,14 +345,17 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   semitone grid 63..127. `LFO_MAX_F` removed. Five `lfo_sync` rows become
   `ROW_MENU_SPECIAL`.
 - **Cymbal/HiHat now Basic (S094 P2 §22):** `INSTRUMENT_FLAG_BASIC` set.
-  No current type is Advanced; the Advanced machinery is preserved.
+  Colloid (S095 P2) is also Basic. No current type is Advanced; the
+  Advanced machinery is preserved.
 - **SRAM D-cache fix (S094 P2 §13):** MPU region 0 had S=1 (shareable)
   since S013, which on Cortex-M7 with CACR.SIWT=0 disabled D-cache for
   all SRAM. Fix: clear S bit. Result: −14.8 % on same Scene.
 - **Memory allocation speed-ups (S094 P3):** AsyncFATFS cache 8→16
   sectors (+4,224 B SRAM1); discardable hint for regular-file data reads;
   write-back stack region (MPU region 2 over SRAM2, `TEX 001 C1 B1 S0`,
-  SRD `0x01`). SRAM1 free after S094: **87,404 B** (DEV link).
+  SRD `0x01`). SRAM1 free after S094: 87,404 B; after S095: **~87,388 B**
+  (handoff +16 B, compressor readout +8 B; partial offset from StereoFilter
+  removal).
 
 ---
 

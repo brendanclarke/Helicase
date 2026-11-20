@@ -1375,6 +1375,34 @@ most expensive choice an oscillator can make.
 93. **IMPLEMENTED (S094 P4): Alkaline waves expanded.** `wav` gains Tri
     (index 2): 0 per sample in existing fused loop. `pwm` gains Tri
     (index 2): new fused ladder mode.
+94. **IMPLEMENTED (S095 P1): Space group effects (Delay, Reverb, Echo).**
+    Three new effect types sharing a DSP kit (SpaceKit) and operating within
+    the 16,634-cycle Effect budget share. Arena prefix 512 B
+    (SK_PREFIX_BYTES). Feed-through handover, drain-into-OFF, slot lock.
+    +19,932 B flash.
+95. **IMPLEMENTED (S095 P2): Colloid instrument (6th type, Basic).**
+    12 free-running oscillators with integer pair loops in ITCM, division-free
+    TPT SVF, ADSR with sustain switch. Worst case 17,433 cycles/block (within
+    Basic 19,620). Voice struct 1,032 B (1,112 B after P3). Flash +5,784 B
+    net P2 (−6,144 sine + 2,536 step 1 + 9,392 step 2). ITCM 14,880 B.
+96. **IMPLEMENTED (S095 P2 step 0): 1,024-point sine table.** TABLESIZE
+    reduced from 4,096 to 1,024 across all engines. Readers >> 22, fraction
+    mask 0x3fffff. Saves 6,144 B flash. Perceptually transparent.
+97. **IMPLEMENTED (S095 P3): Colloid follow-ups.** 11 items: 4 PWM forms
+    (ITCM .itcm.s095p3), pitch slew, intervals, range expansions, filter
+    redesign, post drive/tone. Flash +2,568 B over P2 (856 past budget line).
+    ITCM 15,232 B. Voice 1,112 B. CPU: plain12 stereo 382.1 instr/sample;
+    pwm6 Saw/Rec 324.1; pwm6 Sin/Tri 326.1.
+98. **IMPLEMENTED (S095 P4): StereoFilter removed.** Type IDs renumbered:
+    CrumpBit 1, Delay 2, Reverb 3, Echo 4. −3.7 KB flash.
+99. **IMPLEMENTED (S095 P4): Compressor improvements.** C1 threshold
+    −8..−40 dBFS (was −3..−30); makeup reference −20 dBFS (was −12).
+    C2 filter drive floor 1.0 (was 0.4), curve 5.4x² (was 6x²).
+    C3 half makeup on voice distortion (distortion_makeup[128] table from
+    gen_dist_makeup.py). C5 live GR readout.
+100. **IMPLEMENTED (S095 P4): Colloid device measurements.** Worst case
+     17,433 cycles/block (wtb 12, stereo filter). 1.37–1.41 cycles/instr.
+     Within Basic budget.
 
 ---
 

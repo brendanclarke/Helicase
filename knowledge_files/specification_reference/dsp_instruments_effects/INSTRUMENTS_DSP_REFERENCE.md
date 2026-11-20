@@ -4,18 +4,23 @@ How the six instrument voices are rendered, how their parameters reach the
 DSP, how modulation (LFO, velocity, Morph, step automation) works, what each
 part costs, and how to change or extend it.
 
-- **Current as of:** Session 094 (2026-11-12). S094 added VCA overdrive and
-  tone to Alkaline (§5.5), PWM oscillator type (`ALK_TYP_PWM`, §5.5;
-  `OSC_TYPE_PWM`, §6.1), Tri waveform for both `wav` and `pwm`, LFO sync
-  fix and `lfoRateHz[128]` table (§7.1), `CRASH` removal from the stock
-  list (§6.1), and `IM_SPECIAL_LFO_SYNC` (§4.4). Cymbal/HiHat moved to
-  Basic (`INSTRUMENT_FLAG_BASIC`). S093 added the Alkaline
-  instrument (TB-303 emulation, §5.5): diode-ladder filter B2R, per-octave
-  Q8 square table, gate timer, 303 sequencing rules, `pos` and `alk_attack`
-  rows, extended resonance. S092 (pre-implementation) produced the circuit
-  models, SPICE simulations and DSP equations — see
-  `ALKALINE_MODELLING_REFERENCE.md`. S093 P3 removed the `Re3`/`Sw3` stock
-  table waves (§6.1.2). S088 added the oscillator run modes `osc1_run`
+- **Current as of:** Session 095 (2026-11-20). S095 P2 added the Colloid
+  instrument (6th type, Basic, §5.6): 12 free-running oscillators with
+  integer pair loops, division-free TPT SVF, ADSR with sustain switch,
+  mid/side stereo positioning. S095 P2 step 0 reduced the sine table from
+  4,096 to 1,024 points across all engines (`TABLESIZE` 1024, readers
+  `>> 22`, fraction `0x3fffff`; −6,144 B flash). S095 P3 added 4 Colloid
+  PWM forms, pitch slew, intervals, filter redesign, post drive/tone.
+  See `COLLOID_MODELLING_REFERENCE.md` and `COLLOID_MODULE_REFERENCE.md`.
+  S094 added VCA overdrive and tone to Alkaline (§5.5), PWM oscillator
+  type (`ALK_TYP_PWM`, §5.5; `OSC_TYPE_PWM`, §6.1), Tri waveform for
+  both `wav` and `pwm`, LFO sync fix and `lfoRateHz[128]` table (§7.1),
+  `CRASH` removal from the stock list (§6.1), and `IM_SPECIAL_LFO_SYNC`
+  (§4.4). Cymbal/HiHat moved to Basic (`INSTRUMENT_FLAG_BASIC`). S093
+  added the Alkaline instrument (TB-303 emulation, §5.5). S092 produced
+  the circuit models — see `ALKALINE_MODELLING_REFERENCE.md`. S093 P3
+  removed `Re3`/`Sw3` stock table waves (§6.1.2). S088 added the
+  oscillator run modes `osc1_run`
   (`rst`/`fre`/`itp`, §6.1), gain-matched retrigger
   (`slopeEg2_retriggerFrom()`, §6.3), post-chain gain ramps and
   float-through distortion (§6.5, §6.6), FM depth ramp, filter coefficient
@@ -40,6 +45,10 @@ part costs, and how to change or extend it.
     and DSP equations for the Alkaline (TB-303) instrument (S092);
   - `ALKALINE_MODULE_REFERENCE.md`: Alkaline firmware module layout, files,
     control path, sequencing rules, cost and extension guide (S093);
+  - `COLLOID_MODELLING_REFERENCE.md`: oscillator pair loops, TPT SVF,
+    ADSR, signal path design for the Colloid instrument (S095);
+  - `COLLOID_MODULE_REFERENCE.md`: Colloid firmware module layout, files,
+    registry, parameter table, cost and extension guide (S095);
   - `MIXER_SYSTEM_DSP_REFERENCE.md`: what happens to a voice block after it
     leaves the instrument (decimation, mixer, FX bus, output);
   - `EFFECTS_MODULES_DSP_REFERENCE.md`: each Effect module's DSP, binding
@@ -192,9 +201,11 @@ tap is foreground-only, like the rest of the funnel.
 - **Borrowing rule:** `instrumentManager_runtimeInstance(slot)` and the
   private per-type accessors return a pointer for immediate use only. Never
   keep one across a Scene or Instrument change.
-- **Type limits:** each type has flags: Drum and Snare are Basic; Cymbal is
-  Advanced; HiHat is Advanced and Choke. A Scene may hold at most two
-  Advanced instruments (`instrumentManager_typeSelectableForSceneSlot()`).
+- **Type limits:** each type has flags: Drum, Snare, Alkaline and Colloid
+  are Basic; Cymbal and HiHat are Basic (since S094 P2; were Advanced).
+  HiHat is also Choke. A Scene may hold at most two Advanced instruments
+  (`instrumentManager_typeSelectableForSceneSlot()`); currently no type is
+  Advanced.
 
 ### 3.2 Dispatch functions
 
@@ -709,7 +720,38 @@ osc table wave (sawTable | alkSqrTable[octave]) --x driveGain--> B2R ladder
 - **Post-filter overdrive constants.** `OVD_OCT` 5.0 (gain x1..x32),
   `OVD_MAKEUP_OCT` -2.5.
 
-### 5.6 Where each engine's hot code runs
+### 5.6 Colloid (`ColloidVoice.c`, Basic)
+
+The 6th instrument type (S095 P2/P3). A polyphonic pad/drone synthesiser:
+a stack of 12 free-running oscillators (or 6 PWM) with integer pair loops
+running in ITCM, division-free TPT SVF filters, mid/side stereo positioning,
+and an ADSR envelope with an automatable sustain switch. Voice struct:
+1,112 B after P3. 50 rows, 8 pages (OSC, AEG, MOD, FM, Click, FILTER,
+LFO, MIX).
+
+Full design and firmware references:
+- `COLLOID_MODELLING_REFERENCE.md` — pair-loop DSP, TPT SVF equations,
+  envelope design, stereo position model
+- `COLLOID_MODULE_REFERENCE.md` — files, registry, signal path, control
+  path, parameter table, ITCM layout, cost, extension guide
+
+**Key architectural points:**
+- **1,024-point sine** (S095 P2 step 0): `TABLESIZE` 1024, readers `>> 22`,
+  fraction mask `0x3fffff`. Applied across all engines, not just Colloid.
+  Saves 6,144 B flash.
+- **Integer pair loops** in ITCM (`.itcm.s095p2`, `.itcm.s095p3`): ARM DSP
+  instructions (`SMULWB`/`SMLAWB`/`SMLAWT`) for stereo position accumulation.
+  No floating-point in the per-sample oscillator loop.
+- **Division-free TPT SVF**: reciprocal precomputed per block.
+- **Sustain switch** (`sus`): `susOn = sus && seq_isRunning()`. Transport
+  stop releases all Colloid voices.
+- **Pitch slew** (P3 F3): per-oscillator in log2 Hz domain via `alk_exp2f`.
+- **Intervals** (P3 F4): `in1`/`in2`/`in3` PM63 semitones, `o mod 4` groups.
+- **Post-filter drive/tone** (P3 F10): reuses Alkaline's OTA tanh tables.
+- **Cost**: worst case 17,433 cycles/block (wtb 12, stereo), within
+  Basic budget of 19,620.
+
+### 5.7 Where each engine's hot code runs
 
 The oscillator block functions are in ITCM (`INITCM`), zero wait states
 (since S085 P1 also the sync/ring copies, their dispatchers and the

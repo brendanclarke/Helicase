@@ -3,12 +3,13 @@
 Each Effect module's DSP, binding rules, arena use and cost. Part I is the
 system framework every module shares; Part II has one section per Effect type.
 
-- **Current as of:** Session 094 P2 (2026-11-13). S094 P2 restored the
-  TPT SVF on `grn`/`rvb` (removed S091 P5 F1) and raised the CrumpBit
-  cap to 181 instructions/frame. S091 expanded CrumpBit from one engine
-  to five sub-types (dly/cmb/pit/grn/rvb) across six phases (P1–P6).
-  S074 added CrumpBit (the first type using the arena) and the
-  StereoFilter reference.
+- **Current as of:** Session 095 P4 (2026-11-20). S095 P1 added the Space
+  group effects (Delay, Reverb, Echo) with the arena prefix, elastic
+  seating, feed-through handover, and drain-into-OFF. S095 P4 removed
+  the StereoFilter and renumbered effect type IDs: OFF 0, CrumpBit 1,
+  Delay 2, Reverb 3, Echo 4, count 5. S094 P2 restored the TPT SVF on
+  `grn`/`rvb` and raised the CrumpBit cap to 181 instructions/frame.
+  S091 expanded CrumpBit to five sub-types. S074 added CrumpBit.
 - **Scope split with `MIXER_SYSTEM_DSP_REFERENCE.md`:** that document covers
   the mixer signal path (decimation, fader gains, dry/send, pan/route), the
   FX bus handoff and return, the master bus compressor, the output pipeline,
@@ -43,8 +44,9 @@ and applies the common rows (route, level, pan) itself.
 ## 2. Runtime state
 
 - `effects_runtime` is a union of every type's runtime struct in DTCM
-  (`.dtcmz`), 100 B since S091 P4 (CrumpBit: 56 B shared + a 44 B sub-engine
-  union; StereoFilter 76 B). The
+  (`.dtcmz`), 100 B since S091 P4 (CrumpBit: 56 B shared + a 44 B
+  sub-engine union; Space types use the arena prefix header, not this
+  union; StereoFilter removed in S095 P4). The
   manager zeroes it and calls the type's `init()` when the type becomes
   active. It does not zero or re-`init` on a same-type Scene switch: the
   runtime, and with it any tail, keeps running.
@@ -55,8 +57,8 @@ and applies the common rows (route, level, pan) itself.
 
 ## 3. The shared DTCM arena for buffer-using Effects
 
-CrumpBit (§6) is the first type that uses the arena; StereoFilter uses
-none.
+CrumpBit (§6) and the Space group (§7, Delay/Reverb/Echo) use the arena.
+StereoFilter was removed in S095 P4.
 
 ### 3.1 Geometry
 
@@ -167,26 +169,16 @@ worst-case Scene and a listening check.
 
 ## Part II — Effect Modules
 
-## 5. StereoFilter (`flt`)
+## 5. StereoFilter — REMOVED (S095 P4)
 
-- Stereo in, stereo out. Two `ResonantFilter` states (left, right) share
-  linked coefficients: `stereoFilter_linkCoefficients()` copies `f`, `g`, `q`
-  and `drive` from left to right after every coefficient write; the state
-  variables (`s1`, `s2`, `a`, `b`, `zi`) stay per channel.
-- `write_param` uses the same shaping as a voice filter:
-  `filter_freq` → `SVF_directSetFilterValue(valueShaperF2F(v/127, −0.9))`,
-  `filter_reso` → `SVF_setReso(v/127)`, `filter_drive` → `SVF_setDrive(v)`,
-  `filter_type` → `v + 1`.
-- `process` runs `SVF_calcBlockZDFFloat()` on `io->l`, and on `io->r` when
-  there are two channels.
-- **`SVF_calcBlockZDFFloat()`** is the float twin of the voice filter: the
-  same batched two-division solver (S073), normalised float in and out, no
-  `__SSAT`, float literals. Types 1..7 filter; any other value passes the
-  block through. Its arithmetic must stay identical to `SVF_calcBlockZDF()`;
-  both are described in `INSTRUMENTS_DSP_REFERENCE.md` §6.2. An `#error`
-  guards the shaper configuration it does not mirror.
-- **Cost (S073):** 80–103 instructions per sample per channel, 2 divisions
-  (3 for LP); about 4–5 % of the CPU with both channels.
+The StereoFilter effect type was removed in Session 095 P4. Its four files
+(`Core/DSP/Effects/StereoFilter/StereoFilter.c/.h`,
+`StereoFilterParameters.c/.h`) were deleted. Effect type IDs were
+renumbered: CrumpBit 1, Delay 2, Reverb 3, Echo 4. Savings: −3.7 KB flash.
+
+The float `SVF_calcBlockZDFFloat()` function that StereoFilter used remains
+available in the codebase for future use. Its arithmetic must stay identical
+to `SVF_calcBlockZDF()` (see `INSTRUMENTS_DSP_REFERENCE.md` §6.2).
 
 ---
 
@@ -470,7 +462,35 @@ every lane read goes through
 
 ---
 
-## 7. Pitfalls
+## 7. Space Group Effects (Delay, Reverb, Echo — S095)
+
+The three Space effects share a DSP kit (`SpaceKit`) and an arena prefix
+layout. They are documented in full in their own reference pair:
+
+- `SPACE_GROUP_EFFECTS_MODELLING_REFERENCE.md` — DSP design: arena layout,
+  shared primitives, per-type signal paths, feed-through, drain, seating
+- `SPACE_GROUP_EFFECTS_MODULE_REFERENCE.md` — firmware module: files,
+  registry, parameter tables, EffectsManager integration, build, cost
+
+**Key architectural points (binding):**
+- **Arena prefix** (`SK_PREFIX_BYTES` = 512): first 512 B of the arena are
+  reserved for a 64 B control block (`sk_ctl_t`) and a 448 B type state
+  header. Ring memory starts at offset 512.
+- **100% wet send bus** (P4 T1): Space effects have no mix parameter.
+- **Feed-through**: on type change, old tail is injected into new effect
+  via `sk_feedBegin()`/`sk_feedRead()` compiled loop variants.
+- **Drain into OFF**: outgoing effect keeps rendering until −80 dBFS or 6 s.
+- **Slot lock**: one interpolation slot locked during feed-through.
+- **Elastic seating** (`sk_seat()`): arena divided by priority; growth at
+  the wrap point (SD9).
+- **Reverb half-rate**: 22.05 kHz via 11-tap halfband; always 64 KB ring.
+- **Effect type IDs**: OFF 0, CrumpBit 1, Delay 2, Reverb 3, Echo 4.
+- **Cost**: all three within the 16,634 effect budget share.
+- **Handoff record**: `fxbuf_handoff_t` 196 B (+16 B from S095 P1).
+
+---
+
+## 8. Pitfalls
 
 - **`off` does no bus work at all.** Code that runs "every block" in an
   Effect does not run while `off`; `init()` handles re-entry.

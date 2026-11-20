@@ -53,6 +53,26 @@ be performed when the opportunity arises, not blocking items for current work.
   fade, all confirmed. Final CPU: dly 157.6, cmb 153.8, pit 154.1, grn 165.3,
   rvb 163.9 (worst 165.3 ≤ 170 cap). **Note:** grn/rvb SVF restored in
   S094 P2 §23; grn now 180.8, cap raised to 181.
+- **S095 P1–P4 Space effects, Colloid, compressor, StereoFilter removal
+  (open — needs device test):**
+  - Space effects: boot, select Delay/Reverb/Echo, play through each;
+    type-change feed-through (switch Delay→Reverb while tail is sounding);
+    drain into OFF (tail fades to silence); slot-lock interplay with `itp`
+  - Colloid: boot with `init.col`; Instrument Load listing; all 8 pages;
+    12 oscillators audible; pair-loop pitch tracking; PWM warp forms; filter
+    sweep; ADSR with sustain switch; mid/side stereo; CPU worst case (6
+    Colloid slots, Basic budget)
+  - Compressor retune: clean kit at `cam` 48/64/96 — deeper reduction than
+    before; C5 live GR readout on compressor page; filter drive floor
+    (every filtered voice +8 dB at `drv` 0); half makeup on voice
+    distortion (distortion no longer the only way into compressor range)
+  - StereoFilter removal: confirm type list shows OFF/CrumpBit/Delay/
+    Reverb/Echo (5 total); old `flt` files on card parse as OFF
+  - Sine table: all existing wavetable/LFO/oscillator reads sound correct
+    after 4096→1024 reduction
+  - CrumpBit `rvb` damping: `toneK[ton >> 1]` across full row (126/127
+    both flat)
+  - Flash: 720,084 B; ITCM: 15,232 / 16,384 B
 - **S089 P3 Drum FM ramp efficiency H1–H6 (open):**
   - H1: boot and play Drum `fm` with `slp`/`smp`/`wtb` — sounds correct
   - H2: A/B against the P2 image with `fm` carriers — no audible difference
