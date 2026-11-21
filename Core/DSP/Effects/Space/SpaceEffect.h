@@ -55,11 +55,15 @@
  *
  * What:
  * - tag: SPACE_TAG_*; flags: SPACE_F_*; rows[]: raw row bytes (index - 3),
- *   written by write_param;
+ *   written by write_param; hx (S100 P2, the byte that was padding): the
+ *   `hld` crossfade, 0 (normal play) .. SPACE_HOLD_XF blocks (held), one
+ *   step a block toward the row (SpaceEffect.c space_tapeBegin());
  * - the tape (Delay, Echo): tape_n (frames, without the 3 guard frames),
  *   valid (frames written since the seat, saturating), pos (the write
  *   position in frames, fractional: the tape runs at speed v), d[c] (each
- *   channel's delay in tape frames), v (speed), rph[c] (the reverse head's phase 0..1);
+ *   channel's delay in tape frames, after the glide), v (speed), rph[c] (the reverse head's phase 0..1),
+ *   dr[c] (S100 P2: the delay the reads used at the block end: d[c] after the glide plus
+ *   the wow swing, whole under `hld`; dr - d is the swing);
  * - wet (the wet gain the next block ramps from: the ducking, and on the
  *   Reverb the gate/bloom; S095 P4: no `mix` row, so 1 is the top),
  *   dry (the dry gain, gliding from the outgoing type's to 0; it exists
@@ -76,13 +80,14 @@ typedef struct {
     uint8_t  tag;
     uint8_t  flags;
     uint8_t  rows[SPACE_ROWS_MAX];
-    uint8_t  pad;
+    uint8_t  hx;
     uint32_t tape_n;
     uint32_t valid;
     float    pos;
     float    d[2];
     float    v;
     float    rph[2];
+    float    dr[2];
     float    wet;
     float    dry;
     float    duck;

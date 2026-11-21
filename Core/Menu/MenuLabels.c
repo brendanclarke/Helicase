@@ -73,7 +73,8 @@ const char shortNames[][4] = {
     {"sdt"},{"sto"},{"tnA"},{"tnB"},{"tnC"},{"tnD"},{"teA"},{"teB"},{"teC"},
     {"teD"},{"wid"},{"bof"},{"biv"},{"fbk"},{"sub"},{"spn"},{"aux"},{"p2"},
     {"p3"},{"den"},{"lng"},{"bal"},{"dmp"},{"xfb"},{"deg"},{"wow"},{"hld"},
-    {"rev"},{"hed"},{"dck"},{"siz"},{"dcy"},{"dif"},{"lsh"},{"lsf"},{"hsh"},
+    /* S100 P2: "str" (SHORT_STR) replaces "hed" in place (menu.h). */
+    {"rev"},{"str"},{"dck"},{"siz"},{"dcy"},{"dif"},{"lsh"},{"lsf"},{"hsh"},
     {"hsf"},{"frz"},{"shm"},{"int"},{"e>r"},{"bln"},
     /* S099 P1: the chorus rows; S099 P2: fx rte dpt mix (the effect's; csr,
      * cbw, cdv and cwd removed) */
@@ -176,7 +177,8 @@ const char longNames[][10] = {
     {"Envelope"},{"BitOff"},{"BitInv"},{"Rate"},{"SubType"},{"Switch"},
     {"SubPan"},{"Aux"},{"Pitch2"},{"Pitch3"},{"Density"},{"Balance"},
     {"FinePtch"},{"Damping"},{"XFeed"},{"Degrade"},{"WowFlutr"},{"Hold"},
-    {"Reverse"},{"Heads"},{"Ducking"},{"PreDelay"},{"Size"},{"Diffusn"},
+    /* S100 P2: "Stereo" (LONG_STEREO) replaces "Heads" in place (menu.h). */
+    {"Reverse"},{"Stereo"},{"Ducking"},{"PreDelay"},{"Size"},{"Diffusn"},
     {"LowShelf"},{"LowFreq"},{"HighDamp"},{"HighFreq"},{"Modulatn"},
     {"Freeze"},{"Interval"},{"GateBlom"},{"EchoRvb"},{"Blend"},
     /* S099 P1: the chorus rows */

@@ -47,7 +47,10 @@ const char space_echoFull8[]   = "Echo";
  * Delay rows (plan §4.1; D3, D4, D5, D10, D23; options O1, O3, O4, O6, O8,
  * O9). 100 % wet since S095 P4 T1 (the Effect is a send; the level is the
  * common `vol`). Defaults: a musical starting point (time row 64 = a
- * StepScale stop, feedback 64, flat tone, clean tape).
+ * StepScale stop, feedback 64, the loop band-pass at full width, clean
+ * tape). S100 P2: SELECT 2 tim fbk ton wid, SELECT 3 xfb spr str wow,
+ * SELECT 4 deg dck hld rev (user, 2026-11-21, after hearing the first
+ * build); `str` replaces `hed`.
  */
 const effect_param_descriptor_t space_delayDescriptors[] = {
     EFFECT_COMMON_ROWS(INSTRUMENT_PARAM_FLAG_AUTOMATABLE,
@@ -56,31 +59,53 @@ const effect_param_descriptor_t space_delayDescriptors[] = {
     EFFECT_ROW_FLAGS("dly_time", CAT_DELAY, LONG_TIME, SHORT_MICROTIMING, DTYPE_0B127,
                      EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u,
                      EFFECT_PARAM_FLAG_BUFFER_DEPENDENT),
+    EFFECT_ROW("dly_feedback", CAT_DELAY, LONG_FEEDBACK, SHORT_FBK, DTYPE_0B127,
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
+    /*
+     * S100 P2: the loop band-pass (SpaceEffect.c space_bandLaw()), only in
+     * the feedback path. `ton` is bipolar (+-63, 0 = stored 63, the
+     * default): it slides the band along 10 Hz .. 21 kHz. At 0 with `wid`
+     * full the band is the whole range and cuts nothing; raising `ton`
+     * moves it up (cuts lows), lowering it moves it down (cuts highs). With
+     * a narrow `wid` it places the peak, 80 Hz at -63, 458 Hz at 0, 12 kHz
+     * at +63. `wid` sets the width: 0 a resonant peak (Q 8), 127 (the
+     * default) the full 11 octaves, the curve slow near the top.
+     */
+    EFFECT_ROW("dly_tone", CAT_DELAY, LONG_TONE, SHORT_TON, DTYPE_PM63,
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
+    EFFECT_ROW("dly_width", CAT_DELAY, LONG_WIDTH, SHORT_WID, DTYPE_0B127,
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 127u, 127u),
+    /*
+     * D23, S100 P2: `xfb`, the side allpass's turnover (SpaceEffect.c
+     * SPACE_LAW_XFB): 0 two loops, rising the band above the turnover
+     * ping-pongs, 127 a true ping-pong with no polarity flip; the mid is
+     * never touched, so a mono fold keeps its level.
+     */
+    EFFECT_ROW("dly_xfeed", CAT_DELAY, LONG_XFEED, SHORT_XFB, DTYPE_0B127,
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     /* D23: continuous R/L time ratio 1/2..2 (63 = equal). */
     EFFECT_ROW("dly_spread", CAT_DELAY, LONG_SPREAD, SHORT_SPR, DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
-    EFFECT_ROW("dly_feedback", CAT_DELAY, LONG_FEEDBACK, SHORT_FBK, DTYPE_0B127,
-               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
-    /* D23: continuous L/R feedback cross-feed (0 stereo .. 127 ping-pong). */
-    EFFECT_ROW("dly_xfeed", CAT_DELAY, LONG_XFEED, SHORT_XFB, DTYPE_0B127,
-               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
-    EFFECT_ROW("dly_tone", CAT_DELAY, LONG_TONE, SHORT_TON, DTYPE_PM63,
+    /*
+     * S100 P2: `str`, the stereo field (SpaceEffect.c space_tapeBegin()
+     * step 3), bipolar (+-63, 0 = stored 63, the default): 0 exactly one
+     * head a side; down to -63 the mono sum of the two heads; up to +64 two
+     * taps between the heads' times (they move with `spr`) fading in at
+     * -+1/3 pan. Output only: the loop always recirculates the heads.
+     */
+    EFFECT_ROW("dly_stereo", CAT_DELAY, LONG_STEREO, SHORT_STR, DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
+    EFFECT_ROW("dly_wow", CAT_DELAY, LONG_WOWFLUTR, SHORT_WOW, DTYPE_0B127,
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     EFFECT_ROW("dly_degrade", CAT_DELAY, LONG_DEGRADE, SHORT_DEG, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
-    EFFECT_ROW("dly_wow", CAT_DELAY, LONG_WOWFLUTR, SHORT_WOW, DTYPE_0B127,
+    /* O1, S100 P2: the wet ducked by the input, twice as deep at 127. */
+    EFFECT_ROW("dly_duck", CAT_DELAY, LONG_DUCKING, SHORT_DCK, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     EFFECT_ROW("dly_hold", CAT_DELAY, LONG_HOLD, SHORT_HLD, DTYPE_ON_OFF,
                INSTRUMENT_PARAM_FLAG_AUTOMATABLE, EFFECT_MOD_NONE, 0u, 1u),
     EFFECT_ROW("dly_reverse", CAT_DELAY, LONG_REVERSE, SHORT_REV, DTYPE_ON_OFF,
                INSTRUMENT_PARAM_FLAG_AUTOMATABLE, EFFECT_MOD_NONE, 0u, 1u),
-    /* S095 P4: seven stops 0..6, one per detent (A B C AB AC BC ABC). */
-    EFFECT_ROW("dly_heads", CAT_DELAY, LONG_HEADS, SHORT_HED, DTYPE_0B127,
-               INSTRUMENT_PARAM_FLAG_MORPHABLE |
-               INSTRUMENT_PARAM_FLAG_AUTOMATABLE,
-               EFFECT_MOD_NONE, SPACE_HEADS_DEFAULT, SPACE_HEADS_STOPS - 1u),
-    EFFECT_ROW("dly_duck", CAT_DELAY, LONG_DUCKING, SHORT_DCK, DTYPE_0B127,
-               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
 };
 
 /*
@@ -146,11 +171,31 @@ const effect_param_descriptor_t space_echoDescriptors[] = {
                      EFFECT_PARAM_FLAG_BUFFER_DEPENDENT),
     EFFECT_ROW("ech_feedback", CAT_ECHO, LONG_FEEDBACK, SHORT_FBK, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
+    /* S100 P2: `ton` (bipolar) / `wid` as the Delay's (the Echo's one loop). */
     EFFECT_ROW("ech_tone", CAT_ECHO, LONG_TONE, SHORT_TON, DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
+    EFFECT_ROW("ech_width", CAT_ECHO, LONG_WIDTH, SHORT_WID, DTYPE_0B127,
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 127u, 127u),
+    /*
+     * S100 P2: the Echo's `spr`. Its mono tape is read by two heads at the
+     * Delay's relative law (the longer at `tim`, the other `tim` / ratio);
+     * the loop recirculates the one at `tim`, so the other is output only.
+     */
+    EFFECT_ROW("ech_spread", CAT_ECHO, LONG_SPREAD, SHORT_SPR, DTYPE_PM63,
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
+    /*
+     * S100 P2: the Echo's `str`, bipolar as the Delay's: 0 one head a side,
+     * -63 mono; above 0 its two heads go wider (M/S, the side up to x 2),
+     * no taps.
+     */
+    EFFECT_ROW("ech_stereo", CAT_ECHO, LONG_STEREO, SHORT_STR, DTYPE_PM63,
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
+    EFFECT_ROW("ech_wow", CAT_ECHO, LONG_WOWFLUTR, SHORT_WOW, DTYPE_0B127,
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     EFFECT_ROW("ech_degrade", CAT_ECHO, LONG_DEGRADE, SHORT_DEG, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
-    EFFECT_ROW("ech_wow", CAT_ECHO, LONG_WOWFLUTR, SHORT_WOW, DTYPE_0B127,
+    /* O14, S100 P2: as the Delay's `dck` (twice as deep at 127). */
+    EFFECT_ROW("ech_duck", CAT_ECHO, LONG_DUCKING, SHORT_DCK, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     EFFECT_ROW("ech_to_reverb", CAT_ECHO, LONG_ECHORVB, SHORT_E_TO_R, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
@@ -162,13 +207,6 @@ const effect_param_descriptor_t space_echoDescriptors[] = {
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
     EFFECT_ROW("ech_high_shelf", CAT_PLATE, LONG_HIGHDAMP, SHORT_HSH, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 40u, 127u),
-    /* S095 P4: seven stops 0..6, one per detent (A B C AB AC BC ABC). */
-    EFFECT_ROW("ech_heads", CAT_ECHO, LONG_HEADS, SHORT_HED, DTYPE_0B127,
-               INSTRUMENT_PARAM_FLAG_MORPHABLE |
-               INSTRUMENT_PARAM_FLAG_AUTOMATABLE,
-               EFFECT_MOD_NONE, SPACE_HEADS_DEFAULT, SPACE_HEADS_STOPS - 1u),
-    EFFECT_ROW("ech_duck", CAT_ECHO, LONG_DUCKING, SHORT_DCK, DTYPE_0B127,
-               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     /* S095 P4: three stops 0..2 (e>r r>e lp). */
     EFFECT_ROW("ech_routing", CAT_ECHO, LONG_MIDI_ROUTING, SHORT_RETRIGGER, DTYPE_0B127,
                INSTRUMENT_PARAM_FLAG_MORPHABLE |
@@ -199,23 +237,22 @@ _Static_assert(SPACE_ECHO_PARAM_ENUM_COUNT == SPACE_ECHO_PARAM_COUNT,
  *
  * S095 P4 (T2, user 2026-11-13): only the rows that need a label to be
  * played keep one: `tim` (the synced stops and the clamped row), and the
- * stepped rows `hed`, `frz`, `rtg` (names, not numbers). `spr`, `fbk`,
+ * stepped rows `frz`, `rtg` (names, not numbers; `hed` until S100 P2). `spr`, `fbk`,
  * `xfb`, `dck`, `pre`, `dcy`, `int`, `dtn`, `env` show plain numbers; their
  * laws are unchanged, so the number is a position on the same curve.
  */
 enum {
     SPACE_TXT_NONE = 0,
     SPACE_TXT_TIME,      /* `tim`: the row the DSP plays, CrumpBit's labels (D3) */
-    SPACE_TXT_HEADS,     /* `hed`: the head set (O6), letters (S095 P4) */
     SPACE_TXT_FREEZE,    /* `frz`: off / on / shm (O12) */
     SPACE_TXT_ROUTE      /* `rtg`: e>r / r>e / lp (O16) */
 };
 
-/* tim spr fbk xfb ton deg wow hld rev hed dck */
+/* tim fbk ton wid xfb spr str wow deg dck hld rev (S100 P2) */
 static const uint8_t space_delayText[SPACE_DELAY_PARAM_COUNT - 3u] = {
     SPACE_TXT_TIME, SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE,
     SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE,
-    SPACE_TXT_NONE, SPACE_TXT_HEADS, SPACE_TXT_NONE
+    SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE
 };
 
 /* pre siz dcy dif lsh lsf hsh hsf mod wid frz shm int dtn env dck ton */
@@ -227,27 +264,17 @@ static const uint8_t space_reverbText[SPACE_REVERB_PARAM_COUNT - 3u] = {
     SPACE_TXT_NONE
 };
 
-/* tim fbk ton deg wow e>r bln dcy lsh hsh hed dck rtg */
+/* tim fbk ton wid spr str wow deg dck e>r bln dcy lsh hsh rtg (S100 P2) */
 static const uint8_t space_echoText[SPACE_ECHO_PARAM_COUNT - 3u] = {
     SPACE_TXT_TIME, SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE,
     SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE,
-    SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_HEADS, SPACE_TXT_NONE,
-    SPACE_TXT_ROUTE
+    SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_NONE,
+    SPACE_TXT_NONE, SPACE_TXT_NONE, SPACE_TXT_ROUTE
 };
 
 /* The stepped rows' names (O12, O16). */
 static const char space_frzNames[3][4] = { "off", " on", "shm" };
 static const char space_rtgNames[3][4] = { "e>r", "r>e", "lp " };
-
-/*
- * The seven `hed` stops in knob order (O6; S095 P4 Q3: letters, one per
- * head, A = D/3, B = 2D/3, C = D, so a label cannot be read as a number or
- * a knob position). The order is the one §S18 settled: single heads, then
- * pairs, then all three.
- */
-static const char space_hedNames[SPACE_HEADS_STOPS][4] = {
-    "  A", "  B", "  C", " AB", " AC", " BC", "ABC"
-};
 
 /*
  * The value text of a Space row (S095 P1 plan §6 item 8; S095 P4 T2).
@@ -282,9 +309,6 @@ static __attribute__((optimize("Os"))) uint8_t space_formatValue(const uint8_t *
         crumpBit_formatDelayRow((value > limit) ? limit : value, out);
         return 1u;
     }
-    case SPACE_TXT_HEADS:
-        memcpy(out, space_hedNames[space_step(value, SPACE_HEADS_STOPS)], 3u);
-        return 1u;
     case SPACE_TXT_FREEZE:
         memcpy(out, space_frzNames[space_step(value, 3u)], 3u);
         return 1u;

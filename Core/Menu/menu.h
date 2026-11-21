@@ -273,7 +273,13 @@ enum longNamesEnum {
     LONG_BITINV, LONG_RATE, LONG_SUBTYPE, LONG_SWITCH, LONG_SUBPAN, LONG_AUX,
     LONG_PITCH2, LONG_PITCH3, LONG_DENSITY, LONG_BALANCE, LONG_FINEPTCH,
     LONG_DAMPING, LONG_XFEED, LONG_DEGRADE, LONG_WOWFLUTR, LONG_HOLD,
-    LONG_REVERSE, LONG_HEADS, LONG_DUCKING, LONG_PREDELAY, LONG_SIZE,
+    /*
+     * S100 P2: LONG_STEREO ("Stereo") is the former LONG_HEADS ("Heads"),
+     * renamed in place: the Space types' `hed` row became `str` (the
+     * stereo field: mono .. one head a side .. taps), and nothing else used
+     * the entry, so the table keeps its size and every later id.
+     */
+    LONG_REVERSE, LONG_STEREO, LONG_DUCKING, LONG_PREDELAY, LONG_SIZE,
     LONG_DIFFUSN, LONG_LOWSHELF, LONG_LOWFREQ, LONG_HIGHDAMP, LONG_HIGHFREQ,
     LONG_MODULATN, LONG_FREEZE, LONG_INTERVAL, LONG_GATEBLOM, LONG_ECHORVB,
     LONG_BLEND,
@@ -346,7 +352,11 @@ enum shortNamesEnum {
     SHORT_TED, SHORT_WID, SHORT_BOF, SHORT_BIV, SHORT_FBK, SHORT_SUB,
     SHORT_SPN, SHORT_AUX, SHORT_P2, SHORT_P3, SHORT_DEN, SHORT_LNG,
     SHORT_BAL, SHORT_DMP, SHORT_XFB, SHORT_DEG, SHORT_WOW, SHORT_HLD,
-    SHORT_REV, SHORT_HED, SHORT_DCK, SHORT_SIZ, SHORT_DCY, SHORT_DIF,
+    /*
+     * S100 P2: SHORT_STR ("str") is the former SHORT_HED ("hed"), renamed
+     * in place for the Space types' stereo-field row (see LONG_STEREO).
+     */
+    SHORT_REV, SHORT_STR, SHORT_DCK, SHORT_SIZ, SHORT_DCY, SHORT_DIF,
     SHORT_LSH, SHORT_LSF, SHORT_HSH, SHORT_HSF, SHORT_FRZ, SHORT_SHM,
     SHORT_INT, SHORT_E_TO_R, SHORT_BLN,
     /* S099 P1: the chorus rows; S099 P2: the effect's fx rte dpt mix (were

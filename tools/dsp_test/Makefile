@@ -1625,10 +1625,10 @@ space: crumpbit
 	  --macro EFFECT_TYPE_ECHO --out $(GEN)/sp_types.c
 	$(EX) --src $(ROOT)/Core/DSP/Effects/Space/SpaceParameters.h \
 	  --typedef space_delay_param_t --typedef space_reverb_param_t \
-	  --typedef space_echo_param_t --macro SPACE_HEADS_STOPS \
+	  --typedef space_echo_param_t \
 	  --macro SPACE_FREEZE_SHIMMER --macro SPACE_FREEZE_OFF \
 	  --macro SPACE_FREEZE_STOPS --macro SPACE_ROUTING_STOPS \
-	  --macro SPACE_HEADS_DEFAULT --macro SPACE_ROUTING_E2R \
+	  --macro SPACE_ROUTING_E2R \
 	  --macro SPACE_ROUTING_R2E --macro SPACE_ROUTING_LOOP \
 	  --macro SPACE_INTERVAL_ROW_MIN --macro SPACE_INTERVAL_ROW_MAX \
 	  --out $(GEN)/sp_params.c
@@ -1638,9 +1638,9 @@ space: crumpbit
 	  --out $(GEN)/SpaceEffect.host.c
 	$(HOSTCC) $(HOSTFLAGS) modules/space.c -o build/space -lm
 	./build/space
-	@# S096 P2 F1: the stereo and mono linear reads without their fraction
-	@# (back to a frame-stepped read) must fail SP11.
-	mkdir -p build/break_sp_lin2 build/break_sp_lin1
+	@# S096 P2 F1: the stereo linear read without its fraction (back to a
+	@# frame-stepped read) must fail SP11 (S100 P2: the mono read is gone).
+	mkdir -p build/break_sp_lin2
 	sed 's/\*l = al + f \* /*l = al + 0.0f * /' \
 	  $(GEN)/SpaceEffect.host.c > build/break_sp_lin2/SpaceEffect.host.c
 	@grep -q '\*l = al + 0.0f \* ' build/break_sp_lin2/SpaceEffect.host.c || \
@@ -1649,14 +1649,107 @@ space: crumpbit
 	@if ./build/space_break_lin2 >/dev/null 2>&1; then \
 	  echo "space_break_lin2: FAILED (a frame-stepped Delay head not caught)"; exit 1; \
 	else echo "space_break_lin2: caught (law SP11 fails as expected)"; fi
-	sed 's/return a + f \* ((float)t\[i + 1\] - a);/return a + 0.0f * ((float)t[i + 1] - a);/' \
-	  $(GEN)/SpaceEffect.host.c > build/break_sp_lin1/SpaceEffect.host.c
-	@grep -q 'return a + 0.0f \* ((float)t' build/break_sp_lin1/SpaceEffect.host.c || \
-	  { echo "space_break_lin1: sed did not apply"; exit 1; }
-	$(HOSTCC) -Ibuild/break_sp_lin1 $(HOSTFLAGS) modules/space.c -o build/space_break_lin1 -lm
-	@if ./build/space_break_lin1 >/dev/null 2>&1; then \
-	  echo "space_break_lin1: FAILED (a frame-stepped Echo head not caught)"; exit 1; \
-	else echo "space_break_lin1: caught (law SP11 fails as expected)"; fi
+	@# S100 P2: a side scaled by the coefficient instead of allpassed
+	@# (frequency-independent, so not unity: the loop loses where `spr`
+	@# sets the heads apart) must fail SP12d; a loop without its band-pass
+	@# (the head straight into the clip) must fail SP13a (the DC latch);
+	@# the mid halved must fail SP12c (mono level).
+	mkdir -p build/break_sp_xfb build/break_sp_band build/break_sp_mono
+	sed 's/const float sp = kx \* sd + xs;/const float sp = kx * sd + 0.0f * xs;/' \
+	  $(GEN)/SpaceEffect.host.c > build/break_sp_xfb/SpaceEffect.host.c
+	@grep -q 'const float sp = kx \* sd + 0.0f \* xs;' build/break_sp_xfb/SpaceEffect.host.c || \
+	  { echo "space_break_xfb: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_sp_xfb $(HOSTFLAGS) modules/space.c -o build/space_break_xfb -lm
+	@if ./build/space_break_xfb >/dev/null 2>&1; then \
+	  echo "space_break_xfb: FAILED (a non-allpass side not caught)"; exit 1; \
+	else echo "space_break_xfb: caught (law SP12 fails as expected)"; fi
+	sed 's/const float mid = kc \* (yl + yr);/const float mid = 0.5f * kc * (yl + yr);/' \
+	  $(GEN)/SpaceEffect.host.c > build/break_sp_mono/SpaceEffect.host.c
+	@grep -q 'const float mid = 0.5f \* kc \* (yl + yr);' build/break_sp_mono/SpaceEffect.host.c || \
+	  { echo "space_break_mono: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_sp_mono $(HOSTFLAGS) modules/space.c -o build/space_break_mono -lm
+	@if ./build/space_break_mono >/dev/null 2>&1; then \
+	  echo "space_break_mono: FAILED (a lost mid not caught)"; exit 1; \
+	else echo "space_break_mono: caught (law SP12 fails as expected)"; fi
+	sed 's/y = space_clip1(v1 \* drive);/y = space_clip1(c->play * (1.0f + 0.0f * v1));/' \
+	  $(GEN)/SpaceEffect.host.c > build/break_sp_band/SpaceEffect.host.c
+	@grep -q 'c->play \* (1.0f + 0.0f \* v1)' build/break_sp_band/SpaceEffect.host.c || \
+	  { echo "space_break_band: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_sp_band $(HOSTFLAGS) modules/space.c -o build/space_break_band -lm
+	@if ./build/space_break_band >/dev/null 2>&1; then \
+	  echo "space_break_band: FAILED (a loop without its band-pass not caught)"; exit 1; \
+	else echo "space_break_band: caught (law SP13 fails as expected)"; fi
+	@# S100 P2: each new law must fail on the old or broken law.
+	mkdir -p build/break_sp_hold build/break_sp_deg build/break_sp_wow \
+	  build/break_sp_str build/break_sp_dark
+	sed 's/SPACE_HOLD_RATE \* x \* x/0.0f * x * x/' \
+	  $(GEN)/SpaceEffect.host.c > build/break_sp_hold/SpaceEffect.host.c
+	@grep -q '0.0f \* x \* x' build/break_sp_hold/SpaceEffect.host.c || \
+	  { echo "space_break_hold: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_sp_hold $(HOSTFLAGS) modules/space.c -o build/space_break_hold -lm
+	@if ./build/space_break_hold >/dev/null 2>&1; then \
+	  echo "space_break_hold: FAILED (the held loop's growth removed (unity at every row) not caught)"; exit 1; \
+	else echo "space_break_hold: caught (law SP8 fails as expected)"; fi
+	sed 's/k->makeup = space_degRms(k->dg) \/ space_degRms(1.0f);/k->makeup = 1.0f \/ k->dg;/' \
+	  $(GEN)/SpaceEffect.host.c > build/break_sp_deg/SpaceEffect.host.c
+	@grep -q 'k->makeup = 1.0f / k->dg;' build/break_sp_deg/SpaceEffect.host.c || \
+	  { echo "space_break_deg: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_sp_deg $(HOSTFLAGS) modules/space.c -o build/space_break_deg -lm
+	@if ./build/space_break_deg >/dev/null 2>&1; then \
+	  echo "space_break_deg: FAILED (the makeup back to 1 / drive (not equal amplitude) not caught)"; exit 1; \
+	else echo "space_break_deg: caught (law SP14 fails as expected)"; fi
+	sed 's/(c ? -s : s) \* v1;/(c ? -s : s) * v1 * 0.3f;/' \
+	  $(GEN)/SpaceEffect.host.c > build/break_sp_wow/SpaceEffect.host.c
+	@grep -q '(c ? -s : s) \* v1 \* 0.3f;' build/break_sp_wow/SpaceEffect.host.c || \
+	  { echo "space_break_wow: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_sp_wow $(HOSTFLAGS) modules/space.c -o build/space_break_wow -lm
+	@if ./build/space_break_wow >/dev/null 2>&1; then \
+	  echo "space_break_wow: FAILED (the wow swing at 0.3 of its depth (as the glide had filtered it) not caught)"; exit 1; \
+	else echo "space_break_wow: caught (law SP15 fails as expected)"; fi
+	sed 's/? 0.0f : (str - 63.0f) \* (1.0f \/ 64.0f);/? 0.0f : 0.0f * str;/' \
+	  $(GEN)/SpaceEffect.host.c > build/break_sp_str/SpaceEffect.host.c
+	@grep -q '? 0.0f : 0.0f \* str;' build/break_sp_str/SpaceEffect.host.c || \
+	  { echo "space_break_str: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_sp_str $(HOSTFLAGS) modules/space.c -o build/space_break_str -lm
+	@if ./build/space_break_str >/dev/null 2>&1; then \
+	  echo "space_break_str: FAILED (the Delay's taps silent not caught)"; exit 1; \
+	else echo "space_break_str: caught (law SP16 fails as expected)"; fi
+	sed 's/#define SPACE_SPR_DARK       0.3f/#define SPACE_SPR_DARK       0.0f/' \
+	  $(GEN)/SpaceEffect.host.c > build/break_sp_dark/SpaceEffect.host.c
+	@grep -q '#define SPACE_SPR_DARK       0.0f' build/break_sp_dark/SpaceEffect.host.c || \
+	  { echo "space_break_dark: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_sp_dark $(HOSTFLAGS) modules/space.c -o build/space_break_dark -lm
+	@if ./build/space_break_dark >/dev/null 2>&1; then \
+	  echo "space_break_dark: FAILED (no `spr` darkening not caught)"; exit 1; \
+	else echo "space_break_dark: caught (law SP17 fails as expected)"; fi
+	@# S100 P2 (after the first build): the hold crossfade (undone: one
+	@# block and no per-frame ramps, the first build's step), the width
+	@# curve and the ducking depth each fail their law when undone.
+	mkdir -p build/break_sp_holdxf build/break_sp_wid build/break_sp_dck
+	sed 's/#define SPACE_HOLD_XF        69u/#define SPACE_HOLD_XF        1u/; s/            fbk += dfbk;/            fbk += 0.0f * dfbk;/; s/            ing += ding;/            ing += 0.0f * ding;/' \
+	  $(GEN)/SpaceEffect.host.c > build/break_sp_holdxf/SpaceEffect.host.c
+	@grep -q '#define SPACE_HOLD_XF        1u' build/break_sp_holdxf/SpaceEffect.host.c || \
+	  { echo "space_break_holdxf: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_sp_holdxf $(HOSTFLAGS) modules/space.c -o build/space_break_holdxf -lm
+	@if ./build/space_break_holdxf >/dev/null 2>&1; then \
+	  echo "space_break_holdxf: FAILED (hold switched in one step, the first build, not caught)"; exit 1; \
+	else echo "space_break_holdxf: caught (law SP18 fails as expected)"; fi
+	sed 's/exp2f(5.9378f \* (1.0f - (1.0f - w) \* (1.0f - w))));/exp2f(5.9378f * w));/' \
+	  $(GEN)/SpaceEffect.host.c > build/break_sp_wid/SpaceEffect.host.c
+	@grep -q 'exp2f(5.9378f \* w));' build/break_sp_wid/SpaceEffect.host.c || \
+	  { echo "space_break_wid: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_sp_wid $(HOSTFLAGS) modules/space.c -o build/space_break_wid -lm
+	@if ./build/space_break_wid >/dev/null 2>&1; then \
+	  echo "space_break_wid: FAILED (the earlier width curve (fast at the top) not caught)"; exit 1; \
+	else echo "space_break_wid: caught (law SP19 fails as expected)"; fi
+	sed 's/case SPACE_LAW_DCK: k->dck = 2.0f \* g; break;/case SPACE_LAW_DCK: k->dck = g; break;/' \
+	  $(GEN)/SpaceEffect.host.c > build/break_sp_dck/SpaceEffect.host.c
+	@grep -q 'case SPACE_LAW_DCK: k->dck = g; break;' build/break_sp_dck/SpaceEffect.host.c || \
+	  { echo "space_break_dck: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_sp_dck $(HOSTFLAGS) modules/space.c -o build/space_break_dck -lm
+	@if ./build/space_break_dck >/dev/null 2>&1; then \
+	  echo "space_break_dck: FAILED (the earlier ducking depth not caught)"; exit 1; \
+	else echo "space_break_dck: caught (law SP20 fails as expected)"; fi
 
 # S095 P1 (§S18): the Space types' instructions per frame (space_cpu.py).
 space_cpu_check:
