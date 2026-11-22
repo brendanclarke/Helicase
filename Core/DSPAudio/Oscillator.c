@@ -91,7 +91,8 @@ static const float osc_octaveEdgeHz[10] = {
  * Why:        see osc_octaveEdgeHz. Constant cost: all ten compares always
  *             run (no early exit), so the cost does not depend on pitch.
  * Inputs:     f, the effective oscillator frequency in Hz.
- * Outputs:    the table index 0..10.
+ * Outputs:    the table index 0..10 (S101: osc_calcWavetableFreqValue()
+ *             lifts 0 to 1 for the saw and rec tables, which have no level 0).
  * Accessors:  osc_calcWavetableFreqValue().
  * Affiliates: osc_setFreq()'s frequency cache (existing, kept); wavetable.c
  *             table layout (11 octaves).
@@ -1004,12 +1005,30 @@ static void osc_calcNoiseFreqValue(OscInfo* osc, const float currentFreq)
 	osc_calcSineFreqValue(osc, currentFreq);
 }
 //-----------------------------------------------------------
-static void osc_calcWavetableFreqValue(OscInfo* osc, const float currentFreq)
+/*
+ * S101 (wavetable.h): sawTable / recTable have no level 0 (it served only
+ * fundamentals below 16.35 Hz and differs from level 1 by edge ripple), so
+ * they read level 1 there; triTable is the first table of stockTableRows[]
+ * and keeps level 0, so a triangle reads exactly as before. `triCode` is the
+ * triangle's waveform value for the caller's type (TRI under wav and the
+ * modulator list, OSC_PWM_TRI under pwm).
+ * osc_setFreq() calls it from one switch label (SAW, TRI, REC share it):
+ * with one call per case GCC built a copy of the unrolled compares per case
+ * once the cases were no longer byte-identical (+236 B of ITCM). The former
+ * `> 10` clamp was redundant: the count never exceeds 10.
+ */
+static void osc_calcWavetableFreqValue(OscInfo* osc, const float currentFreq,
+                                       const uint8_t triCode)
 {
+	const uint8_t wave = osc->waveform;
+
 	osc->phaseInc = freq2PhaseIncr1024(currentFreq);
 
-	const uint8_t overtoneIndex = freqToTableIndex(currentFreq);
-	osc->tableOffset = overtoneIndex>10?10:overtoneIndex;
+	{
+		const uint8_t idx = freqToTableIndex(currentFreq);
+
+		osc->tableOffset = (uint8_t)((idx == 0u && wave != triCode) ? 1u : idx);
+	}
 }
 //-----------------------------------------------------------
 /*
@@ -1029,6 +1048,8 @@ void osc_setTableFreq(OscInfo* osc)
 	int32_t k = ((v.i >> 23) & 0xFF) - (127 + 4)
 	          + (int32_t)((v.i & 0x007FFFFF) >= 0x0002D013);
 
+	/* S101: 0..10 as before; the Alkaline lifts 0 to 1 where it reads
+	 * sawTable (wavetable.h: no level 0); its square and triangle keep 0. */
 	k = (k < 0) ? 0 : ((k > 10) ? 10 : k);
 	osc->phaseInc = freq2PhaseIncr1024(f);
 	osc->tableOffset = (uint8_t)((v.i > 0) ? k : 0);
@@ -1103,18 +1124,6 @@ void osc_setTableFreq(OscInfo* osc)
 			osc_calcSineFreqValue(osc, currentFreq);
 			break;
 
-		case SAW:
-			osc_calcWavetableFreqValue(osc, currentFreq);
-			break;
-
-		case TRI:
-			osc_calcWavetableFreqValue(osc, currentFreq);
-			break;
-
-		case REC:
-			osc_calcWavetableFreqValue(osc, currentFreq);
-			break;
-
 		case NOISE:
 			osc_calcNoiseFreqValue(osc, currentFreq);
 			break;
@@ -1123,9 +1132,13 @@ void osc_setTableFreq(OscInfo* osc)
 		 * S087 P1: user content never reaches this switch (osc_userBind()
 		 * above sets its increment); the default only guards an impossible
 		 * value with the table law.
+		 * S101: SAW, TRI and REC share this one call (they had three
+		 * identical cases). One call site keeps one inlined copy of the
+		 * octave compares in this ITCM function now that the call takes the
+		 * waveform's lowest stored level (osc_calcWavetableFreqValue()).
 		 */
-		default:
-			osc_calcWavetableFreqValue(osc, currentFreq);
+		default:   /* SAW, TRI, REC */
+			osc_calcWavetableFreqValue(osc, currentFreq, TRI);
 			break;
 
 		}
@@ -1374,7 +1387,8 @@ void osc_userBind(OscInfo* osc)
 			osc->sampleCacheData = 0;
 			osc->sampleCacheGeneration = 0u;
 		}
-		osc_calcWavetableFreqValue(osc, currentFreq);
+		/* S101: pwm Tri reads triTable (level 0 kept), Saw/Rec sawTable */
+		osc_calcWavetableFreqValue(osc, currentFreq, OSC_PWM_TRI);
 		return;
 	}
 

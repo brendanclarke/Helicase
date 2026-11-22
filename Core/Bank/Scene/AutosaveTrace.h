@@ -344,7 +344,13 @@ typedef enum {
      * n = 1..7: value32 = the average of mixer section n - 1
      * (MIXER_PROBE_SEC_*: control/LFO, effects_service, set-up, SRR,
      * output/send adds, Effect, compressor); n = 8: value32 = MPU region
-     * 0's RASR (bit 18 S set: SRAM not D-cached). 216 MHz / 1378.4 blocks per
+     * 0's RASR (bit 18 S set: SRAM not D-cached). S101 (S1): fifteen more
+     * records per window (31 in all): n = 9..14 (slot n - 9): value32 bits
+     * 16..31 = that slot's largest single-block block-rate work, bits 0..15
+     * = its largest render; n = 16..22: section n - 16's largest block;
+     * n = 24: the average cycles per block of voiceControl_processPending()
+     * + seq_rampService() (outside the mixer, main.c); n = 25: their
+     * largest block. Maxima saturate at 0xFFFF. 216 MHz / 1378.4 blocks per
      * second = 156,705 cycles per block. Producer: mixer_probeEnd().
      * Consumer: tools/diagnostic_tools/decode_devlogs.py ('p' branch).
      */

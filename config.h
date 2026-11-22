@@ -565,6 +565,11 @@
  * S099 P3 §10 (device trace SD_CARD_ATS_4: still 14 s): 2,000 -> 1,000 ms,
  * with the trace flush held off while a save is pending and the drain polled
  * at full SD rate (AUTOSAVE_DRAIN_POLL_BUDGET_US).
+ * S101 (device trace SD_CARD_S100, Bank 076 Scene 5 playing at a 93 % render
+ * load): one parameter drain then takes 7.2-8.6 s (about 390 passes of at
+ * least 1 ms each; the longest 16-20 s). The 3-4 s figure holds only at a
+ * lower load: the drain's speed is bounded by the foreground share the render
+ * leaves. S101_P1_CPU_INVESTIGATION.md §3.4.
  */
 #define AUTOSAVE_WRITER_INTERVAL_MS 1000u
 
@@ -578,8 +583,13 @@
  * driver clocks 16 bytes per poll, so a 512-byte sector takes 32 polls; at one
  * poll per 4-24 ms main-loop pass the 34,768-byte parameter copy took 7.2 s
  * and an edit was lost at power-off. About 1 ms moves one sector per pass.
- * A trace flush gets it only when already in flight, to free the facade
- * sooner; none starts while a save is pending (§0). Inputs: TIM2 time.
+ * A trace flush gets it only while core work waits (a save, or Load/Save),
+ * to free the facade sooner; none starts while a save is pending (§0). S101: that
+ * condition is now in the code (filesystem_drainPollEligible(); before S101
+ * every trace flush got the burst), and Flush Finish ends its burst once
+ * AsyncFATFS has nothing left to write (afatfs_isFlushed()). Each burst is
+ * foreground time: at a 93 % render load 1 ms of it stretches one main-loop
+ * pass to about 20 ms (S101_P1_CPU_INVESTIGATION.md §3.1). Inputs: TIM2 time.
  * Outputs: SD progress only. RAM: none (compile-time).
  */
 #define AUTOSAVE_DRAIN_POLL_BUDGET_US 1000u

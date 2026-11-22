@@ -99,6 +99,20 @@ enum
 
 void mixer_init();
 void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2);
+#if DEV_MODE_LOGGING
+/*
+ * S101 (S1): the cycle probe's outside-the-mixer span (DEV only).
+ *
+ * mixer_probeNow() returns DWT_CYCCNT; mixer_probeOutside(start) adds
+ * now - start to the window's outside-mixer sum and maximum. Called by
+ * audio_check_and_render() (main.c) around voiceControl_processPending() and
+ * seq_rampService(), once per 32-frame block; recorded by mixer_probeEnd()
+ * with the mixer's window (trace stage 'p', flags 6 | 24 << 3 average,
+ * 6 | 25 << 3 maximum). Both noinline: the caller keeps one local.
+ */
+uint32_t mixer_probeNow(void) __attribute__((noinline));
+void mixer_probeOutside(uint32_t start) __attribute__((noinline));
+#endif
 void mixer_moveDataToOutput(uint8_t dest, const float panL, const float panR, sample_mx_t* data,sample_mx_t* outL,sample_mx_t* outR,sample_mx_t* outL2, sample_mx_t* outR2);
 void mixer_addDataToOutput(uint8_t dest, const float panL, const float panR,  sample_mx_t* data,sample_mx_t* outL,sample_mx_t* outR,sample_mx_t* outL2, sample_mx_t* outR2);
 void mixer_setOutJackDetectPB(uint8_t pb4_high, uint8_t pb6_high);

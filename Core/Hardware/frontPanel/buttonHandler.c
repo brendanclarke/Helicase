@@ -4,8 +4,9 @@
  *
  * CONCURRENCY:
  *   buttonHandler_buttonPressed / buttonReleased are called from the
- *   foreground scan (din_dout_exchange via timebase_serviceFrontPanel at
- *   500 Hz), not from an ISR. They write to the event ring and btn_held[].
+ *   foreground scan (din_dout_exchange via timebase_serviceFrontPanelInput
+ *   at 500 Hz, after each audio render commit and once per main-loop pass,
+ *   S101), not from an ISR. They write to the event ring and btn_held[].
  *
  *   buttonHandler_processEvents() is called from the main loop (two call
  *   sites, separated by audio_check_and_render). It drains the ring and
@@ -71,6 +72,9 @@ static volatile uint8_t btn_held[BUT_COUNT];
 ** Inputs: evt_push() is called by the foreground din_dout_exchange() scan at
 ** 500 Hz. Outputs: buttonHandler_processEvents() drains one event per call
 ** from the main loop. Two call sites give roughly 30 events per scan.
+** S101: the scan also runs after each audio render commit, so at a high
+** render load several scans can fall in one main-loop pass (about ten in a
+** 20 ms pass); the ring holds their events until the pass drains them.
 **
 ** RAM: 64 bytes ring plus one unconditional overflow flag and one
 ** DEV_MODE_LOGGING-only drop counter (66 bytes at the approved maximum).

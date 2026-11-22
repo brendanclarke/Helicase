@@ -44,7 +44,6 @@
 
 #include "stm32f4xx.h"
 #include <stdint.h>
-#include "transientTables.h"
 
 typedef struct TransientGeneratorStruct
 {
@@ -63,7 +62,6 @@ void transient_init(TransientGenerator* transient);
 
 void transient_trigger(TransientGenerator* transient);
 
-void transient_calc(TransientGenerator* transient);
 void transient_calcBlock(TransientGenerator* transient, int16_t* buf, const uint8_t size);
 
 void transient_setWaveform(TransientGenerator* transient, const uint8_t waveform);
@@ -72,11 +70,13 @@ void transient_setWaveform(TransientGenerator* transient, const uint8_t waveform
  * Transient list layout with user one-shot samples (S087 P3).
  *
  * What:       the transient wav list is 0 Snp (snap EG), 1 Ofs (offset),
- *             2..TRANSIENT_USER_FIRST-1 the built-in PCM clicks
- *             (transientData rows 0..NUM_TRANSIENTS-1), then one entry per
- *             installed sample, shown s01, s02, ... (one-shot only: no loop
- *             or wavetable entries). TRANSIENT_USER_PHASE_SHIFT is the Q19.12
- *             phase of a sample entry (the built-in rows use Q20).
+ *             then one entry per installed sample, shown s01, s02, ...
+ *             (one-shot only: no loop or wavetable entries).
+ *             TRANSIENT_USER_PHASE_SHIFT is the Q19.12 phase of a sample entry.
+ *             S101: the twelve built-in PCM clicks (transientTables.c,
+ *             26,460 B) left the firmware; the card carries them as
+ *             samples/LXRClk.wav .. LXRSp2.wav (S101_IMPLEMENTATION.md), so
+ *             TRANSIENT_USER_FIRST is 2 and transientTables.c/.h are gone.
  * Why:        S087 P3: the transient lookup gains the user one-shots the way
  *             the modulator wav list does (built-in entries first, then sNN).
  * Accessors:  transient_calcBlock(), transient_entryCount(), menu.c (count,
@@ -84,7 +84,7 @@ void transient_setWaveform(TransientGenerator* transient, const uint8_t waveform
  * Affiliates: MenuText.h transientNames (its count must equal
  *             TRANSIENT_USER_FIRST); SampleMemory.h.
  */
-#define TRANSIENT_USER_FIRST        (NUM_TRANSIENTS + 2u)
+#define TRANSIENT_USER_FIRST        2u
 #define TRANSIENT_USER_PHASE_SHIFT  12u
 
 /*
@@ -94,7 +94,7 @@ void transient_setWaveform(TransientGenerator* transient, const uint8_t waveform
  *             (the row stores 0..127).
  * Why:        the menu clamp, the automation range and the display must agree
  *             with what the generator can play.
- * Inputs:     the catalogue.  Outputs: the entry count (at least 14).
+ * Inputs:     the catalogue.  Outputs: the entry count (at least 2; S101: 14 before the built-in clicks moved to the card).
  * Accessors:  menu.c (clamp, automation max, names).
  * Affiliates: sampleMemory_getNumSamples().
  */

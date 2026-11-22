@@ -47,7 +47,10 @@
  *                     the fused call;
  *               AL-O  osc_setTableFreq() (T1-7) gives osc_setFreq()'s
  *                     phaseInc and tableOffset for SAW at every note, with
- *                     pitchMod and modNodeValue at 1 and away from 1.
+ *                     pitchMod and modNodeValue at 1 and away from 1 (S101:
+ *                     osc_setFreq() lifts SAW's octave 0 to 1, sawTable has
+ *                     no level 0, so the law compares the lifted offset; the
+ *                     pre-S101 osc_setFreq() fails it below 16.35 Hz).
  *               AL-A  (S093 P6) the VEG attack as the CPU trigger width:
  *                     attack 0 is the former VEG bit for bit; 10->90 % rises
  *                     from 2.0..2.8 ms at 0 to 4.6..5.7 ms at 1;
@@ -541,7 +544,13 @@ static void test_tablefreq(void)
 			b = a;
 			osc_setFreq(&a);
 			osc_setTableFreq(&b);
-			if (a.phaseInc != b.phaseInc || a.tableOffset != b.tableOffset)
+			/* S101 (wavetable.h): osc_setFreq() lifts SAW's octave 0 to 1
+			 * (sawTable has no level 0); osc_setTableFreq() keeps 0..10 for
+			 * the Alkaline's square and triangle, and the Alkaline lifts it
+			 * where it reads sawTable. So SAW's offset is the table law's,
+			 * lifted: equal at every note from 16.35 Hz up, 1 below. */
+			if (a.phaseInc != b.phaseInc ||
+			    a.tableOffset != ((b.tableOffset == 0u) ? 1u : b.tableOffset))
 				fail(G_O, "osc_setTableFreq == osc_setFreq", n, m);
 		}
 	{	/* a dense sweep 1 Hz..20 kHz, and every octave edge and the float
@@ -565,7 +574,9 @@ static void test_tablefreq(void)
 			b = a;
 			osc_setFreq(&a);
 			osc_setTableFreq(&b);
-			if (a.phaseInc != b.phaseInc || a.tableOffset != b.tableOffset)
+			/* S101: SAW's lifted offset, as above */
+			if (a.phaseInc != b.phaseInc ||
+			    a.tableOffset != ((b.tableOffset == 0u) ? 1u : b.tableOffset))
 				fail(G_O, "dense sweep / edges", a.freq, k);
 		}
 	}

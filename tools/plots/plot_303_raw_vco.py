@@ -139,8 +139,10 @@ def fit_filtered_saw(target_db, raw_db):
 # ------------------------------------------------------------------ plot
 def main():
     plt = L.setup_matplotlib()
-    saw_t = read_table("sawTable", os.path.join(DSP, "wavetable.c"))
-    rec_t = read_table("recTable", os.path.join(DSP, "wavetable.c"))
+    # S101: the full tables are archived (the firmware keeps levels 1..10)
+    arch = os.path.join(os.path.dirname(os.path.abspath(__file__)), "archive", "stock_tables_s100.c")
+    saw_t = read_table("sawTable", arch)
+    rec_t = read_table("recTable", arch)
     sq3_t = read_table("sq3Table", os.path.join(HERE, "archive", "wavetableStock.c"))
     sw3_t = read_table("sw3Table", os.path.join(HERE, "archive", "wavetableStock.c"))
     taper = level_taper(saw_t[LEVEL])

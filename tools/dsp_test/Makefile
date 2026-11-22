@@ -70,6 +70,10 @@ all: oscillator modulation voice_control sequencer seq_steplen instrument_manage
      buscomp scene_identity chorus chorus_tables
 
 # S099 P1: the BBD chorus (laws CH-TAP .. CH-HALF) and three breaks.
+# S101: the half-rate Alkaline (BBD_ALK_HALF_RATE, law CH-AHALF and the
+# CH-GUARD / CH-ALK extensions); the full-rate build also sets
+# -DBBD_ALK_HALF_RATE=0; a fourth break removes one post pole from the
+# half-rate Alkaline tap loop bbd_alkTH(), both sides' (CH-AHALF must fail).
 # S099 P1 review: built twice, the default (BBD_COL_HALF_RATE 1, the Colloid's
 # half-rate wet, C3) and the full-rate Colloid (-DBBD_COL_HALF_RATE=0), so
 # both forms stay proven. The breaks run on the default build and reach both
@@ -82,9 +86,9 @@ chorus: | $(GEN)
 	$(EX) --src $(ROOT)/Core/DSP/Instruments/Chorus/BbdChorusTables.c --body --out $(GEN)/BbdChorusTables.host.c
 	$(HOSTCC) $(HOSTFLAGS) -I. modules/chorus.c -o build/chorus -lm
 	./build/chorus
-	$(HOSTCC) $(HOSTFLAGS) -DBBD_COL_HALF_RATE=0 -I. modules/chorus.c -o build/chorus_full -lm
+	$(HOSTCC) $(HOSTFLAGS) -DBBD_COL_HALF_RATE=0 -DBBD_ALK_HALF_RATE=0 -I. modules/chorus.c -o build/chorus_full -lm
 	./build/chorus_full
-	mkdir -p build/break_cho_guard build/break_cho_mirror build/break_cho_mix
+	mkdir -p build/break_cho_guard build/break_cho_mirror build/break_cho_mix build/break_cho_ahalf
 	sed 's/r\[BBD_RING\] = r\[0\];/(void)0;/' $(GEN)/BbdChorus.host.c > build/break_cho_guard/BbdChorus.host.c
 	@grep -q '(void)0;' build/break_cho_guard/BbdChorus.host.c || { echo "chorus_break_guard: sed did not apply"; exit 1; }
 	$(HOSTCC) -Ibuild/break_cho_guard $(HOSTFLAGS) -I. modules/chorus.c -o build/chorus_break_guard -lm
@@ -109,6 +113,14 @@ chorus: | $(GEN)
 	@if ./build/chorus_break_mix 2>&1 | grep -q 'CH-MIX0 FAIL'; then \
 	  echo "chorus_break_mix: caught (law CH-MIX0 fails as expected; at cmx 64)"; \
 	else echo "chorus_break_mix: FAILED"; exit 1; fi
+	sed '/o = bbd_smlawt(o - th, kk, th);/{n;s/o2 = bbd_smlawt(o2 - o, kk, o);/o2 = o;/;}' \
+	  $(GEN)/BbdChorus.host.c > build/break_cho_ahalf/BbdChorus.host.c
+	@test $$(grep -c 'o2 = o;' build/break_cho_ahalf/BbdChorus.host.c) -eq 1 || \
+	  { echo "chorus_break_ahalf: sed did not apply to the half-rate Alkaline tap loop"; exit 1; }
+	$(HOSTCC) -Ibuild/break_cho_ahalf $(HOSTFLAGS) -I. modules/chorus.c -o build/chorus_break_ahalf -lm
+	@if ./build/chorus_break_ahalf 2>&1 | grep -q 'CH-AHALF FAIL'; then \
+	  echo "chorus_break_ahalf: caught (law CH-AHALF fails as expected; one post pole fewer)"; \
+	else echo "chorus_break_ahalf: FAILED"; exit 1; fi
 
 chorus_tables:
 	cd $(ROOT) && python3 tools/chorus/gen_chorus_tables.py --check
@@ -448,8 +460,27 @@ special_tags:
 	cd $(ROOT) && python3 tools/colloid/make_init_col.py --check
 	cd $(ROOT) && python3 tools/tetrakt/make_init_tkt.py --check
 
-stock_tables:
+stock_tables: stock_rows
 	cd $(ROOT) && python3 tools/plots/gen_stock_tables.py --check
+
+# ---------------------------------------------------------------------------
+# S101 (S101_P2_REDUCTIONS.md §B.3 F3): law STOCK-ROWS.
+#
+# What:       the firmware's stockTableRows[31][1024] (wavetable.c) must hold
+#             triTable levels 0..10, recTable levels 1..10 and sawTable levels
+#             1..10 of the archived pre-S101 tables
+#             (tools/plots/archive/stock_tables_s100.c) byte for byte, in that
+#             order. The benches extract whole [11][1024] tables from the
+#             archive (STOCK_FULL); this law is what makes that the firmware's
+#             data for every level a reader can reach (1..10).
+# Break:      stock_rows_check.py --break swaps two rows and must fail.
+# Accessors:  make -C tools/dsp_test stock_rows (also run by stock_tables).
+STOCK_FULL := $(ROOT)/tools/plots/archive/stock_tables_s100.c
+stock_rows:
+	python3 stock_rows_check.py --fw $(ROOT)/Core/DSPAudio/wavetable.c --archive $(STOCK_FULL)
+	@if python3 stock_rows_check.py --fw $(ROOT)/Core/DSPAudio/wavetable.c --archive $(STOCK_FULL) --break >/dev/null 2>&1; then \
+	  echo "stock_rows_break: FAILED (a swapped row was not caught)"; exit 1; \
+	else echo "stock_rows_break: caught (law STOCK-ROWS fails as expected)"; fi
 
 # S089 P2: the real voiceFold.c (ITCM sections stripped) against reference
 # models; break proof: dropping the bias DC term ("t * p - kC" in
@@ -507,10 +538,10 @@ alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
 	$(EX) --src $(ALK)/AlkalineVoice.h --body --out $(GEN)/AlkalineVoice.host.h
 	$(EX) --src $(ALK)/AlkalineVoice.c --body --out $(GEN)/AlkalineVoice.host.c
 	$(EX) --src $(ALK)/AlkalineChop.c --body --out $(GEN)/AlkalineChop.host.c
-	$(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object sawTable --out $(GEN)/alk_sawTable.raw.c
+	$(EX) --src $(STOCK_FULL) --object sawTable --out $(GEN)/alk_sawTable.raw.c
 	sed 's/const int16_t sawTable/int16_t sawTable/' $(GEN)/alk_sawTable.raw.c > $(GEN)/alk_sawTable.c
 # S094 P4: the real triangle for the Tri laws (AL-XT, AL-PWW).
-	$(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object triTable --out $(GEN)/alk_triTable.raw.c
+	$(EX) --src $(STOCK_FULL) --object triTable --out $(GEN)/alk_triTable.raw.c
 	sed 's/const int16_t triTable/int16_t triTable/' $(GEN)/alk_triTable.raw.c > $(GEN)/alk_triTable.c
 # S094 P1 S5: the pwm read-form reference (ALK_PWM_READ_FORM 0, both reads
 # interpolated) renders build/alk_pwm_ref.bin for law AL-PW (P-D6 evidence).
@@ -686,7 +717,8 @@ colloid: $(GEN)/Oscillator.host.h $(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables
 	  $(EX) --src $(COL)/$$f --body --out $(GEN)/$${f%.*}.host.$${f##*.} || exit 1; \
 	done
 	for t in sine_table sawTable triTable recTable; do \
-	  $(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object $$t --out $(GEN)/col_$$t.raw.c && \
+	  src=$(STOCK_FULL); [ $$t = sine_table ] && src=$(ROOT)/Core/DSPAudio/wavetable.c; \
+	  $(EX) --src $$src --object $$t --out $(GEN)/col_$$t.raw.c && \
 	  sed "s/const int16_t $$t/int16_t $$t/" $(GEN)/col_$$t.raw.c > $(GEN)/col_$$t.c || exit 1; \
 	done
 	$(EX) --src $(ROOT)/Core/DSPAudio/mixer.c --func mixer_addVoiceInt16ToOutput \
@@ -1771,7 +1803,8 @@ pwm_dump: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
 	$(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables.host.c \
 	$(GEN)/oscPwmWarp.host.h | $(GEN)
 	for t in sine_table sawTable triTable recTable; do \
-	  $(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object $$t --out $(GEN)/pd_$$t.raw.c && \
+	  src=$(STOCK_FULL); [ $$t = sine_table ] && src=$(ROOT)/Core/DSPAudio/wavetable.c; \
+	  $(EX) --src $$src --object $$t --out $(GEN)/pd_$$t.raw.c && \
 	  sed "s/const int16_t $$t/int16_t $$t/" $(GEN)/pd_$$t.raw.c > $(GEN)/pd_$$t.c || exit 1; \
 	done
 	$(EX) --src $(ROOT)/Core/DSP/Instruments/Alkaline/AlkalineSquareTable.c --body \

@@ -69,10 +69,17 @@ static const char midiModes[][4] = {
 static const char quantisationNames[][4] = {
     {6}, {"off"}, {"8"}, {"16"}, {"32"}, {"64"}, {"trk"},
 };
+/*
+ * Transient list names (S087 P3; S101).
+ *
+ * S101: only the two generator modes are named here. The twelve built-in
+ * clicks (Clk Ck2 Tik Kik Rim Drp Hat Clp Kk2 Snr Tom Sp2) left the firmware
+ * and are card samples (samples/LXRClk.wav .. LXRSp2.wav), listed with the
+ * other installed one-shots as sNN from value 2 (TRANSIENT_USER_FIRST).
+ */
 static const char transientNames[][4] = {
-    {14},
-    {"Snp"},{"Ofs"},{"Clk"},{"Ck2"},{"Tik"},{"Kik"},{"Rim"},
-    {"Drp"},{"Hat"},{"Clp"},{"Kk2"},{"Snr"},{"Tom"},{"Sp2"},
+    {2},
+    {"Snp"},{"Ofs"},
 };
 static const char nextPatternNames[][4] = {
     {23},

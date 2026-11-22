@@ -53,10 +53,20 @@
  *                        depth 0, 65 var at full depth, 127 dbl at full
  *                        depth, 3..127 at rte's rate, the centre and depth
  *                        never falling and the delay inside its range.
+ *               CH-AHALF (S101) the half-rate Alkaline (bbd_alkAH(),
+ *                        bbd_alkTH()) against the full-rate one, both outputs:
+ *                        the 1 kHz level within 0.5 dB, the images and folds
+ *                        under CH-HALF's bounds, and the 6 kHz half / full
+ *                        ratio within 0.3 dB of the Colloid form's (break:
+ *                        one post pole fewer). S101 also extends CH-GUARD to
+ *                        bbd_alkAH() and CH-ALK's ring law to both rates; the
+ *                        16 kHz 12 dB-wet law runs the full-rate loops by
+ *                        name.
  *             Built twice (Makefile): the default (BBD_COL_HALF_RATE 1, the
- *             Colloid half rate) and -DBBD_COL_HALF_RATE=0 (the full-rate
- *             Colloid), so both forms stay proven through
- *             bbdChorus_renderColloid().
+ *             Colloid half rate; BBD_ALK_HALF_RATE 1, the Alkaline half rate,
+ *             S101) and -DBBD_COL_HALF_RATE=0 -DBBD_ALK_HALF_RATE=0 (both
+ *             full rate), so both forms stay proven through
+ *             bbdChorus_renderColloid() and bbdChorus_renderAlkaline().
  * Inputs:     generated fragments (Makefile target chorus).
  * Outputs:    failure counts per group; exit 1 on any failure.
  * Accessors:  make -C tools/dsp_test chorus.
@@ -80,10 +90,11 @@
 
 #define BLK OUTPUT_DMA_SIZE
 
-enum { G_TAP, G_GUARD, G_LAW, G_MIX0, G_SLEW, G_SRC, G_ALK, G_INIT, G_HALF, G_DPT, G_N };
+enum { G_TAP, G_GUARD, G_LAW, G_MIX0, G_SLEW, G_SRC, G_ALK, G_INIT, G_HALF, G_DPT,
+       G_AHALF, G_N };
 static const char *g_name[G_N] = { "CH-TAP", "CH-GUARD", "CH-LAW", "CH-MIX0",
                                    "CH-SLEW", "CH-SRC", "CH-ALK", "CH-INIT", "CH-HALF",
-                                   "CH-DPT" };
+                                   "CH-DPT", "CH-AHALF" };
 static unsigned g_fail[G_N];
 
 static void fail(int g, const char *what, double a, double b)
@@ -214,6 +225,47 @@ static void test_guard(void)
 		}
 		if (((w + BBD_HALF_BLOCK - 1u) & BBD_RMASK) < BBD_HALF_BLOCK && r[BBD_RING] != r[0])
 			fail(G_GUARD, "half-rate guard not refreshed", r[BBD_RING], r[0]);
+	}
+	/* S101: the half-rate Alkaline loop bbd_alkAH(). At the BBD drive x1
+	 * (gDrv 8,192) the ring sample is ((p0 + p1) << 2) x 8,192 >> 16, the
+	 * floor of the pair's mean: the same ring as bbd_sideH()'s. */
+	{
+		static int16_t xr[BLK];
+
+		memset(r, 0, sizeof(r));
+		memset(expv, 0, sizeof(expv));
+		memset(&s, 0, sizeof(s));
+		s.ring = r;
+		s.dEnd = (int32_t)(65.0f * 65536.0f);
+		for (uint32_t b = 0u; b < 1000u; b++) {
+			const uint32_t w = b * BBD_HALF_BLOCK;
+			const float d = 65.0f + (float)((b * 997u) % 926u);
+			uint32_t rp0, inc;
+
+			bbd_sidePlan(&s, w, d, bbdKcTone[BBD_COL_TONE], 1u);
+			s.kk = 0u;
+			rp0 = s.rp;
+			inc = s.inc;
+			bbd_alkAH(&s, x + b * BLK, xr, w, 0u, 8192u);
+			for (uint32_t j = 0u; j < BBD_HALF_BLOCK; j++) {
+				const uint32_t rp = rp0 + j * inc;
+				const uint32_t i = (rp >> 16) & BBD_RMASK;
+				const uint32_t f = (rp >> 2) & 0x3FFFu;
+				double ref;
+
+				expv[(w + j) & BBD_RMASK] = (int16_t)(((int32_t)x[b * BLK + 2u * j] +
+				                                       (int32_t)x[b * BLK + 2u * j + 1u]) >> 1);
+				ref = 2.0 * ((1.0 - (double)f / 16384.0) * expv[i] +
+				             ((double)f / 16384.0) * expv[(i + 1u) & BBD_RMASK]);
+				if (fabs((double)bbd_tap(r, rp) - ref) > 1.5) {
+					fail(G_GUARD, "half-rate Alkaline tap against the exact ring",
+					     bbd_tap(r, rp), ref);
+					return;
+				}
+			}
+			if (((w + BBD_HALF_BLOCK - 1u) & BBD_RMASK) < BBD_HALF_BLOCK && r[BBD_RING] != r[0])
+				fail(G_GUARD, "half-rate Alkaline guard not refreshed", r[BBD_RING], r[0]);
+		}
 	}
 }
 
@@ -476,16 +528,25 @@ static void test_alk(void)
 	for (uint32_t n = 0u; n < BLK; n++)
 		if (r[n] != (int16_t)(1500 - 9 * (int)n))
 			fail(G_ALK, "right is not the dry", r[n], n);
-	/* cdv 0: the ring holds the input (a transparent pre pole) */
+	/* cdv 0: the ring holds the input (a transparent pre pole); S101: at
+	 * half rate (BBD_ALK_HALF_RATE) the floor of each input pair's mean, 16
+	 * ring samples a block */
 	bbdChorus_init(unit, 1u, BBD_DPT_I);
 	bbd_state(unit)->side[0].kk = 0u;
 	bbd_state(unit)->gDrv = 8192u;
 	for (uint32_t n = 0u; n < BLK; n++)
-		l[n] = (int16_t)(500 + n);
+		l[n] = (int16_t)(500 + 3 * (int)n);
 	bbdChorus_renderAlkaline(unit, l, r);
-	for (uint32_t n = 0u; n < BLK; n++)
-		if (bbd_state(unit)->side[0].ring[n] != (int16_t)(500 + n))
-			fail(G_ALK, "cdv 0 ring", bbd_state(unit)->side[0].ring[n], 500 + n);
+	for (uint32_t n = 0u; n < (BBD_ALK_HALF_RATE ? BBD_HALF_BLOCK : BLK); n++) {
+		const int16_t want = BBD_ALK_HALF_RATE
+		    ? (int16_t)(((500 + 6 * (int)n) + (503 + 6 * (int)n)) >> 1)
+		    : (int16_t)(500 + 3 * (int)n);
+
+		if (bbd_state(unit)->side[0].ring[n] != want)
+			fail(G_ALK, "cdv 0 ring", bbd_state(unit)->side[0].ring[n], want);
+	}
+	if (bbd_state(unit)->w != (BBD_ALK_HALF_RATE ? BBD_HALF_BLOCK : BLK))
+		fail(G_ALK, "the write count's step", bbd_state(unit)->w, BLK);
 	/* cdv 127: a full-scale input clips */
 	bbdChorus_init(unit, 1u, BBD_DPT_I);
 	bbd_state(unit)->side[0].kk = 0u;
@@ -499,7 +560,10 @@ static void test_alk(void)
 	 * formula with the wrong numerator and never ran the loop). A 16 kHz
 	 * sine at 154 samples (a whole sample: the tap's fraction is 0), wet only
 	 * (gn -32768: no dry; gw 32767), both poles on the tone coefficient,
-	 * against the restated pre pole x post pole x post pole. */
+	 * against the restated pre pole x post pole x post pole. S101: on the
+	 * full-rate loops by name (bbd_alkA(), bbd_alkB()), whatever
+	 * BBD_ALK_HALF_RATE selects: 16 kHz is above the half-rate ring's band,
+	 * so the half form is held to the full one by CH-AHALF instead. */
 	{
 		static int16_t out[400u * BLK];
 		const int32_t kc = bbdKcTone[BBD_COL_TONE];
@@ -521,7 +585,9 @@ static void test_alk(void)
 			st->side[0].kk = st->side[1].kk = (uint32_t)(uint16_t)kc | ((uint32_t)(uint16_t)kc << 16);
 			st->gk = (32767u << 16) | 0x8000u;
 			st->gDrv = 8192u;
-			bbdChorus_renderAlkaline(unit, l, r);
+			bbd_alkA(&st->side[0], l, r, st->w, st->gk, st->gDrv);
+			bbd_alkB(&st->side[1], r, st->gk);
+			st->w += BLK;
 			if (b2 >= 400u)
 				memcpy(out + (b2 - 400u) * BLK, l, sizeof(l));
 		}
@@ -605,6 +671,116 @@ static void test_half(void)
 	}
 }
 
+/* -------------------------------------------------------------- CH-AHALF
+ * S101: the half-rate Alkaline (bbd_alkAH(), bbd_alkTH()) against the
+ * full-rate one (bbd_alkA(), bbd_alkB()), CH-HALF's method on the mono form:
+ * one ring, both sides at 154 output samples (77 ring samples: whole
+ * samples), wet only, every pole on the tone coefficient, the BBD drive x1.
+ * Returns the amplitude at fm of the last 600 blocks of the left (pass A) or
+ * the right (pass B) output. */
+static double alk_half_run(const uint32_t half, const double f, const double fm,
+                           const uint32_t right)
+{
+	static int16_t r[FXBUF_VOICE_UNIT_SAMPLES];
+	static int16_t xl[BLK], xr[BLK];
+	static int16_t out[600u * BLK];
+	const int32_t kc = bbdKcTone[BBD_COL_TONE];
+	const uint32_t kk = (uint32_t)(uint16_t)kc | ((uint32_t)(uint16_t)kc << 16);
+	const uint32_t gk = (32767u << 16) | 0x8000u;
+	const double wr = 2.0 * M_PI * f / (double)REAL_FS;
+	BbdSide s[2];
+
+	memset(r, 0, sizeof(r));
+	memset(s, 0, sizeof(s));
+	for (unsigned i = 0u; i < 2u; i++) {
+		s[i].ring = r;
+		s[i].dEnd = (int32_t)(154.0f * 65536.0f);
+	}
+	for (uint32_t b = 0u; b < 1000u; b++) {
+		const uint32_t w = b * (half ? BBD_HALF_BLOCK : BLK);
+
+		for (uint32_t n = 0u; n < BLK; n++)
+			xl[n] = (int16_t)lround(12000.0 * sin(wr * (double)(b * BLK + n)));
+		for (unsigned i = 0u; i < 2u; i++) {
+			bbd_sidePlan(&s[i], w, 154.0f, kc, half);
+			s[i].kk = kk;
+		}
+		if (half) {
+			bbd_alkAH(&s[0], xl, xr, w, gk, 8192u);
+			bbd_alkTH(&s[1], xr, gk);
+		} else {
+			bbd_alkA(&s[0], xl, xr, w, gk, 8192u);
+			bbd_alkB(&s[1], xr, gk);
+		}
+		if (b >= 400u)
+			memcpy(out + (b - 400u) * BLK, right ? xr : xl, sizeof(xl));
+	}
+	return tone_amp(out, 600u * BLK, fm);
+}
+
+/*
+ * The bounds: CH-HALF's for the level (0.5 dB at 1 kHz), the images (2 and
+ * 5 kHz at 22,054 - f: at most -18 dB re the wet partial) and the folds (15
+ * and 18 kHz at 22,054 - f: at most -10 dB re the input partial), on both
+ * outputs; and at 6 kHz the half / full ratio within 0.3 dB of the
+ * Colloid form's (the pair mean and the tap interpolation are the same
+ * structure, the post poles full rate in both: one post pole fewer in a half
+ * loop moves the ratio by about 2 dB; break chorus_break_ahalf).
+ */
+static void test_ahalf(void)
+{
+	const double fh = (double)REAL_FS / 2.0;
+
+	for (uint32_t side = 0u; side < 2u; side++) {
+		const char *nm = side ? "right" : "left";
+
+		{
+			const double db = 20.0 * log10(alk_half_run(1u, 1000.0, 1000.0, side) /
+			                               alk_half_run(0u, 1000.0, 1000.0, side));
+
+			printf("CH-AHALF: %s, 1 kHz wet, half against full %+.2f dB\n", nm, db);
+			if (fabs(db) > 0.5) fail(G_AHALF, "1 kHz level", db, 0.5);
+		}
+		{
+			/* the half form's own loss at 6 kHz (the pair mean and the tap
+			 * interpolation) is the Colloid form's: the post poles run at the
+			 * full rate in both forms, so the half / full ratio must match
+			 * the Colloid's (CH-HALF's loops) */
+			const double db = 20.0 * log10(alk_half_run(1u, 6000.0, 6000.0, side) /
+			                               alk_half_run(0u, 6000.0, 6000.0, side));
+			const double col = 20.0 * log10(half_run(1u, 6000.0, 6000.0) /
+			                                half_run(0u, 6000.0, 6000.0));
+
+			printf("CH-AHALF: %s, 6 kHz wet (the two post poles), half against full %+.2f dB "
+			       "(the Colloid's form %+.2f dB)\n", nm, db, col);
+			if (fabs(db - col) > 0.3) fail(G_AHALF, "6 kHz half / full against the Colloid's", db, col);
+		}
+		{
+			static const double fi[2] = { 2000.0, 5000.0 };
+
+			for (unsigned i = 0u; i < 2u; i++) {
+				const double db = 20.0 * log10(alk_half_run(1u, fi[i], fh - fi[i], side) /
+				                               alk_half_run(1u, fi[i], fi[i], side));
+
+				printf("CH-AHALF: %s, image of %.0f Hz at %.0f Hz %.1f dB re the wet partial\n",
+				       nm, fi[i], fh - fi[i], db);
+				if (db > -18.0) fail(G_AHALF, "image", fi[i], db);
+			}
+		}
+		{
+			static const double fa[2] = { 15000.0, 18000.0 };
+
+			for (unsigned i = 0u; i < 2u; i++) {
+				const double db = 20.0 * log10(alk_half_run(1u, fa[i], fh - fa[i], side) / 12000.0);
+
+				printf("CH-AHALF: %s, fold of %.0f Hz at %.0f Hz %.1f dB re the input\n",
+				       nm, fa[i], fh - fa[i], db);
+				if (db > -10.0) fail(G_AHALF, "fold", fa[i], db);
+			}
+		}
+	}
+}
+
 /* --------------------------------------------------------------- CH-INIT */
 static void test_init(void)
 {
@@ -635,6 +811,7 @@ int main(void)
 	test_init();
 	test_half();
 	test_dpt();
+	test_ahalf();
 	for (g = 0u; g < G_N; g++) {
 		printf("chorus %-8s failures: %u\n", g_name[g], g_fail[g]);
 		total += g_fail[g];

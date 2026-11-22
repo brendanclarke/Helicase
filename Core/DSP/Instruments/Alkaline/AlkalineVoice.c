@@ -591,11 +591,19 @@ static __attribute__((noinline)) void alk_renderWav(AlkalineVoice *voice, int16_
 	/* S093 P3: the oscillator's table read fused into the B2R loop (-9 per
 	 * sample, bit-identical: bench law AL-X). This wrapper is only the [11][1024]
 	 * Saw/Sqr/Tri path; typ wtb uses alk_renderWtb(). */
-	DiodeLadder_renderB2Osc(&voice->ladder, buf, table[voice->osc.tableOffset],
+	/* S101 (wavetable.h): sawTable has no level 0 (sub-16.35 Hz only), so
+	 * Saw reads level 1 there; the square and the triangle keep level 0. */
+	DiodeLadder_renderB2Osc(&voice->ladder, buf,
+	                        table[(voice->osc.tableOffset == 0u &&
+	                               wave != ALK_WAVE_SQUARE && wave != ALK_WAVE_TRI)
+	                              ? 1u : voice->osc.tableOffset],
 	                        &voice->osc.phase, voice->osc.phaseInc,
 	                        scale * voice->driveGain,
 	                        voice->iLadEnd, voice->iAbcEnd * voice->makeup);
 #else
+	/* S101: the generic reader takes osc.tableOffset itself; lift Saw's 0 */
+	if (voice->osc.tableOffset == 0u && wave != ALK_WAVE_SQUARE && wave != ALK_WAVE_TRI)
+		voice->osc.tableOffset = 1u;
 	calcWavetableOscBlock(&voice->osc, table, buf, OUTPUT_DMA_SIZE, 1.0f);
 	DiodeLadder_renderB2(&voice->ladder, buf, scale * voice->driveGain,
 	                     voice->iLadEnd, voice->iAbcEnd * voice->makeup);
@@ -763,7 +771,9 @@ static __attribute__((noinline)) void alk_renderPwm(AlkalineVoice *voice, int16_
 		const float level = (float)(square ? oscPwmLevelRecQ14[k]
 		                                   : oscPwmLevelSawQ14[k]) * (1.0f / 16384.0f);
 
-		DiodeLadder_renderB2OscPwm(&voice->ladder, buf, sawTable[osc->tableOffset],
+		/* S101: sawTable has no level 0 (wavetable.h) */
+		DiodeLadder_renderB2OscPwm(&voice->ladder, buf,
+		                           sawTable[osc->tableOffset ? osc->tableOffset : 1u],
 		                           &osc->phase, osc->phaseInc,
 		                           square ? oscPwmDRec[k] : oscPwmDSaw[k],
 		                           square ? -1.0f : 1.0f,

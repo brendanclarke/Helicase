@@ -1174,6 +1174,22 @@ void mixer_calcNextSampleBlockTest(sample_mx_t *output, sample_mx_t *output2)
  *             (which SRAM cache configuration ran). The whole block less
  *             the slots and
  *             sections is the probe's own overhead.
+ *             S101 (S1, RAM approved by the user 2026-11-21: 84 B, logging
+ *             builds only) adds per-block maxima and the span outside the
+ *             mixer, fifteen more records per window:
+ *               flags 6 | (9 + slot) << 3: that slot's largest block-rate
+ *                 << 16 | largest render (each the largest single block's
+ *                 sum, saturated to 16 bits);
+ *               flags 6 | (16 + section) << 3: that section's largest block;
+ *               flags 6 | 24 << 3 / 6 | 25 << 3: the average / largest block
+ *                 of voiceControl_processPending() + seq_rampService()
+ *                 (mixer_probeOutside(), measured in main.c).
+ *             Each max word holds (this block's running sum << 16) | the
+ *             window's maximum: the adds of a block (the slot's filter and
+ *             async; six set-up, SRR and send-add spans) sum in the high
+ *             half, and mixer_probeEnd() folds it into the low half at every
+ *             block end. No call site in mixer_calcNextSampleBlock() changed:
+ *             only the out-of-line bodies (S101: the mixer's loops stay).
  * Why:        the instruction-count model (S093) does not see flash wait
  *             states, cache misses or VDIV stalls; S094 P2 needs measured
  *             cycles per slot, and run 1 left a fifth of the block
@@ -1181,8 +1197,11 @@ void mixer_calcNextSampleBlockTest(sample_mx_t *output, sample_mx_t *output2)
  * Inputs:     DWT_CYCCNT (enabled by audioCodec_initCycleCounter()).
  * Outputs:    AutosaveTrace records only; nothing on screen, no product
  *             state depends on them.
- * Cost:       94 B RAM; ~30 out-of-line calls per block (noinline so LTO
- *             keeps them out of the inlined render loops).
+ * Cost:       94 B RAM, + 84 B since S101; ~30 out-of-line calls per block
+ *             (noinline so LTO keeps them out of the inlined render loops),
+ *             each now also a range test and a saturating add, and a 19-word
+ *             fold per block in mixer_probeEnd() (after the block's own
+ *             measurement).
  * Affiliates: AUTOSAVE_TRACE_STAGE_CPU_PROBE, decode_devlogs.py ('p').
  */
 #define MIXER_PROBE_CYCCNT  (*(volatile uint32_t *)0xE0001004u)
@@ -1203,6 +1222,13 @@ static uint32_t mixer_probe_max;
 static uint32_t mixer_probe_start;
 static uint32_t mixer_probe_last;
 static uint16_t mixer_probe_blocks;
+/* S101 (S1): the max words, (block sum << 16) | window max (48 + 28 B), and
+ * the outside-mixer span's window sum and maximum (8 B). */
+static uint32_t mixer_probe_async_max[6];
+static uint32_t mixer_probe_sync_max[6];
+static uint32_t mixer_probe_sec_max[MIXER_PROBE_SEC_COUNT];
+static uint32_t mixer_probe_outside_sum;
+static uint32_t mixer_probe_outside_max;
 
 static __attribute__((noinline)) void mixer_probeBegin(void)
 {
@@ -1210,11 +1236,61 @@ static __attribute__((noinline)) void mixer_probeBegin(void)
 	mixer_probe_last = mixer_probe_start;
 }
 
+/* S101: the max word that shadows one accumulator (by address: the call
+ * sites pass only the accumulator), or NULL. */
+static uint32_t *mixer_probeMaxWord(const uint32_t *acc)
+{
+	const uintptr_t a = (uintptr_t)acc;
+
+	if (a - (uintptr_t)mixer_probe_async < sizeof(mixer_probe_async))
+		return &mixer_probe_async_max[(a - (uintptr_t)mixer_probe_async) / 4u];
+	if (a - (uintptr_t)mixer_probe_sync < sizeof(mixer_probe_sync))
+		return &mixer_probe_sync_max[(a - (uintptr_t)mixer_probe_sync) / 4u];
+	if (a - (uintptr_t)mixer_probe_sec < sizeof(mixer_probe_sec))
+		return &mixer_probe_sec_max[(a - (uintptr_t)mixer_probe_sec) / 4u];
+	return 0;
+}
+
 static __attribute__((noinline)) void mixer_probeAdd(uint32_t *acc)
 {
 	const uint32_t now = MIXER_PROBE_CYCCNT;
-	*acc += now - mixer_probe_last;
+	const uint32_t d = now - mixer_probe_last;
+	uint32_t *const mw = mixer_probeMaxWord(acc);
+
+	*acc += d;
 	mixer_probe_last = now;
+	/* S101: this block's running sum in the high half, saturated */
+	if (mw) {
+		uint32_t s = (*mw >> 16) + d;
+
+		s = (s > 0xFFFFu) ? 0xFFFFu : s;
+		*mw = (s << 16) | (*mw & 0xFFFFu);
+	}
+}
+
+/* S101: fold each word's block sum into its window maximum, clear the sum. */
+static void mixer_probeFold(uint32_t *mw, const uint32_t n)
+{
+	for (uint32_t i = 0u; i < n; i++) {
+		const uint32_t s = mw[i] >> 16;
+		const uint32_t m = mw[i] & 0xFFFFu;
+
+		mw[i] = (s > m) ? s : m;
+	}
+}
+
+uint32_t mixer_probeNow(void)
+{
+	return MIXER_PROBE_CYCCNT;
+}
+
+void mixer_probeOutside(const uint32_t start)
+{
+	const uint32_t d = MIXER_PROBE_CYCCNT - start;
+
+	mixer_probe_outside_sum += d;
+	if (d > mixer_probe_outside_max)
+		mixer_probe_outside_max = d;
 }
 
 static uint16_t mixer_probeAvg16(uint32_t sum)
@@ -1230,6 +1306,9 @@ static __attribute__((noinline)) void mixer_probeEnd(void)
 	mixer_probe_total += block;
 	if (block > mixer_probe_max)
 		mixer_probe_max = block;
+	mixer_probeFold(mixer_probe_async_max, 6u);
+	mixer_probeFold(mixer_probe_sync_max, 6u);
+	mixer_probeFold(mixer_probe_sec_max, MIXER_PROBE_SEC_COUNT);
 	if (++mixer_probe_blocks < MIXER_PROBE_WINDOW)
 		return;
 	for (uint8_t slot = 0u; slot < 6u; slot++) {
@@ -1254,6 +1333,25 @@ static __attribute__((noinline)) void mixer_probeEnd(void)
 	*(volatile uint32_t *)0xE000ED98u = 0u;                 /* MPU_RNR */
 	autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE, (uint8_t)(6u | (8u << 3)),
 			*(volatile uint32_t *)0xE000EDA0u);                 /* MPU_RASR */
+	/* S101 (S1): the maxima and the outside-mixer span, then restart them */
+	for (uint8_t slot = 0u; slot < 6u; slot++) {
+		autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE,
+				(uint8_t)(6u | ((9u + slot) << 3)),
+				(mixer_probe_async_max[slot] << 16) | mixer_probe_sync_max[slot]);
+		mixer_probe_async_max[slot] = 0u;
+		mixer_probe_sync_max[slot] = 0u;
+	}
+	for (uint8_t sec = 0u; sec < MIXER_PROBE_SEC_COUNT; sec++) {
+		autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE,
+				(uint8_t)(6u | ((16u + sec) << 3)), mixer_probe_sec_max[sec]);
+		mixer_probe_sec_max[sec] = 0u;
+	}
+	autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE, (uint8_t)(6u | (24u << 3)),
+			mixer_probe_outside_sum / MIXER_PROBE_WINDOW);
+	autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE, (uint8_t)(6u | (25u << 3)),
+			mixer_probe_outside_max);
+	mixer_probe_outside_sum = 0u;
+	mixer_probe_outside_max = 0u;
 	mixer_probe_total = 0u;
 	mixer_probe_max = 0u;
 	mixer_probe_blocks = 0u;

@@ -99,7 +99,9 @@ C_PATH = "Core/DSPAudio/oscPwmTables.c"
 # --- S099 P1: the chopped waves (oscChopTables.h/.c) ---
 CHOP_H_PATH = "Core/DSPAudio/oscChopTables.h"
 CHOP_C_PATH = "Core/DSPAudio/oscChopTables.c"
-WAVETABLE_C = "Core/DSPAudio/wavetable.c"
+# S101: the full [11][1024] sawTable is archived (the firmware stores levels
+# 1..10 in stockTableRows[]); levels 1..10 are byte-identical (STOCK-ROWS).
+WAVETABLE_C = "tools/plots/archive/stock_tables_s100.c"
 CHOP_POINTS = 1024
 CHOP_WRAP_INDEX = 128          # (ph + 2^29) >> 22 puts x = 0 at index 128
 CHOP_ROWS = 11

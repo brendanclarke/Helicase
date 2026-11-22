@@ -1012,7 +1012,7 @@ static __attribute__((noinline)) float col_oscControl(ColloidVoice *voice, const
 		if (isWtb) {
 			const uint32_t fr = (voice->frame[i] < frames) ? voice->frame[i] : (frames - 1u);
 
-			voice->row[i] = wtbBase ? wtbBase + fr * WAVETABLE_ROW_POINTS : sawTable[0];
+			voice->row[i] = wtbBase ? wtbBase + fr * WAVETABLE_ROW_POINTS : sawTable[1];   /* S101: level 1 (no level 0) */
 		} else if (isSin) {
 			voice->row[i] = sine_table;
 		} else if (isPwm && form == COL_PWM_TRI) {
@@ -1021,7 +1021,11 @@ static __attribute__((noinline)) float col_oscControl(ColloidVoice *voice, const
 
 			voice->row[i] = stock[(r > 10u) ? 10u : r];
 		} else {
-			voice->row[i] = stock[col_octave(f)];
+			/* S101 (wavetable.h): sawTable / recTable have no level 0, so
+			 * they read level 1 below 16.35 Hz; the triangle keeps level 0 */
+			const uint32_t o = col_octave(f);
+
+			voice->row[i] = stock[(o == 0u && stock != (const int16_t (*)[1024])triTable) ? 1u : o];
 		}
 		voice->motPhase[i] += (uint32_t)(motStep * colMotK[i]);
 		{
@@ -1123,7 +1127,7 @@ void Colloid_initVoice(ColloidVoice *voice)
 		voice->motPhase[i] = col_rngNext(&rng);
 		voice->pitchCur[i] = 0.0f;   /* set on the first block (pitchJump) */
 		voice->inc[i] = 0u;
-		voice->row[i] = sawTable[0];
+		voice->row[i] = sawTable[1];   /* S101: level 1 (wavetable.h: no level 0) */
 		voice->rnd[i] = 0;
 		voice->frame[i] = 0u;
 		voice->pwPos[i] = 0u;

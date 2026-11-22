@@ -28940,6 +28940,39 @@ static void filesystem_batchScanTick(void (*tick)(void))
     }
 }
 
+/*
+ * Which facade owners get the AUTOSAVE_DRAIN_POLL_BUDGET_US burst (S101).
+ *
+ * What: the scalar and Pattern AutoSave drains and Flush Finish always; the
+ * two diagnostic trace flushes (logging builds) only while core work waits
+ * for the facade, so they free it sooner: filesystem_coreSavePending()
+ * (a save) or menu_loadSaveStorageWaiting() (a Load/Save page open or a
+ * command active; a trace flush already in flight when the page opens would
+ * otherwise hold its first request back at one poll per pass).
+ * Why (S101_P1_CPU_INVESTIGATION.md §3.3, rule §0): otherwise each trace flush,
+ * twice a second, took 1 ms of foreground per main-loop pass, about 20 ms of
+ * pass at this Scene's 93 % render load.
+ * Inputs: current_op, the two predicates. Output: predicate only.
+ * Accessors: filesystem_tick().
+ */
+static uint8_t filesystem_drainPollEligible(void)
+{
+    switch (current_op) {
+    case FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN:
+    case FS_INTERNAL_OP_AUTOSAVE_PATTERN_DRAIN:
+    case FS_INTERNAL_OP_FLUSH_FINISH:
+        return 1u;
+#if DEV_MODE_LOGGING
+    case FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH:
+    case FS_INTERNAL_OP_PATTERN_TRACE_FLUSH:
+        return (uint8_t)(filesystem_coreSavePending() ||
+                         menu_loadSaveStorageWaiting());
+#endif
+    default:
+        return 0u;
+    }
+}
+
 #if DEV_MODE_LOGGING
 /*
  * Filesystem pass probe (S097 P3, DEV only).
@@ -29136,21 +29169,34 @@ void filesystem_tick(void)
          * S099 P3 §10: core AutoSave storage polls for up to
          * AUTOSAVE_DRAIN_POLL_BUDGET_US per pass. One poll per pass moved
          * 16 bytes, so the parameter copy took seconds and edits were lost
-         * at power-off. A trace flush already in flight when an edit arrives
-         * gets the same rate only so it releases the facade sooner; no new
-         * flush starts while a save is pending (§0).
+         * at power-off.
+         *
+         * S101 (S101_P1_CPU_INVESTIGATION.md §3.3): the burst is foreground time
+         * the render does not get back. At a 93 % render load 1 ms of it
+         * stretches one main-loop pass to about 20 ms, and the front panel
+         * was sampled once per pass. Two corrections, neither slowing a save:
+         * - a trace flush (diagnostic) gets the burst only while core work
+         *   waits for the facade (a pending save, which is what this comment
+         *   always said, or Load/Save); the condition had no such test, so
+         *   every flush, twice a second, spun 1 ms on each of its passes
+         *   (rule §0: diagnostics never take core time);
+         * - Flush Finish ends its burst once AsyncFATFS has nothing left to
+         *   write (afatfs_isFlushed()). A trace flush syncs before it
+         *   finishes, so the Flush Finish closing it had nothing to do and
+         *   still spun the whole 1 ms.
+         * The drains themselves keep the full burst: their speed is bounded
+         * by the foreground share, not by this loop.
          */
-        if (status == FS_STATUS_BUSY &&
-            (current_op == FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN ||
-             current_op == FS_INTERNAL_OP_AUTOSAVE_PATTERN_DRAIN ||
-             current_op == FS_INTERNAL_OP_FLUSH_FINISH ||
-             current_op == FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH ||
-             current_op == FS_INTERNAL_OP_PATTERN_TRACE_FLUSH)) {
+        if (status == FS_STATUS_BUSY && filesystem_drainPollEligible()) {
             const uint32_t poll_start_us = timebase_tim2Now();
 
             while (timebase_tim2Delta(timebase_tim2Now(), poll_start_us) <
-                   AUTOSAVE_DRAIN_POLL_BUDGET_US)
+                   AUTOSAVE_DRAIN_POLL_BUDGET_US) {
+                if (current_op == FS_INTERNAL_OP_FLUSH_FINISH &&
+                    afatfs_isFlushed())
+                    break;
                 afatfs_poll();
+            }
         }
     } else {
         uint16_t now = time_sysTick;

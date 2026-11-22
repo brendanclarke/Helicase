@@ -1289,6 +1289,22 @@ bool afatfs_sync()
     return afatfs_flush();
 }
 
+bool afatfs_isFlushed(void)
+{
+    /*
+     * S101: afatfs_flush()'s "done" condition without its side effect.
+     *
+     * What: true when no cache sector is dirty and no sector write is
+     * waiting for its completion callback. Why: filesystem.c's Flush Finish
+     * poll burst (AUTOSAVE_DRAIN_POLL_BUDGET_US) spun its whole 1 ms even
+     * when the flush was already complete (a trace flush syncs before it
+     * finishes), costing about 20 ms of main-loop pass at a 93 % render load.
+     * Inputs: cacheDirtyEntries, cacheFlushInProgress. Output: predicate
+     * only. Affiliates: afatfs_flush(), filesystem_tick().
+     */
+    return (bool)(afatfs.cacheDirtyEntries == 0 && !afatfs.cacheFlushInProgress);
+}
+
 /**
  * Returns true if either the freefile or the regular cluster pool has been exhausted during a previous write operation.
  */

@@ -1144,11 +1144,31 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
                         4: "SRR decimators", 5: "output/FX-send adds",
                         6: "Effect (bus, process, return)",
                         7: "bus compressor"}
-            if flags >> 3 == 8:
+            n = flags >> 3
+            if n == 8:
                 cached = ("NOT D-cached (S=1)" if value & (1 << 18)
                           else "D-cached (S=0)")
                 detail = (f"{enum_name} via {producer}: MPU region 0 RASR "
                           f"0x{value:08x}: SRAM {cached}")
+            elif 9 <= n <= 14:
+                # S101 (S1): one slot's largest single block in the window
+                blk = (value >> 16) & 0xFFFF
+                ren = value & 0xFFFF
+                detail = (f"{enum_name} via {producer}: slot{n - 9} MAX "
+                          f"block-rate {blk} / render {ren} cycles "
+                          f"(largest single blocks; sum {blk + ren}, "
+                          f"{100.0 * (blk + ren) / budget:.1f}% CPU)")
+            elif 16 <= n <= 22:
+                name = sections.get(n - 15, f"section {n - 15}")
+                detail = (f"{enum_name} via {producer}: mixer {name} MAX "
+                          f"block {value} cycles ({100.0 * value / budget:.1f}% "
+                          f"CPU)")
+            elif n in (24, 25):
+                what = "average" if n == 24 else "maximum"
+                detail = (f"{enum_name} via {producer}: outside the mixer "
+                          f"(voiceControl_processPending + seq_rampService) "
+                          f"{what} {value} cycles/block "
+                          f"({100.0 * value / budget:.1f}% CPU)")
             else:
                 name = sections.get(flags >> 3, f"section {flags >> 3}")
                 detail = (f"{enum_name} via {producer}: mixer {name} average "

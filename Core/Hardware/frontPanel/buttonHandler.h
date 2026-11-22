@@ -3,8 +3,9 @@
  * Ported from original LXR AVR buttonHandler.h by Julian Schmidt.
  *
  * CONCURRENCY: buttonHandler_buttonPressed / buttonReleased are called by the
- * foreground scan (din_dout_exchange via timebase_serviceFrontPanel at about
- * 500 Hz). They only update held state and enqueue an event; they do not call
+ * foreground scan (din_dout_exchange via timebase_serviceFrontPanelInput at
+ * about 500 Hz: after each audio render commit and once per main-loop pass,
+ * S101). They only update held state and enqueue an event; they do not call
  * LCD/menu actions. buttonHandler_processEvents() in the main loop dispatches
  * one event per call, with two bounded calls separated by audio rendering.
  */

@@ -192,7 +192,6 @@ DSP_SRCS = \
   Core/DSP/Instruments/Snare/Snare.c \
   Core/DSPAudio/squareRootLut.c \
   Core/DSPAudio/transientGenerator.c \
-  Core/DSPAudio/transientTables.c \
   Core/DSPAudio/voiceFold.c \
   Core/DSPAudio/voiceFoldTables.c \
   Core/DSPAudio/wavetable.c \
@@ -220,13 +219,16 @@ OS_SRCS = \
   Core/Menu/SplashAnimation.c
 
 # S097 P2 step 3: filesystem.c with -Os as well (-36 KB, every per-sample loop
-# exact with COLD_LAST below). Off by default while it is retested: the Scene
-# Load stumble first seen on the FS_OS=1 image was a baseline defect, fixed in
-# S097 P3 §8-§9 (S097_P3_FS_OPTIMIZE_INVESTIGATION.md §10). Build it with
-# `make clean && make all FS_OS=1`. FS_OS_BUILD keeps the helpers reachable
-# from TIM3/MIDI at -O2 (FS_HOT_O2 in filesystem.c). Changing FS_OS needs
-# `make clean` (compiler flags are not object prerequisites).
-FS_OS ?= 0
+# exact with COLD_LAST below). The Scene Load stumble first seen on the
+# FS_OS=1 image was a baseline defect, fixed in S097 P3 §8-§9
+# (S097_P3_FS_OPTIMIZE_INVESTIGATION.md §10); the §11 image ran clean on the
+# device (§12). S101 (user, 2026-11-21: "FS_OS=1 is fine, put that in"): on
+# by default, -36,896 B on the S101 logging build, every per-sample loop
+# exact (S101_P2_REDUCTIONS.md §B.3). `make all FS_OS=0` builds the -O2
+# filesystem. FS_OS_BUILD keeps the helpers reachable from TIM3/MIDI at -O2
+# (FS_HOT_O2 in filesystem.c). Changing FS_OS needs `make clean` (compiler
+# flags are not object prerequisites).
+FS_OS ?= 1
 ifeq ($(FS_OS),1)
 OS_SRCS += Core/Hardware/SD/filesystem.c
 $(BUILD)/Core/Hardware/SD/filesystem.o: CFLAGS += -DFS_OS_BUILD

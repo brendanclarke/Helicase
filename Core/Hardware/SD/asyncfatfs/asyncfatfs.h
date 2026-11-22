@@ -478,6 +478,13 @@ void afatfs_findLastObject(afatfsFilePtr_t directory,
  */
 bool afatfs_flush();
 bool afatfs_sync();
+/*
+ * S101: true when no cache entry is dirty and no sector write is in flight;
+ * read only, starts no write. At least as strict as afatfs_sync()'s true
+ * result (a locked dirty sector keeps this false). Lets filesystem.c end its
+ * Flush Finish poll burst once nothing is left to write.
+ */
+bool afatfs_isFlushed(void);
 void afatfs_init();
 bool afatfs_destroy(bool dirty);
 void afatfs_poll();

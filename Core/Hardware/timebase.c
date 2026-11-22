@@ -116,6 +116,23 @@
 ** State
 ** ----------------------------------------------------------------------- */
 volatile uint16_t time_sysTick = 0;
+/*
+ * S101: two 500 Hz flags in the one byte (no new RAM).
+ *
+ * What: FP_DUE_SCAN asks for the panel input scan (LED latch, button SPI
+ * exchange, jack detect, encoder button); FP_DUE_SERVICE asks for the rest of
+ * the 500 Hz foreground work (endless pots, LiveRecord, Pattern stack,
+ * copy/clear). TIM6 sets both every 2 ms; each owner clears only its own.
+ * Why (S101_P1_CPU_INVESTIGATION.md §3.2): the scan ran once per main-loop
+ * pass, and at this Scene's 93 % render load a pass took 20 ms or more, so
+ * the three-sample button debounce needed about 60 ms and fast taps were
+ * lost. The scan now also runs after each audio render commit
+ * (timebase_serviceFrontPanelInput()), about every 2.2 ms whatever the pass
+ * length. Before S101 this was a counter capped at 2 and cleared to 0 by its
+ * one consumer, i.e. already a flag.
+ */
+#define FP_DUE_SCAN    0x01u
+#define FP_DUE_SERVICE 0x02u
 static volatile uint8_t frontpanel_service_due = 0;
 
 /* systick_ticks — 32-bit canonical LXR mainboard counter. It advances at
@@ -137,8 +154,22 @@ void TIM6_DAC_IRQHandler(void)
     time_sysTick++;
     screensaver_timer++;
 
-    if ((time_sysTick & 1u) == 0u && frontpanel_service_due < 2u)
-        frontpanel_service_due++;
+    if ((time_sysTick & 1u) == 0u)
+        frontpanel_service_due |= (uint8_t)(FP_DUE_SCAN | FP_DUE_SERVICE);
+}
+
+/* Take one 500 Hz flag: 1 if it was set (and is now clear), else 0. */
+static uint8_t timebase_takeFrontPanelDue(uint8_t flag)
+{
+    uint8_t due;
+
+    if ((frontpanel_service_due & flag) == 0u)
+        return 0u;
+    __asm volatile("cpsid i" ::: "memory");
+    due = frontpanel_service_due;
+    frontpanel_service_due = (uint8_t)(due & (uint8_t)~flag);
+    __asm volatile("cpsie i" ::: "memory");
+    return (uint8_t)((due & flag) != 0u);
 }
 
 void timebase_holdPreAudioMs(uint16_t duration_ms)
@@ -160,17 +191,32 @@ void timebase_holdPreAudioMs(uint16_t duration_ms)
     }
 }
 
-void timebase_serviceFrontPanel(void)
+void timebase_serviceFrontPanelInput(void)
 {
     uint32_t gpiob_idr;
     uint32_t gpiod_idr;
 
-    if (frontpanel_service_due == 0u)
+    /*
+     * The 500 Hz panel input scan (S101 split from timebase_serviceFrontPanel()).
+     *
+     * What: when FP_DUE_SCAN is set, latches the LED shift registers,
+     * exchanges the button chain over SPI1 (din_dout_exchange(): debounce and
+     * the button event ring), refreshes the output-jack detect and samples the
+     * encoder button. At most one scan per 2 ms flag: owed scans are not run
+     * back to back, because the three-sample debounce needs samples spread
+     * in time.
+     * Why (S101_P1_CPU_INVESTIGATION.md §3.2): a scan only once per main-loop
+     * pass lost fast taps whenever a pass ran long (20 ms and more at a 93 %
+     * render load).
+     * Accessors: audio_check_and_render() after each render commit (main.c),
+     * and timebase_serviceFrontPanel() once per main-loop pass. Both are the
+     * main loop, so the LED shadow, the debounce state and the event ring keep
+     * their one foreground owner.
+     * Cost: 5 SPI bytes at 13.5 MHz, 41 debounce steps, two GPIO reads; the
+     * endless pots' angle maths stays in the main-loop service.
+     */
+    if (!timebase_takeFrontPanelDue(FP_DUE_SCAN))
         return;
-
-    __asm volatile("cpsid i" ::: "memory");
-    frontpanel_service_due = 0u;
-    __asm volatile("cpsie i" ::: "memory");
 
     /* LED/button SPI exchange on SPI1 (PA7/PA6/PB3/PB2).
     ** SD card is on separate bit-bang pins (PC12/PD2/PC8/PD0). */
@@ -187,6 +233,15 @@ void timebase_serviceFrontPanel(void)
                              (uint8_t)((gpiob_idr >> 6) & 1u));
 
     encoder_tick();
+}
+
+void timebase_serviceFrontPanel(void)
+{
+    /* S101: the input scan first, as before, then the rest when it is due. */
+    timebase_serviceFrontPanelInput();
+    if (!timebase_takeFrontPanelDue(FP_DUE_SERVICE))
+        return;
+
     endlessPots_tick();
 
     /*

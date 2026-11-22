@@ -12838,8 +12838,9 @@ static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *bu
     const char *p = menuText_dash;
     switch (menuId) {
     case MENU_TRANS:
-        /* S087 P3: past the built-in names, the user one-shots as sNN
-         * (menu_formatTransientName() gives the 8-character name). */
+        /* S087 P3: past the named modes (Snp, Ofs), the installed one-shots
+         * as sNN (menu_formatTransientName() gives the 8-character name;
+         * S101: the former built-in clicks are among them, LXR*.wav). */
         if (curParmVal < (uint8_t)transientNames[0][0]) {
             p = transientNames[curParmVal+1]; break;
         }
@@ -12967,10 +12968,11 @@ _Static_assert(sizeof(mixFmNames) / sizeof(mixFmNames[0]) == 5u,
 /* S086 P2: the wav list (stock waves) ends where the user samples start. */
 _Static_assert((sizeof(waveformNames) / sizeof(waveformNames[0])) - 1u == OSC_SAMPLE_START,
                "waveformNames must list every waveform below OSC_SAMPLE_START");
-/* S087 P3: the user one-shots follow the last built-in transient name. */
+/* S087 P3: the user one-shots follow the last named transient entry
+ * (S101: Snp and Ofs only; the built-in clicks are card samples). */
 _Static_assert((sizeof(transientNames) / sizeof(transientNames[0])) - 1u ==
                TRANSIENT_USER_FIRST,
-               "transientNames must list Snp, Ofs and every built-in click");
+               "transientNames must list Snp, Ofs and nothing else");
 /* S089 P2: the chain and fold name tables must list every stored value. */
 _Static_assert((sizeof(voiceChainNames) / sizeof(voiceChainNames[0])) - 1u ==
                    VOICE_CHAIN_COUNT,

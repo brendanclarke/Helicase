@@ -1285,7 +1285,7 @@ _Static_assert((int)SPACE_ECH_FEEDBACK == (int)SPACE_DLY_FEEDBACK &&
  *   0.18 (Q 8, a resonant peak) at 0 and the whole 11.04 at 127, as
  *   before, but the curve's slope is 0 at the top (user: "lowering wid
  *   cuts frequencies too fast"): 10 rows below 127 the band is still
- *   10.8 octaves (the earlier law: 8), 3.9 at 64, 1.1 at 32;
+ *   10.8 octaves (the earlier law: 8), 4.0 at 64, 1.1 at 32;
  * - the edges centre x 2^(-+N/2), held inside 10 Hz .. 21 kHz: so at `ton`
  *   0 and `wid` 127 the band is exactly the room, `ton` up then moves the
  *   low edge up (the high one stays at the 21 kHz bound), `ton` down

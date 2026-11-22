@@ -93,9 +93,10 @@
 /* the delay's range in output samples: >= 65 keeps the guard rule (the tap
  * reaches index 1,023 at least two blocks after ring[0] was written); <= 990
  * keeps the mid form's pass B behind the 32 samples pass A wrote (S099 P1
- * deviation §0.3 item 8). At half rate (BBD_COL_HALF_RATE) the delay in ring
- * samples is half: 32.5 .. 495, against 16 ring samples a block, so both
- * rules still hold by the same margins in blocks. */
+ * deviation §0.3 item 8). At half rate (BBD_COL_HALF_RATE, and since S101
+ * BBD_ALK_HALF_RATE) the delay in ring samples is half: 32.5 .. 495, against
+ * 16 ring samples a block, so both rules still hold by the same margins in
+ * blocks (the Alkaline's pass B on its one ring is the mid form's pass B). */
 #define BBD_D_MIN         65.0f
 #define BBD_D_MAX         990.0f
 /* the quiet test: 32 blocks (23 ms) after the host went quiet, every ring
@@ -117,8 +118,8 @@
  *             between ring samples, so the half-rate images near 22 kHz - f
  *             are sin^2-shaped, not sin), and the post pole and the dry + wet
  *             run at the full rate. 0: the full-rate loops.
- *             The Alkaline always runs full rate (it has room: S099 P1 review
- *             F2).
+ *             The Alkaline has its own switch, BBD_ALK_HALF_RATE (below; S101:
+ *             half rate too; it ran full rate from S099 P1 review F2).
  * Why:        F1: the full-rate L-R form is 51.8 instructions a sample after
  *             the behaviour-neutral trims; the p95 target at 1.4 cycles an
  *             instruction is 50. The half-rate form measured 47.0 (40.5 in
@@ -134,6 +135,30 @@
  */
 #ifndef BBD_COL_HALF_RATE
 #define BBD_COL_HALF_RATE 1
+#endif
+/*
+ * The Advanced Alkaline's half-rate wet (S101, user 2026-11-21).
+ *
+ * What:       1: the Alkaline's chorus runs its one ring at half the sample
+ *             rate, in the Colloid's form (above): the pre pole at the full
+ *             rate, the mean of each output pair through the BBD drive and
+ *             clip into the ring, one interpolated tap per pair, both post
+ *             poles (the 12 dB wet) and the dry + wet at the full rate
+ *             (bbd_alkAH(), bbd_alkBH()). 0: the full-rate loops (bbd_alkA(),
+ *             bbd_alkB()), kept so the bench proves both forms.
+ * Why:        the S101 device probe (S101_P1_CPU_INVESTIGATION.md §2.1): the
+ *             Advanced Alkaline's chorus, the one left at full rate, cost
+ *             +2.3-2.7k cycles a block over the Basic Alkaline in the
+ *             two-Advanced Scene that runs at 99 %. "If that's the worst case
+ *             instrument put in the half-rate chorus" (user).
+ * Sound:      the Colloid's C3 trade: the wet's highs above about 11 kHz
+ *             fold and image, and the BBD clip's harmonics are made at the
+ *             ring's 22 kHz rate. The dry is exact. Laws CH-AHALF.
+ * Inputs:     -DBBD_ALK_HALF_RATE (the bench builds both).
+ * Accessors:  bbdChorus_renderAlkaline(), bbdChorus_init().
+ */
+#ifndef BBD_ALK_HALF_RATE
+#define BBD_ALK_HALF_RATE 1
 #endif
 /* the ring samples one half-rate block writes */
 #define BBD_HALF_BLOCK    (OUTPUT_DMA_SIZE / 2u)
@@ -172,7 +197,8 @@ typedef struct {
  *             samples); idleBlocks (blocks since the host went quiet, held at
  *             0xFFFF); mono (1 for the Alkaline's one-ring form); half (1
  *             when the rings run at half rate: the Colloid with
- *             BBD_COL_HALF_RATE; w then counts ring samples, 16 a block).
+ *             BBD_COL_HALF_RATE, the Alkaline with BBD_ALK_HALF_RATE (S101);
+ *             w then counts ring samples, 16 a block).
  * Why:        the voice structs keep only 12 B (Colloid) / 76 B (Alkaline);
  *             the unit has 288 B after its rings (draft §3.1).
  */

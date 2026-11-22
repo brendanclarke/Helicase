@@ -91,10 +91,18 @@ void time_initTimer(void);
  */
 void timebase_holdPreAudioMs(uint16_t duration_ms);
 
-/* Foreground front-panel service. Drains the TIM6-scheduled service flag and
+/* Foreground front-panel service. Drains the TIM6-scheduled service flags and
 ** performs the heavier shift-register, encoder-button, jack-detect, and
-** endless-pot work outside interrupt context. */
+** endless-pot work outside interrupt context, then the 500 Hz LiveRecord,
+** Pattern stack and copy/clear services. */
 void timebase_serviceFrontPanel(void);
+
+/* S101: only the 500 Hz panel input scan (LED latch, button SPI exchange and
+** debounce, jack detect, encoder button), when its flag is due. Main loop
+** only: called after each audio render commit so the scan cadence does not
+** depend on the main-loop pass length; timebase_serviceFrontPanel() calls it
+** too. */
+void timebase_serviceFrontPanelInput(void);
 
 /* 1us shared timestamp. Safe from foreground code and ISRs. TIM2 wraps after
 ** about 71 minutes; always compute intervals with timebase_tim2Delta() or

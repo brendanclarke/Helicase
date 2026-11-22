@@ -450,6 +450,114 @@ BBD_LOOP static void bbd_alkB(BbdSide *s, int16_t *x, const uint32_t gk)
 }
 
 /*
+ * The half-rate Alkaline loops (S101, user 2026-11-21: the Colloid's
+ * half-rate form on the Advanced Alkaline too; BBD_ALK_HALF_RATE).
+ *
+ * What:       bbd_alkA() / bbd_alkB() with the ring at half the sample rate,
+ *             in bbd_sideH()'s pattern. Per output pair x0, x1:
+ *               dry      xR[0..1] = x0, x1 (pass B's dry, as bbd_alkA());
+ *               pre pole at the full rate on x0 then x1 (p0, p1);
+ *               write    ring[w & 1,023] = clip((p0 + p1) / 2 x the BBD
+ *                        drive) (the mean of the pair: the 2-tap decimator of
+ *                        the Colloid's form; the drive and the hard clip act
+ *                        on that one ring sample);
+ *               tap      t = bbd_tap(ring, rp) (x 2), rp in ring samples;
+ *               post     both post poles at the full rate: on (tq + t) / 2
+ *                        for out0 (the interpolation between this and the
+ *                        previous tap), then on t for out1; tq = t;
+ *               out      x (gd) + o2 / 2 x gw, as bbd_alkA() (the dry exact).
+ *             The work is split in two loops (S101, measured: one loop
+ *             spilled): bbd_alkWH() writes (the dry copy, the pre pole, the
+ *             drive and clip, the ring) and bbd_alkTH() taps one side (the
+ *             tap, both post poles, the output); pass A is both on the left
+ *             (bbd_alkAH()), pass B bbd_alkTH() on the right, on the same
+ *             (one) ring with pass A's dry copy. The operations and their
+ *             order per state are those of the one loop: the same output.
+ *             w counts ring samples (16 a block), as for the Colloid.
+ * Why:        the Advanced Alkaline was the one chorus at full rate (S101
+ *             device probe: +2.3-2.7k cycles a block over the Basic
+ *             Alkaline). The write, the drive, the clip and the tap now run
+ *             once per two outputs.
+ * Sound:      the Colloid's C3 trade (BbdChorus.h): the wet above about
+ *             11 kHz folds and images; the BBD clip's harmonics are made at
+ *             the ring's 22 kHz rate, so they fold around 11 kHz; the dry is
+ *             exact (law CH-MIX0's form, CH-ALK). Laws CH-AHALF bound the
+ *             level, images and folds against the full-rate form.
+ * Requires:   w % BBD_HALF_BLOCK == 0. The (p0 + p1) << 2 is the mean x 8
+ *             of bbd_alkA()'s p << 3 without the mean's floor (|p| < 2^15:
+ *             no overflow).
+ */
+BBD_LOOP static void bbd_alkWH(BbdSide *s, const int16_t *xL, int16_t *xR, uint32_t w,
+                               const uint32_t gDrv)
+{
+	int16_t *const r = s->ring;
+	const uint32_t kk = s->kk;
+	int32_t p = s->p;
+
+	do {
+		const int32_t x0 = xL[0], x1 = xL[1];
+		const int32_t p0 = bbd_smlawb(p - x0, kk, x0);
+
+		xR[0] = (int16_t)x0;
+		xR[1] = (int16_t)x1;
+		p = bbd_smlawb(p0 - x1, kk, x1);
+		r[w & BBD_RMASK] = bbd_ssat16(bbd_smulwb((p0 + p) << 2, gDrv));
+		xL += 2;
+		xR += 2;
+		w++;
+	} while ((w & (BBD_HALF_BLOCK - 1u)) != 0u);
+	/* this block wrote index 0 (w & 1,023 == 16 at its end; CH-GUARD) */
+	if ((w & BBD_RMASK) == BBD_HALF_BLOCK)
+		r[BBD_RING] = r[0];
+	s->p = p;
+}
+
+/* bbd_alkTH: one side's tap at half rate, in place on x (its dry): the tap
+ * once per output pair, both post poles at the full rate on (tq + t) / 2
+ * then t, the output gains. Pass A's left (after bbd_alkWH()) and pass B's
+ * right (bbd_alkB()'s rules on the one ring). */
+BBD_LOOP static void bbd_alkTH(BbdSide *s, int16_t *x, const uint32_t gk)
+{
+	const int16_t *const r = s->ring;
+	uint32_t rp = s->rp;
+	const uint32_t inc = s->inc;
+	const uint32_t kk = s->kk;
+	int32_t o = s->o, o2 = s->o2, tq = s->tq;
+	int16_t *const end = x + OUTPUT_DMA_SIZE;
+
+	do {
+		const int32_t x0 = x[0], x1 = x[1];
+		const int32_t t = bbd_tap(r, rp);
+		const int32_t th = (tq + t) >> 1;
+
+		o = bbd_smlawt(o - th, kk, th);
+		o2 = bbd_smlawt(o2 - o, kk, o);
+		x[0] = bbd_ssat16(bbd_smlawt(o2, gk, bbd_smlawb(x0 << 1, gk, x0)));
+		o = bbd_smlawt(o - t, kk, t);
+		o2 = bbd_smlawt(o2 - o, kk, o);
+		x[1] = bbd_ssat16(bbd_smlawt(o2, gk, bbd_smlawb(x1 << 1, gk, x1)));
+		tq = t;
+		x += 2;
+		rp += inc;
+	} while (x != end);
+	s->rp = rp;
+	s->o = o;
+	s->o2 = o2;
+	s->tq = tq;
+}
+
+/* bbd_alkAH: the half-rate pass A, the write pass then the left tap (the
+ * split keeps each loop inside the registers: S101 measured the one-loop
+ * form at 60 a pair with a dozen stack accesses). Requires
+ * w % BBD_HALF_BLOCK == 0. */
+BBD_LOOP static void bbd_alkAH(BbdSide *s, int16_t *xL, int16_t *xR, const uint32_t w,
+                               const uint32_t gk, const uint32_t gDrv)
+{
+	bbd_alkWH(s, xL, xR, w, gDrv);
+	bbd_alkTH(s, xL, gk);
+}
+
+/*
  * The Juno modes and the var / dbl path (S099 P1; draft §1.1, §5.1; S099 P2:
  * one dpt row, BbdChorus.h).
  *
@@ -547,9 +655,9 @@ void bbdChorus_init(int16_t *unit, const uint8_t mono, const uint8_t dpt)
 	st->cNow = centre;
 	st->gDrv = 8192u;     /* x1 */
 	st->mono = mono;
-	/* the Colloid's rings at half rate (BBD_COL_HALF_RATE); the Alkaline's
-	 * always full rate */
-	st->half = (uint8_t)(!mono && BBD_COL_HALF_RATE);
+	/* the rings' rate: the Colloid's by BBD_COL_HALF_RATE, the Alkaline's
+	 * (mono) by BBD_ALK_HALF_RATE (S101: both half by default) */
+	st->half = (uint8_t)(mono ? BBD_ALK_HALF_RATE : BBD_COL_HALF_RATE);
 }
 
 /*
@@ -688,12 +796,22 @@ void bbdChorus_renderAlkaline(int16_t *unit, int16_t *left, int16_t *right)
 	 * The Alkaline's chorus pass (S099 P1; draft §4.5): the Alpha Juno's own
 	 * topology, a mono voice into a stereo chorus; right is written from
 	 * left's dry in pass A, then pass B makes it the right output.
+	 * BBD_ALK_HALF_RATE (S101): the half-rate loops, the write count
+	 * advancing 16 a block; else the full-rate loops, 32 a block. Pass B
+	 * reads the one ring after pass A wrote the block: the shortest delay
+	 * (32.5 ring samples at half rate) stays behind the 16 just written.
 	 */
 	BbdChorusState *const st = bbd_state(unit);
 
+#if BBD_ALK_HALF_RATE
+	bbd_alkAH(&st->side[0], left, right, st->w, st->gk, st->gDrv);
+	bbd_alkTH(&st->side[1], right, st->gk);
+	st->w += BBD_HALF_BLOCK;
+#else
 	bbd_alkA(&st->side[0], left, right, st->w, st->gk, st->gDrv);
 	bbd_alkB(&st->side[1], right, st->gk);
 	st->w += OUTPUT_DMA_SIZE;
+#endif
 }
 
 uint8_t bbdChorus_tailDone(const int16_t *unit)
