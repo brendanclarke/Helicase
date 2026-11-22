@@ -2354,6 +2354,20 @@ static uint8_t menu_cellIsFoldWave(const menu_cell_t *cell);
 static void menu_instrumentCellLabels(uint8_t slot,
                                       const ParamDescriptor *descriptor,
                                       const char **cat, const char **lng);
+/* S101 P3: the Spc chain's five cells; defined beside the WFd rules. */
+/* The roles menu_spaceRole() returns (the five cells, S101 P3 §6.4). */
+#define MENU_SPC_NONE      0u
+#define MENU_SPC_SPREAD    1u
+#define MENU_SPC_FEEDBACK  2u
+#define MENU_SPC_TIME      3u
+#define MENU_SPC_TONE      4u
+#define MENU_SPC_LEVEL     5u
+#define MENU_SPC_COUNT     6u
+static uint8_t menu_spaceRole(uint8_t slot, const ParamDescriptor *descriptor);
+static uint8_t menu_cellSpaceRole(const menu_cell_t *cell);
+static uint8_t menu_formatSpaceValue3(uint8_t role, uint8_t value, char *out);
+static const char *menu_instrumentShortLabel(uint8_t slot,
+                                             const ParamDescriptor *descriptor);
 
 /* S078 P2 §B STEP overlay helpers. Definitions stay adjacent to the va_*
  * state/logic below; these declarations keep the same forward-reference style
@@ -3498,6 +3512,10 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value,
      */
     if (cell && cell->kind == MENU_CELL_INSTRUMENT && cell->bit_plus1)
         value = (uint8_t)((value >> (cell->bit_plus1 - 1u)) & 1u);
+
+    /* S101 P3: the Spc spread and feedback texts. */
+    if (menu_formatSpaceValue3(menu_cellSpaceRole(cell), value, out))
+        return;
 
     /* Per-track play mode shows its 0..5 name (S078 §4.1). */
     if (cell && cell->kind == MENU_CELL_STATIC &&
@@ -6492,7 +6510,8 @@ static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText)
         return;
     }
 
-    menu_copyPaddedField(valueAsText, menuLabel_short(descriptor->short_id), 3u);
+    /* S101 P3: an Spc cell's name */
+    menu_copyPaddedField(valueAsText, menu_instrumentShortLabel(slot, descriptor), 3u);
 }
 
 static void menu_displayInstrumentTargetFull(uint16_t target)
@@ -6704,6 +6723,10 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         memcpy(valueAsText, menuText_dash, 3);
         return;
     }
+
+    /* S101 P3: the Spc spread and feedback texts. */
+    if (menu_formatSpaceValue3(menu_cellSpaceRole(cell), value, valueAsText))
+        return;
 
     /* Per-track play mode shows its 0..5 name (S078 §4.1). */
     if (cell && cell->kind == MENU_CELL_STATIC &&
@@ -7105,6 +7128,9 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
         /* S089 P2: a WFd wav cell holds a fold type (0..VOICE_FOLD_COUNT-1). */
         if (menu_cellIsFoldWave(cell))
             n = (uint8_t)VOICE_FOLD_COUNT;
+        /* S101 P3: an Spc wav cell is the spread, 0..127. */
+        if (menu_cellSpaceRole(cell) == MENU_SPC_SPREAD)
+            n = 128u;
         if (n == 0u)
             *value = 0u;
         else if (*value >= n)
@@ -12728,6 +12754,89 @@ static uint8_t menu_cellIsFoldWave(const menu_cell_t *cell)
 }
 
 /*
+ * The Spc chain's five cells (S101 P3 §6.4, decided).
+ *
+ * What:       menu_spaceRole() names the role a descriptor plays on a slot
+ *             whose chain is Spc (VOICE_CHAIN_SPACE): transient_wave = spread,
+ *             transient_vol = feedback, transient_freq = time,
+ *             instrument_decimation = tone (`spt`), instrument_drive = level
+ *             (`spc`); MENU_SPC_NONE for every other row, chain or type
+ *             (instrumentManager_slotVoiceChain() is T+D for non-drum types).
+ *             menu_cellSpaceRole() is the same for a cell.
+ *             menu_formatSpaceValue3() writes the value text of the two cells
+ *             whose display changes: spread as a number 0..127 (the row's
+ *             dtype is the transient list), feedback with the one bipolar law
+ *             (value - 63, as DTYPE_PM63); 0 for the others (their numeric
+ *             display is already right).
+ *             menu_instrumentShortLabel() is the 3-character cell name: the
+ *             Spc name for those five, the descriptor's own otherwise.
+ * Why:        the stored rows and their bytes are unchanged in every chain
+ *             (switching back restores the transient, the drive and the
+ *             SRR); only the labels and two value texts follow the chain, as
+ *             under WFd. The mix-page cells read spt and spc, never empty
+ *             (your decision).
+ * Accessors:  the page header, the cell and automation value painters, the
+ *             single-parameter view, the value clamp and the automation max.
+ */
+/* MENU_SPC_* roles: defined with the forward declarations above. */
+
+static const char menu_spcShort[MENU_SPC_COUNT][4] = {
+    "", "spr", "fbk", "tim", "spt", "spc",
+};
+static const char *const menu_spcLong[MENU_SPC_COUNT] = {
+    "", "Spread", "Feedback", "Time", "Tone", "Level",
+};
+
+static uint8_t menu_spaceRole(uint8_t slot, const ParamDescriptor *descriptor)
+{
+    if (!descriptor ||
+        instrumentManager_slotVoiceChain(slot) != VOICE_CHAIN_SPACE)
+        return MENU_SPC_NONE;
+    if (strcmp(descriptor->file_key, "transient_wave") == 0)
+        return MENU_SPC_SPREAD;
+    if (strcmp(descriptor->file_key, "transient_vol") == 0)
+        return MENU_SPC_FEEDBACK;
+    if (strcmp(descriptor->file_key, "transient_freq") == 0)
+        return MENU_SPC_TIME;
+    if (strcmp(descriptor->file_key, "instrument_decimation") == 0)
+        return MENU_SPC_TONE;
+    if (strcmp(descriptor->file_key, "instrument_drive") == 0)
+        return MENU_SPC_LEVEL;
+    return MENU_SPC_NONE;
+}
+
+static uint8_t menu_cellSpaceRole(const menu_cell_t *cell)
+{
+    if (!cell || cell->kind != MENU_CELL_INSTRUMENT || !cell->descriptor)
+        return MENU_SPC_NONE;
+    return menu_spaceRole(cell->slot, cell->descriptor);
+}
+
+static uint8_t menu_formatSpaceValue3(uint8_t role, uint8_t value, char *out)
+{
+    switch (role) {
+    case MENU_SPC_SPREAD:
+        numtostrpu(out, (uint8_t)((value > 127u) ? 127u : value), ' ');
+        return 1u;
+    case MENU_SPC_FEEDBACK:
+        numtostrps(out, (int8_t)(((value > 127u) ? 127u : value) - 63));
+        return 1u;
+    default:
+        return 0u;
+    }
+}
+
+static const char *menu_instrumentShortLabel(uint8_t slot,
+                                             const ParamDescriptor *descriptor)
+{
+    const uint8_t role = menu_spaceRole(slot, descriptor);
+
+    if (role != MENU_SPC_NONE)
+        return menu_spcShort[role];
+    return descriptor ? menuLabel_short(descriptor->short_id) : "";
+}
+
+/*
  * Category and long name of an instrument cell, by chain (S089 P2).
  *
  * What:       the descriptor's category/long name, except for the three
@@ -12758,6 +12867,16 @@ static void menu_instrumentCellLabels(uint8_t slot,
 
     *cat = menuLabel_cat(descriptor->cat_id);
     *lng = menuLabel_long(descriptor->long_id);
+    /* S101 P3: under Spc the five space cells read "Spatial" and their role. */
+    {
+        const uint8_t role = menu_spaceRole(slot, descriptor);
+
+        if (role != MENU_SPC_NONE) {
+            *cat = "Spatial";
+            *lng = menu_spcLong[role];
+            return;
+        }
+    }
     if (instrumentManager_slotVoiceChain(slot) != VOICE_CHAIN_WAVEFOLDER)
         return;
     if (strcmp(descriptor->file_key, "transient_wave") == 0) {
@@ -14489,6 +14608,11 @@ static void menu_formatVoiceAutomationValue3(uint16_t target,
         menu_formatWaveValue3(&cell, value, buf);
         return;
     }
+    /* S101 P3: an Spc slot's spread and feedback automation texts. */
+    if (instrumentParam_isVoiceParameter(target) &&
+        menu_formatSpaceValue3(menu_spaceRole(instrumentParam_slot(target),
+                                              descriptor), value, buf))
+        return;
     /* S089 P2: a WFd slot's automated wav value names its fold type. */
     if (descriptor && instrumentParam_isVoiceParameter(target) &&
         strcmp(descriptor->file_key, "transient_wave") == 0 &&
@@ -15074,6 +15198,10 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
             instrumentManager_slotVoiceChain(instrumentParam_slot(vt)) ==
                 VOICE_CHAIN_WAVEFOLDER)
             max_val = (uint8_t)(VOICE_FOLD_COUNT - 1u);
+        /* S101 P3: under Spc the wav byte is the spread, 0..127. */
+        if (desc && instrumentParam_isVoiceParameter(vt) &&
+            menu_spaceRole(instrumentParam_slot(vt), desc) == MENU_SPC_SPREAD)
+            max_val = 127u;
         if (sceneModTarget_isSceneTarget(vt)) {
             const scene_mod_target_descriptor_t *scene_desc =
                 sceneModTarget_descriptor(vt);
@@ -15415,9 +15543,9 @@ static void menu_repaintStepAutomation(void)
                 descriptor = instrumentManager_descriptor(
                     instrument->type, instrumentParam_local(target));
             numtostru(&editDisplayBuffer[1][5], (uint8_t)(slot + 1u));
-            if (descriptor)
+            if (descriptor)   /* S101 P3: an Spc cell's name */
                 menu_copyPaddedField(&editDisplayBuffer[1][9],
-                                     menuLabel_short(descriptor->short_id), 3u);
+                                     menu_instrumentShortLabel(slot, descriptor), 3u);
             else
                 menu_copyPaddedField(&editDisplayBuffer[1][9], "inv", 3u);
         } else if (menu_stepAutomationIsEffect(target)) {
@@ -15594,6 +15722,9 @@ static void menu_repaintGeneric(void)
             } else if (menu_getMidiStaticName(&cell, value,
                                        &editDisplayBuffer[1][13])) {
                 /* S083 MIDI names: off / glb / on / channel / note. */
+            } else if (menu_formatSpaceValue3(menu_cellSpaceRole(&cell), value,
+                                              &editDisplayBuffer[1][13])) {
+                /* S101 P3: the Spc spread (number) and feedback (bipolar). */
             } else switch (dtype) {
             case DTYPE_TARGET_SELECTION_VELO:
             case DTYPE_TARGET_SELECTION_LFO:
@@ -15789,8 +15920,11 @@ static void menu_repaintGeneric(void)
                                       &editDisplayBuffer[0][4u * i]);
             } else if (cell.kind == MENU_CELL_INSTRUMENT ||
                        cell.kind == MENU_CELL_KIT_SETTING) {
+                /* S101 P3: the Spc cells' names (instrument cells only). */
                 menu_copyPaddedField(&editDisplayBuffer[0][4u * i],
-                                     menuLabel_short(cell.descriptor->short_id), 3u);
+                                     (cell.kind == MENU_CELL_INSTRUMENT)
+                                         ? menu_instrumentShortLabel(cell.slot, cell.descriptor)
+                                         : menuLabel_short(cell.descriptor->short_id), 3u);
                 /* S096 P1 SD2: a bit cell is named on + its layer: onA .. onD. */
                 if (cell.kind == MENU_CELL_INSTRUMENT && cell.bit_plus1) {
                     editDisplayBuffer[0][4u * i]      = 'o';

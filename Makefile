@@ -194,6 +194,7 @@ DSP_SRCS = \
   Core/DSPAudio/transientGenerator.c \
   Core/DSPAudio/voiceFold.c \
   Core/DSPAudio/voiceFoldTables.c \
+  Core/DSPAudio/voiceSpace.c \
   Core/DSPAudio/wavetable.c \
   Core/DSPAudio/oscChopTables.c \
   Core/DSP/Instruments/Chorus/BbdChorus.c \
@@ -382,6 +383,14 @@ $(BUILD)/Core/DSP/Instruments/Chorus/BbdChorusTables.o: Core/DSP/Instruments/Cho
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 
+# S101 P3: the Spc chain's spatializer and the Cymbal/HiHat low-pass
+# (voiceSpace.c) are DSP: -Ofast, and -fno-lto for the S095 P2 / S099 P1
+# reason (a new object inside the LTO unit can re-partition it and move other
+# engines' loops). Every entry point is noinline, so the engines' calls into
+# it lose nothing from LTO.
+$(BUILD)/Core/DSPAudio/voiceSpace.o: Core/DSPAudio/voiceSpace.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 # S096 P1: the Tetrakt engine and its tables are DSP: -Ofast like the
 # Colloid. -fno-lto for the S095 P2 reason (Makefile comment above): outside
 # the LTO unit the Tetrakt cannot shift LTO's partitioning of the other

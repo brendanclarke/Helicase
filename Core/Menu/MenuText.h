@@ -229,8 +229,9 @@ static const char oscRunNames[][4] = {
  * Accessors:  menu_onoffTagNames() (menu.c).
  * Affiliates: VOICE_CHAIN_* (voiceFold.h).
  */
+/* S101 P3: Spc, the spatializer chain (voiceSpace.h). */
 static const char voiceChainNames[][4] = {
-    {2}, {"T+D"},{"WFd"},
+    {3}, {"T+D"},{"WFd"},{"Spc"},
 };
 /*
  * DTYPE_ON_OFF tag for the Alkaline type selector (S093 P8).

@@ -125,6 +125,8 @@ void Snare_initVoice(SnareVoice *voice)
 	voice->lastAmpGain = 0.0f;
 	voice->snapshot.active = 0u;
 	voice->snapshot.counter = 0u;
+	/* S101 P3: no unit until the voice_chain writer binds one (Spc). */
+	voiceSpace_init(&voice->space);
 }
 //---------------------------------------------------
 /*
@@ -357,7 +359,8 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 	 *       no transient: its fold runs on the tone oscillator below (D1).
 	 * Why:  Snare's only pre-filter signal is noise; folding it does little.
 	 */
-	if (voice->chainType != VOICE_CHAIN_WAVEFOLDER) {
+	/* S101 P3: T+D only (was "not WFd"); Spc has no transient either. */
+	if (voice->chainType == VOICE_CHAIN_DEFAULT) {
 		//calc transient sample
 		transient_calcBlock(&voice->transGen,transBuf,size);
 		bufferTool_addBuffersSaturating(buf,transBuf,size);
@@ -455,9 +458,21 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 		const float lastAmpGain = voice->ampRampArm
 			? voice->lastAmpGain : ampGain;
 
-		voicePost_mixAddGainDist(buf, transBuf, voice->mix, ampGain,
-		                         lastAmpGain,
-		                         &voice->distortion, size);
+		/*
+		 * The Spc chain (S101 P3 §6.1): the spatializer's two-input form in
+		 * place of the post-chain (the same mix and saturating add, the amp
+		 * ramp fused, no drive; no SRR in the mixer). Spread and feedback
+		 * are the transient_wave and transient_vol rows.
+		 */
+		if (voice->chainType == VOICE_CHAIN_SPACE)
+			voiceSpace_processMix(&voice->space, buf, transBuf, voice->mix,
+			                      lastAmpGain, ampGain,
+			                      voice->transGen.waveform,
+			                      voice->transGen.volume);
+		else
+			voicePost_mixAddGainDist(buf, transBuf, voice->mix, ampGain,
+			                         lastAmpGain,
+			                         &voice->distortion, size);
 		voice->lastAmpGain = ampGain;
 		voice->ampRampArm = 0u;
 	}

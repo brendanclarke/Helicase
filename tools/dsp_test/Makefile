@@ -62,12 +62,45 @@ OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
         elf_s099_snapshot elf_s099_check \
         space space_cpu_check colloid colloid_tables colloid_cpu_check \
         tetrakt tetrakt_tables tetrakt_cpu_check \
-        distortion dist_makeup_table scene_identity chorus chorus_tables
+        distortion dist_makeup_table scene_identity chorus chorus_tables voice_space
 all: oscillator modulation voice_control sequencer seq_steplen instrument_manager samples \
      sampleoptimize run_modes special_tags stock_tables voicefold fold_tables pwm_tables \
      crumpbit crumpbit_tables alkaline alkaline_tables alk_post_tables lfo lfo_rate_table \
      space colloid colloid_tables distortion dist_makeup_table tetrakt tetrakt_tables \
-     buscomp scene_identity chorus chorus_tables
+     buscomp scene_identity chorus chorus_tables voice_space
+
+# S101 P3: the Spc chain's spatializer and the Cymbal/HiHat LP (voiceSpace.c),
+# laws SP-RING .. LP1-STAB (modules/voice_space.c), and two breaks that must
+# fail SP-RING: the mirror copy removed, and the spread tap's floor lowered
+# below one block (a read of a mirror sample not yet copied).
+voice_space: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/Tetrakt/TetraktTables.c --object tktFbLpK \
+	  --out $(GEN)/vs_tables.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/voiceSpace.h --body --out $(GEN)/voiceSpace.host.h
+	$(EX) --src $(ROOT)/Core/DSPAudio/voiceSpace.c --body --out $(GEN)/voiceSpace.host.c
+	$(HOSTCC) $(HOSTFLAGS) -Wno-unknown-attributes modules/voice_space.c \
+	  -o build/voice_space -lm
+	./build/voice_space
+	mkdir -p build/break_vs_mirror
+	sed '/\*(VsBlk \*)(void \*)(ring + VSPACE_RING)/d' \
+	  $(GEN)/voiceSpace.host.c > build/break_vs_mirror/voiceSpace.host.c
+	@! grep -q '(VsBlk \*)(void \*)(ring + VSPACE_RING)' build/break_vs_mirror/voiceSpace.host.c || \
+	  { echo "voice_space_break_mirror: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_vs_mirror $(HOSTFLAGS) -Wno-unknown-attributes \
+	  modules/voice_space.c -o build/voice_space_break_mirror -lm
+	@if ./build/voice_space_break_mirror >/dev/null 2>&1; then \
+	  echo "voice_space_break_mirror: FAILED (a stale mirror not caught)"; exit 1; \
+	else echo "voice_space_break_mirror: caught (law SP-RING fails as expected)"; fi
+	mkdir -p build/break_vs_floor
+	sed 's/tR = (tR < (float)VSPACE_TAP_MIN) ? (float)VSPACE_TAP_MIN : tR;/tR = (tR < 2.0f) ? 2.0f : tR;/' \
+	  $(GEN)/voiceSpace.host.c > build/break_vs_floor/voiceSpace.host.c
+	@grep -q 'tR = (tR < 2.0f) ? 2.0f : tR;' build/break_vs_floor/voiceSpace.host.c || \
+	  { echo "voice_space_break_floor: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_vs_floor $(HOSTFLAGS) -Wno-unknown-attributes \
+	  modules/voice_space.c -o build/voice_space_break_floor -lm
+	@if ./build/voice_space_break_floor >/dev/null 2>&1; then \
+	  echo "voice_space_break_floor: FAILED (a tap below one block not caught)"; exit 1; \
+	else echo "voice_space_break_floor: caught (laws SP-RING / SP-MIN fail as expected)"; fi
 
 # S099 P1: the BBD chorus (laws CH-TAP .. CH-HALF) and three breaks.
 # S101: the half-rate Alkaline (BBD_ALK_HALF_RATE, law CH-AHALF and the

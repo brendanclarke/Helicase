@@ -23,6 +23,7 @@
 #include "sequencer.h"            /* S093 P4: seq_trackStepSamples() (read-only) for the
                                    * Alkaline gate */
 #include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* clamps */
+#include "voiceSpace.h"  /* S101 P3: the Spc chain (bind, the row-byte stores) */
 #include "mixer.h"
 #include "modulationNode.h"
 #include "MidiOut.h"             /* S096 P3: a wide track's layer note TX */
@@ -277,15 +278,20 @@ static instrument_type_t runtime_slot_type[INSTRUMENT_SLOT_COUNT];
  * Sole tagged runtime owner for loadable instrument types.
  *
  * Inputs: SceneData selects one engine type for each visible slot. Output: one
- * union member per slot supplies that engine's complete DSP state. The 1,176 B
- * reserve is twice the current largest engine state and is future-engine
- * capacity, not a second active engine. runtime_slot_type selects the only
- * member that may be read or rendered; fixed globals and per-engine slot pools
- * are deliberately absent so adding an engine cannot multiply SRAM by type.
+ * union member per slot supplies that engine's complete DSP state. The
+ * reserve is future-engine capacity, not a second active engine.
+ * runtime_slot_type selects the only member that may be read or rendered;
+ * fixed globals and per-engine slot pools are deliberately absent so adding an
+ * engine cannot multiply SRAM by type.
+ *
+ * S101 P3 (§6.8, RAM sign-off with the build instruction of 2026-11-22): the
+ * reserve is pinned at 1,264 B, its size until now (2 x the 632 B DrumVoice).
+ * It was 2 x sizeof(DrumVoice), so the drum-family VoiceSpace (80 B) would
+ * have grown every slot by 160 B (+960 B SRAM1). Pinned, runtime_slots stays
+ * 7,584 B and each engine's _Static_assert below holds it to the reserve
+ * (Drum 712 B, Tetrakt 1,080 B, Colloid 1,224 B).
  */
-#define INSTRUMENT_RUNTIME_CURRENT_MAX_BYTES sizeof(DrumVoice)
-#define INSTRUMENT_RUNTIME_SLOT_BYTES \
-    (2u * INSTRUMENT_RUNTIME_CURRENT_MAX_BYTES)
+#define INSTRUMENT_RUNTIME_SLOT_BYTES 1264u
 typedef union {
     DrumVoice drum;
     SnareVoice snare;
@@ -547,6 +553,23 @@ static uint8_t instrumentManager_unitsWanted(const kit_instrument_slot_t *incomi
     switch (incoming->type) {
     case INSTRUMENT_TYPE_TKT:
         return 1u;
+    /*
+     * S101 P3: a drum-family slot whose stored chain (the Normal image, where
+     * selectors live) is Spc holds the spatializer's unit; the voice_chain
+     * writer binds it at the selector apply that follows the reset.
+     */
+    case INSTRUMENT_TYPE_DRM:
+        return (uint8_t)(incoming->parameter_images.instrument_parameters[DRUM_IDX_VOICE_CHAIN]
+                         == VOICE_CHAIN_SPACE);
+    case INSTRUMENT_TYPE_SNR:
+        return (uint8_t)(incoming->parameter_images.instrument_parameters[SNARE_IDX_VOICE_CHAIN]
+                         == VOICE_CHAIN_SPACE);
+    case INSTRUMENT_TYPE_CYM:
+        return (uint8_t)(incoming->parameter_images.instrument_parameters[CYMBAL_IDX_VOICE_CHAIN]
+                         == VOICE_CHAIN_SPACE);
+    case INSTRUMENT_TYPE_HAT:
+        return (uint8_t)(incoming->parameter_images.instrument_parameters[HIHAT_IDX_VOICE_CHAIN]
+                         == VOICE_CHAIN_SPACE);
     case INSTRUMENT_TYPE_CLX:
         return (uint8_t)(incoming->parameter_images.instrument_parameters[COL_IDX_FX_TYPE]
                          != ADV_FX_OFF);
@@ -608,6 +631,31 @@ static void instrumentManager_slotRightUpdate(uint8_t slot)
         break;
     case INSTRUMENT_TYPE_ALX:
         right = runtime_slots[slot].alkaline.choUnit ? runtime_slots[slot].alkaline.right : 0;
+        break;
+    /*
+     * S101 P3: a drum-family voice is stereo while its Spc chain holds its
+     * unit (the Alkaline's rule: stereo only while the stage runs); without
+     * the unit the render is the mono dry ramp.
+     */
+    case INSTRUMENT_TYPE_DRM:
+        right = (runtime_slots[slot].drum.chainType == VOICE_CHAIN_SPACE &&
+                 runtime_slots[slot].drum.space.line)
+            ? runtime_slots[slot].drum.space.right : 0;
+        break;
+    case INSTRUMENT_TYPE_SNR:
+        right = (runtime_slots[slot].snare.chainType == VOICE_CHAIN_SPACE &&
+                 runtime_slots[slot].snare.space.line)
+            ? runtime_slots[slot].snare.space.right : 0;
+        break;
+    case INSTRUMENT_TYPE_CYM:
+        right = (runtime_slots[slot].cymbal.chainType == VOICE_CHAIN_SPACE &&
+                 runtime_slots[slot].cymbal.space.line)
+            ? runtime_slots[slot].cymbal.space.right : 0;
+        break;
+    case INSTRUMENT_TYPE_HAT:
+        right = (runtime_slots[slot].hihat.chainType == VOICE_CHAIN_SPACE &&
+                 runtime_slots[slot].hihat.space.line)
+            ? runtime_slots[slot].hihat.space.right : 0;
         break;
     default:
         break;
@@ -1977,6 +2025,21 @@ void instrumentManager_runtimeInit(void)
         instrumentManager_gateDuck[slot] = 0u;
         instrumentManager_gateRelease[slot] = 0u;
         instrumentManager_overlayClearSlot(slot);
+        /*
+         * S101 P3: a drum-family slot whose resident chain is Spc claims its
+         * unit here (the ALX/CLX chorus rule below); the boot apply's
+         * voice_chain write binds it.
+         */
+        switch (runtime_slot_type[slot]) {
+        case INSTRUMENT_TYPE_DRM:
+        case INSTRUMENT_TYPE_SNR:
+        case INSTRUMENT_TYPE_CYM:
+        case INSTRUMENT_TYPE_HAT:
+            (void)instrumentManager_slotVoiceUnits(slot, instrumentManager_unitsWanted(instrument));
+            break;
+        default:
+            break;
+        }
         switch (runtime_slot_type[slot]) {
         case INSTRUMENT_TYPE_DRM:
             Drum_initVoice(instrumentManager_drumRuntime(slot), slot);
@@ -2977,7 +3040,16 @@ uint8_t instrumentManager_slotUsesSrr(uint8_t slot)
     case INSTRUMENT_TYPE_SNR:
     case INSTRUMENT_TYPE_CYM:
     case INSTRUMENT_TYPE_HAT:
-        return 1u;
+        /*
+         * S101 P3: the Spc chain has no SRR (its srt row is the space's
+         * tone). A drum-family slot has a right block exactly while its Spc
+         * chain holds its unit (instrumentManager_slotRightUpdate()), so the
+         * one table read the mixer already makes answers it: decided by the
+         * chain, never by a value, so the worst case stays constant. (A
+         * chain lookup here, inlined into the mixer, grew the SRR loop
+         * 10 -> 11; S101_P3_IMPLEMENTATION.md §4.)
+         */
+        return (uint8_t)(instrumentManager_rightBlock[slot] == 0);
     default:
         return 0u;
     }
@@ -3585,6 +3657,71 @@ static TransientGenerator *instrumentManager_transient(uint8_t slot)
     default:
         return 0;
     }
+}
+
+/*
+ * The slot's Spc spatializer state (S101 P3).
+ *
+ * What:       the drum-family voice's VoiceSpace, or NULL for every other type
+ *             (and an empty slot).
+ * Why:        the row writers store their bytes in it in every chain, and the
+ *             voice_chain writer binds its unit.
+ * Accessors:  instrumentManager_writeSpecialRuntime(), the slot-decimation
+ *             bind, instrumentManager_spaceBind().
+ */
+static VoiceSpace *instrumentManager_space(uint8_t slot)
+{
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        return voice ? &voice->space : 0; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        return voice ? &voice->space : 0; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        return voice ? &voice->space : 0; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? &voice->space : 0; }
+    default:
+        return 0;
+    }
+}
+
+/*
+ * Bind or release a drum-family slot's Spc unit (S101 P3 §6.5).
+ *
+ * What:       want: the slot claims one voice unit if it owns none
+ *             (fxbuf_voiceAcquire(): at most one per slot, so six at most, the
+ *             six-Tetrakt ceiling) and binds it (voiceSpace_bind() clears it on
+ *             a new pointer; the same pointer keeps the tail). !want: the unit
+ *             is released (the share callback may grow the Effect's share) and
+ *             the voice falls back to its mono dry ramp. Then the right-block
+ *             pointer follows (stereo only while the unit is held).
+ * Why:        the Advanced chorus's rule (instrumentManager_chorusBind()): the
+ *             unit is held while the stage is selected. The writer runs in the
+ *             foreground only: voice_chain is a fixed selector (S101 P3 Q4).
+ * Inputs:     slot, want.
+ * Context:    foreground (the FxBuffer share callback).
+ * Accessors:  the IM_SPECIAL_VOICE_CHAIN writer.
+ */
+static void instrumentManager_spaceBind(uint8_t slot, uint8_t want)
+{
+    VoiceSpace *const sp = instrumentManager_space(slot);
+
+    if (!sp)
+        return;
+    if (want) {
+        if (!fxbuf_voiceUnitCount(slot))
+            (void)fxbuf_voiceAcquire(slot, 1u);
+        voiceSpace_bind(sp, fxbuf_voiceUnit(slot, 0u));
+    } else {
+        if (fxbuf_voiceUnitCount(slot))
+            fxbuf_voiceRelease(slot);
+        voiceSpace_bind(sp, 0);
+    }
+    instrumentManager_slotRightUpdate(slot);
 }
 
 /*
@@ -4909,14 +5046,26 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         SVF_setDrive(filter, byteValue);
 #endif
         return 1u; }
-    case IM_SPECIAL_FILTER_TYPE:
-        if (!instrumentManager_filter(slot)) return 0u;
+    case IM_SPECIAL_FILTER_TYPE: {
+        ResonantFilter *const filter = instrumentManager_filter(slot);
+        const instrument_type_t type = instrumentManager_slotType(slot);
+        uint8_t *typeField;
+        if (!filter) return 0u;
+        typeField = (uint8_t *)instrumentManager_runtimeInstance(slot) +
+                    descriptor->runtime.offset;
+        /*
+         * S101 P3: Cymbal and HiHat play LP through voiceSpace_lp1() (a TPT
+         * state in filter->s1/s2) and every other type through the ZDF (its
+         * own states there). A change to or from LP clears them, so neither
+         * filter starts from the other's state.
+         */
+        if ((type == INSTRUMENT_TYPE_CYM || type == INSTRUMENT_TYPE_HAT) &&
+            ((*typeField == FILTER_LP) != ((uint8_t)(byteValue + 1u) == FILTER_LP)))
+            SVF_reset(filter);
         instrumentManager_writeParameter(
-            (Parameter){ (void *)((uint8_t *)instrumentManager_runtimeInstance(slot) +
-                                  descriptor->runtime.offset),
-                         descriptor->runtime.parameter_type },
+            (Parameter){ (void *)typeField, descriptor->runtime.parameter_type },
             (uint8_t)(byteValue + 1u));
-        return 1u;
+        return 1u; }
     case IM_SPECIAL_AMP_ATTACK: {
         SlopeEg2 *ampEg = instrumentManager_ampEg(slot);
         if (!ampEg) return 0u;
@@ -4980,8 +5129,11 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         return 1u; }
     case IM_SPECIAL_TRANSIENT_FREQ: {
         TransientGenerator *transient = instrumentManager_transient(slot);
+        VoiceSpace *const sp = instrumentManager_space(slot);
         if (!transient) return 0u;
         transient->pitch = 1.0f + ((byteValue / 33.9f) - 0.75f);
+        /* S101 P3: the Spc chain's time (stored in every chain) */
+        if (sp) sp->time = (byteValue > 127u) ? 127u : byteValue;
         return 1u; }
     case IM_SPECIAL_INSTRUMENT_DRIVE: {
         /*
@@ -5011,8 +5163,11 @@ static uint8_t instrumentManager_writeSpecialRuntime(
             return 1u;
         }
         Distortion *distortion = instrumentManager_distortion(slot);
+        VoiceSpace *const sp = instrumentManager_space(slot);
         if (!distortion) return 0u;
         setDistortionShape(distortion, byteValue);
+        /* S101 P3: the Spc chain's level, `spc` (stored in every chain) */
+        if (sp) sp->level = (byteValue > 127u) ? 127u : byteValue;
         return 1u; }
     case IM_SPECIAL_LFO_RATE: {
         Lfo *lfo = instrumentManager_runtimeLfo(slot);
@@ -5170,6 +5325,14 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         instrumentManager_writeParameter(
             (Parameter){ (void *)field, descriptor->runtime.parameter_type },
             chain);
+        /*
+         * S101 P3: Spc holds the slot's voice unit (bound, and cleared on a
+         * new claim); every other chain releases it. The right-block pointer
+         * follows inside instrumentManager_spaceBind(). An out-of-range byte
+         * now clamps to Spc (VOICE_CHAIN_COUNT - 1). Foreground only: the
+         * row is a fixed selector (no step automation, Q4).
+         */
+        instrumentManager_spaceBind(slot, (uint8_t)(chain == VOICE_CHAIN_SPACE));
         return 1u; }
     case IM_SPECIAL_NONE:
     default:
@@ -5488,12 +5651,19 @@ static uint8_t instrumentManager_writeRuntimeInternal(
             instrumentManager_noteRuntimeValueChanged(slot, descriptor, baseValue);
         return 1u;
 
-    case INSTRUMENT_BIND_SLOT_DECIMATION:
+    case INSTRUMENT_BIND_SLOT_DECIMATION: {
+        VoiceSpace *sp;
+
         if (slot >= INSTRUMENT_SLOT_COUNT)
             return 0u;
         mixer_decimation_rate[slot] =
             valueShaperI2F((uint8_t)((value > 127u) ? 127u : value), -0.7f);
-        return 1u;
+        /* S101 P3: the Spc chain's tone, `spt` (stored in every chain; the
+         * mixer runs no SRR for an Spc slot) */
+        sp = instrumentManager_space(slot);
+        if (sp)
+            sp->tone = (uint8_t)((value > 127u) ? 127u : value);
+        return 1u; }
 
     case INSTRUMENT_BIND_VELOCITY_AMOUNT:
         if (slot >= INSTRUMENT_SLOT_COUNT)

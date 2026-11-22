@@ -118,6 +118,22 @@ const uint8_t cymbal_instrument_type_flags = CYMBAL_INSTRUMENT_TYPE_FLAGS;
  * Accessors:  the osc1_run row below.
  * Affiliates: ONOFF_TAG_OSC_RUN (MenuText.h); menu.c DTYPE_ON_OFF sites.
  */
+/*
+ * ROW_SELECT_ONOFF_FIXED_SPECIAL: a tagged DTYPE_ON_OFF selector that step
+ * automation cannot reach (S101 P3, Q4 decided).
+ * What:       ROW_SELECT_ONOFF_SPECIAL without INSTRUMENT_PARAM_FLAG_AUTOMATABLE:
+ *             flags SELECTOR only, the Advanced fx row's form
+ *             (ROW_SELECT_FIXED_SPECIAL, S099 P1 Q-8).
+ * Why:        the voice_chain writer claims and releases the Spc chain's
+ *             FxBuffer voice unit, which must happen in the foreground (a
+ *             menu edit, a MIDI write, an Instrument/Kit/Scene apply), never
+ *             from a step: a claim reseats the bus Effect.
+ * Accessors:  the voice_chain row below.
+ */
+#define ROW_SELECT_ONOFF_FIXED_SPECIAL(key_, cat_, long_, short_, tag_, member_, type_, special_) \
+    { key_, short_, long_, cat_, (uint8_t)(DTYPE_ON_OFF | ((tag_) << 4)), \
+      INSTRUMENT_PARAM_FLAG_SELECTOR, \
+      MOD_NONE, BIND_SPECIAL(member_, type_, special_) }
 #define ROW_SELECT_ONOFF_SPECIAL(key_, cat_, long_, short_, tag_, member_, type_, special_) \
     { key_, short_, long_, cat_, (uint8_t)(DTYPE_ON_OFF | ((tag_) << 4)), \
       (INSTRUMENT_PARAM_FLAG_AUTOMATABLE | INSTRUMENT_PARAM_FLAG_SELECTOR), \
@@ -212,6 +228,8 @@ typedef enum {
     CYMBAL_PARAM_COUNT
 } cymbal_param_index_t;
 
+_Static_assert(CYMBAL_PARAM_VOICE_CHAIN == CYMBAL_IDX_VOICE_CHAIN,
+               "CYMBAL_IDX_VOICE_CHAIN must name the voice_chain row (S101 P3)");
 _Static_assert(CYMBAL_PARAM_DESCRIPTOR_COUNT == CYMBAL_PARAM_COUNT,
                "CYMBAL_PARAM_DESCRIPTOR_COUNT must match cymbal_param_index_t");
 
@@ -360,7 +378,8 @@ const ParamDescriptor cymbal_param_descriptors[] = {
      * Affiliates: VOICE_CHAIN_* (voiceFold.h); voiceChainNames (MenuText.h);
      *             ONOFF_TAG_VOICE_CHAIN; menu_onoffTagNames() in menu.c.
      */
-    ROW_SELECT_ONOFF_SPECIAL("voice_chain", CAT_VOICE, LONG_CHAIN, SHORT_CHN, ONOFF_TAG_VOICE_CHAIN, chainType, TYPE_UINT8, IM_SPECIAL_VOICE_CHAIN),
+    /* S101 P3: a fixed selector (no step automation; the unit claim is foreground). */
+    ROW_SELECT_ONOFF_FIXED_SPECIAL("voice_chain", CAT_VOICE, LONG_CHAIN, SHORT_CHN, ONOFF_TAG_VOICE_CHAIN, chainType, TYPE_UINT8, IM_SPECIAL_VOICE_CHAIN),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -414,3 +433,4 @@ _Static_assert(CYMBAL_MENU_PAGE_COUNT ==
 #undef MOD_0_127
 #undef MOD_NONE
 #undef ROW_SELECT_ONOFF_SPECIAL
+#undef ROW_SELECT_ONOFF_FIXED_SPECIAL
