@@ -23,7 +23,9 @@
  *                        (+-1);
  *               TK-TONE  tnA 63, teA 63: y == x exactly; a coefficient jump
  *                        across u = 0 under the ramp has no step larger than
- *                        the input's own plus 0.02; tnA 0 and 126 reach the
+ *                        the input's own plus 0.04 (S101 P2: the four-block
+ *                        ramp in sub-block steps; was 0.02 for the one-block
+ *                        per-sample ramp); tnA 0 and 126 reach the
  *                        LP / HP ends (|H| = 1 / 1.2 at 120 Hz and 3 kHz
  *                        within 2 %, |H| = 1 / sqrt(2) at 1.148 x those
  *                        within 3 %: the -3 dB point of a damping-0.6 SVF);
@@ -112,10 +114,10 @@ uint8_t modNode_interpClaim(void *osc) { (void)osc; return g_claim; }
 #include "TetraktVoice.host.c"
 
 #define BLK OUTPUT_DMA_SIZE
-enum { G_TRIG, G_DEC, G_TUNE, G_SRR, G_TONE, G_DRV, G_W2, G_S1, G_VEL, G_RING, G_READ, G_N };
+enum { G_TRIG, G_DEC, G_TUNE, G_SRR, G_TONE, G_DRV, G_W2, G_S1, G_VEL, G_RING, G_READ, G_A2Q, G_N };
 static const char *g_name[G_N] = { "TK-TRIG", "TK-DEC", "TK-TUNE", "TK-SRR", "TK-TONE",
                                    "TK-DRV", "TK-W2", "TK-S1", "TK-VEL", "TK-RING",
-                                   "TK-READ" };
+                                   "TK-READ", "TK-A2Q" };
 static unsigned g_fail[G_N];
 static void fail(int g, const char *what, double a, double b)
 {
@@ -362,6 +364,82 @@ static void test_dec(void)
 	expect(G_DEC, V.layer[0].env == 0.0f, "idle env is 0", V.layer[0].env, 0);
 }
 
+/* ----------------------------------------------------------- TK-A2Q -- */
+/*
+ * TK-A2Q (S101 P2 A2q): the layer control every fourth block.
+ * What:  (1) after a hit, every layer's decay follows the exact per-block
+ *        exponential, env_n+1 = env_n (1 - k), within 2 ulp a block, on
+ *        control and carried blocks alike, to idle; (2) a row change (level)
+ *        reaches layer i's gains in the first block where
+ *        (ctlPhase + i) % 4 is 0, and not before; each of the four layers
+ *        on a different block; (3) the tone ramp is continuous: each block
+ *        starts where the last ended (a + 32 da).
+ * Break (Makefile): a carry that holds the envelope must fail TK-A2Q.
+ */
+static void test_a2q(void)
+{
+	uint32_t i, b;
+
+	voice_init();
+	V.layerOn = 15u;
+	for (i = 0u; i < TKT_LAYERS; i++)
+		V.layer[i].decay = (uint8_t)(5u + 12u * i);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 15u);
+	block();
+	for (b = 0u; b < 3000u; b++) {
+		float prev[TKT_LAYERS], a1e[TKT_LAYERS];
+		for (i = 0u; i < TKT_LAYERS; i++) {
+			prev[i] = V.layer[i].env;
+			a1e[i] = V.layer[i].a1 + (float)BLK * V.layer[i].da1;
+		}
+		block();
+		for (i = 0u; i < TKT_LAYERS; i++) {
+			const TktLayer *L = &V.layer[i];
+			const float k = colEgK[L->decay & 127u];
+			const float want = prev[i] - k * prev[i];
+
+			if (L->stage == TKT_STAGE_PLAY &&
+			    fabsf(L->env - want) > 2.0f * 1.2e-7f * (prev[i] + 1e-30f))
+				fail(G_A2Q, "decay off the per-block exponential", i, L->env - want);
+			if (L->a1 != a1e[i] && fabsf(L->a1 - a1e[i]) > 1e-6f)
+				fail(G_A2Q, "tone ramp not continuous", i, L->a1 - a1e[i]);
+		}
+	}
+	for (i = 0u; i < TKT_LAYERS; i++)
+		expect(G_A2Q, V.layer[i].stage == TKT_STAGE_IDLE && V.layer[i].env == 0.0f,
+		       "every layer decays to idle", i, V.layer[i].env);
+
+	/* (2) a level change reaches each layer on its own scheduled block */
+	voice_init();
+	V.layerOn = 15u;
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 15u);
+	block();
+	block();
+	{
+		uint32_t seen[TKT_LAYERS], blocks;
+		float g0[TKT_LAYERS];
+		const uint8_t phase0 = V.ctlPhase;
+
+		for (i = 0u; i < TKT_LAYERS; i++) {
+			g0[i] = V.layer[i].gL;
+			V.layer[i].level = 30u;
+			seen[i] = 99u;
+		}
+		for (blocks = 0u; blocks < 4u; blocks++) {
+			block();
+			for (i = 0u; i < TKT_LAYERS; i++)
+				if (seen[i] == 99u && V.layer[i].gL != g0[i])
+					seen[i] = blocks;
+		}
+		for (i = 0u; i < TKT_LAYERS; i++) {
+			const uint32_t want = (4u - ((phase0 + i) & 3u)) & 3u;
+			expect(G_A2Q, seen[i] == want, "row change on the layer's own block", i, seen[i]);
+			for (b = i + 1u; b < TKT_LAYERS; b++)
+				expect(G_A2Q, seen[i] != seen[b], "layers on different blocks", i, b);
+		}
+	}
+}
+
 /* ---------------------------------------------------------- TK-TUNE -- */
 static void tune_inc(uint8_t tune, uint32_t note, uint32_t *out)
 {
@@ -538,17 +616,43 @@ static void test_tone(void)
 	L.a1 = a1; L.a2 = a2; L.a3 = a3; L.mX = mX; L.mB = mB; L.mL = mL;
 	post_block(&L, in);
 	tone_law(126.0f, &a1, &a2, &a3, &mX, &mB, &mL);
-	L.da1 = (a1 - L.a1) / 32.0f; L.da2 = (a2 - L.a2) / 32.0f; L.da3 = (a3 - L.a3) / 32.0f;
-	L.dmX = (mX - L.mX) / 32.0f; L.dmB = (mB - L.mB) / 32.0f; L.dmL = (mL - L.mL) / 32.0f;
-	post_block(&L, in);
-	for (n = 1u; n < BLK; n++) {
-		const float d = fabsf(tkt_work.busL[n] - tkt_work.busL[n - 1u]) *
-		                32768.0f / (1.0f / 1.0f);
+	/*
+	 * S101 P2 A2q + B1 (sub-block form): the firmware ramps a coefficient
+	 * change over TKT_CTL_BLOCKS blocks (tkt_ramp()), stepping it every
+	 * TKT_SUB_BLOCK samples, with the start carried between blocks
+	 * (tkt_layerCarry()). The law runs that ramp: four blocks, the same
+	 * output-step bound. (Before S101 P2 it ran a one-block per-sample ramp,
+	 * which the firmware no longer has.)
+	 */
+	{
+		const float span = (float)TKT_CTL_BLOCKS * 32.0f;
+		uint32_t b;
+		float last = tkt_work.busL[BLK - 1u];
 
-		if (d > maxOut)
-			maxOut = d;
+		L.da1 = (a1 - L.a1) / span; L.da2 = (a2 - L.a2) / span; L.da3 = (a3 - L.a3) / span;
+		/* the weights stay (the law's form since S096 P1: the post loop
+		 * does not ramp them; dmX..dmL are unused) */
+		for (b = 0u; b < TKT_CTL_BLOCKS; b++) {
+			post_block(&L, in);
+			for (n = 0u; n < BLK; n++) {
+				const float d = fabsf(tkt_work.busL[n] - (n ? tkt_work.busL[n - 1u] : last)) *
+				                32768.0f;
+
+				if (n && d > maxOut)
+					maxOut = d;
+			}
+			last = tkt_work.busL[BLK - 1u];
+			L.a1 += 32.0f * L.da1; L.a2 += 32.0f * L.da2; L.a3 += 32.0f * L.da3;
+		}
 	}
-	expect(G_TONE, maxOut <= maxIn + 0.02f * 32768.0f, "sweep is ramped", maxOut, maxIn);
+	/*
+	 * S101 P2 B1 (sub-block form): the coefficients step by 1/16 of the
+	 * ramp at once every 8 samples (the full LP -> HP range over four
+	 * blocks), so the bound is the input's step + 0.04 of full scale
+	 * (measured +0.029 on this extreme sweep; the per-sample ramp's bound was
+	 * + 0.02). A sub-block step four times too large breaks it (Makefile).
+	 */
+	expect(G_TONE, maxOut <= maxIn + 0.04f * 32768.0f, "sweep is ramped", maxOut, maxIn);
 
 	/* The ends reach their cutoffs (damping 0.6: |H| = 1/1.2 at the corner). */
 	expect(G_TONE, fabsf(tone_gain(0.0f, 120.0) - (1.0f / 1.2f)) < 0.02f,
@@ -978,6 +1082,7 @@ static void test_layers_override(void)
 
 int main(void)
 {
+	test_a2q();
 	uint32_t i;
 	int rc = 0;
 

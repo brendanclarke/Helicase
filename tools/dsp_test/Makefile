@@ -209,14 +209,41 @@ oscillator: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
 	  echo "oscillator_break_pwm3: FAILED (Rec width table break not caught)"; exit 1; \
 	else echo "oscillator_break_pwm3: caught (laws PW2/PW10 fail as expected)"; fi
 
+# S101 P2 A1: also the staggered slot control (modNode_blockBegin(),
+# modNode_restoreAll(), modNode_controlBlock(), the MODNODE_CTL_* bits; laws
+# A1-CTL 1-4). Breaks: (1) the gap block ignoring the velocity dirty bits must
+# fail A1-CTL 2; (2) every full run stepping the LFOs by 1 must fail A1-CTL 1.
 modulation: $(GEN)/Oscillator.host.h
 	$(EX) --src $(ROOT)/Core/DSPAudio/modulationNode.c \
 	  --func modNode_interpStampOf --func modNode_setWaveInterpEnabled \
-	  --func modNode_setItpReserved --func modNode_resetTargets \
-	  --func modNode_interpClaim \
+	  --func modNode_setItpReserved --func modNode_blockBegin \
+	  --func modNode_restoreAll --func modNode_resetTargets \
+	  --func modNode_controlBlock --func modNode_interpClaim \
 	  --out $(GEN)/modulation_interp.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/modulationNode.c \
+	  --macro MODNODE_CTL_VELO_DIRTY --macro MODNODE_CTL_FORCE \
+	  --macro MODNODE_CTL_OWED --out $(GEN)/modulation_ctl_macros.inc
 	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/modulation.c -o build/modulation -lm
 	./build/modulation
+	mkdir -p build/break_a1ctl1 build/break_a1ctl2
+	sed 's/if (st & (1u << i)) {/if (0) {/' $(GEN)/modulation_interp.c \
+	  > build/break_a1ctl2/modulation_interp.c
+	grep -q 'if (0) {' build/break_a1ctl2/modulation_interp.c || \
+	  { echo "modulation_break_a1ctl2: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_a1ctl2 $(HOSTFLAGS) $(OSC_HOST_INC) modules/modulation.c \
+	  -o build/modulation_break_a1ctl2 -lm
+	@if ./build/modulation_break_a1ctl2 >/dev/null 2>&1; then \
+	  echo "modulation_break_a1ctl2: FAILED (an ignored velocity dirty bit not caught)"; exit 1; \
+	else echo "modulation_break_a1ctl2: caught (law A1-CTL 2 fails as expected)"; fi
+	sed 's/(st \& MODNODE_CTL_OWED) ? 2u : 1u/1u/' $(GEN)/modulation_interp.c \
+	  > build/break_a1ctl1/modulation_interp.c
+	grep -q 'instrumentManager_dispatchRuntimeLfos(1u)' build/break_a1ctl1/modulation_interp.c || \
+	  { echo "modulation_break_a1ctl1: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_a1ctl1 $(HOSTFLAGS) $(OSC_HOST_INC) modules/modulation.c \
+	  -o build/modulation_break_a1ctl1 -lm
+	@if ./build/modulation_break_a1ctl1 >/dev/null 2>&1; then \
+	  echo "modulation_break_a1ctl1: FAILED (a lost LFO step not caught)"; exit 1; \
+	else echo "modulation_break_a1ctl1: caught (law A1-CTL 1 fails as expected)"; fi
 
 # S094 P1 S1: the real LFO phase law and rate table (modules/lfo.c).
 # Breaks: (1) the sync writer storing the byte only (lfo_setSync() without
@@ -230,7 +257,7 @@ lfo: | $(GEN)
 	$(EX) --src $(ROOT)/Core/DSPAudio/lfoRateTable.c --object lfoRateHz \
 	  --out $(GEN)/lfo_rate_table.c
 	$(EX) --src $(ROOT)/Core/DSPAudio/lfo.c --func lfo_calc --func lfo_calcPhaseInc \
-	  --func lfo_setFreq --func lfo_setSync --out $(GEN)/lfo_funcs.c
+	  --func lfo_setFreq --func lfo_setSync --func lfo_stepBlock --out $(GEN)/lfo_funcs.c
 	$(HOSTCC) $(HOSTFLAGS) -I$(GEN) modules/lfo.c -o build/lfo -lm
 	./build/lfo
 	mkdir -p build/break_lfo1 build/break_lfo2
@@ -246,6 +273,15 @@ lfo: | $(GEN)
 	@if ./build/lfo_break2 >/dev/null 2>&1; then \
 	  echo "lfo_break2: FAILED (a synced LFO following the overlay not caught)"; exit 1; \
 	else echo "lfo_break2: caught (law LF4 fails as expected)"; fi
+	# S101 P2 A1: an lfo_stepBlock() that does not step must fail LF6.
+	mkdir -p build/break_lfo3
+	sed 's/	lfo->phase += incInt;/	(void)incInt;/' $(GEN)/lfo_funcs.c > build/break_lfo3/lfo_funcs.c
+	grep -q '(void)incInt;' build/break_lfo3/lfo_funcs.c || \
+	  { echo "lfo_break3: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_lfo3 $(HOSTFLAGS) -I$(GEN) modules/lfo.c -o build/lfo_break3 -lm
+	@if ./build/lfo_break3 >/dev/null 2>&1; then \
+	  echo "lfo_break3: FAILED (a stepBlock that does not step not caught)"; exit 1; \
+	else echo "lfo_break3: caught (law LF6 fails as expected)"; fi
 
 lfo_rate_table:
 	cd $(ROOT) && python3 tools/plots/gen_lfo_rate_table.py --check
@@ -723,7 +759,8 @@ colloid: $(GEN)/Oscillator.host.h $(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables
 	done
 	$(EX) --src $(ROOT)/Core/DSPAudio/mixer.c --func mixer_addVoiceInt16ToOutput \
 	  --func mixer_addVoiceInt16ToOutputAndFx --func mixer_addVoiceStereoToOutput \
-	  --func mixer_addVoiceStereoToOutputAndFx --out $(GEN)/col_mixer_funcs.c
+	  --func mixer_addVoiceStereoToOutputAndFx --func mixer_floatToMxScaled \
+	  --func mixer_addFxReturnToOutput --out $(GEN)/col_mixer_funcs.c
 	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c $(CAT_HOST_SRC) -o build/colloid -lm
 	./build/colloid
 	mkdir -p build/break_col_side
@@ -806,6 +843,16 @@ colloid: $(GEN)/Oscillator.host.h $(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables
 	@if ./build/colloid_break_mx >/dev/null 2>&1; then \
 	  echo "colloid_break_mx: FAILED (a right side panned by panL not caught)"; exit 1; \
 	else echo "colloid_break_mx: caught (law MX-ST fails as expected)"; fi
+	# S101 P2: a return ramp scale of 2^23 must fail MX-E1.
+	mkdir -p build/break_col_e1
+	sed 's/const float lastKL = mixer_fx_return_last_gain\[0\] \* 8388352.0f;/const float lastKL = mixer_fx_return_last_gain[0] * 8388608.0f;/' $(GEN)/col_mixer_funcs.c > build/break_col_e1/col_mixer_funcs.c
+	@grep -q '8388608.0f' build/break_col_e1/col_mixer_funcs.c || \
+	  { echo "colloid_break_e1: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_e1 $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_e1 -lm
+	@if ./build/colloid_break_e1 2>&1 | grep -Eq 'MX-E1 +failures: [1-9]'; then \
+	  echo "colloid_break_e1: caught (law MX-E1 fails as expected)"; \
+	else echo "colloid_break_e1: FAILED (a return ramp scale of 2^23 not caught)"; exit 1; fi
 	mkdir -p build/break_col_rng
 	sed 's/voice->rnd\[i\] = (int16_t)(col_rngNext(\&rng) >> 16);/voice->rnd[i] = GetRngValue();/' \
 	  $(GEN)/ColloidVoice.host.c > build/break_col_rng/ColloidVoice.host.c
@@ -1075,6 +1122,29 @@ tetrakt: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c $(GEN)/oscPwmTables.h
 	@if ./build/tetrakt_break_frac >/dev/null 2>&1; then \
 	  echo "tetrakt_break_frac: FAILED (a read without interpolation not caught)"; exit 1; \
 	else echo "tetrakt_break_frac: caught (law TK-READ fails as expected)"; fi
+	# S101 P2 B1: coefficients that jump to the ramp's end (no ramp) must fail
+	# TK-TONE.
+	mkdir -p build/break_tkt_sub
+	sed 's/	float a1 = L->a1 + 0.5f \* (float)TKT_SUB_BLOCK \* da1;/	float a1 = L->a1 + 128.0f * da1;/; s/	float a2 = L->a2 + 0.5f \* (float)TKT_SUB_BLOCK \* da2;/	float a2 = L->a2 + 128.0f * da2;/; s/	float a3 = L->a3 + 0.5f \* (float)TKT_SUB_BLOCK \* da3;/	float a3 = L->a3 + 128.0f * da3;/; s/	a1 += (float)TKT_SUB_BLOCK \* da1;/	(void)0;/; s/	a2 += (float)TKT_SUB_BLOCK \* da2;/	(void)0;/; s/	a3 += (float)TKT_SUB_BLOCK \* da3;/	(void)0;/' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_sub/TetraktVoice.host.c
+	@grep -q 'float a1 = L->a1 + 128.0f \* da1;' build/break_tkt_sub/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_sub: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_sub $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_sub -lm
+	@if ./build/tetrakt_break_sub 2>&1 | grep -Eq 'TK-TONE +failures: [1-9]'; then \
+	  echo "tetrakt_break_sub: caught (law TK-TONE fails as expected)"; \
+	else echo "tetrakt_break_sub: FAILED (an unramped coefficient jump not caught)"; exit 1; fi
+	# S101 P2 A2q: a carry that holds the envelope must fail TK-A2Q.
+	mkdir -p build/break_tkt_a2q
+	sed 's/	L->env \*= L->envMul;/	(void)L->envMul;/' $(GEN)/TetraktVoice.host.c \
+	  > build/break_tkt_a2q/TetraktVoice.host.c
+	@grep -q '(void)L->envMul;' build/break_tkt_a2q/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_a2q: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_a2q $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_a2q -lm
+	@if ./build/tetrakt_break_a2q 2>&1 | grep -Eq 'TK-A2Q +failures: [1-9]'; then \
+	  echo "tetrakt_break_a2q: caught (law TK-A2Q fails as expected)"; \
+	else echo "tetrakt_break_a2q: FAILED (a held envelope not caught)"; exit 1; fi
 
 tetrakt_tables:
 	cd $(ROOT) && python3 tools/tetrakt/gen_tkt_tables.py --check

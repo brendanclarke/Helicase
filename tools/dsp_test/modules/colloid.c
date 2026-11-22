@@ -141,13 +141,13 @@ int16_t GetRngValue(void)
 #define BLK OUTPUT_DMA_SIZE
 enum { G_OSC, G_POS, G_W, G_MOT, G_INT, G_SLEW, G_EG, G_AMP, G_SVF, G_SER, G_RTE, G_POST,
        G_PWM, G_WTB, G_MX, G_RND, G_JOIN, G_PWG, G_GATE, G_RETRIG, G_ROLLGATE,
-       G_CHANGE, G_PENV, G_NOISE, G_SCAN, G_CHP, G_N };
+       G_CHANGE, G_PENV, G_NOISE, G_SCAN, G_CHP, G_E1, G_N };
 static const char *g_name[G_N] = { "CO-OSC", "CO-POS", "CO-W", "CO-MOT", "CO-INT", "CO-SLEW",
                                    "CO-EG", "CO-AMP", "CO-SVF", "CO-SER", "CO-RTE", "CO-POST",
                                    "CO-PWM", "CO-WTB", "MX-ST", "CO-RND", "CO-JOIN",
                                    "CO-PWG", "CO-GATE", "CO-RETRIG", "CO-ROLLGATE",
                                    "CO-CHANGE", "CO-PENV", "CO-NOISE", "CO-SCAN",
-                                   "CO-CHP" };
+                                   "CO-CHP", "MX-E1" };
 static unsigned g_fail[G_N];
 
 static void fail(int g, const char *what, double a, double b)
@@ -991,6 +991,10 @@ static void test_svf(void)
 	Colloid_triggerVoice(&V, 0u, 127u, 63u, 5514u, 1u);
 	for (b = 0u; b < 20000u; b++) {
 		const float t1A = V.svfA.t1, t2A = V.svfA.t2, t3A = V.svfA.t3;
+		/* S101 P2 CL5: the ramp spans two blocks; the block between carries
+		 * its start on by one block's step (col_svfCarry()) */
+		const float a1A = V.svfA.a1, a2A = V.svfA.a2, a3A = V.svfA.a3;
+		const float d1A = V.svfA.da1, d2A = V.svfA.da2, d3A = V.svfA.da3;
 		if ((b % 7u) == 0u) {
 			V.cut = (float)(golden_rand(&s) & 127u) / 127.0f;
 			V.cutOfs = (float)(golden_rand(&s) & 127u) / 127.0f;
@@ -1007,7 +1011,16 @@ static void test_svf(void)
 		}
 		if ((b % 300u) == 0u) Colloid_triggerVoice(&V, 0u, 127u, (uint8_t)(40u + (golden_rand(&s) % 50u)), 5514u, 1u);
 		block();
-		if (V.svfA.a1 != t1A || V.svfA.a2 != t2A || V.svfA.a3 != t3A) fail(G_SVF, "ramp start != last target", V.svfA.a1, t1A);
+		/* S101 P2 CL5: the control ran this block when nPhase was 1 before
+		 * col_noiseControl() toggled it (0 now); then the ramp starts on the
+		 * last target, else it carries on from where the last block ended */
+		if (V.nPhase == 0u) {
+			if (V.svfA.a1 != t1A || V.svfA.a2 != t2A || V.svfA.a3 != t3A)
+				fail(G_SVF, "ramp start != last target", V.svfA.a1, t1A);
+		} else if (V.svfA.a1 != a1A + (float)BLK * d1A || V.svfA.a2 != a2A + (float)BLK * d2A ||
+		           V.svfA.a3 != a3A + (float)BLK * d3A || V.svfA.t1 != t1A) {
+			fail(G_SVF, "carry block: ramp not continued", V.svfA.a1, a1A + (float)BLK * d1A);
+		}
 		if (!isfinite(V.svfA.ic1) || !isfinite(V.svfA.ic2) || !isfinite(V.svfB.ic1) || !isfinite(V.svfB.ic2) ||
 		    fabsf(V.svfA.ic1) > 100.0f || fabsf(V.svfA.ic2) > 100.0f ||
 		    fabsf(V.svfB.ic1) > 100.0f || fabsf(V.svfB.ic2) > 100.0f) {
@@ -1555,6 +1568,7 @@ static void test_scan(void)
  * Why:        C-D11: a stereo voice is the mono voice's law per side.
  */
 static mixer_fx_bus_t mixer_fx_bus;
+static float mixer_fx_return_last_gain[2];   /* S101 P2 E1: the return's ramp origin */
 static inline sample_mx_t bufferTool_satAdd32(sample_mx_t a, sample_mx_t b)
 {
 	const int64_t s = (int64_t)a + b;
@@ -1600,6 +1614,65 @@ static void test_mixer(void)
 		mixer_addVoiceStereoToOutput(0u, 1.0f, 1.0f, d, z, 1.0f, 1.0f, b[0], b[1], b[2], b[3]);
 		for (i = 0u; i < BLK; i++)
 			if (b[3][2 * i] != 0) { fail(G_MX, "right bus fed from L", i, b[3][2 * i]); break; }
+	}
+}
+
+/*
+ * MX-E1 (S101 P2): mixer_addFxReturnToOutput() is within 256 (one int16 LSB)
+ * of the pre-S101-P2 law (sample_mx_t)(clamp(x g, +-255) x 8,388,352),
+ * restated here, on every routing, stereo and mono return, ramping gains,
+ * including values past the +-255 guard. Break (Makefile): 8,388,608 for
+ * 8,388,352 in E1's ramp scale must fail MX-E1.
+ * (S101 P2: the MX-A5 and MX-E2 laws went with the send-add revert.)
+ */
+static sample_mx_t ref_floatToMx(float v)
+{
+	if (v > 255.0f) v = 255.0f; else if (v < -255.0f) v = -255.0f;
+	return (sample_mx_t)(v * 8388352.0f);
+}
+static void test_mixer_s101p2(void)
+{
+	unsigned r, i, st;
+
+	/* MX-E1: the return, every routing, stereo and mono returns, past the guard */
+	{
+		float l[BLK], rr[BLK];
+		for (i = 0u; i < BLK; i++) {
+			l[i] = (float)(0.9 * sin(0.4 * i));
+			rr[i] = (float)(0.7 * cos(0.3 * i));
+		}
+		l[5] = 300.0f; rr[9] = -400.0f;          /* past the +-255 guard */
+		for (r = 0u; r < 6u; r++)
+			for (st = 0u; st < 2u; st++) {
+				sample_mx_t a[4][2 * BLK], b[4][2 * BLK];
+				const float *rp = st ? rr : 0;
+				const float gl = 0.8f, gr = 0.45f, ll = 0.2f, lr = 0.65f;
+				const float inv = 1.f / (OUTPUT_DMA_SIZE - 1.f);
+				memset(a, 0, sizeof(a)); memset(b, 0, sizeof(b));
+				mixer_fx_return_last_gain[0] = ll; mixer_fx_return_last_gain[1] = lr;
+				mixer_addFxReturnToOutput((uint8_t)r, l, rp, gl, gr, a[0], a[1], a[2], a[3]);
+				for (i = 0u; i < BLK; i++) {
+					const float cl = ll + ((float)i * inv * (gl - ll));
+					const float cr = lr + ((float)i * inv * (gr - lr));
+					sample_mx_t *outs[4] = { b[0], b[1], b[2], b[3] };
+					if (r < 2u) {
+						sample_mx_t *sl = outs[r ? 0 : 2], *sr = outs[r ? 1 : 3];
+						sl[2*i] = bufferTool_satAdd32(sl[2*i], ref_floatToMx(l[i] * cl));
+						sr[2*i] = bufferTool_satAdd32(sr[2*i], ref_floatToMx((rp ? rp[i] : l[i]) * cr));
+					} else {
+						static const unsigned map[4] = { 2u, 3u, 0u, 1u };
+						sample_mx_t *m = outs[map[r - 2u]];
+						const float ms = rp ? (0.5f * (l[i] * cl + rp[i] * cr)) : (l[i] * cl);
+						m[2*i] = bufferTool_satAdd32(m[2*i], ref_floatToMx(ms));
+					}
+				}
+				for (unsigned k = 0u; k < 4u; k++)
+					for (i = 0u; i < 2u * BLK; i++)
+						if (llabs((long long)a[k][i] - (long long)b[k][i]) > 256) {
+							fail(G_E1, "return off the old law by > 1 int16 LSB", r, a[k][i] - b[k][i]);
+							k = 4u; break;
+						}
+			}
 	}
 }
 
@@ -1868,6 +1941,7 @@ int main(void)
 	test_wtb();
 	test_scan();
 	test_mixer();
+	test_mixer_s101p2();
 	test_rnd();
 	test_join();
 	test_pwg();

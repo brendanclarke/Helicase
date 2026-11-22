@@ -59,6 +59,14 @@
  *                     REAL_FS (44,108 Hz) is 2,205.4, under the bound.
  */
 #define TKT_QUIET           1.0e-4f
+/*
+ * S101 P2 A2q (user 2026-11-22: "do A2q instead" of B3): each layer's
+ * control runs every TKT_CTL_BLOCKS blocks, one layer a block
+ * (Tetrakt_calcVoiceAsync(), tkt_layerCarry(), tkt_ramp()). A power of two.
+ */
+#define TKT_CTL_BLOCKS      4u
+/* S101 P2 B1 (sub-block form): the tone coefficients' step in samples (tkt_layerPost()) */
+#define TKT_SUB_BLOCK       8u
 #define TKT_IN_SCALE        (1.0f / 32768.0f)
 #define TKT_OUT_SCALE       32767.0f
 #define TKT_UNITY_INC       4096.0f
@@ -150,7 +158,9 @@ static inline void tkt_ramp(float *a, float *da, const float target, const uint3
 	const float start = init ? target : (*a + (float)OUTPUT_DMA_SIZE * *da);
 
 	*a = start;
-	*da = init ? 0.0f : (target - start) * (1.0f / (float)OUTPUT_DMA_SIZE);
+	/* S101 P2 A2q: the ramp spans the TKT_CTL_BLOCKS blocks until this
+	 * layer's next control (tkt_layerCarry() moves the start on between) */
+	*da = init ? 0.0f : (target - start) * (1.0f / ((float)TKT_CTL_BLOCKS * (float)OUTPUT_DMA_SIZE));
 }
 
 /*
@@ -273,6 +283,9 @@ static __attribute__((noinline)) void tkt_layerControl(TetraktVoice *voice, cons
 	if (!init) {
 		const float k = colEgK[tkt_idx(decay)];
 
+		/* S101 P2 A2q: envMul carries the same per-block step on the
+		 * blocks between this layer's controls (tkt_layerCarry()) */
+		L->envMul = 1.0f - k;
 		switch (L->stage) {
 		case TKT_STAGE_START:
 			L->envLast = 1.0f;
@@ -283,6 +296,7 @@ static __attribute__((noinline)) void tkt_layerControl(TetraktVoice *voice, cons
 			L->envLast = L->env;
 			L->env = 0.0f;
 			L->stage = TKT_STAGE_START;
+			L->envMul = 0.0f;
 			break;
 		case TKT_STAGE_PLAY:
 			L->envLast = L->env;
@@ -295,6 +309,7 @@ static __attribute__((noinline)) void tkt_layerControl(TetraktVoice *voice, cons
 		default:
 			L->envLast = 0.0f;
 			L->env = 0.0f;
+			L->envMul = 0.0f;
 			break;
 		}
 	}
@@ -438,6 +453,7 @@ void Tetrakt_initVoice(TetraktVoice *voice, const uint8_t slot, int16_t *line)
 		L->ic1 = L->ic2 = 0.0f;
 		L->srrCnt = L->srrHold = 0.0f;
 		L->bindGain = 1.0f;           /* the bind below sets the sample's own (§19) */
+		L->envMul = 0.0f;
 		tkt_layerControl(voice, i, 1u, 1u);
 	}
 	tkt_spaceControl(voice);
@@ -487,6 +503,42 @@ void Tetrakt_triggerVoice(TetraktVoice *voice, const uint8_t source_slot,
 	}
 }
 
+/*
+ * One block between a layer's controls (S101 P2 A2q; S101_P2_REDUCTIONS.md
+ * §A.3 A2q; S101_P2_IMPLEMENTATION.md §5.1).
+ *
+ * What:       the envelope's exact per-block step (env x envMul, the 1 - k
+ *             of the layer's last control; at or below TKT_QUIET the layer
+ *             goes idle at 0, as in tkt_layerControl()), and the tone
+ *             coefficients' ramp start moved on by one block (a += 32 da:
+ *             tkt_ramp() spread the ramp over TKT_CTL_BLOCKS blocks). The
+ *             pitch, the bind, the drive, the gains, the pan, the SRR rate and
+ *             the tone targets keep the values of the layer's last control.
+ * Why:        tkt_layerControl() measured 346 instructions per layer per
+ *             block (1,384 for four layers). One layer's control per block,
+ *             the other three carried, costs about a quarter of that.
+ * Sound:      the decay envelope is unchanged (the same exponential, step
+ *             for step); a change of a layer's rows (a menu edit, an LFO or
+ *             an automation on tune, level, pan, drive, SRR, space, tone or
+ *             decay) reaches it at its next control, at most 2.2 ms later,
+ *             and steps every 2.9 ms instead of every 0.73 ms; the tone
+ *             envelope's coefficients ramp across 2.9 ms. A trigger (START,
+ *             FADE) and a rebind still run the layer's control at once.
+ * Accessors:  Tetrakt_calcVoiceAsync().
+ */
+static inline void tkt_layerCarry(TktLayer *L)
+{
+	L->envLast = L->env;
+	L->env *= L->envMul;
+	if (L->stage == TKT_STAGE_PLAY && L->env < TKT_QUIET) {
+		L->env = 0.0f;
+		L->stage = TKT_STAGE_IDLE;
+	}
+	L->a1 += (float)OUTPUT_DMA_SIZE * L->da1;
+	L->a2 += (float)OUTPUT_DMA_SIZE * L->da2;
+	L->a3 += (float)OUTPUT_DMA_SIZE * L->da3;
+}
+
 void Tetrakt_calcVoiceAsync(TetraktVoice *voice)
 {
 	const uint32_t gen = sampleMemory_getGeneration();
@@ -496,12 +548,26 @@ void Tetrakt_calcVoiceAsync(TetraktVoice *voice)
 
 	voice->bindGen = gen;
 	for (i = 0u; i < TKT_LAYERS; i++) {
-		const float lv = (float)voice->layer[i].level;
+		TktLayer *const L = &voice->layer[i];
+		const float lv = (float)L->level;
 
-		tkt_layerControl(voice, i, 0u, rebind);
-		num += lv * voice->layer[i].env;
+		/*
+		 * S101 P2 A2q: layer i's control on the blocks where
+		 * (ctlPhase + i) % TKT_CTL_BLOCKS is 0 (one layer a block, the four
+		 * a block apart), and at once for a trigger (START, FADE) or a
+		 * rebind, which does not move the schedule (a hit starts all four
+		 * layers together; a countdown restarted there would line them up
+		 * on one block). The blocks between carry (tkt_layerCarry()).
+		 */
+		if (rebind || ((voice->ctlPhase + i) & (TKT_CTL_BLOCKS - 1u)) == 0u ||
+		    L->stage == TKT_STAGE_START || L->stage == TKT_STAGE_FADE)
+			tkt_layerControl(voice, i, 0u, rebind);
+		else
+			tkt_layerCarry(L);
+		num += lv * L->env;
 		den += lv;
 	}
+	voice->ctlPhase = (uint8_t)((voice->ctlPhase + 1u) & (TKT_CTL_BLOCKS - 1u));   /* S101 P2 A2q */
 	/* W2 on the summed right bus (trim 1): the level-weighted envelope. */
 	envW = (den > 0.0f) ? (num / den) : 0.0f;
 	voice->busWMix = (float)voice->width * (1.0f / 127.0f) *
@@ -576,13 +642,29 @@ static inline __attribute__((always_inline)) void tkt_layerPost(TktLayer *L, con
 	const float rate = L->srrRate;
 	const float gL = L->gL, gR = L->gR, gS = L->gS;
 	const float da1 = L->da1, da2 = L->da2, da3 = L->da3;
-	float a1 = L->a1, a2 = L->a2, a3 = L->a3;
+	/*
+	 * S101 P2 B1, the sub-block form (S101_P2_REDUCTIONS.md §A.4 B1;
+	 * S101_P2_IMPLEMENTATION.md §5.2): the tone coefficients step once per
+	 * TKT_SUB_BLOCK (8) samples, held at each sub-block's centre value
+	 * (a + da x (8 j + 4)), instead of += da every sample.
+	 * Why: three adds per sample per layer (12 for four layers) and their
+	 * live steps. The ramp still spans the same blocks (A2q: four) in
+	 * quarters of a block; the TPT filter takes a coefficient change without
+	 * a jump in its state (the Colloid's stereo loop has run this form since
+	 * S096 P3). Sound: S1-S2 on the fastest tone-envelope sweeps.
+	 */
+	float a1 = L->a1 + 0.5f * (float)TKT_SUB_BLOCK * da1;
+	float a2 = L->a2 + 0.5f * (float)TKT_SUB_BLOCK * da2;
+	float a3 = L->a3 + 0.5f * (float)TKT_SUB_BLOCK * da3;
 	float mX = L->mX, mB = L->mB, mL = L->mL;
 	float ic1 = L->ic1, ic2 = L->ic2;
 	float cnt = L->srrCnt, hold = L->srrHold;
-	uint32_t n;
+	uint32_t n, j;
 
-	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
+#pragma GCC unroll 1
+	for (j = 0u; j < OUTPUT_DMA_SIZE; j += TKT_SUB_BLOCK) {
+#pragma GCC unroll 1
+	for (n = j; n < j + TKT_SUB_BLOCK; n++) {
 		const uint32_t idx = ph >> OSC_SAMPLE_PHASE_SHIFT;
 		const int32_t a = data[idx];
 		float x = (float)((a << OSC_SAMPLE_PHASE_SHIFT) +
@@ -607,7 +689,6 @@ static inline __attribute__((always_inline)) void tkt_layerPost(TktLayer *L, con
 		ic1 = 2.0f * v1 - ic1;
 		ic2 = 2.0f * v2 - ic2;
 		y = mX * x + mB * v1 + mL * v2;
-		a1 += da1; a2 += da2; a3 += da3;
 		r = y * gR;
 		if (first) {
 			bL[n] = y * gL;
@@ -618,6 +699,10 @@ static inline __attribute__((always_inline)) void tkt_layerPost(TktLayer *L, con
 			bR[n] += r;
 			bS[n] += y * gS;
 		}
+	}
+	a1 += (float)TKT_SUB_BLOCK * da1;
+	a2 += (float)TKT_SUB_BLOCK * da2;
+	a3 += (float)TKT_SUB_BLOCK * da3;
 	}
 	L->ic1 = ic1;
 	L->ic2 = ic2;

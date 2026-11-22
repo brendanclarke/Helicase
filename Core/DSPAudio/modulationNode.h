@@ -129,6 +129,16 @@ void modNode_init(ModulationNode* vm);
  */
 void modNode_resetTargets();
 void modNode_reassignVeloMod();
+/*
+ * The mixer's block control (S101 P2 A1, staggered; contract at the
+ * definition in modulationNode.c): the interpolation-slot accounting every
+ * block; the restores, the velocity re-apply and the LFO dispatch every other
+ * block (or the next block after a foreground restore); in between, only the
+ * nodes whose base an ordinary write refreshed.
+ * Accessors: mixer_calcNextSampleBlock(), in place of modNode_resetTargets()
+ * + modNode_reassignVeloMod() + instrumentManager_dispatchRuntimeLfos().
+ */
+void modNode_controlBlock(void);
 
 /** if multiple nodes address the same target we need to update the other modNodes if one of them changes the destionation*/
 //void modNode_originalValueModulated(uint16_t idx, ModulationNode* modSource);

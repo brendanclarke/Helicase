@@ -877,7 +877,17 @@ void instrumentManager_resetRuntimeSlot(uint8_t slot);
  */
 void instrumentManager_resetRuntimeSlotFromScene(uint8_t slot,
                                                  uint8_t scene_index);
-void instrumentManager_dispatchRuntimeLfos(void);
+/*
+ * S101 P2 A1: dispatch every slot LFO, stepping its phase by `steps` blocks
+ * (1 or 2: the staggered control runs every other block, so each run steps
+ * the blocks it owes and the rate stays exact); clears the dirty sources.
+ * instrumentManager_reapplyDirtyLfos(): on the block between, re-apply at
+ * its last value (no phase step) each source LFO whose descriptor target an
+ * ordinary write refreshed since its last dispatch, in slot order.
+ * Accessors: modNode_controlBlock().
+ */
+void instrumentManager_dispatchRuntimeLfos(uint8_t steps);
+void instrumentManager_reapplyDirtyLfos(void);
 void instrumentManager_recalcRuntimeLfoSync(void);
 void instrumentManager_retriggerRuntimeLfos(uint8_t trigger_track);
 void instrumentManager_recalcSlotFilter(uint8_t slot);

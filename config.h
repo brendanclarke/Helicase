@@ -88,6 +88,31 @@
 #define DEV_MODE_LOGGING    1
 
 /*
+ * MIXER_PROBE_MAX: the S101 (S1) per-slot and per-section maxima of the
+ * mixer's cycle probe (S101 P2, S101_P2_REDUCTIONS.md Q-C9; user 2026-11-22:
+ * "build option P as recommended").
+ *
+ * What: value 1 compiles, inside a DEV_MODE_LOGGING build, the max words of
+ * mixer.c's probe (mixer_probe_async_max[], _sync_max[], _sec_max[]), the
+ * range test and saturating add that every mixer_probeAdd() call makes on
+ * them, their per-block fold and their fifteen trace records per window
+ * (decoder codes 6 | (9..15) << 3 and 6 | (16..22) << 3). Value 0 removes
+ * them; the averages, the whole-block maximum and the outside-mixer span
+ * (codes 6 | 24 << 3, 6 | 25 << 3) stay with DEV_MODE_LOGGING.
+ * Why: the maxima cost about 1.5k cycles a block inside the mixer (measured
+ * on SD_CARD_S101_P2: the send-add section 10.7k -> 11.9k with no change to
+ * its code, S101_P2_REDUCTIONS.md §A.1b item 7). That is diagnostic time
+ * inside the audio render, which the trace rule says a diagnostic must not
+ * take, and it made the logging build the user runs read about 1 % above a
+ * release build. Off by default; set to 1 for an investigation that needs
+ * the single-block maxima.
+ * Inputs: none (compile time). Outputs: when 1, the S1 records and 76 B of
+ * logging-only RAM. Affiliates: mixer_probeAdd(), mixer_probeEnd(),
+ * decode_devlogs.py (decodes the codes whether or not they are present).
+ */
+#define MIXER_PROBE_MAX     0
+
+/*
  * DEV_STALL_DETECTION enables cooperative stall detectors inside every
  * foreground filesystem state machine. Each detector fires once after its
  * phase stays unchanged for a site-specific tick threshold (20,000 to 50,000),

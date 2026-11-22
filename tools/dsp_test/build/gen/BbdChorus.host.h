@@ -147,7 +147,7 @@
  *             poles (the 12 dB wet) and the dry + wet at the full rate
  *             (bbd_alkAH(), bbd_alkBH()). 0: the full-rate loops (bbd_alkA(),
  *             bbd_alkB()), kept so the bench proves both forms.
- * Why:        the S101 device probe (S101_CPU_INVESTIGATION.md §2.1): the
+ * Why:        the S101 device probe (S101_P1_CPU_INVESTIGATION.md §2.1): the
  *             Advanced Alkaline's chorus, the one left at full rate, cost
  *             +2.3-2.7k cycles a block over the Basic Alkaline in the
  *             two-Advanced Scene that runs at 99 %. "If that's the worst case

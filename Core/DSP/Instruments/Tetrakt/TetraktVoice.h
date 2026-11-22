@@ -114,6 +114,14 @@ typedef struct {
 	uint8_t  pendSample;
 	uint8_t  pendVel;
 	float    env, envLast, velo;
+	/*
+	 * S101 P2 A2q (S101_P2_REDUCTIONS.md §A.3 A2q; S101_P2_IMPLEMENTATION.md
+	 * §5.1): the decay's per-block factor (1 - k, or 0 after a FADE) that
+	 * tkt_layerCarry() applies on the three blocks between this layer's
+	 * controls, so the envelope stays the exact per-block exponential.
+	 * RAM: none (inside the 1,264 B slot reserve: the voice was 1,064 B).
+	 */
+	float    envMul;
 	float    ic1, ic2;
 	float    a1, a2, a3, da1, da2, da3;
 	float    mX, mB, mL, dmX, dmB, dmL;
@@ -152,6 +160,10 @@ typedef struct TetraktVoiceStruct
 	uint8_t  layerOn, veloVol, pan;
 	uint8_t  spaceTime, spaceFeedback, spaceDetune, spaceTone, spaceLevel, width;
 	uint8_t  slot, note, veloKind;
+	/* S101 P2 A2q: the layer-control schedule, 0..TKT_CTL_BLOCKS - 1 (layer i
+	 * runs its control when (ctlPhase + i) % 4 is 0; RAM: none, inside the
+	 * slot reserve) */
+	uint8_t  ctlPhase;
 } TetraktVoice;
 
 /*

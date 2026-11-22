@@ -98,6 +98,44 @@ static INCCMZ uint8_t modNode_itpReserved = 0u;
 static INCCMZ uint8_t modNode_interpLastStamp = 0u;
 
 /*
+ * The staggered block control's state (S101 P2 A1; S101_P2_REDUCTIONS.md
+ * §A.3 A1, as built in S101_P2_IMPLEMENTATION.md §2.1).
+ *
+ * What:       one byte:
+ *               bits 0..5 (MODNODE_CTL_VELO_DIRTY): velocity node i's base
+ *                 was refreshed (a menu edit, an automation ramp, a Morph
+ *                 apply or a Kit load wrote the target it modulates) since the
+ *                 node last applied;
+ *               bit 6 (MODNODE_CTL_FORCE): the next block must run the full
+ *                 control (a foreground restore or retarget happened, or a
+ *                 legacy direct LFO node's base was refreshed);
+ *               bit 7 (MODNODE_CTL_OWED): one block has passed since the full
+ *                 control last ran (the next block is the one that runs it).
+ * Why:        the full control (restore every velocity and LFO target,
+ *             re-apply the six velocity modulations, advance and dispatch the
+ *             six LFOs) now runs on every other block, all six slots in the
+ *             same block so that modulators sharing a target (cross-slot LFO
+ *             targets exist) keep today's write order. Every write is
+ *             absolute (each node computes from its own stored base), so a
+ *             target that is not rewritten simply holds its modulated value.
+ *             The one case that is not safe is an ordinary write between
+ *             blocks: it puts the unmodulated base into the target, and today
+ *             the control re-applies the overlay before the next render. The
+ *             dirty bits make the in-between block re-apply exactly those
+ *             nodes, so a modulated parameter that is also automated or
+ *             morphed never renders unmodulated.
+ * RAM:        1 B INCCMZ (S101 P2, listed for sign-off in the log).
+ * Accessors:  modNode_controlBlock(), the refresh paths below,
+ *             modNode_resetTargets(), modNode_clearDestination().
+ * Affiliates: mixer_calcNextSampleBlock(), instrumentManager_lfoDirty,
+ *             instrumentManager_dispatchRuntimeLfos().
+ */
+#define MODNODE_CTL_VELO_DIRTY 0x3Fu
+#define MODNODE_CTL_FORCE      0x40u
+#define MODNODE_CTL_OWED       0x80u
+static INCCMZ uint8_t modNode_ctlState = MODNODE_CTL_FORCE;
+
+/*
  * Slot stamp of a block generation (S087 P1).
  *
  * What:       (generation % 255) + 1: 1..255, never 0; consecutive generations
@@ -390,7 +428,7 @@ void modNode_init(ModulationNode* vm)
 	vm->amount = 0.f;
 }
 //-----------------------------------------------------------------------
-static void modNode_setOriginalValueChanged(ModulationNode* vm, uint16_t idx)
+static uint8_t modNode_setOriginalValueChanged(ModulationNode* vm, uint16_t idx)
 {
 	/*
 	 * Refresh legacy target baselines after a ParameterArray-backed edit.
@@ -404,10 +442,12 @@ static void modNode_setOriginalValueChanged(ModulationNode* vm, uint16_t idx)
 	   vm->destinationMode == MOD_NODE_DEST_LEGACY_PARAM_ARRAY &&
 	   vm->destination == idx) {
 		(void)modNode_captureOriginalValue(vm);
+		return 1u;   /* S101 P2 A1: the caller marks the node dirty */
 	}
+	return 0u;
 }
 //-----------------------------------------------------------------------
-static void modNode_setDirectOriginalValueChanged(ModulationNode* vm,
+static uint8_t modNode_setDirectOriginalValueChanged(ModulationNode* vm,
 												  uint16_t destination,
 												  mod_node_range_t range)
 {
@@ -426,7 +466,9 @@ static void modNode_setDirectOriginalValueChanged(ModulationNode* vm,
 	   vm->destination == destination) {
 		modNode_storeRange(vm, range);
 		(void)modNode_captureOriginalValue(vm);
+		return 1u;   /* S101 P2 A1: the caller marks the node dirty */
 	}
+	return 0u;
 }
 //-----------------------------------------------------------------------
 /*
@@ -441,8 +483,12 @@ static void modNode_refreshLegacyLfoPair(ModulationNode *primary,
 										 ModulationNode *secondary, void *context)
 {
 	const uint16_t idx = *((const uint16_t *)context);
-	modNode_setOriginalValueChanged(primary, idx);
-	modNode_setOriginalValueChanged(secondary, idx);
+	/* S101 P2 A1: the visitor does not pass the source slot, so a refreshed
+	 * legacy LFO node asks for the full control next block (rare: descriptor
+	 * LFO targets live in InstrumentManager's adapters, not these nodes). */
+	if (modNode_setOriginalValueChanged(primary, idx) |
+	    modNode_setOriginalValueChanged(secondary, idx))
+		modNode_ctlState |= MODNODE_CTL_FORCE;
 }
 
 // This is called when a user changes a parameter value on the front. It saves
@@ -451,7 +497,8 @@ void modNode_originalValueChanged(uint16_t idx)
 {
 	uint8_t i;
 	for(i=0;i<6;i++)
-		modNode_setOriginalValueChanged(&velocityModulators[i],idx);
+		if (modNode_setOriginalValueChanged(&velocityModulators[i],idx))
+			modNode_ctlState |= (uint8_t)(1u << i);   /* S101 P2 A1 */
 	instrumentManager_visitRuntimeLfoNodes(modNode_refreshLegacyLfoPair, &idx);
 }
 //-----------------------------------------------------------------------
@@ -471,10 +518,13 @@ static void modNode_refreshDirectLfoPair(ModulationNode *primary,
 										 ModulationNode *secondary, void *context)
 {
 	const mod_node_direct_refresh_t *refresh = context;
-	modNode_setDirectOriginalValueChanged(primary, refresh->destination,
-											refresh->range);
-	modNode_setDirectOriginalValueChanged(secondary, refresh->destination,
-											refresh->range);
+	/* S101 P2 A1: as modNode_refreshLegacyLfoPair(): no source slot here, so
+	 * a refreshed direct LFO node asks for the full control next block. */
+	if (modNode_setDirectOriginalValueChanged(primary, refresh->destination,
+											refresh->range) |
+	    modNode_setDirectOriginalValueChanged(secondary, refresh->destination,
+											refresh->range))
+		modNode_ctlState |= MODNODE_CTL_FORCE;
 }
 
 void modNode_directOriginalValueChanged(uint16_t destination,
@@ -485,7 +535,8 @@ void modNode_directOriginalValueChanged(uint16_t destination,
 
 	/* Descriptor-target baseline/range refresh for velocity and live LFO nodes. */
 	for(i=0;i<6;i++)
-		modNode_setDirectOriginalValueChanged(&velocityModulators[i],destination,range);
+		if (modNode_setDirectOriginalValueChanged(&velocityModulators[i],destination,range))
+			modNode_ctlState |= (uint8_t)(1u << i);   /* S101 P2 A1 */
 	instrumentManager_visitRuntimeLfoNodes(modNode_refreshDirectLfoPair,
 											  (void *)&refresh);
 }
@@ -513,9 +564,19 @@ void modNode_setItpReserved(uint8_t slots)
 	modNode_itpReserved = slots;
 }
 
-void modNode_resetTargets()
+/*
+ * The block-start slot accounting (S101 P2 A1: split out of
+ * modNode_resetTargets(), unchanged).
+ *
+ * What:       everything modNode_resetTargets() did before its restores: the
+ *             generation, the stamp and the sticky and itp reservations.
+ * Why:        the interpolation slots are claimed by the renders every block
+ *             (modNode_interpClaim()), so this must stay per block while the
+ *             target restores move to alternate blocks (A1).
+ * Accessors:  modNode_resetTargets(), modNode_controlBlock().
+ */
+static void modNode_blockBegin(void)
 {
-	uint8_t i;
 	/*
 	 * Slot reservations for the new block (S087 P1; S087 stage E).
 	 *
@@ -581,9 +642,83 @@ void modNode_resetTargets()
 		modNode_interpReserved = (lock && reserve > cap) ? cap : reserve;
 		modNode_waveInterpActiveCount = lock;
 	}
+}
+
+/* Restore every velocity and LFO target to its base (the former tail of
+ * modNode_resetTargets(); S101 P2 A1). */
+static void modNode_restoreAll(void)
+{
+	uint8_t i;
+
 	for(i=0;i<6;i++)
 		modNode_restoreTarget(&velocityModulators[i]);
 	instrumentManager_visitRuntimeLfoNodes(modNode_restoreLfoPair, 0);
+}
+
+void modNode_resetTargets()
+{
+	/*
+	 * S101 P2 A1: unchanged for its foreground callers
+	 * (modNode_setDestination()): the block accounting and every restore.
+	 * The restores leave every modulated target at its base, so the next
+	 * block must run the full control whatever its phase.
+	 */
+	modNode_blockBegin();
+	modNode_restoreAll();
+	modNode_ctlState |= MODNODE_CTL_FORCE;
+}
+
+/*
+ * One block of the slot control, staggered (S101 P2 A1;
+ * S101_P2_REDUCTIONS.md §A.3 A1; S101_P2_IMPLEMENTATION.md §2.1).
+ *
+ * What:       every block: the interpolation-slot accounting
+ *             (modNode_blockBegin()). Then:
+ *             - on every other block (OWED set), or when FORCE is set: the
+ *               full control as before A1: every velocity and LFO target
+ *               restored, the six velocity modulations re-applied, and the six
+ *               LFOs dispatched with the number of blocks they owe (2, or 1
+ *               after a forced block), so every LFO's rate is exact;
+ *             - on the block between: only the dirty velocity nodes
+ *               (restore, re-apply at their lastVal, slot order) and the
+ *               dirty LFO sources (re-applied at their last value, no phase
+ *               step: instrumentManager_reapplyDirtyLfos()).
+ *             All six slots run in the same block, so the order in which
+ *             modulators write a shared target is today's.
+ * Why:        the control measured 7.0k cycles a block (S100, S101 P2); its
+ *             per-slot part is restore + re-apply + dispatch, which now runs
+ *             once per 1.45 ms instead of every 0.73 ms. Targets a voice ramps
+ *             itself (filter cutoff, amp) are unaffected; an LFO now steps at
+ *             689 Hz instead of 1,378 Hz.
+ * Inputs:     modNode_ctlState; the LFOs (InstrumentManager).
+ * Outputs:    the targets; modNode_ctlState.
+ * Accessors:  mixer_calcNextSampleBlock() (once per block, in place of
+ *             modNode_resetTargets() + modNode_reassignVeloMod() +
+ *             instrumentManager_dispatchRuntimeLfos()).
+ * Affiliates: host law A1-CTL (tools/dsp_test/modules/modulation.c).
+ */
+void modNode_controlBlock(void)
+{
+	const uint8_t st = modNode_ctlState;
+	uint8_t i;
+
+	modNode_blockBegin();
+	if (st & (MODNODE_CTL_OWED | MODNODE_CTL_FORCE)) {
+		modNode_restoreAll();
+		modNode_reassignVeloMod();
+		instrumentManager_dispatchRuntimeLfos((st & MODNODE_CTL_OWED) ? 2u : 1u);
+		modNode_ctlState = 0u;
+		return;
+	}
+	for (i = 0u; i < 6u; i++) {
+		if (st & (1u << i)) {
+			modNode_restoreTarget(&velocityModulators[i]);
+			modNode_updateValue(&velocityModulators[i],
+								velocityModulators[i].lastVal);
+		}
+	}
+	instrumentManager_reapplyDirtyLfos();
+	modNode_ctlState = MODNODE_CTL_OWED;
 }
 //-----------------------------------------------------------------------
 void modNode_reassignVeloMod()
@@ -611,6 +746,8 @@ void modNode_clearDestination(ModulationNode* vm)
 	}
 	modNode_restoreTarget(vm);
 	modNode_resetIdentity(vm);
+	/* S101 P2 A1: a restore between blocks; re-apply everything next block. */
+	modNode_ctlState |= MODNODE_CTL_FORCE;
 }
 //-----------------------------------------------------------------------
 // set a modulation destination to one of the sound parameters.

@@ -2383,7 +2383,43 @@ void instrumentManager_resetRuntimeSlot(uint8_t slot)
     instrumentManager_resetRuntimeSlotFromScene(slot, scene_getActiveIndex());
 }
 
-void instrumentManager_dispatchRuntimeLfos(void)
+/*
+ * Source slots whose LFO must re-apply on the next block (S101 P2 A1).
+ *
+ * What:       bit s: an ordinary write (menu, automation ramp, Morph apply,
+ *             Kit load: instrumentManager_noteRuntimeValueChanged()) refreshed
+ *             the base of a descriptor target that source slot s's LFO
+ *             modulates, so the target now holds the unmodulated base.
+ * Why:        the staggered control (modNode_controlBlock()) dispatches the
+ *             LFOs every other block. Without this the block between would
+ *             render such a target unmodulated: an automated or morphed
+ *             parameter under an LFO would flip between modulated and
+ *             unmodulated every block.
+ * RAM:        1 B (S101 P2, listed for sign-off in the log).
+ * Accessors:  instrumentManager_noteRuntimeValueChanged() (sets),
+ *             instrumentManager_reapplyDirtyLfos(),
+ *             instrumentManager_dispatchRuntimeLfos() (clear).
+ */
+static uint8_t instrumentManager_lfoDirty;
+
+void instrumentManager_reapplyDirtyLfos(void)
+{
+    uint8_t slot;
+    const uint8_t dirty = instrumentManager_lfoDirty;
+
+    /* S101 P2 A1: see instrumentManager_lfoDirty. Slot order, as the full
+     * dispatch, so a shared target ends on the same writer. */
+    if (!dirty)
+        return;
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        Lfo *lfo = instrumentManager_runtimeLfo(slot);
+        if (lfo && (dirty & (1u << slot)))
+            lfo_reapplyValue(lfo, slot);
+    }
+    instrumentManager_lfoDirty = 0u;
+}
+
+void instrumentManager_dispatchRuntimeLfos(uint8_t steps)
 {
     uint8_t slot;
 
@@ -2395,12 +2431,18 @@ void instrumentManager_dispatchRuntimeLfos(void)
      * LFO targets update exactly once per audio block. This belongs here
      * instead of mixer.c so mixer does not duplicate the type-to-instance
      * routing table.
+     * S101 P2 A1: once per control run (every other block); `steps` is the
+     * number of blocks the phase owes (lfo_stepBlock() for the extra one).
      */
     for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
         Lfo *lfo = instrumentManager_runtimeLfo(slot);
-        if (lfo)
+        if (lfo) {
+            if (steps > 1u)
+                lfo_stepBlock(lfo);
             lfo_dispatchNextValue(lfo, slot);
+        }
     }
+    instrumentManager_lfoDirty = 0u;
 }
 
 void instrumentManager_recalcRuntimeLfoSync(void)
@@ -3638,6 +3680,8 @@ static void instrumentManager_noteRuntimeValueChanged(
                 &lfo_descriptor_targets[source_slot][pair];
             if (adapter->active && adapter->id == id) {
                 adapter->base_value = value;
+                /* S101 P2 A1: re-apply this source's LFO next block */
+                instrumentManager_lfoDirty |= (uint8_t)(1u << source_slot);
             }
         }
     }

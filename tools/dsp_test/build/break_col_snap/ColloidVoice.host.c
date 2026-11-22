@@ -572,6 +572,62 @@ static void col_svfControl(ColSvf *f, const float cut, const float res,
 }
 
 /*
+ * One filter's coefficients for two blocks (S101 P2 CL5;
+ * S101_P2_REDUCTIONS.md §A.5 CL5; S101_P2_IMPLEMENTATION.md §4.1).
+ *
+ * What:       col_svfControl() for a ramp that spans two blocks: the same
+ *             targets, the cutoff and damping slewed by COL_SLEW2 (two blocks
+ *             of COL_SLEW: the same time constant), and da = (t - a) / 64. On
+ *             the block between, col_svfCarry() moves the start on by one
+ *             block's ramp (a += 32 da), so the render loops (which never
+ *             write the coefficients back) continue the ramp to t exactly at
+ *             the end of the second block.
+ * Why:        the two filters' controls (one alk_exp2f(), one col_tanf() and
+ *             two VDIVs each, 99 instructions a block) ran for both filters
+ *             every block. Both now run every other block (the parity the
+ *             noise corners already use, voice->nPhase), which halves the
+ *             average; the block between costs two col_svfCarry() calls. Both
+ *             filters update in the same block so that with zero offsets they
+ *             stay identical (law CO-RTE). The filter envelope and the
+ *             knobs reach a filter at most one block (0.73 ms) later; the
+ *             coefficients still ramp per sample (per sub-block in the stereo
+ *             loop), so no step is added.
+ * Inputs:     as col_svfControl(). Outputs: f's a, t, da, cutSt, k and mix.
+ * Accessors:  Colloid_calcVoiceAsync().
+ */
+static void col_svfControl2(ColSvf *f, const float cut, const float res,
+                            const uint8_t type, const float envSt)
+{
+	const float st = fminf(fmaxf(col_clamp01(cut) * COL_CUT_ST_MAX + envSt, 0.0f),
+	                       COL_CUT_ST_MAX);
+	const float kT = 2.0f - COL_K_SPAN * col_clamp01(res);
+	float g;
+
+	(void)0;
+	f->a2 = f->t2;
+	f->a3 = f->t3;
+	f->cutSt += COL_SLEW2 * (st - f->cutSt);
+	f->k += COL_SLEW2 * (kT - f->k);
+	g = col_tanf(COL_CUT_BASE_HZ * alk_exp2f(f->cutSt * (1.0f / 12.0f)) * COL_PI_OVER_FS);
+	f->t1 = 1.0f / (1.0f + g * (g + f->k));
+	f->t2 = g * f->t1;
+	f->t3 = g * f->t2;
+	f->da1 = (f->t1 - f->a1) * (1.0f / (2.0f * (float)OUTPUT_DMA_SIZE));
+	f->da2 = (f->t2 - f->a2) * (1.0f / (2.0f * (float)OUTPUT_DMA_SIZE));
+	f->da3 = (f->t3 - f->a3) * (1.0f / (2.0f * (float)OUTPUT_DMA_SIZE));
+	col_svfMix(f, type);
+}
+
+/* The block between two col_svfControl2() runs (S101 P2 CL5, see there):
+ * the ramp's start moves on by one block; da, t and the mix stay. */
+static inline void col_svfCarry(ColSvf *f)
+{
+	f->a1 += (float)OUTPUT_DMA_SIZE * f->da1;
+	f->a2 += (float)OUTPUT_DMA_SIZE * f->da2;
+	f->a3 += (float)OUTPUT_DMA_SIZE * f->da3;
+}
+
+/*
  * A filter at rest on its knob settings (S095 P2).
  *
  * What:       clears the integrators, puts the slewed cutoff and damping on
@@ -1457,9 +1513,24 @@ void Colloid_calcVoiceAsync(ColloidVoice *voice)
 		famR = fminf(fmaxf((famB + (voice->envOfs - 63.0f / 127.0f) * 127.0f)
 		                   * (1.0f / 63.0f), -1.0f), 1.0f);
 	}
-	col_svfControl(&voice->svfA, voice->cut, voice->res, voice->filtType,
-	               famL * COL_FENV_ST * voice->fltEg.level);
-	col_svfControl(&voice->svfB, cutR, resR, typeB, famR * COL_FENV_ST * voice->fltEg.level);
+	/*
+	 * S101 P2 CL5: both filters' controls every other block, each with a
+	 * two-block ramp (col_svfControl2()); on the block between both carry
+	 * their ramps on (col_svfCarry()). Both in the same block, so that with
+	 * zero offsets the left and right filters stay identical bit for bit
+	 * (law CO-RTE: alternating them left one a block behind the other). The
+	 * parity is the noise corners' (nPhase, toggled later in this block by
+	 * col_noiseControl()).
+	 */
+	if (voice->nPhase != 0u) {
+		col_svfControl2(&voice->svfA, voice->cut, voice->res, voice->filtType,
+		                famL * COL_FENV_ST * voice->fltEg.level);
+		col_svfControl2(&voice->svfB, cutR, resR, typeB,
+		                famR * COL_FENV_ST * voice->fltEg.level);
+	} else {
+		col_svfCarry(&voice->svfA);
+		col_svfCarry(&voice->svfB);
+	}
 
 	/*
 	 * The post-filter overdrive and tone (S095 P3 F10): the Alkaline's tables

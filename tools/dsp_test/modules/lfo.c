@@ -19,6 +19,13 @@
  *                    with sync off it advances by phaseInc x modNodeValue;
  *               LF5  the top rate x 2 (the overlay's maximum) stays below
  *                    2^32 in lfo_calc()'s step.
+ *               LF6  (S101 P2 A1) lfo_stepBlock() + lfo_calc() advance the
+ *                    phase exactly as two lfo_calc() calls, for free and
+ *                    synced rates and rate overlays 0, 0.5, 1, 2, over 1,000
+ *                    control runs; a noise LFO whose phase wraps in the
+ *                    stepped block draws its next random value.
+ *             S101 P2 break: an lfo_stepBlock() that does not step must fail
+ *             LF6.
  *             Break builds (Makefile): a sync writer that only stores the
  *             byte must fail LF1; lfo_calc() without the sync select must
  *             fail LF4.
@@ -62,15 +69,16 @@ typedef struct {
 
 /* host stand-ins for what lfo_calc() reads */
 int16_t sine_table[1025];   /* S095 P2: the 1,024-point sine + guard */
-int16_t GetRngValue(void) { return 0; }
+static int host_rng_draws;
+int16_t GetRngValue(void) { host_rng_draws++; return 0; }
 static uint16_t host_bpm = 120u;
 uint16_t seq_getBpm(void) { return host_bpm; }
 
 #include "lfo_rate_table.c"      /* the real lfoRateHz[] */
 #include "lfo_funcs.c"           /* the real lfo_calc/_calcPhaseInc/_setFreq/_setSync */
 
-static unsigned g_fail[5];
-static const char *g_name[] = { "LF1", "LF2", "LF3", "LF4", "LF5" };
+static unsigned g_fail[6];
+static const char *g_name[] = { "LF1", "LF2", "LF3", "LF4", "LF5", "LF6" };
 
 static void fail(int g, const char *what, double a, double b)
 {
@@ -164,6 +172,46 @@ static void test_syncwins(void)
 		}
 }
 
+/* LF6 (S101 P2 A1): the staggered control's two-block step is exact */
+static void test_stepblock(void)
+{
+	static const float mods[] = { 0.0f, 0.5f, 1.0f, 2.0f };
+	static const uint8_t frqs[] = { 1u, 40u, 100u, 127u };
+
+	for (unsigned m = 0u; m < 4u; m++)
+		for (unsigned f = 0u; f < 4u; f++)
+			for (uint8_t s = 0u; s < 2u; s++) {
+				Lfo a, b;
+
+				memset(&a, 0, sizeof a);
+				lfo_setFreq(&a, frqs[f]);
+				lfo_setSync(&a, s ? 10u : 0u);
+				a.modNodeValue = mods[m];
+				a.waveform = LFO_SINE;
+				b = a;
+				for (int r = 0; r < 1000; r++) {
+					lfo_stepBlock(&a);
+					(void)lfo_calc(&a);
+					(void)lfo_calc(&b);
+					(void)lfo_calc(&b);
+				}
+				if (a.phase != b.phase) fail(5, "two-block step == two calls", f, m);
+			}
+	/* noise: a step that wraps in lfo_stepBlock() draws */
+	{
+		Lfo n;
+
+		memset(&n, 0, sizeof n);
+		n.waveform = LFO_NOISE;
+		n.modNodeValue = 1.0f;
+		n.phaseInc = 0xC0000000u;   /* wraps on most steps */
+		n.phase = 0x50000000u;      /* + 0xC0000000 wraps */
+		host_rng_draws = 0;
+		lfo_stepBlock(&n);
+		if (host_rng_draws != 1) fail(5, "noise draws on a stepped wrap", host_rng_draws, 1);
+	}
+}
+
 int main(void)
 {
 	unsigned total = 0u;
@@ -171,7 +219,8 @@ int main(void)
 	test_order();
 	test_table();
 	test_syncwins();
-	for (unsigned g = 0u; g < 5u; g++) {
+	test_stepblock();
+	for (unsigned g = 0u; g < 6u; g++) {
 		printf("lfo %s: %u failure(s)\n", g_name[g], g_fail[g]);
 		total += g_fail[g];
 	}
