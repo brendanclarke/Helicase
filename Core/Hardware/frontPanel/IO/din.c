@@ -121,9 +121,12 @@ void din_dout_exchange(void)
 {
     uint8_t rx[SR_CHAIN_BYTES];
 
-    /* Full-duplex: TX = LED shadow, RX = button data */
+    /* Full-duplex: TX = LED shadow, RX = button data. S102 P1: owned LEDs
+    ** (the chromatic overlay) show dout_ownedData[] over the shadow. */
     for (int i = 0; i < SR_CHAIN_BYTES; i++)
-        rx[i] = dout_spi_xfer(dout_outputData[i]);
+        rx[i] = dout_spi_xfer((uint8_t)((dout_outputData[i] &
+                                         (uint8_t)~dout_ownedMask[i]) |
+                                        dout_ownedData[i]));
 
     /* Wait for SPI to finish — timeout guards against stall from rail glitch */
     uint32_t t = 10000; while ((SPI1_SR & (1UL << 7)) && --t);

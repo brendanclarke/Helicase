@@ -114,9 +114,39 @@ static void voiceControl_irqRestore(uint32_t primask)
 	__asm volatile ("msr primask, %0" :: "r" (primask) : "memory");
 }
 
+/*
+ * Note watch for the chromatic keyboard overlay (S102 P1).
+ *
+ * What: voiceControl_watchTrack is the selected track while the overlay is
+ * up (0xFF otherwise); every trigger enqueued for it leaves its internal
+ * note + 1 in voiceControl_watchNote (the latest wins; 0 = none). Why: the
+ * keyboard blinks the key of each note the selected track plays. The hook
+ * sits at the enqueue, not at the fire: the fire path is inlined into the
+ * render loop's trigger drain (audio_check_and_render()), where a call
+ * moved LTO's register allocation of the automation-drain loops (S102 P1
+ * loop check). Writers: the enqueue (TIM3 or foreground, under PRIMASK),
+ * voiceControl_noteWatch() (foreground). RAM: 2 B SRAM1.
+ */
+static volatile uint8_t voiceControl_watchTrack = 0xFFu;
+static volatile uint8_t voiceControl_watchNote;
+
+uint8_t voiceControl_noteWatch(uint8_t track)
+{
+	uint8_t note;
+	uint32_t primask = voiceControl_irqSave();
+
+	voiceControl_watchTrack = track;
+	note = voiceControl_watchNote;
+	voiceControl_watchNote = 0u;
+	voiceControl_irqRestore(primask);
+	return note;
+}
+
 static void voiceControl_enqueueTriggerLocked(uint8_t voice, uint8_t note, uint8_t vel,
                                               uint8_t layers)
 {
+	if (voice == voiceControl_watchTrack)          /* S102 P1 */
+		voiceControl_watchNote = (uint8_t)(note + 1u);
 	uint8_t next = (uint8_t)((voiceTriggerHead + 1u) & VOICE_TRIGGER_RING_MASK);
 
 	if (next == voiceTriggerTail) {

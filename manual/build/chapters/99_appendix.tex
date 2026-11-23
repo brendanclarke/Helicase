@@ -1,5 +1,19 @@
 \section{Appendix}\label{appendix}
 
+\subsection{Glossary}\label{glossary}
+
+\begin{paramtable}
+Active Scene & Term & The Scene being viewed and edited. \\
+Played Scene & Term & The Scene whose Pattern a track is playing. \\
+Basic / Advanced & Term & Instrument classes; Advanced types are limited to two per Kit. \\
+Choke & Term & An Instrument whose second decay is selected by track 7 (HiHat). \\
+Edit mask & Term & The set of Scenes that receive an edit together. \\
+Lock & Term & A value fixed on one effect-sequence step. \\
+Morph & Term & Blend between a parameter's Normal and Morph values. \\
+Scene 17 & Term & The hidden background Scene that plays during a Bank load. \\
+St1 / St2 & Term & The two stereo output pairs. \\
+\end{paramtable}
+
 \subsection{References}\label{references}
 
 \begin{enumerate}
@@ -12,43 +26,26 @@
   3, 2005, pp.~47--56.
 \end{enumerate}
 
+\draftnote{Include this reference only if the Euclidean generator is released.}
+
 \subsection{Sample Credits}\label{sample-credits}
 
-The following third-party audio samples are embedded in the firmware:
+\draftnote{The sample credits of the original LXR (crash, tick, acoustic kick, rim shot, drip, hi-hat
+and 808 clap) described samples embedded in the original firmware. The built-in crash was
+removed from this firmware's flash; a card sample replaces it. Replace this section with the
+credits of the factory samples and built-in clicks that actually ship. Source credits in the
+original manual include Matias Reccius (CC0), patchen (CC BY), KEVOY (CC0), altemark (CC BY),
+Neotone (CC0), pjcohen (CC0) and shiftr.}
 
-\begin{enumerate}
-\def\labelenumi{\arabic{enumi}.}
-\setcounter{enumi}{1}
-\item
-  \textbf{Crash sample} --- based on an edited version of
-  \texttt{crashBv2.wav} by Matias Reccius (freesound.org), released
-  under CC0 1.0 Universal Public Domain Dedication. Sabian AAX Studio
-  Crash 16'', recorded with an Audio Technica AT3040 condenser
-  microphone. Sample was cut, EQ'd, and heavily compressed by Julian
-  Schmidt to approximate a 909 crash.
-\item
-  \textbf{Tick sound} --- sound by patchen, July 14, 2005.
-  \url{http://www.freesound.org/people/patchen/sounds/4102/} Released
-  under Creative Commons Attribution License.
-\item
-  \textbf{Acoustic kick} ---
-  \url{http://www.freesound.org/people/KEVOY/sounds/82279/}
-  Post-processed with EQ, compressor, and amplitude curves by Julian
-  Schmidt. Released under CC0 1.0.
-\item
-  \textbf{Rim shot} --- TR-909 JGB pack, \texttt{rs03.wav}, by altemark.
-  \url{http://www.freesound.org/people/altemark/sounds/26672/} Sampled
-  by Janne G:son Berg from his TR-909. Released under Creative Commons
-  Attribution License.
-\item
-  \textbf{Drip sound} --- \texttt{Drip2.wav} by Neotone, July 10, 2009.
-  \url{http://www.freesound.org/people/Neotone/sounds/75344/} Released
-  under CC0 1.0.
-\item
-  \textbf{Hi-hat sample} --- Zildjian A-Custom Hi-Hat Cymbals Pedal
-  Chic, by pjcohen.
-  \url{http://www.freesound.org/people/pjcohen/sounds/45668/} Released
-  under CC0 1.0.
-\item
-  \textbf{808 clap} --- provided by shiftr.
-\end{enumerate}
+\subsection{Figure checklist}\label{figure-checklist}
+
+All figures marked ``FIGURE TO COME'' in the manual are listed with
+their file names in \texttt{FIGURES\_TODO.md} in the manual's source
+folder, which \texttt{build\_manual.py\ -\/-figures} regenerates. Place
+finished images in the \texttt{images} folder with the listed file name
+and the placeholder is replaced automatically at the next build.
+
+\subsection{Open questions}\label{open-questions}
+
+All \textbf{VERIFY} notes are listed in \texttt{DRAFT\_QUESTIONS.md},
+which \texttt{build\_manual.py\ -\/-questions} regenerates.

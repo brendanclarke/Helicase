@@ -1,0 +1,126 @@
+\section{How the Machine Is
+Organised}\label{how-the-machine-is-organised}
+
+Helicase LXR stores its work in a hierarchy. Understanding it makes
+Load/Save, Morph and live performance much easier to follow.
+
+\figplaceholder{hierarchy_diagram.png}{The Bank, Scene, Kit and Instrument hierarchy.}{Tree diagram. Bank at the top, containing up to 16 Scenes. Each Scene contains: a Pattern (7 tracks of 128 steps), a Kit made of 6 Instruments (one per voice slot), one Effect, mix and MIDI settings, and chain settings. Show Scene 17 as a dashed box labelled background Scene. Use orange for things stored on the SD card as libraries and grey for things that live inside a Scene.}
+
+\subsection{Bank}\label{bank}
+
+A \textbf{Bank} is a complete set of up to \textbf{16 Scenes}. One Bank
+is resident (loaded in memory) at a time. Loading a Bank replaces the
+Scenes; saving a Bank writes every Scene back as a folder on the SD
+card. Banks can be changed from the Load page or over MIDI (CC0 on the
+global channel).
+
+\subsection{Scene}\label{scene}
+
+A \textbf{Scene} is everything needed to play one section of a song.
+Each of the 16 Scenes holds:
+
+\begin{itemize}
+\tightlist
+\item
+  a \textbf{Pattern}: 7 tracks of 128 steps, with all step data and step
+  automation;
+\item
+  a \textbf{Kit}: six Instruments, one per voice slot;
+\item
+  one \textbf{Effect} (off, StFilter or CrumpBit) with its parameters
+  and its 16-step effect sequence;
+\item
+  \textbf{mix settings} per voice (output route, effect send, fader
+  mode, Morph endpoints);
+\item
+  the \textbf{bus compressor} settings;
+\item
+  \textbf{per-track timing} (length, step scale, shuffle, run mode) and
+  per-track \textbf{MIDI channel and note};
+\item
+  the Scene's \textbf{chain} settings (what plays next).
+\end{itemize}
+
+Switching Scene in Performance mode changes all of these together.
+Because the Scene owns the sounds as well as the notes, changing Scene
+can change the whole sound of the machine.
+
+\subsubsection{Active Scene and played
+Scene}\label{active-scene-and-played-scene}
+
+The \textbf{active Scene} is the Scene you are looking at and editing:
+it decides which values the Voice and Effect pages show and which Scene
+your edits are written to. The \textbf{played Scene} of a track is the
+Scene whose Pattern that track is currently playing. Normally they are
+the same, but with \emph{per-track Scene playback} (see the Operation
+Modes chapter) each track can play a different Scene.
+
+\subsubsection{Scene 17}\label{scene-17}
+
+While a Bank is loading in the background, the music keeps playing from
+a hidden copy called \textbf{Scene 17}. It is released when you change
+Scene.
+
+\subsection{Kit and Instrument}\label{kit-and-instrument}
+
+An \textbf{Instrument} is the patch of one voice: oscillators, filter,
+envelopes, LFO and so on. There are several Instrument \textbf{types}
+(Drum, Snare, Cymbal, HiHat and Alkaline), each with its own parameter
+set. A \textbf{Kit} is a set of six Instruments. Instruments and Kits
+can be saved and loaded individually.
+
+Slots have rules:
+
+\begin{itemize}
+\tightlist
+\item
+  \textbf{Basic} types may be used in any number of slots.
+\item
+  \textbf{Advanced} types are limited to two per Kit. No current type is
+  Advanced.
+\item
+  The \textbf{HiHat} is a \emph{choke} type: in slot 6 it serves both
+  track 6 (closed) and track 7 (open), and the closed hat chokes the
+  open hat.
+\end{itemize}
+
+\subsection{Effect}\label{effect}
+
+Each Scene owns exactly one \textbf{Effect} on a shared effects bus.
+Voices feed it through their own send levels. Loading a Kit or an
+Instrument never changes the Effect; loading a Scene or a Bank does.
+
+\subsection{Pattern, track and step}\label{pattern-track-and-step}
+
+A \textbf{Pattern} belongs to a Scene. It has \textbf{7 tracks} of
+\textbf{128 steps}. The 128 steps of a track are shown as eight bars of
+16 steps on the sequencer buttons. A step carries a trigger and optional
+\emph{specials}: note, velocity, condition, roll, timing, rhythm and
+fill, plus step \textbf{automation} entries that set parameters on that
+step.
+
+\subsection{Morph}\label{morph}
+
+Most Instrument, Effect and Scene parameters store \textbf{two values}:
+a Normal value and a Morph value. A \textbf{Morph amount} (0 to 255)
+blends between them. There is a Morph amount per voice, one for the
+Effect, and a \textbf{global Morph} (\texttt{mrp}) that sets all of them
+at once. Morph is the main tool for evolving sounds live. See
+\emph{Morph} in the Operation Modes chapter.
+
+\subsection{Edit mask}\label{edit-mask}
+
+Edits fan out to every Scene in the \textbf{voice edit mask}, so several
+Scenes with the same structure can be edited together. Pattern data is
+never fanned out.
+
+\subsection{Automatic saving}\label{automatic-saving}
+
+Edits are written to the SD card automatically in the background
+(\textbf{AutoSave}). You do not have to press Save to keep your work in
+the current Bank; Save is for creating named library files. See the
+Storage chapter.
+
+\draftnote{The terms ``Kit'' and ``Instrument'' follow the firmware. The names of the Load/Save
+types and the exact way the voice edit mask is chosen from the panel need confirming on the
+device.}

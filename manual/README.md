@@ -1,6 +1,6 @@
-# LXR Owners Manual — Source
+# Helicase LXR Owner's Manual (DRAFT) — Source
 
-This directory contains the source files for the LXR Owners Manual, structured for
+This directory contains the source files for the Helicase LXR Owner's Manual, structured for
 version-control-friendly editing and reproducible PDF generation.
 
 ## Directory Structure
@@ -10,16 +10,10 @@ manual/
 ├── build_manual.py       # Build script — entry point for all operations
 ├── requirements.txt      # Python dependencies
 ├── chapters/             # Editable Markdown source for each chapter
-│   ├── 01_overview.md
-│   ├── 02_quickstart.md
-│   ├── 03_voices.md
-│   ├── 04_sequencer.md
-│   ├── 05_operation_modes.md
-│   ├── 06_synth_modules.md
-│   ├── 07_midi.md
-│   ├── 08_firmware_update.md
-│   ├── 09_drum_synthesis_intro.md
-│   ├── 10_specifications.md
+│   ├── 01_overview.md  ... 13_specifications.md
+│   │   (overview, quickstart, concepts, instruments, sequencer, operation modes,
+│   │    synth modules, mixer and effects, MIDI, storage, firmware update,
+│   │    drum synthesis intro, specifications)
 │   └── 99_appendix.md
 ├── latex/
 │   ├── main.tex          # Master document — assembles chapters
@@ -41,8 +35,27 @@ manual/
 │   ├── panel_diagram_template.svg
 │   └── substep_diagram_template.svg
 └── build/                # Generated output (git-ignored)
-    └── LXR_Owners_Manual.pdf
+    └── Helicase_LXR_Owners_Manual.pdf
 ```
+
+## Draft workflow
+
+This is a draft. Three commands in `latex/preamble.tex` mark unfinished material:
+
+| Command | Effect |
+|---|---|
+| `\figplaceholder{file.png}{Caption}{What it should show}` | Uses `images/file.png` if it exists, otherwise draws a grey "FIGURE TO COME" box with the description |
+| `\verify{text}` | Inline red note: a fact to confirm on the device before release |
+| `\draftnote{text}` | Boxed note for a block of unconfirmed content |
+
+```bash
+python build_manual.py --figures     # writes FIGURES_TODO.md (every placeholder)
+python build_manual.py --questions   # writes DRAFT_QUESTIONS.md (every VERIFY / DRAFT NOTE)
+```
+
+To supply a figure, save it in `images/` under the listed file name and rebuild. Use the SVG
+files in `image_templates/` as starting points. Underscores in the second and third arguments
+of `\figplaceholder` must be written `\_`.
 
 ## Prerequisites
 
@@ -62,11 +75,11 @@ pip install -r requirements.txt
 ## Building the Manual
 
 ```bash
-# Full build — produces build/LXR_Owners_Manual.pdf
+# Full build — produces build/Helicase_LXR_Owners_Manual.pdf
 python build_manual.py
 
 # Convert a single chapter to LaTeX (for quick iteration, no PDF generated)
-python build_manual.py --chapter 06
+python build_manual.py --chapter 09
 
 # Watch mode — rebuilds automatically on any .md or .tex change
 python build_manual.py --watch
@@ -97,11 +110,11 @@ Markdown using fenced blocks or inline `\command{}` syntax. Rebuild to regenerat
 
 ### Updating MIDI tables
 
-Edit `latex/midi_tables.tex` directly — it is plain LaTeX and not generated from Markdown.
+Edit `latex/midi_tables.tex` directly (it is `\input` from `chapters/09_midi.md`) — it is plain LaTeX and not generated from Markdown.
 Each row follows the pattern:
 
 ```latex
-<CC or NRPN number> & <Function description> & <Voice number or ---> \\
+<NRPN ID> & <Target> & <Works on> \\
 ```
 
 ### Replacing or adding images

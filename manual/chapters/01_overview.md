@@ -1,131 +1,165 @@
 # Overview
 
-In this first chapter we will focus on the physical appearance of the LXR, describing the front
-panel controls as well as the connection jacks on the back. The basic menu navigation is also
-explained.
+Helicase LXR is a drum machine and synthesizer built on the LXR-02 hardware. It has six
+instrument voices (seven sequencer tracks), sixteen Scenes that each carry their own pattern,
+sounds and effect, a stereo effects bus, a bus compressor, and an SD card for storing everything.
+
+This chapter describes the physical controls, the connections on the back, and the basic rules of
+menu navigation.
+
+\draftnote{This draft was assembled from the project's engineering documents, not from the
+finished front panel. Control names follow the firmware's own terms. Check every control
+description in this chapter against the real panel and fix the numbered callouts once the
+panel figure exists.}
 
 ## The Front
 
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\linewidth]{front_panel.png}
-  \caption{LXR front panel with numbered control regions.}
-\end{figure}
+\figplaceholder{front_panel.png}{Helicase LXR front panel with numbered control regions.}{Top-down photo or clean vector of the front panel. Number the regions 1 to 11 in the order used in this chapter: display, four knobs, play and record, shift, copy/clear, 16 step buttons, encoder, 8 select buttons, 4 mode buttons, 7 voice buttons, six sliders, BAR buttons. Orange numbered callouts as in image\_templates/panel\_diagram\_template.svg.}
 
 ### 1) Display
 
-The display shows parameter values from the selected menu page.
+A 16-character by 2-line OLED. The top line shows parameter names and the bottom line shows their
+values. Most pages show four parameters at a time as three-character cells (see
+*Menu Navigation* below).
 
 ### 2) Knobs
 
-The 4 knobs edit the values shown in the display. A parameter fetch option — which prevents
-value jumps when switching menu pages — can be activated in the settings menu.
+The four endless knobs edit the four parameters shown on the display. Because they are endless
+(they have no end stops) the knob never jumps to a position: it changes the stored value from
+wherever it was. Turning a knob quickly moves the value faster. For Morph amounts the knobs run
+at double angular speed.
 
-### 3) Record/Play Buttons
+### 3) Play and Record buttons
 
-**The Play button** starts and stops playback. The current pattern is reset to the first step when
-the sequencer is stopped. \[Alternative SHIFT function: reset last sound parameters loaded from file.\]
+**Play** starts and stops the sequencer.
 
-**The Record button** activates the recording function. When the LED is lit, all incoming MIDI
-notes are recorded into the active pattern. Knob movements are also recorded to the selected
-automation track. \[Alternative SHIFT function: record settings.\]
+**Record** controls live recording: tap it to switch recording on (LATCH), hold it for more than
+300 ms to overdub while the button is held. See the Live Recording section of the Operation Modes
+chapter. **SHIFT + Record** opens the record settings menu.
 
-### 4) Shift Button
+### 4) Shift button
 
-Activates an alternate function set for the buttons. Hold SHIFT while pressing another button to activate the alternative function. A global setting can change the SHIFT button to work as a toggle instead, in which case the led indicates whether SHIFT is active or not.  
+Hold SHIFT while pressing another button to reach its alternative function. Several menus
+(the record settings and the chain editor) are *latched*: they stay open after you release
+SHIFT and close with the next SHIFT or MODE press.
 
-### 4) Copy/Clear Button
+\verify{The hardware map lists one button, SW43, as ``SHIFT/BAR1''. Confirm whether SHIFT and the BAR buttons are separate keys on the panel.}
 
-Used to copy and \[clear (alternative SHIFT function)\] sequencer data.
+### 5) Copy/Clear button
 
-### 5) 16 Sequencer Buttons
+Used to copy, paste and clear sequencer data and Scene data. **SHIFT + Copy/Clear** enters the
+clear function. See *Copy and Clear* in the Sequencer chapter.
 
-Function depends on the active mode:
-
-- **Voice mode:** set/reset the 16 main steps in the sequencer.
-- **Performance mode:** buttons 1–7 trigger manual rolls. Buttons 9–16 control the looper.
-- **Step Edit mode:** select one of the 16 main steps for editing.
-- **Menu mode:** no function.
-
-### 6) Encoder
-
-Used to navigate through the menu. Press the encoder to activate a selected option or enter a single-parameter view.
-\[Hold shift while in single-parameter view to view and edit the **morph** parameter where applicable.\]  
-
-### 7) 8 Select Buttons
+### 6) 16 Sequencer buttons (SEQ)
 
 Function depends on the active mode:
 
-- **Voice Edit mode:** select the synth section to edit (Oscillators, Mix, Envelopes, etc.)
-- **Performance mode:** change the playing pattern.
-- **Step Edit mode:** select/edit sub steps.
-- **Menu/Pattern generator mode:** no function.
+- **Voice mode:** set and clear the 16 steps of the visible bar of the selected track.
+- **Step mode:** select a step for editing.
+- **Performance mode:** select a Scene (with SHIFT: queue a Scene change).
+- **Effect page:** edit the 16 steps of the Effect's own sequence.
 
-### 8) 4 Mode Buttons
+### 7) Encoder
 
-Switch between the 4 operating modes. Modes shown in brackets are selected using the shift
-button.
+The main encoder navigates the menu. Turn it to move between parameters and pages; push it to
+open the full-size view of a parameter, or to confirm in Load/Save. Hold SHIFT in a single
+parameter view to edit its **Morph** value.
 
-- Button 1 — Voice edit mode
-- Button 2 — Performance mode \[Pattern generator mode\]
-- Button 3 — Step Edit mode
-- Button 4 — Load/Save \[Settings menu\]
+### 8) 8 Select buttons
 
-### 9) 7 Voice Buttons
+Function depends on the active mode:
 
-The voice buttons select the active track to edit. Together with the shift key they mute/unmute
-the voices. They behave the same in all operation modes except performance mode — see the
-performance mode chapter for details.
+- **Voice mode:** choose the synthesis page (oscillator, envelope, filter, and so on).
+- **Step mode:** show and edit the eight sub steps of the selected step.
+- **Performance mode:** act as the looper divisions while held.
+- **Effect page:** choose the effect page; on CrumpBit they are also the eight bit buttons.
+
+### 9) 4 Mode buttons
+
+Switch between operating modes. The alternative function is reached with SHIFT.
+
+- Button 1 --- Voice mode \[SHIFT: Voice Morph view\]
+- Button 2 --- Performance mode \[SHIFT: Effect page\]
+- Button 3 --- Step mode \[SHIFT: pattern generator (SOM)\]
+- Button 4 --- Load/Save \[SHIFT: settings menu\]
+
+\verify{Mode button numbering, the Load/Save versus Settings assignment, and the generator entry are taken from the firmware's mode table; confirm against the panel legends.}
+
+### 10) 7 Voice buttons
+
+Select the active voice and track. Press SHIFT with a voice button to mute or unmute the track.
+In Performance mode the function is inverted (see the Sequencer chapter). Tracks 6 and 7 both
+play the hi-hat voice (closed and open).
+
+### 11) 6 Sliders
+
+One slider per voice. The slider scales the voice's level according to the voice's *fader mode*
+(see the Mixer and Effects chapter): it can control the dry level, the effect send, both, or
+crossfade between them.
+
+### 12) BAR buttons
+
+BAR 1 and BAR 2 are the two performance triggers. In Performance mode they switch the
+`<` and `>` trigger overlays; while the looper is running they apply a triplet or dotted
+modifier to the loop length.
 
 ## The Back
 
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=0.85\linewidth]{back_panel.jpeg}
-  \caption{LXR rear panel connections.}
-\end{figure}
+\figplaceholder{back_panel.png}{Helicase LXR rear panel connections.}{Rear panel photo or vector with each jack labelled: MAIN L and R, OUT2 L and R, MIDI IN and OUT, USB, CLK IN, RST IN, CLK OUT, SD card slot, DC power. Mark which jacks belong to St1 and St2.}
 
-### USB
+### Audio outputs
 
-The synthesizer provides a class-compliant USB MIDI interface.
+Four 6.3 mm line-level mono outputs, used as two stereo pairs:
 
-### Memory
+- **St1** (MAIN L/R, also the headphone output).
+- **St2** (OUT2 L/R).
 
-Insert an SD card to load and save preset and pattern data. The card must be inserted with the
-label facing downward.
+Each voice and the effect return can be routed to St1, St2, or to a single jack. If a jack is not
+plugged in, the firmware moves the signal to a jack that is (see the Mixer and Effects chapter).
 
-\attention{The SD card must use a FAT32 filesystem for reliable operation. The synth will work
-with FAT16 cards too, but \textbf{firmware updates are only possible from FAT32 cards}.}
-
-### 4 Audio Outputs
-
-4 mono audio outputs at line level. Can also be used as 2 stereo output pairs.
+\verify{Confirm the physical jack types and the headphone socket location.}
 
 ### MIDI
 
-MIDI in and output via standard DIN connectors.
+Standard 5-pin DIN MIDI input and output, plus a class-compliant USB MIDI port. Both carry the
+same data. See the MIDI chapter.
 
-### Power Connector
+### Clock and reset jacks
 
-**7–9V DC** power plug, **centre pin positive, at least 600 mA**.
+- **CLK IN:** an external clock pulse, rising edge.
+- **RST IN:** a reset pulse, rising edge.
+- **CLK OUT:** the LXR's own clock when it is the master.
+
+Clock and reset sources should idle low and trigger on the low-to-high transition.
+
+### SD card slot
+
+Insert an SD card to load and save Banks, Scenes, Kits, Instruments, Patterns and samples, and
+to update the firmware. The card must be formatted **FAT32**. See the Storage chapter.
+
+### Power
+
+\verify{Power input voltage and polarity for the LXR-02 board are not in the project documents. The original LXR specified 7--9 V DC, centre pin positive, at least 600 mA.}
 
 ## Menu Navigation
 
-The upper row of the display shows the short name of the parameter. The bottom row shows its
-current value. Use one of the 4 knobs to change it.
+The upper row of the display shows the three-character short name of each parameter and the
+lower row shows its value.
 
-\oled{frq \quad Res \quad typ \quad drv >}{32 \quad\; 120 \quad LP \quad\;\; 0}
+\oled{frq \quad res \quad typ \quad drv}{ 64 \quad\; 0 \quad LP \quad\;\; 0}
 
-- The encoder selects a menu parameter. A capital letter at the beginning of the name
-  indicates the selected parameter. In the example above, `Res` is selected.
-- If there are more than 4 entries in the current menu, a `>` or `<` sign in the upper-right
-  corner indicates a second page. The two pages toggle by pressing the menu button again.
+- Turn the **encoder** to move the cursor between cells and between pages. A cue character in the
+  last column (`>`, `<`, `^` or `+`) shows that more cells or pages follow.
+- Turn a **knob** to change the value of the cell above it.
+- **Push the encoder** to open the single-parameter view. It shows the full name and the value in
+  a larger form, which is useful for fine adjustment.
 
-Pushing the encoder opens the detail page:
+\oled{\textbf{Filter}}{Resonance \hfill 0}
 
-\oled{\textbf{Filter}}{Resonance \hfill 120}
+- Hold **SHIFT** in the single-parameter view to see and edit the **Morph** value of the
+  parameter. A parameter that cannot be morphed shows its normal value instead.
+- Parameters that have step automation on the visible track or pattern have their name
+  **underlined**. The underline reports stored automation, whether or not it would sound.
+- Some value cells show `LRN` while MIDI Learn is waiting for a CC (see the MIDI chapter).
 
-On the detail page you can see the full parameter name and change its value with the encoder.
-This is useful for fine adjustments where the knob control is too coarse. When viewing a drumkit
-parameter in VOICE mode, hold SHIFT in this mode to view and edit the corresponding **morph**
-parameter. Push the encoder again to return to the normal menu mode.
+\figplaceholder{menu_navigation.png}{Reading the display.}{Annotated close-up of the OLED showing the compact four-cell view, an underlined parameter name, a scroll cue in the last column, and the single-parameter full view below it.}

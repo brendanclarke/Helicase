@@ -90,5 +90,9 @@ void voiceControl_noteOff(uint8_t voice);//0xff == all voices
 ** TIM3 sequencer owner. */
 void voiceControl_processPending(void);
 uint8_t voiceControl_isVoicePlaying(uint8_t voice);
+/* Chromatic keyboard note watch (S102 P1): sets the watched track (0xFF
+** none) and returns the internal note + 1 of the latest trigger enqueued for
+** the previously watched track since the last call (0 = none). Foreground. */
+uint8_t voiceControl_noteWatch(uint8_t track);
 
 #endif /* MIDIVOICECONTROL_H_ */

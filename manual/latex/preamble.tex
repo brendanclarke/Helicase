@@ -1,11 +1,11 @@
 % ============================================================
-%  LXR Owners Manual — Preamble
+%  Helicase LXR Owner's Manual — Preamble
 %  Packages, colours, custom commands, page geometry & style.
 %  Edit \manualversion below when releasing a new version.
 % ============================================================
 
 % ----- Version string (update per release) -----
-\newcommand{\manualversion}{Catalyst Edition v1.0 (based on LXR firmware v0.37)}
+\newcommand{\manualversion}{DRAFT 0.1 --- documents the firmware as of Session 094 (2026-11-13)}
 
 % ----- Page geometry -----
 \usepackage[
@@ -41,7 +41,7 @@
 \providecommand{\tightlist}{%
   \setlength{\itemsep}{2pt}\setlength{\parskip}{0pt}}
 \usepackage{caption}
-\usepackage[scaled=0.85]{beramono}  % Monospace font for OLED displays
+\IfFileExists{beramono.sty}{\usepackage[scaled=0.85]{beramono}}{\renewcommand{\ttdefault}{cmtt}}  % Monospace font for OLED displays
 \usepackage[hidelinks, colorlinks=true, linkcolor=lxrblue,
             urlcolor=lxrblue, citecolor=lxrblue]{hyperref}
 \usepackage{xurl}             % Allow URLs to break at any character, not just /
@@ -72,7 +72,7 @@
 % ----- Header / footer -----
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\small\textcolor{lxrgrey}{LXR Owners Manual}}
+\fancyhead[L]{\small\textcolor{lxrgrey}{Helicase LXR Owner's Manual --- DRAFT}}
 \fancyhead[R]{\small\textcolor{lxrgrey}{\leftmark}}
 \fancyfoot[C]{\small\textcolor{lxrgrey}{\thepage}}
 \renewcommand{\headrulewidth}{0.4pt}
@@ -176,13 +176,13 @@
 
 % MIDI table environment — used in midi_tables.tex (longtable, paginates)
 \newenvironment{miditableCC}{%
-  \begin{longtable}{c  l  c}
+  \begin{longtable}{>{\raggedright\arraybackslash}p{4.2cm} >{\raggedright\arraybackslash}p{8.6cm} c}
   \toprule
-  \textbf{CC} & \textbf{Function} & \textbf{Voice} \\
+  \textbf{Parameter} & \textbf{Values} & \\
   \midrule
   \endfirsthead
   \toprule
-  \textbf{CC} & \textbf{Function} & \textbf{Voice} \\
+  \textbf{Parameter} & \textbf{Values} & \\
   \midrule
   \endhead
   \bottomrule
@@ -192,13 +192,13 @@
 }
 
 \newenvironment{miditableNRPN}{%
-  \begin{longtable}{c  l  c}
+  \begin{longtable}{>{\raggedright\arraybackslash}p{2.2cm} >{\raggedright\arraybackslash}p{9cm} >{\raggedright\arraybackslash}p{3.3cm}}
   \toprule
-  \textbf{NRPN Nr.} & \textbf{Function} & \textbf{Voice} \\
+  \textbf{NRPN ID} & \textbf{Target} & \textbf{Works on} \\
   \midrule
   \endfirsthead
   \toprule
-  \textbf{NRPN Nr.} & \textbf{Function} & \textbf{Voice} \\
+  \textbf{NRPN ID} & \textbf{Target} & \textbf{Works on} \\
   \midrule
   \endhead
   \bottomrule
@@ -231,6 +231,57 @@
 % Horizontal rule for section breaks
 \newcommand{\sectionrule}{%
   \vspace{4pt}\noindent\textcolor{lxrorange}{\rule{\linewidth}{0.6pt}}\vspace{4pt}%
+}
+
+
+% ============================================================
+%  DRAFT-MANUAL COMMANDS (added for the Helicase LXR draft)
+% ============================================================
+\definecolor{figbg}{RGB}{245,245,245}
+\definecolor{verifybg}{RGB}{255,243,160}
+\definecolor{verifyfg}{RGB}{150,40,0}
+
+% Figure placeholder.
+%   \figplaceholder{file_name.png}{Caption}{What the figure must show}
+% If images/<file_name> exists the real figure is used; otherwise a
+% labelled grey box is drawn.  Keep the three arguments free of braces
+% and of the characters  % & # _  (use plain words in the description).
+\newcommand{\figplaceholder}[3]{%
+  \IfFileExists{../images/#1}{%
+    \begin{figure}[H]
+      \centering
+      \includegraphics[width=0.9\linewidth]{#1}
+      \caption{#2}
+    \end{figure}%
+  }{%
+    \begin{figure}[H]
+      \centering
+      \fcolorbox{lxrorange}{figbg}{%
+        \parbox{0.92\linewidth}{%
+          \small\raggedright
+          \textbf{\textcolor{lxrorange}{FIGURE TO COME}}\quad
+          \texttt{\detokenize{#1}}\\[3pt]
+          \textit{What it should show:} #3}%
+      }
+      \caption{#2}
+    \end{figure}%
+  }%
+}
+
+% Inline note for facts that must be checked against the device or the
+% project owner before release.  Collected into DRAFT_QUESTIONS.md by
+% build_manual.py --questions.
+\newcommand{\verify}[1]{%
+  \textcolor{verifyfg}{\textbf{[VERIFY:} \textit{#1}\textbf{]}}%
+}
+
+% Block-level draft note (whole paragraph).
+\newcommand{\draftnote}[1]{%
+  \begin{mdframed}[backgroundcolor=verifybg, linecolor=verifyfg, linewidth=1pt,
+                   innerleftmargin=8pt, innerrightmargin=8pt,
+                   skipabove=8pt, skipbelow=8pt]
+  \small\textbf{\textcolor{verifyfg}{DRAFT NOTE.}} #1
+  \end{mdframed}%
 }
 
 % Fix for pandoc generating \def\LTcaptype{none} for longtables without caption

@@ -69,7 +69,26 @@ void dout_init(void);
 /* Pulse the LATCH line — called from TIM6 ISR only. */
 void dout_latch(void);
 
-/* Set/clear the SW43 LED (PB8 GPIO, separate from shift register chain). */
+/* Set/clear the SW43 LED (PB8 GPIO, separate from shift register chain).
+** Ignored while the SW43 LED is owned (dout_setSw43Owned()). */
 void dout_setSw43Led(uint8_t on);
+
+/*
+ * Owned-LED composite (S102 P1, the chromatic keyboard overlay).
+ *
+ * What: dout_ownedMask[] marks chain bits whose physical output is taken
+ * from dout_ownedData[] instead of dout_outputData[]; din_dout_exchange()
+ * sends (outputData & ~ownedMask) | ownedData. dout_setSw43Owned() does the
+ * same for the SW43 (BAR1) GPIO LED: 0 = ledHandler drives it, 1 = held
+ * off, 2 = held on. Why: the overlay owns the SEQ and BAR LEDs in every mode
+ * while every mode keeps painting its own state underneath, so leaving the
+ * overlay shows the mode's current display with no repaint. Writer:
+ * ledHandler.c led_ownedShow() / led_ownedRelease() only (main loop, the
+ * same owner as the SPI exchange). All zero = no composite.
+ * RAM: 11 B SRAM1 (S102 P1).
+ */
+extern uint8_t dout_ownedMask[NUM_OUTS / 8];
+extern uint8_t dout_ownedData[NUM_OUTS / 8];
+void dout_setSw43Owned(uint8_t mode);
 
 #endif /* DOUT_H_ */

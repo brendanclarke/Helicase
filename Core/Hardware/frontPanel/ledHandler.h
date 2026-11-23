@@ -155,6 +155,22 @@ uint8_t led_getFastBlinkSlot(uint8_t slot);
 /* S080 P2: 1 when ledNr holds a persistent blink slot. */
 uint8_t led_isBlinkLed(uint8_t ledNr);
 
+/*
+ * Owned SEQ/BAR display (S102 P1, the chromatic keyboard overlay).
+ *
+ * What: led_ownedShow() makes STEP1..16 show seqBits (bit n = SEQ n+1),
+ * BAR1 (`<`) show bar1 and BAR2 (`>`) show bar2, over everything this file
+ * paints (base, chase, blink, flash, pulse, fast blink). Every other writer
+ * keeps working on the state underneath; led_ownedRelease() reveals it as
+ * it is now. Why: the overlay applies in every mode and must leave each
+ * mode's SEQ/BAR display intact for its exit. Inputs: the 16-bit key
+ * picture and two booleans. Outputs: dout_ownedMask/Data and the SW43 owner
+ * (dout.h). Context: main loop. Accessor: buttonHandler.c
+ * buttonHandler_chromaPaint() / buttonHandler_chromaExit().
+ */
+void led_ownedShow(uint16_t seqBits, uint8_t bar1, uint8_t bar2);
+void led_ownedRelease(void);
+
 /* High-level voice/mode LED control — matches original API */
 /*
  * High-level voice/mode/page LED API.

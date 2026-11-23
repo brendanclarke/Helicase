@@ -1,0 +1,1639 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   viewBox="0 0 1280 720"
+   width="1280"
+   height="720"
+   version="1.1"
+   id="svg135"
+   sodipodi:docname="LXR02_panel_template 2.svg"
+   inkscape:version="1.4.4 (dcaf3e7, 2026-05-05)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns:c2pa="http://c2pa.org/manifest">
+  <sodipodi:namedview
+     id="namedview135"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="1.0003036"
+     inkscape:cx="596.31894"
+     inkscape:cy="502.84732"
+     inkscape:window-width="1710"
+     inkscape:window-height="915"
+     inkscape:window-x="0"
+     inkscape:window-y="39"
+     inkscape:window-maximized="0"
+     inkscape:current-layer="chassis"
+     showguides="false" />
+  <title
+     id="title1">LXR-02 front panel template</title>
+  <!--
+ HOW TO USE
+ - Slider caps: each is a <g id="slider-N-cap"> with transform="translate(x,y)". Change ONLY y (range ~230 top .. ~365 bottom) to move it.
+ - Buttons: every button is a <use> whose xlink:href is one of
+     #btn-small-off  #btn-small-on     (round buttons)
+     #btn-big-off    #btn-big-on  #btn-big-on-sel  #btn-big-off-sel   (square LED buttons; -sel = white frame "selected")
+   Change the href to switch state.
+ - Screen: edit text in #screen-line1 / #screen-line2 (keep them padded to 16 characters).
+ - Fonts: edit the two CSS classes in <style> (.screen and .silk). Install the fonts on your system, or convert text to outlines before sending to print.
+-->
+  <defs
+     id="defs25">
+    <style
+       id="style1">
+  /* Silkscreen font: wide geometric sans. First installed font wins. */
+  .silk{font-family:'Michroma','Orbitron','Eurostile','Microgramma D Extended','Century Gothic','Verdana',sans-serif;fill:#d9d9d9;letter-spacing:.6px;text-anchor:middle}
+  .silk-inv{fill:#111111}
+  /* Screen font: red 16x2 dot-matrix look. First installed font wins. */
+  .screen{font-family:'DotMatrix','Dot Matrix','5x7 Dot Matrix','VT323','Share Tech Mono','Courier New',monospace;fill:#ff3b2a;font-size:29px;font-weight:bold}
+</style>
+    <filter
+       id="ledglow"
+       x="-0.35294118"
+       y="-0.35294118"
+       width="1.7058824"
+       height="1.7058824">
+      <feGaussianBlur
+         stdDeviation="5"
+         id="feGaussianBlur1" />
+    </filter>
+    <radialGradient
+       id="gOn"
+       cx=".45"
+       cy=".4"
+       r=".65">
+      <stop
+         offset="0"
+         stop-color="#ff8a5c"
+         id="stop1" />
+      <stop
+         offset=".55"
+         stop-color="#f2411f"
+         id="stop2" />
+      <stop
+         offset="1"
+         stop-color="#c92a10"
+         id="stop3" />
+    </radialGradient>
+    <radialGradient
+       id="gOff"
+       cx=".45"
+       cy=".4"
+       r=".7">
+      <stop
+         offset="0"
+         stop-color="#5d5d5d"
+         id="stop4" />
+      <stop
+         offset="1"
+         stop-color="#2e2e2e"
+         id="stop5" />
+    </radialGradient>
+    <radialGradient
+       id="gSmall"
+       cx=".4"
+       cy=".35"
+       r=".8">
+      <stop
+         offset="0"
+         stop-color="#8a8a8a"
+         id="stop6" />
+      <stop
+         offset="1"
+         stop-color="#4a4a4a"
+         id="stop7" />
+    </radialGradient>
+    <radialGradient
+       id="gKnob"
+       cx=".4"
+       cy=".35"
+       r=".8">
+      <stop
+         offset="0"
+         stop-color="#dcdcdc"
+         id="stop8" />
+      <stop
+         offset="1"
+         stop-color="#8e8e8e"
+         id="stop9" />
+    </radialGradient>
+    <radialGradient
+       id="gData"
+       cx=".4"
+       cy=".3"
+       r=".9">
+      <stop
+         offset="0"
+         stop-color="#3a3a3a"
+         id="stop10" />
+      <stop
+         offset="1"
+         stop-color="#050505"
+         id="stop11" />
+    </radialGradient>
+    <linearGradient
+       id="gCap"
+       x1="0"
+       x2="1">
+      <stop
+         offset="0"
+         stop-color="#1c1c1c"
+         id="stop12" />
+      <stop
+         offset=".5"
+         stop-color="#3a3a3a"
+         id="stop13" />
+      <stop
+         offset="1"
+         stop-color="#1c1c1c"
+         id="stop14" />
+    </linearGradient>
+    <!-- ===== BUTTONS (origin = centre) ===== -->
+    <g
+       id="btn-small-off">
+      <circle
+         r="15"
+         fill="#0b0b0b"
+         stroke="#333"
+         id="circle14" />
+      <circle
+         r="12.5"
+         fill="url(#gSmall)"
+         id="circle15" />
+    </g>
+    <g
+       id="btn-small-on">
+      <circle
+         r="17"
+         fill="#ff4a1f"
+         opacity=".55"
+         filter="url(#ledglow)"
+         id="circle16" />
+      <circle
+         r="15"
+         fill="#0b0b0b"
+         stroke="#333"
+         id="circle17" />
+      <circle
+         r="12.5"
+         fill="url(#gOn)"
+         id="circle18" />
+    </g>
+    <g
+       id="btn-big-off">
+      <rect
+         x="-26"
+         y="-23"
+         width="52"
+         height="46"
+         rx="4"
+         fill="#0e0e0e"
+         stroke="#4a4a4a"
+         id="rect18" />
+      <circle
+         r="20"
+         fill="url(#gOff)"
+         stroke="#1a1a1a"
+         id="circle19" />
+    </g>
+    <g
+       id="btn-big-on">
+      <circle
+         r="26"
+         fill="#ff4a1f"
+         opacity=".5"
+         filter="url(#ledglow)"
+         id="circle20" />
+      <rect
+         x="-26"
+         y="-23"
+         width="52"
+         height="46"
+         rx="4"
+         fill="#0e0e0e"
+         stroke="#4a4a4a"
+         id="rect20" />
+      <circle
+         r="20"
+         fill="url(#gOn)"
+         stroke="#7a1608"
+         id="circle21" />
+    </g>
+    <g
+       id="btn-big-off-sel">
+      <rect
+         x="-26"
+         y="-23"
+         width="52"
+         height="46"
+         rx="4"
+         fill="#ececec"
+         stroke="#fff"
+         id="rect21" />
+      <circle
+         r="20"
+         fill="url(#gOff)"
+         stroke="#1a1a1a"
+         id="circle22" />
+    </g>
+    <g
+       id="btn-big-on-sel">
+      <circle
+         r="26"
+         fill="#ff4a1f"
+         opacity=".5"
+         filter="url(#ledglow)"
+         id="circle23" />
+      <rect
+         x="-26"
+         y="-23"
+         width="52"
+         height="46"
+         rx="4"
+         fill="#ececec"
+         stroke="#fff"
+         id="rect23" />
+      <circle
+         r="20"
+         fill="url(#gOn)"
+         stroke="#7a1608"
+         id="circle24" />
+    </g>
+    <!-- ===== SLIDER CAP (origin = centre of the white stripe) ===== -->
+    <g
+       id="slider-cap">
+      <rect
+         x="-14"
+         y="-14"
+         width="28"
+         height="36"
+         rx="2.5"
+         fill="url(#gCap)"
+         stroke="#000"
+         id="rect24" />
+      <rect
+         x="-14"
+         y="-3"
+         width="28"
+         height="5"
+         fill="#e4e4e4"
+         id="rect25" />
+    </g>
+    <polygon
+       id="arrow-up"
+       points="0,-4 3.5,2 -3.5,2"
+       fill="#d9d9d9" />
+    <polygon
+       id="arrow-dn"
+       points="0,4 3.5,-2 -3.5,-2"
+       fill="#d9d9d9" />
+  </defs>
+  <g
+     id="background"
+     inkscape:groupmode="layer"
+     inkscape:label="background"
+     style="display:none">
+    <rect
+       width="1280"
+       height="720"
+       fill="#3b3b3d"
+       id="rect26" />
+  </g>
+  <g
+     id="chassis"
+     inkscape:groupmode="layer"
+     inkscape:label="chassis">
+    <rect
+       x="171.6171"
+       y="94.538567"
+       width="955"
+       height="550"
+       rx="9"
+       fill="#141414"
+       stroke="#2b2b2b"
+       stroke-width="2"
+       id="rect27" />
+    <rect
+       x="175"
+       y="94"
+       width="931"
+       height="6"
+       fill="#1d1d1d"
+       id="rect28" />
+  </g>
+  <g
+     id="silk-static"
+     inkscape:groupmode="layer"
+     inkscape:label="silkscreen-static">
+    <text
+       class="silk"
+       x="213"
+       y="133"
+       font-size="8"
+       id="text28">12V DC</text>
+    <use
+       xlink:href="#arrow-dn"
+       x="213"
+       y="120"
+       id="use28" />
+    <text
+       class="silk"
+       x="288"
+       y="133"
+       font-size="8"
+       id="text29">OFF / ON</text>
+    <text
+       class="silk"
+       x="351"
+       y="133"
+       font-size="8"
+       id="text30">CLK IN</text>
+    <use
+       xlink:href="#arrow-dn"
+       x="351"
+       y="120"
+       id="use30" />
+    <text
+       class="silk"
+       x="396"
+       y="133"
+       font-size="8"
+       id="text31">CLK OUT</text>
+    <use
+       xlink:href="#arrow-up"
+       x="396"
+       y="120"
+       id="use31" />
+    <text
+       class="silk"
+       x="442"
+       y="133"
+       font-size="8"
+       id="text32">RST IN</text>
+    <use
+       xlink:href="#arrow-dn"
+       x="442"
+       y="120"
+       id="use32" />
+    <text
+       class="silk"
+       x="497"
+       y="133"
+       font-size="8"
+       id="text33">SD CARD</text>
+    <use
+       xlink:href="#arrow-up"
+       x="497"
+       y="120"
+       id="use33" />
+    <text
+       class="silk"
+       x="549"
+       y="133"
+       font-size="8"
+       id="text34">USB</text>
+    <use
+       xlink:href="#arrow-up"
+       x="549"
+       y="120"
+       id="use34" />
+    <text
+       class="silk"
+       x="626"
+       y="133"
+       font-size="8"
+       id="text35">MIDI IN</text>
+    <use
+       xlink:href="#arrow-dn"
+       x="626"
+       y="120"
+       id="use35" />
+    <text
+       class="silk"
+       x="708"
+       y="133"
+       font-size="8"
+       id="text36">MIDI OUT</text>
+    <use
+       xlink:href="#arrow-up"
+       x="708"
+       y="120"
+       id="use36" />
+    <text
+       class="silk"
+       x="792"
+       y="133"
+       font-size="8"
+       id="text37">L</text>
+    <use
+       xlink:href="#arrow-up"
+       x="792"
+       y="120"
+       id="use37" />
+    <text
+       class="silk"
+       x="829"
+       y="133"
+       font-size="8"
+       id="text38">OUT 2</text>
+    <text
+       class="silk"
+       x="865"
+       y="133"
+       font-size="8"
+       id="text39">R</text>
+    <use
+       xlink:href="#arrow-up"
+       x="865"
+       y="120"
+       id="use39" />
+    <text
+       class="silk"
+       x="940"
+       y="133"
+       font-size="8"
+       id="text40">L</text>
+    <use
+       xlink:href="#arrow-up"
+       x="940"
+       y="120"
+       id="use40" />
+    <text
+       class="silk"
+       x="977.04065"
+       y="133.26929"
+       font-size="8px"
+       id="text41">MAIN OUT</text>
+    <text
+       class="silk"
+       x="1013"
+       y="133"
+       font-size="8"
+       id="text42">R</text>
+    <use
+       xlink:href="#arrow-up"
+       x="1013"
+       y="120"
+       id="use42" />
+    <text
+       class="silk"
+       x="1070"
+       y="133"
+       font-size="8"
+       id="text43">PHONES</text>
+    <use
+       xlink:href="#arrow-up"
+       x="1070"
+       y="120"
+       id="use43" />
+    <circle
+       cx="280"
+       cy="120"
+       r="2.5"
+       fill="#d9d9d9"
+       id="circle43" />
+    <rect
+       x="299"
+       y="116"
+       width="2"
+       height="8"
+       fill="#d9d9d9"
+       id="rect43" />
+    <text
+       class="silk"
+       x="612.18524"
+       y="347"
+       font-size="9px"
+       id="text46">DATA</text>
+    <text
+       class="silk"
+       x="724"
+       y="197.42172"
+       font-size="9px"
+       id="text49">V1</text>
+    <text
+       class="silk"
+       x="783"
+       y="197.42172"
+       font-size="9px"
+       id="text50">V2</text>
+    <text
+       class="silk"
+       x="840"
+       y="197.42172"
+       font-size="9px"
+       id="text51">V3</text>
+    <text
+       class="silk"
+       x="898"
+       y="197.42172"
+       font-size="9px"
+       id="text52">V4</text>
+    <text
+       class="silk"
+       x="956"
+       y="197.42172"
+       font-size="9px"
+       id="text53">V5</text>
+    <text
+       class="silk"
+       x="1014"
+       y="197.42172"
+       font-size="9px"
+       id="text54"><tspan
+         sodipodi:role="line"
+         x="1014.3"
+         y="197.42172"
+         id="tspan5">V6/CHOKE</tspan></text>
+    <text
+       class="silk"
+       x="1071"
+       y="197.42172"
+       font-size="9px"
+       id="text55">VOL</text>
+    <rect
+       x="180"
+       y="460"
+       width="225"
+       height="47"
+       rx="4"
+       fill="none"
+       stroke="#6a6a6a"
+       stroke-width="1.2"
+       id="rect55" />
+    <rect
+       style="fill:#141414;stroke:none;fill-opacity:1"
+       id="rect1"
+       width="216.4912"
+       height="15.574906"
+       x="185.34138"
+       y="497.61826" />
+    <rect
+       x="412"
+       y="460"
+       width="220"
+       height="47"
+       rx="4"
+       fill="none"
+       stroke="#6a6a6a"
+       stroke-width="1.2"
+       id="rect56" />
+    <rect
+       style="fill:#141414;fill-opacity:1;stroke:none;stroke-width:0.50159"
+       id="rect12"
+       width="62.440437"
+       height="13.586138"
+       x="577.90955"
+       y="451.69348" />
+    <rect
+       style="fill:#141414;fill-opacity:1;stroke:none;stroke-width:0.268341"
+       id="rect10"
+       width="14.532045"
+       height="16.707504"
+       x="407.13657"
+       y="499.82294" />
+    <rect
+       style="fill:#141414;fill-opacity:1;stroke:none;stroke-width:0.528619"
+       id="rect5"
+       width="14.532045"
+       height="64.836975"
+       x="625.81793"
+       y="451.69348" />
+    <rect
+       style="fill:#141414;fill-opacity:1;stroke:none;stroke-width:0.991291"
+       id="rect2"
+       width="212.73677"
+       height="15.574906"
+       x="415.61325"
+       y="500.95554" />
+    <rect
+       x="643"
+       y="460"
+       width="460"
+       height="47"
+       rx="4"
+       fill="none"
+       stroke="#6a6a6a"
+       stroke-width="1.2"
+       id="rect57" />
+    <rect
+       style="fill:#141414;fill-opacity:1;stroke:none;stroke-width:1.43721"
+       id="rect3"
+       width="447.18021"
+       height="15.574906"
+       x="649.63953"
+       y="499.2869" />
+    <g
+       id="g56"
+       transform="translate(0.97529032)">
+      <text
+         class="silk"
+         x="638.97327"
+         y="402.61328"
+         font-size="8.5px"
+         id="text64">BAR</text>
+      <polygon
+         points="601,447 607,444 607,450 "
+         fill="#d9d9d9"
+         id="polygon64"
+         transform="translate(15.930555,-47.12488)" />
+      <polygon
+         points="671,444 671,450 677,447 "
+         fill="#d9d9d9"
+         id="polygon65"
+         transform="translate(-16.733611,-47.12488)" />
+    </g>
+    <rect
+       x="190"
+       y="499.77875"
+       width="30"
+       height="12.5"
+       rx="1.5"
+       fill="#cfcfcf"
+       id="rect65" />
+    <text
+       class="silk silk-inv"
+       x="205"
+       y="509.77875"
+       font-size="8.5px"
+       id="text65">SHIFT</text>
+    <text
+       class="silk"
+       x="364.39688"
+       y="510.10754"
+       font-size="8.5px"
+       id="text68">COPY</text>
+    <rect
+       x="379"
+       y="499.77875"
+       width="22"
+       height="12.5"
+       rx="1.5"
+       fill="#cfcfcf"
+       id="rect68" />
+    <text
+       class="silk silk-inv"
+       x="390"
+       y="509.77875"
+       font-size="8.5px"
+       id="text69">CLR</text>
+    <text
+       class="silk"
+       x="425"
+       y="509.77875"
+       font-size="8.5px"
+       id="text70">VOICE</text>
+    <text
+       class="silk"
+       x="485.81406"
+       y="509.77875"
+       font-size="8.5px"
+       id="text71"
+       style="fill:#f95f2d;fill-opacity:1">PERF</text>
+    <text
+       class="silk"
+       x="541.52173"
+       y="509.77875"
+       font-size="8.5px"
+       id="text72">STEP</text>
+    <text
+       class="silk"
+       x="610"
+       y="463.5867"
+       font-size="8.5px"
+       id="text73"
+       style="fill:#cfcfcf;fill-opacity:1">LOAD/SAVE</text>
+    <text
+       class="silk"
+       x="668"
+       y="509.77875"
+       font-size="8.5px"
+       id="text74">OSC</text>
+    <text
+       class="silk"
+       x="727"
+       y="509.77875"
+       font-size="8.5px"
+       id="text75">AEG</text>
+    <text
+       class="silk"
+       x="784"
+       y="509.77875"
+       font-size="8.5px"
+       id="text76">MOD</text>
+    <text
+       class="silk"
+       x="842"
+       y="509.77875"
+       font-size="8.5px"
+       id="text77">FM</text>
+    <text
+       class="silk"
+       x="900"
+       y="509.77875"
+       font-size="8.5px"
+       id="text78">CLICK</text>
+    <text
+       class="silk"
+       x="958"
+       y="509.77875"
+       font-size="8.5px"
+       id="text79">FILTER</text>
+    <text
+       class="silk"
+       x="1017"
+       y="509.77875"
+       font-size="8.5px"
+       id="text80">LFO</text>
+    <text
+       class="silk"
+       x="1075"
+       y="509.77875"
+       font-size="8.5px"
+       id="text81">MIX</text>
+    <g
+       id="g9"
+       transform="translate(16.065621,45.607344)">
+      <rect
+         x="426.65384"
+         y="454.17142"
+         width="22"
+         height="12.5"
+         rx="1.5"
+         fill="#cfcfcf"
+         id="rect6" />
+      <text
+         class="silk silk-inv"
+         x="437.65384"
+         y="464.17142"
+         font-size="8.5px"
+         id="text6">MRP</text>
+    </g>
+    <g
+       id="g13">
+      <rect
+         x="500.67752"
+         y="499.77875"
+         width="14.983485"
+         height="12.5"
+         rx="1.0216013"
+         fill="#cfcfcf"
+         id="rect7"
+         style="stroke-width:0.825268;fill:#f95e2c;fill-opacity:1" />
+      <text
+         class="silk silk-inv"
+         x="508.16925"
+         y="509.77875"
+         font-size="8.5px"
+         id="text7">FX</text>
+    </g>
+    <g
+       id="g11"
+       transform="translate(15.19011,45.314989)">
+      <rect
+         x="541.2569"
+         y="454.17142"
+         width="22"
+         height="12.5"
+         rx="1.5"
+         fill="#cfcfcf"
+         id="rect8" />
+      <text
+         class="silk silk-inv"
+         x="552.2569"
+         y="464.17142"
+         font-size="8.5px"
+         id="text8">GEN</text>
+    </g>
+    <rect
+       x="584.81775"
+       y="499.77875"
+       width="49.48135"
+       height="12.5"
+       rx="3.3737283"
+       fill="#cfcfcf"
+       id="rect9"
+       style="stroke-width:1.49972;fill:#cfcece;fill-opacity:1" />
+    <text
+       class="silk silk-inv"
+       x="609.55841"
+       y="509.77875"
+       font-size="8.5px"
+       id="text9">SETTINGS</text>
+    <text
+       class="silk"
+       x="290.34244"
+       y="583.11646"
+       font-size="8.5px"
+       id="text12"
+       style="fill:#f95f2d;fill-opacity:1">SCENE</text>
+    <g
+       id="g16"
+       transform="translate(-64.407377,0.81185769)">
+      <rect
+         x="375.43784"
+         y="573.10718"
+         width="72.896004"
+         height="12.5"
+         rx="4.9701819"
+         fill="#cfcfcf"
+         id="rect13"
+         style="fill:#f95e2c;fill-opacity:1;stroke-width:1.82029" />
+      <text
+         class="silk silk-inv"
+         x="411.6152"
+         y="582.29535"
+         font-size="8.5px"
+         id="text13">QUEUE SCENE</text>
+    </g>
+    <text
+       class="silk"
+       x="194.17484"
+       y="583.10718"
+       font-size="8.5px"
+       id="text14">STEP</text>
+    <g
+       id="g15"
+       transform="translate(14.665688)">
+      <rect
+         x="195.31569"
+         y="573.10718"
+         width="55.157207"
+         height="12.5"
+         rx="3.7607188"
+         fill="#cfcfcf"
+         id="rect14"
+         style="stroke-width:1.58339" />
+      <text
+         class="silk silk-inv"
+         x="222.89429"
+         y="583.10718"
+         font-size="8.5px"
+         id="text15">STEP EDIT</text>
+    </g>
+    <rect
+       style="fill:#141414;fill-opacity:1;stroke:none;stroke-width:0.416804"
+       id="rect16"
+       width="37.610256"
+       height="15.574906"
+       x="854.0827"
+       y="453.27246" />
+    <text
+       class="silk"
+       x="872.77728"
+       y="462.7995"
+       font-size="8.5px"
+       id="text16"
+       style="fill:#f95e2c;fill-opacity:1">LOOP</text>
+    <text
+       class="silk"
+       x="632.2998"
+       y="431.42905"
+       font-size="8.59241px"
+       id="text16-3"
+       style="font-family:Michroma, Orbitron, Eurostile, 'Microgramma D Extended', 'Century Gothic', Verdana, sans-serif;letter-spacing:0.606523px;text-anchor:middle;fill:#f95e2c;fill-opacity:1;stroke-width:1.01087"
+       transform="scale(1.0108712,0.98924572)">TRIG</text>
+    <rect
+       x="694.685"
+       y="398.87933"
+       width="407.94232"
+       height="47.069111"
+       rx="3.5473244"
+       fill="none"
+       stroke="#6a6a6a"
+       stroke-width="1.13088"
+       id="rect17" />
+    <g
+       id="g22">
+      <rect
+         style="fill:#141414;fill-opacity:1;stroke:none;stroke-width:0.295498"
+         id="rect22"
+         width="30.783863"
+         height="9.5643034"
+         x="880.026"
+         y="394.09631" />
+      <text
+         class="silk"
+         x="896.26984"
+         y="401.61288"
+         font-size="8.5px"
+         id="text17"
+         style="fill:#f95e2c;fill-opacity:1">MUTE</text>
+    </g>
+    <rect
+       style="fill:#141414;fill-opacity:1;stroke:none;stroke-width:1.34908"
+       id="rect19"
+       width="394.01981"
+       height="15.574906"
+       x="702.79993"
+       y="438.02585" />
+    <text
+       class="silk"
+       x="723.74207"
+       y="449.37103"
+       font-size="8.5px"
+       id="text57">T1</text>
+    <text
+       class="silk"
+       x="780.74207"
+       y="449.37103"
+       font-size="8.5px"
+       id="text58">T2</text>
+    <text
+       class="silk"
+       x="838.74207"
+       y="449.37103"
+       font-size="8.5px"
+       id="text59">T3</text>
+    <text
+       class="silk"
+       x="896.74207"
+       y="449.37103"
+       font-size="8.5px"
+       id="text60">T4</text>
+    <text
+       class="silk"
+       x="954.74207"
+       y="449.37103"
+       font-size="8.5px"
+       id="text61">T5</text>
+    <text
+       class="silk"
+       x="1013.7421"
+       y="449.37103"
+       font-size="8.5px"
+       id="text62">T6</text>
+    <text
+       class="silk"
+       x="1071.7421"
+       y="449.37103"
+       font-size="8.5px"
+       id="text63">T7</text>
+    <line
+       x1="1028.1123"
+       y1="445.91309"
+       x2="1056.9314"
+       y2="445.91309"
+       stroke="#d9d9d9"
+       id="line63"
+       style="stroke-width:1.05282" />
+    <text
+       class="silk"
+       x="309.27142"
+       y="509.77875"
+       font-size="8.5px"
+       id="text67">REC</text>
+    <rect
+       x="321.1835"
+       y="499.77875"
+       width="22"
+       height="12.5"
+       rx="1.5"
+       fill="#cfcfcf"
+       id="rect29" />
+    <text
+       class="silk silk-inv"
+       x="332.1835"
+       y="509.77875"
+       font-size="8.5px"
+       id="text44">CFG</text>
+    <text
+       class="silk"
+       x="251.93466"
+       y="509.77875"
+       font-size="8.5px"
+       id="text66">PLAY</text>
+    <rect
+       x="265.99945"
+       y="499.77875"
+       width="22"
+       height="12.5"
+       rx="1.5"
+       fill="#cfcfcf"
+       id="rect45"
+       style="fill:#f95e2c;fill-opacity:1" />
+    <text
+       class="silk silk-inv"
+       x="276.99945"
+       y="509.77875"
+       font-size="8.5px"
+       id="text45">CHN</text>
+    <g
+       id="g55"
+       transform="translate(0,-0.50606692)">
+      <rect
+         x="609.87018"
+         y="441.38458"
+         width="60.21809"
+         height="12.5"
+         rx="4.1057787"
+         fill="#cfcfcf"
+         id="rect47"
+         style="fill:#cfcece;fill-opacity:1;stroke-width:1.65445" />
+      <text
+         class="silk silk-inv"
+         x="639.97919"
+         y="450.79416"
+         font-size="8.5px"
+         id="text48">CHROMATIC</text>
+    </g>
+  </g>
+  <g
+     id="knobs"
+     inkscape:groupmode="layer"
+     inkscape:label="knobs">
+    <g
+       id="knob-1"
+       transform="translate(240,390)">
+      <circle
+         r="36"
+         fill="#050505"
+         stroke="#222"
+         stroke-width="1.5"
+         id="circle97" />
+      <circle
+         cx="0"
+         cy="-3"
+         r="29"
+         fill="url(#gKnob)"
+         id="circle98" />
+    </g>
+    <g
+       id="knob-2"
+       transform="translate(334,390)">
+      <circle
+         r="36"
+         fill="#050505"
+         stroke="#222"
+         stroke-width="1.5"
+         id="circle99" />
+      <circle
+         cx="0"
+         cy="-3"
+         r="29"
+         fill="url(#gKnob)"
+         id="circle100" />
+    </g>
+    <g
+       id="knob-3"
+       transform="translate(428,390)">
+      <circle
+         r="36"
+         fill="#050505"
+         stroke="#222"
+         stroke-width="1.5"
+         id="circle101" />
+      <circle
+         cx="0"
+         cy="-3"
+         r="29"
+         fill="url(#gKnob)"
+         id="circle102" />
+    </g>
+    <g
+       id="knob-4"
+       transform="translate(520,390)">
+      <circle
+         r="36"
+         fill="#050505"
+         stroke="#222"
+         stroke-width="1.5"
+         id="circle103" />
+      <circle
+         cx="0"
+         cy="-3"
+         r="29"
+         fill="url(#gKnob)"
+         id="circle104" />
+    </g>
+    <g
+       id="knob-data"
+       transform="translate(612,282)">
+      <line
+         x1="-33.2"
+         y1="33.2"
+         x2="-36.8"
+         y2="36.8"
+         stroke="#bdbdbd"
+         stroke-width="1"
+         id="line104" />
+      <line
+         x1="-44.7"
+         y1="14.5"
+         x2="-49.5"
+         y2="16.1"
+         stroke="#bdbdbd"
+         stroke-width="1"
+         id="line105" />
+      <line
+         x1="-46.4"
+         y1="-7.4"
+         x2="-51.4"
+         y2="-8.1"
+         stroke="#bdbdbd"
+         stroke-width="1"
+         id="line106" />
+      <line
+         x1="-38.0"
+         y1="-27.6"
+         x2="-42.1"
+         y2="-30.6"
+         stroke="#bdbdbd"
+         stroke-width="1"
+         id="line107" />
+      <line
+         x1="-21.3"
+         y1="-41.9"
+         x2="-23.6"
+         y2="-46.3"
+         stroke="#bdbdbd"
+         stroke-width="1"
+         id="line108" />
+      <line
+         x1="0.0"
+         y1="-47.0"
+         x2="0.0"
+         y2="-52.0"
+         stroke="#bdbdbd"
+         stroke-width="1"
+         id="line109" />
+      <line
+         x1="21.3"
+         y1="-41.9"
+         x2="23.6"
+         y2="-46.3"
+         stroke="#bdbdbd"
+         stroke-width="1"
+         id="line110" />
+      <line
+         x1="38.0"
+         y1="-27.6"
+         x2="42.1"
+         y2="-30.6"
+         stroke="#bdbdbd"
+         stroke-width="1"
+         id="line111" />
+      <line
+         x1="46.4"
+         y1="-7.4"
+         x2="51.4"
+         y2="-8.1"
+         stroke="#bdbdbd"
+         stroke-width="1"
+         id="line112" />
+      <line
+         x1="44.7"
+         y1="14.5"
+         x2="49.5"
+         y2="16.1"
+         stroke="#bdbdbd"
+         stroke-width="1"
+         id="line113" />
+      <line
+         x1="33.2"
+         y1="33.2"
+         x2="36.8"
+         y2="36.8"
+         stroke="#bdbdbd"
+         stroke-width="1"
+         id="line114" />
+      <circle
+         r="46"
+         fill="#050505"
+         stroke="#2a2a2a"
+         id="circle114" />
+      <circle
+         r="39"
+         fill="url(#gData)"
+         id="circle115" />
+      <path
+         d="M0,-22 L10,-8 L22,0 L10,10 L0,22 L-10,10 L-22,0 L-10,-8 Z"
+         fill="#0c0c0c"
+         opacity=".7"
+         id="path115" />
+    </g>
+  </g>
+  <g
+     id="display"
+     inkscape:groupmode="layer"
+     inkscape:label="display">
+    <rect
+       x="254"
+       y="248"
+       width="265"
+       height="66"
+       rx="3"
+       fill="#1a0707"
+       stroke="#3a3a3a"
+       stroke-width="2"
+       id="rect115" />
+    <!-- 16 characters per line: keep padded to 16 -->
+    <text
+       id="screen-line1"
+       class="screen"
+       x="271"
+       y="278"
+       xml:space="preserve"
+       textLength="237"
+       lengthAdjust="spacing">COA fin wav pwm</text>
+    <text
+       id="screen-line2"
+       class="screen"
+       x="271"
+       y="306"
+       xml:space="preserve"
+       textLength="237"
+       lengthAdjust="spacing">125   2 Noi   0</text>
+  </g>
+  <g
+     id="sliders"
+     inkscape:groupmode="layer"
+     inkscape:label="sliders">
+    <g
+       id="slider-1-track">
+      <rect
+         x="706"
+         y="210"
+         width="36"
+         height="180"
+         rx="3"
+         fill="#0a0a0a"
+         stroke="#2a2a2a"
+         id="rect116" />
+      <rect
+         x="721"
+         y="216"
+         width="6"
+         height="168"
+         rx="3"
+         fill="#000"
+         id="rect117" />
+    </g>
+    <g
+       id="slider-2-track">
+      <rect
+         x="765"
+         y="210"
+         width="36"
+         height="180"
+         rx="3"
+         fill="#0a0a0a"
+         stroke="#2a2a2a"
+         id="rect118" />
+      <rect
+         x="780"
+         y="216"
+         width="6"
+         height="168"
+         rx="3"
+         fill="#000"
+         id="rect119" />
+    </g>
+    <g
+       id="slider-3-track">
+      <rect
+         x="822"
+         y="210"
+         width="36"
+         height="180"
+         rx="3"
+         fill="#0a0a0a"
+         stroke="#2a2a2a"
+         id="rect120" />
+      <rect
+         x="837"
+         y="216"
+         width="6"
+         height="168"
+         rx="3"
+         fill="#000"
+         id="rect121" />
+    </g>
+    <g
+       id="slider-4-track">
+      <rect
+         x="880"
+         y="210"
+         width="36"
+         height="180"
+         rx="3"
+         fill="#0a0a0a"
+         stroke="#2a2a2a"
+         id="rect122" />
+      <rect
+         x="895"
+         y="216"
+         width="6"
+         height="168"
+         rx="3"
+         fill="#000"
+         id="rect123" />
+    </g>
+    <g
+       id="slider-5-track">
+      <rect
+         x="938"
+         y="210"
+         width="36"
+         height="180"
+         rx="3"
+         fill="#0a0a0a"
+         stroke="#2a2a2a"
+         id="rect124" />
+      <rect
+         x="953"
+         y="216"
+         width="6"
+         height="168"
+         rx="3"
+         fill="#000"
+         id="rect125" />
+    </g>
+    <g
+       id="slider-6-track">
+      <rect
+         x="996"
+         y="210"
+         width="36"
+         height="180"
+         rx="3"
+         fill="#0a0a0a"
+         stroke="#2a2a2a"
+         id="rect126" />
+      <rect
+         x="1011"
+         y="216"
+         width="6"
+         height="168"
+         rx="3"
+         fill="#000"
+         id="rect127" />
+    </g>
+    <g
+       id="slider-7-track">
+      <rect
+         x="1053"
+         y="210"
+         width="36"
+         height="180"
+         rx="3"
+         fill="#0a0a0a"
+         stroke="#2a2a2a"
+         id="rect128" />
+      <rect
+         x="1068"
+         y="216"
+         width="6"
+         height="168"
+         rx="3"
+         fill="#000"
+         id="rect129" />
+    </g>
+  </g>
+  <g
+     id="slider-caps"
+     inkscape:groupmode="layer"
+     inkscape:label="slider-caps">
+    <g
+       id="slider-1-cap"
+       inkscape:label="cap drum1"
+       transform="translate(724,233)">
+      <use
+         xlink:href="#slider-cap"
+         id="use129" />
+    </g>
+    <g
+       id="slider-2-cap"
+       inkscape:label="cap drum2"
+       transform="translate(783,285)">
+      <use
+         xlink:href="#slider-cap"
+         id="use130" />
+    </g>
+    <g
+       id="slider-3-cap"
+       inkscape:label="cap drum3"
+       transform="translate(840,233)">
+      <use
+         xlink:href="#slider-cap"
+         id="use131" />
+    </g>
+    <g
+       id="slider-4-cap"
+       inkscape:label="cap snare"
+       transform="translate(898,233)">
+      <use
+         xlink:href="#slider-cap"
+         id="use132" />
+    </g>
+    <g
+       id="slider-5-cap"
+       inkscape:label="cap clpcym"
+       transform="translate(956,233)">
+      <use
+         xlink:href="#slider-cap"
+         id="use133" />
+    </g>
+    <g
+       id="slider-6-cap"
+       inkscape:label="cap hihats"
+       transform="translate(1014,233)">
+      <use
+         xlink:href="#slider-cap"
+         id="use134" />
+    </g>
+    <g
+       id="slider-7-cap"
+       inkscape:label="cap volume"
+       transform="translate(1071,226)">
+      <use
+         xlink:href="#slider-cap"
+         id="use135" />
+    </g>
+  </g>
+  <g
+     id="buttons-small"
+     inkscape:groupmode="layer"
+     inkscape:label="buttons-small">
+    <use
+       id="sbtn-bar-prev"
+       xlink:href="#btn-small-off"
+       transform="translate(610,424)" />
+    <use
+       id="sbtn-bar-next"
+       xlink:href="#btn-small-off"
+       transform="translate(668,424)" />
+    <use
+       id="sbtn-drum1"
+       xlink:href="#btn-small-off"
+       transform="translate(723.74207,422.37104)" />
+    <use
+       id="sbtn-drum2"
+       xlink:href="#btn-small-off"
+       transform="translate(780.74207,422.37104)" />
+    <use
+       id="sbtn-drum3"
+       xlink:href="#btn-small-off"
+       transform="translate(838.74207,422.37104)" />
+    <use
+       id="sbtn-snare"
+       xlink:href="#btn-small-off"
+       transform="translate(896.74207,422.37104)" />
+    <use
+       id="sbtn-clpcym"
+       xlink:href="#btn-small-off"
+       transform="translate(954.74207,422.37104)" />
+    <use
+       id="sbtn-clhh"
+       xlink:href="#btn-small-off"
+       transform="translate(1013.7421,422.37104)" />
+    <use
+       id="sbtn-ophh"
+       xlink:href="#btn-small-off"
+       transform="translate(1071.7421,422.37104)" />
+    <use
+       id="sbtn-shift"
+       xlink:href="#btn-small-off"
+       transform="translate(205,483)" />
+    <use
+       id="sbtn-play"
+       xlink:href="#btn-small-off"
+       transform="translate(263,483)" />
+    <use
+       id="sbtn-rec"
+       xlink:href="#btn-small-off"
+       transform="translate(320,483)" />
+    <use
+       id="sbtn-copy"
+       xlink:href="#btn-small-off"
+       transform="translate(378,483)" />
+    <use
+       id="sbtn-voice"
+       xlink:href="#btn-small-on"
+       transform="translate(437,483)" />
+    <use
+       id="sbtn-perf"
+       xlink:href="#btn-small-off"
+       transform="translate(494,483)" />
+    <use
+       id="sbtn-load"
+       xlink:href="#btn-small-off"
+       transform="translate(552,483)" />
+    <use
+       id="sbtn-save"
+       xlink:href="#btn-small-off"
+       transform="translate(610,483)" />
+    <use
+       id="sbtn-osc"
+       xlink:href="#btn-small-on"
+       transform="translate(668,483)" />
+    <use
+       id="sbtn-aeg"
+       xlink:href="#btn-small-off"
+       transform="translate(727,483)" />
+    <use
+       id="sbtn-mod"
+       xlink:href="#btn-small-off"
+       transform="translate(784,483)" />
+    <use
+       id="sbtn-fm"
+       xlink:href="#btn-small-off"
+       transform="translate(842,483)" />
+    <use
+       id="sbtn-click"
+       xlink:href="#btn-small-off"
+       transform="translate(900,483)" />
+    <use
+       id="sbtn-filter"
+       xlink:href="#btn-small-off"
+       transform="translate(958,483)" />
+    <use
+       id="sbtn-lfo"
+       xlink:href="#btn-small-off"
+       transform="translate(1017,483)" />
+    <use
+       id="sbtn-mix"
+       xlink:href="#btn-small-off"
+       transform="translate(1075,483)" />
+  </g>
+  <g
+     id="buttons-big"
+     inkscape:groupmode="layer"
+     inkscape:label="buttons-big">
+    <use
+       id="bbtn-drum1"
+       xlink:href="#btn-big-on-sel"
+       transform="translate(203,541)" />
+    <use
+       id="bbtn-drum2"
+       xlink:href="#btn-big-on"
+       transform="translate(261,541)" />
+    <use
+       id="bbtn-drum3"
+       xlink:href="#btn-big-on"
+       transform="translate(319,541)" />
+    <use
+       id="bbtn-snare"
+       xlink:href="#btn-big-on"
+       transform="translate(378,541)" />
+    <use
+       id="bbtn-clpcym"
+       xlink:href="#btn-big-on-sel"
+       transform="translate(436,541)" />
+    <use
+       id="bbtn-clhh"
+       xlink:href="#btn-big-on"
+       transform="translate(494,541)" />
+    <use
+       id="bbtn-ophh"
+       xlink:href="#btn-big-on"
+       transform="translate(552,541)" />
+    <use
+       id="bbtn-kit"
+       xlink:href="#btn-big-on"
+       transform="translate(610,541)" />
+    <use
+       id="bbtn-morph"
+       xlink:href="#btn-big-off-sel"
+       transform="translate(668,541)" />
+    <use
+       id="bbtn-song"
+       xlink:href="#btn-big-on"
+       transform="translate(727,541)" />
+    <use
+       id="bbtn-project"
+       xlink:href="#btn-big-on"
+       transform="translate(785,541)" />
+    <use
+       id="bbtn-config"
+       xlink:href="#btn-big-on"
+       transform="translate(844,541)" />
+    <use
+       id="bbtn-reload"
+       xlink:href="#btn-big-on-sel"
+       transform="translate(902,541)" />
+    <use
+       id="bbtn-laststep"
+       xlink:href="#btn-big-on"
+       transform="translate(960,541)" />
+    <use
+       id="bbtn-fx"
+       xlink:href="#btn-big-on"
+       transform="translate(1018,541)" />
+    <use
+       id="bbtn-pattern"
+       xlink:href="#btn-big-off"
+       transform="translate(1077,541)" />
+  </g>
+  <metadata
+     id="metadata135">
+    <c2pa:manifest>AAAWgmp1bWIAAAAeanVtZGMycGEAEQAQgAAAqgA4m3EDYzJwYQAAABZcanVtYgAAAEdqdW1kYzJtYQARABCAAACqADibcQN1cm46YzJwYTo4NzdiYzZmNC03YzM4LTRjMGEtOTk2MC1hODc4M2M0NTU5MjUAAAADl2p1bWIAAAApanVtZGMyYXMAEQAQgAAAqgA4m3EDYzJwYS5hc3NlcnRpb25zAAAAALxqdW1iAAAARGp1bWRjYm9yABEAEIAAAKoAOJtxE2MycGEuaW5ncmVkaWVudC52MwAAAAAYYzJzaG8/78kshk6MQ7XXGDI8joIAAABwY2JvcqNpZGM6Zm9ybWF0bWltYWdlL3N2Zyt4bWxqaW5zdGFuY2VJRHgseG1wOmlpZDpiMThhZTYyOC1lYzRiLTQ5NTEtODc5ZS0yZjYxNTZiYjJmNzNscmVsYXRpb25zaGlwaHBhcmVudE9mAAAB4mp1bWIAAABBanVtZGNib3IAEQAQgAAAqgA4m3ETYzJwYS5hY3Rpb25zLnYyAAAAABhjMnNoo1D0lzYTGBL4EKWlsYEwEAAAAZljYm9yomdhY3Rpb25zgqJmYWN0aW9ua2MycGEub3BlbmVkanBhcmFtZXRlcnOha2luZ3JlZGllbnRzgaJjdXJseC1zZWxmI2p1bWJmPWMycGEuYXNzZXJ0aW9ucy9jMnBhLmluZ3JlZGllbnQudjNkaGFzaFggVFk6VOpBrT0VchciPXBSCv4Vv5ms+Hwgu1T8+7R/IZCkZmFjdGlvbngdY29tLmFudGhyb3BpYy5jbGF1ZGUucHJvdmlkZWRqcGFyYW1ldGVyc6F4H2NvbS5hbnRocm9waWMub3JpZ2luLWNvbmZpZGVuY2VndW5rbm93bmtkZXNjcmlwdGlvbnhmQ2xhdWRlIHByb3ZpZGVkIHRoaXMgZmlsZSBhdCB0aGUgcmVxdWVzdCBvZiBhIHVzZXIgYW5kIG1heSBoYXZlIGNyZWF0ZWQgb3IgbW9kaWZpZWQgdGhlIGZpbGUgY29udGVudHMubXNvZnR3YXJlQWdlbnShZG5hbWVmQ2xhdWRlcmFsbEFjdGlvbnNJbmNsdWRlZPUAAADIanVtYgAAAEBqdW1kY2JvcgARABCAAACqADibcRNjMnBhLmhhc2guZGF0YQAAAAAYYzJzaAsS1H1VZkhDf56qi/RoVuUAAACAY2JvcqVjYWxnZnNoYTI1NmNwYWRMAAAAAAAAAAAAAAAAZGhhc2hYIKNxv68LUayrQGgVSy1eDrqC+S3nfRjbTUK/jfjGTUEhZG5hbWVuanVtYmYgbWFuaWZlc3RqZXhjbHVzaW9uc4GiZXN0YXJ0GUtQZmxlbmd0aBkeBAAAAj5qdW1iAAAAJ2p1bWRjMmNsABEAEIAAAKoAOJtxA2MycGEuY2xhaW0udjIAAAACD2Nib3KlY2FsZ2ZzaGEyNTZpc2lnbmF0dXJleE1zZWxmI2p1bWJmPS9jMnBhL3VybjpjMnBhOjg3N2JjNmY0LTdjMzgtNGMwYS05OTYwLWE4NzgzYzQ1NTkyNS9jMnBhLnNpZ25hdHVyZWppbnN0YW5jZUlEeCx4bXA6aWlkOjEyYzU4ZGU4LWQ4YjctNDc5Mi1hMmExLTc0YzczNTU4NTZlZXJjcmVhdGVkX2Fzc2VydGlvbnODomN1cmx4LXNlbGYjanVtYmY9YzJwYS5hc3NlcnRpb25zL2MycGEuaW5ncmVkaWVudC52M2RoYXNoWCBUWTpU6kGtPRVyFyI9cFIK/hW/maz4fCC7VPz7tH8hkKJjdXJseCpzZWxmI2p1bWJmPWMycGEuYXNzZXJ0aW9ucy9jMnBhLmFjdGlvbnMudjJkaGFzaFggwDwpvSplhQXzVEO6QwZFLfF11Oc1mBD+fTVv2JzaEcuiY3VybHgpc2VsZiNqdW1iZj1jMnBhLmFzc2VydGlvbnMvYzJwYS5oYXNoLmRhdGFkaGFzaFgg96kA/xHAWzcCaQtjwoCzTg87IQusfh2kVwfO99BDtKF0Y2xhaW1fZ2VuZXJhdG9yX2luZm+jZG5hbWVvQW50aHJvcGljIEZpbGVzZ3ZlcnNpb25lMS4wLjBrc3BlY1ZlcnNpb25lMi40LjAAABA4anVtYgAAAChqdW1kYzJjcwARABCAAACqADibcQNjMnBhLnNpZ25hdHVyZQAAABAIY2JvctKEWQISogEmGCFZAgowggIGMIIBjaADAgECAhRA5aAK7sI50L64g/oGQgU9Z1UTADAKBggqhkjOPQQDAzBJMRcwFQYDVQQKEw5BbnRocm9waWMsIFBCQzEuMCwGA1UEAxMlQW50aHJvcGljIENvbnRlbnQgQ3JlZGVudGlhbHMgUm9vdCBDQTAeFw0yNjA4MDcxODQzNTZaFw0yODA4MDYxOTQzNTZaMEQxFzAVBgNVBAoTDkFudGhyb3BpYywgUEJDMSkwJwYDVQQDEyBBbnRocm9waWMgQ2xhdWRlIENvbnRlbnQgU2lnbmluZzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJh6CmvLUBgFFNU0vUKlOVtE6djd17L5SuwX0LemFisBM3dkd/3cyjxFA3Qo5S46fX0/ihY0VZ7mfb9KF703t5OjWDBWMA4GA1UdDwEB/wQEAwIHgDAVBgNVHSUEDjAMBgorBgEEAYPoXgIBMAwGA1UdEwEB/wQCMAAwHwYDVR0jBBgwFoAUzlHiBIFOZFsj+OPEz5o+nMHXXMIwCgYIKoZIzj0EAwMDZwAwZAIwMXMdFJ4BetLLVY7ORuE9noqbbAZOZn/aArXyTwFAZfKrPzxF2vPoJNf1+UCdg1XGAjBwX1zd9WGqYkqmL5SFqw1QySjr1zJfpJM9+1rdDwSPLMOPOjKuiXjoU/pUUeG9RwmhY3BhZFkNngAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPZYQNXencza92Iu0JFE039ofKmdCZCAcH8Z44KXu0DKyaPb2V0I46jV3iGWbZVMSgTYrbWFjBwiUD6Byb7ts/Yhtsw=</c2pa:manifest>
+  </metadata>
+</svg>

@@ -1,9 +1,9 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.10.16)  16 OCT 2026 13:38
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.10.16)  23 NOV 2026 12:07
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
-**"/Users/bc/LXR1 Project/LXR/manual/build/latex/main.tex"
-(/Users/bc/LXR1 Project/LXR/manual/build/latex/main.tex
+**"/Users/bc/Helicase Project/Helicase/manual/build/latex/main.tex"
+(/Users/bc/Helicase Project/Helicase/manual/build/latex/main.tex
 LaTeX2e <2025-11-01>
 L3 programming layer <2026-01-19>
 (/usr/local/texlive/2026/texmf-dist/tex/latex/base/article.cls
@@ -23,7 +23,7 @@ File: size11.clo 2025/01/22 v1.4n Standard LaTeX file (size option)
 \belowcaptionskip=\skip50
 \bibindent=\dimen148
 )
-(/Users/bc/LXR1 Project/LXR/manual/build/../latex/preamble.tex
+(/Users/bc/Helicase Project/Helicase/manual/build/../latex/preamble.tex
 (/usr/local/texlive/2026/texmf-dist/tex/latex/geometry/geometry.sty
 Package: geometry 2026/03/07 v6.0 Page Geometry
 
@@ -618,9 +618,9 @@ LaTeX Font Info:    Trying to load font information for T1+lmr on input line 24
 (/usr/local/texlive/2026/texmf-dist/tex/latex/lm/t1lmr.fd
 File: t1lmr.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
 )
-(/Users/bc/LXR1 Project/LXR/manual/build/main.aux
+(/Users/bc/Helicase Project/Helicase/manual/build/main.aux
 
-LaTeX Warning: Label `menu-navigation' multiply defined.
+LaTeX Warning: Label `morph' multiply defined.
 
 
 LaTeX Warning: Label `midi' multiply defined.
@@ -639,6 +639,9 @@ LaTeX Warning: Label `overview' multiply defined.
 
 
 LaTeX Warning: Label `sequencer' multiply defined.
+
+
+LaTeX Warning: Label `power' multiply defined.
 
 )
 \openout1 = `main.aux'.
@@ -744,17 +747,18 @@ Package caption Info: hyperref package is loaded.
 Package caption Info: End \AtBeginDocument code.
 Package hyperref Info: Link coloring ON on input line 24.
 
-(/Users/bc/LXR1 Project/LXR/manual/build/main.out)
-(/Users/bc/LXR1 Project/LXR/manual/build/main.out)
+(/Users/bc/Helicase Project/Helicase/manual/build/main.out)
+(/Users/bc/Helicase Project/Helicase/manual/build/main.out)
 \@outlinefile=\write3
 \openout3 = `main.out'.
 
 
-(/Users/bc/LXR1 Project/LXR/manual/build/../latex/title_page.tex [1
+(/Users/bc/Helicase Project/Helicase/manual/build/../latex/title_page.tex
+[1
 
 {/usr/local/texlive/2026/texmf-var/fonts/map/pdftex/updmap/pdftex.map}{/usr/loc
 al/texlive/2026/texmf-dist/fonts/enc/dvips/lm/lm-ec.enc}])
-(/Users/bc/LXR1 Project/LXR/manual/build/main.toc
+(/Users/bc/Helicase Project/Helicase/manual/build/main.toc
 LaTeX Font Info:    Trying to load font information for OT1+lmr on input line 1
 .
 
@@ -790,301 +794,103 @@ pdfTeX warning (ext4): destination with the same identifier (name{page.1}) has
 been already used, duplicate ignored
 <to be read again> 
                    \relax 
-l.51 ...Automation Track}{16}{subsubsection.4.7.1}
-                                                  % [1] [2]
-LaTeX Font Info:    Trying to load font information for T1+fvm on input line 11
-3.
+l.51 ...style sequencing}{14}{subsubsection.4.5.1}
+                                                  % [1]
+LaTeX Font Info:    Trying to load font information for T1+fvm on input line 94
+.
 
 (/usr/local/texlive/2026/texmf-dist/tex/latex/bera/t1fvm.fd
 File: t1fvm.fd 2004/09/07 scalable font definitions for T1/fvm.
 )
 LaTeX Font Info:    Font shape `T1/fvm/m/n' will be
-(Font)              scaled to size 9.30756pt on input line 113.
+(Font)              scaled to size 9.30756pt on input line 94.
 Package microtype Info: Loading generic protrusion settings for font family
 (microtype)             `fvm' (encoding: T1).
 (microtype)             For optimal results, create family-specific settings.
 (microtype)             See the microtype manual for details.
- [3{/usr/local/texlive/2026/texmf-dist/fonts/enc/dvips/base/8r.enc}])
+ [2{/usr/local/texlive/2026/texmf-dist/fonts/enc/dvips/base/8r.enc}] [3])
 \tf@toc=\write4
 \openout4 = `main.toc'.
 
  [4]
-(/Users/bc/LXR1 Project/LXR/manual/build/chapters/01_overview.tex
-<../images/front_panel.png, id=899, 712.16063pt x 378.66469pt>
-File: ../images/front_panel.png Graphic file (type png)
-<use ../images/front_panel.png>
-Package pdftex.def Info: ../images/front_panel.png  used on input line 11.
-(pdftex.def)             Requested size: 472.31577pt x 251.13283pt.
- [5 </Users/bc/LXR1 Project/LXR/manual/build/../images/front_panel.png (PNG cop
-y)>]
-LaTeX Font Info:    Trying to load font information for TS1+lmr on input line 5
-5.
-
-(/usr/local/texlive/2026/texmf-dist/tex/latex/lm/ts1lmr.fd
-File: ts1lmr.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
-)
-<../images/back_panel.jpeg, id=905, 798.985pt x 124.465pt>
-File: ../images/back_panel.jpeg Graphic file (type jpg)
-<use ../images/back_panel.jpeg>
-Package pdftex.def Info: ../images/back_panel.jpeg  used on input line 117.
-(pdftex.def)             Requested size: 401.47128pt x 62.54001pt.
- [6{/usr/local/texlive/2026/texmf-dist/fonts/enc/dvips/lm/lm-ts1.enc} </Users/b
-c/LXR1 Project/LXR/manual/build/../images/back_panel.jpeg>]
+(/Users/bc/Helicase Project/Helicase/manual/build/chapters/01_overview.tex
 LaTeX Font Info:    Font shape `T1/fvm/m/n' will be
-(Font)              scaled to size 8.50006pt on input line 152.
+(Font)              scaled to size 8.50006pt on input line 18.
+
+[5]
+LaTeX Font Info:    Trying to load font information for TS1+lmr on input line 6
+7.
+ (/usr/local/texlive/2026/texmf-dist/tex/latex/lm/ts1lmr.fd
+File: ts1lmr.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
+) [6{/usr/local/texlive/2026/texmf-dist/fonts/enc/dvips/lm/lm-ts1.enc}] [7]
 LaTeX Font Info:    Font shape `T1/fvm/b/n' will be
-(Font)              scaled to size 8.50006pt on input line 169.
-) [7]
-(/Users/bc/LXR1 Project/LXR/manual/build/chapters/02_quickstart.tex) [8]
-(/Users/bc/LXR1 Project/LXR/manual/build/chapters/03_voices.tex
-<../images/voice_drum_signal_flow.jpeg, id=933, 649.42625pt x 259.97125pt>
-File: ../images/voice_drum_signal_flow.jpeg Graphic file (type jpg)
-<use ../images/voice_drum_signal_flow.jpeg>
-Package pdftex.def Info: ../images/voice_drum_signal_flow.jpeg  used on input l
-ine 15.
-(pdftex.def)             Requested size: 472.31577pt x 189.0753pt.
-<../images/voice_snare_signal_flow.jpeg, id=934, 597.23125pt x 185.69376pt>
-File: ../images/voice_snare_signal_flow.jpeg Graphic file (type jpg)
-<use ../images/voice_snare_signal_flow.jpeg>
-Package pdftex.def Info: ../images/voice_snare_signal_flow.jpeg  used on input 
-line 27.
-(pdftex.def)             Requested size: 472.31577pt x 146.85512pt.
-<../images/voice_cymbal_signal_flow.jpeg, id=935, 596.2275pt x 175.65625pt>
-File: ../images/voice_cymbal_signal_flow.jpeg Graphic file (type jpg)
-<use ../images/voice_cymbal_signal_flow.jpeg>
-Package pdftex.def Info: ../images/voice_cymbal_signal_flow.jpeg  used on input
- line 39.
-(pdftex.def)             Requested size: 472.31577pt x 139.15018pt.
- [9 </Users/bc/LXR1 Project/LXR/manual/build/../images/voice_drum_signal_flow.j
-peg> </Users/bc/LXR1 Project/LXR/manual/build/../images/voice_snare_signal_flow
-.jpeg>]
-<../images/voice_hihat_signal_flow.jpeg, id=942, 603.25375pt x 161.60374pt>
-File: ../images/voice_hihat_signal_flow.jpeg Graphic file (type jpg)
-<use ../images/voice_hihat_signal_flow.jpeg>
-Package pdftex.def Info: ../images/voice_hihat_signal_flow.jpeg  used on input 
-line 53.
-(pdftex.def)             Requested size: 472.31577pt x 126.52632pt.
-LaTeX Font Info:    External font `lmex10' loaded for size
-(Font)              <10> on input line 71.
-LaTeX Font Info:    External font `lmex10' loaded for size
-(Font)              <7> on input line 71.
-LaTeX Font Info:    External font `lmex10' loaded for size
-(Font)              <5> on input line 71.
- [10{/usr/local/texlive/2026/texmf-dist/fonts/enc/dvips/lm/lm-mathsy.enc} </Use
-rs/bc/LXR1 Project/LXR/manual/build/../images/voice_cymbal_signal_flow.jpeg> </
-Users/bc/LXR1 Project/LXR/manual/build/../images/voice_hihat_signal_flow.jpeg>]
- [11]
-[12]) [13{/usr/local/texlive/2026/texmf-dist/fonts/enc/dvips/lm/lm-rm.enc}]
-(/Users/bc/LXR1 Project/LXR/manual/build/chapters/04_sequencer.tex
-<../images/substep_diagram.png, id=965, 599.23875pt x 333.49594pt>
-File: ../images/substep_diagram.png Graphic file (type png)
-<use ../images/substep_diagram.png>
-Package pdftex.def Info: ../images/substep_diagram.png  used on input line 53.
-(pdftex.def)             Requested size: 472.31577pt x 262.86351pt.
- [14]
-[15 </Users/bc/LXR1 Project/LXR/manual/build/../images/substep_diagram.png (PNG
- copy)>]
+(Font)              scaled to size 8.50006pt on input line 218.
+) [8]
+(/Users/bc/Helicase Project/Helicase/manual/build/chapters/02_quickstart.tex
 LaTeX Font Info:    Font shape `T1/fvm/b/n' will be
-(Font)              scaled to size 9.30756pt on input line 151.
- [16]
-ignored: Infinite glue shrinkage found in box being split [17]) [18]
-(/Users/bc/LXR1 Project/LXR/manual/build/chapters/05_operation_modes.tex
-File: ../images/front_panel.png Graphic file (type png)
-<use ../images/front_panel.png>
-Package pdftex.def Info: ../images/front_panel.png  used on input line 39.
-(pdftex.def)             Requested size: 472.31577pt x 251.13283pt.
-<../images/substep_panel.jpeg, id=1010, 1023.825pt x 640.3925pt>
-File: ../images/substep_panel.jpeg Graphic file (type jpg)
-<use ../images/substep_panel.jpeg>
-Package pdftex.def Info: ../images/substep_panel.jpeg  used on input line 62.
-(pdftex.def)             Requested size: 472.31577pt x 295.42447pt.
-
-[19] [20 </Users/bc/LXR1 Project/LXR/manual/build/../images/substep_panel.jpeg>
-] [21]
-<../images/pattern_chain_example1.png, id=1039, 411.78844pt x 255.20343pt>
-File: ../images/pattern_chain_example1.png Graphic file (type png)
-<use ../images/pattern_chain_example1.png>
-Package pdftex.def Info: ../images/pattern_chain_example1.png  used on input li
-ne 277.
-(pdftex.def)             Requested size: 472.31577pt x 292.71841pt.
- [22]
-<../images/pattern_chain_example2.png, id=1049, 1181.91562pt x 264.99pt>
-File: ../images/pattern_chain_example2.png Graphic file (type png)
-<use ../images/pattern_chain_example2.png>
-Package pdftex.def Info: ../images/pattern_chain_example2.png  used on input li
-ne 283.
-(pdftex.def)             Requested size: 472.31577pt x 105.89304pt.
- [23 </Users/bc/LXR1 Project/LXR/manual/build/../images/pattern_chain_example1.
-png> </Users/bc/LXR1 Project/LXR/manual/build/../images/pattern_chain_example2.
-png (PNG copy)>] [24] [25] [26]
-Package mdframed Info: Not enough space on this page on input line 534.
- [27] [28]) [29]
-(/Users/bc/LXR1 Project/LXR/manual/build/chapters/06_synth_modules.tex [30]
-<../images/filter_lowpass.png, id=1105, 602.25pt x 451.6875pt>
-File: ../images/filter_lowpass.png Graphic file (type png)
-<use ../images/filter_lowpass.png>
-Package pdftex.def Info: ../images/filter_lowpass.png  used on input line 94.
-(pdftex.def)             Requested size: 401.47128pt x 301.11276pt.
-<../images/filter_highpass.png, id=1106, 602.25pt x 451.6875pt>
-File: ../images/filter_highpass.png Graphic file (type png)
-<use ../images/filter_highpass.png>
-Package pdftex.def Info: ../images/filter_highpass.png  used on input line 103.
-
-(pdftex.def)             Requested size: 401.47128pt x 301.11276pt.
-
-[31 </Users/bc/LXR1 Project/LXR/manual/build/../images/filter_lowpass.png (PNG 
-copy)>]
-<../images/filter_bandpass.png, id=1113, 602.25pt x 451.6875pt>
-File: ../images/filter_bandpass.png Graphic file (type png)
-<use ../images/filter_bandpass.png>
-Package pdftex.def Info: ../images/filter_bandpass.png  used on input line 112.
-
-(pdftex.def)             Requested size: 401.47128pt x 301.11276pt.
- [32 </Users/bc/LXR1 Project/LXR/manual/build/../images/filter_highpass.png (PN
-G copy)> </Users/bc/LXR1 Project/LXR/manual/build/../images/filter_bandpass.png
- (PNG copy)>]
-<../images/filter_unitgain_bandpass.png, id=1120, 602.25pt x 451.6875pt>
-File: ../images/filter_unitgain_bandpass.png Graphic file (type png)
-<use ../images/filter_unitgain_bandpass.png>
-Package pdftex.def Info: ../images/filter_unitgain_bandpass.png  used on input 
-line 122.
-(pdftex.def)             Requested size: 401.47128pt x 301.11276pt.
-<../images/filter_notch.png, id=1121, 602.25pt x 451.6875pt>
-File: ../images/filter_notch.png Graphic file (type png)
-<use ../images/filter_notch.png>
-Package pdftex.def Info: ../images/filter_notch.png  used on input line 131.
-(pdftex.def)             Requested size: 401.47128pt x 301.11276pt.
- [33 </Users/bc/LXR1 Project/LXR/manual/build/../images/filter_unitgain_bandpas
-s.png (PNG copy)>]
-<../images/filter_peak.png, id=1127, 602.25pt x 451.6875pt>
-File: ../images/filter_peak.png Graphic file (type png)
-<use ../images/filter_peak.png>
-Package pdftex.def Info: ../images/filter_peak.png  used on input line 141.
-(pdftex.def)             Requested size: 401.47128pt x 301.11276pt.
- [34 </Users/bc/LXR1 Project/LXR/manual/build/../images/filter_notch.png (PNG c
-opy)>]
-<../images/envelope_linear.png, id=1133, 408.77719pt x 381.67593pt>
-File: ../images/envelope_linear.png Graphic file (type png)
-<use ../images/envelope_linear.png>
-Package pdftex.def Info: ../images/envelope_linear.png  used on input line 154.
-
-(pdftex.def)             Requested size: 330.61958pt x 308.71902pt.
- [35 </Users/bc/LXR1 Project/LXR/manual/build/../images/filter_peak.png (PNG co
-py)>]
-<../images/envelope_exponential.jpeg, id=1139, 545.03625pt x 508.90125pt>
-File: ../images/envelope_exponential.jpeg Graphic file (type jpg)
-<use ../images/envelope_exponential.jpeg>
-Package pdftex.def Info: ../images/envelope_exponential.jpeg  used on input lin
-e 172.
-(pdftex.def)             Requested size: 330.61958pt x 308.69766pt.
- [36 </Users/bc/LXR1 Project/LXR/manual/build/../images/envelope_linear.png (PN
-G copy)>]
-<../images/envelope_logarithmic.jpeg, id=1146, 545.03625pt x 508.90125pt>
-File: ../images/envelope_logarithmic.jpeg Graphic file (type jpg)
-<use ../images/envelope_logarithmic.jpeg>
-Package pdftex.def Info: ../images/envelope_logarithmic.jpeg  used on input lin
-e 178.
-(pdftex.def)             Requested size: 330.61958pt x 308.69766pt.
- [37 </Users/bc/LXR1 Project/LXR/manual/build/../images/envelope_exponential.jp
-eg> </Users/bc/LXR1 Project/LXR/manual/build/../images/envelope_logarithmic.jpe
-g>]
-<../images/envelope_repeat.png, id=1153, 810.02625pt x 459.21562pt>
-File: ../images/envelope_repeat.png Graphic file (type png)
-<use ../images/envelope_repeat.png>
-Package pdftex.def Info: ../images/envelope_repeat.png  used on input line 192.
-
-(pdftex.def)             Requested size: 401.47128pt x 227.60323pt.
- [38 </Users/bc/LXR1 Project/LXR/manual/build/../images/envelope_repeat.png (PN
-G copy)>]
-<../images/distortion_curve.jpeg, id=1159, 642.4pt x 388.45125pt>
-File: ../images/distortion_curve.jpeg Graphic file (type jpg)
-<use ../images/distortion_curve.jpeg>
-Package pdftex.def Info: ../images/distortion_curve.jpeg  used on input line 25
-5.
-(pdftex.def)             Requested size: 330.61958pt x 199.92719pt.
- [39 </Users/bc/LXR1 Project/LXR/manual/build/../images/distortion_curve.jpeg>]
+(Font)              scaled to size 9.30756pt on input line 45.
 )
-[40] (/Users/bc/LXR1 Project/LXR/manual/build/chapters/07_midi.tex [41]
-Overfull \hbox (0.96248pt too wide) in paragraph at lines 114--115
-[]\T1/lmr/m/n/10.95 (-20) Function  
+[9] (/Users/bc/Helicase Project/Helicase/manual/build/chapters/03_concepts.tex
+[10]) [11]
+(/Users/bc/Helicase Project/Helicase/manual/build/chapters/04_instruments.tex
+LaTeX Font Info:    External font `lmex10' loaded for size
+(Font)              <10> on input line 7.
+LaTeX Font Info:    External font `lmex10' loaded for size
+(Font)              <7> on input line 7.
+LaTeX Font Info:    External font `lmex10' loaded for size
+(Font)              <5> on input line 7.
+
+[12] [13{/usr/local/texlive/2026/texmf-dist/fonts/enc/dvips/lm/lm-mathsy.enc}]
+[14] [15{/usr/local/texlive/2026/texmf-dist/fonts/enc/dvips/lm/lm-rm.enc}]
+[16]) [17]
+(/Users/bc/Helicase Project/Helicase/manual/build/chapters/05_sequencer.tex
+[18]
+Underfull \hbox (badness 1024) in paragraph at lines 78--79
+[]|\T1/lmr/m/n/10 (+20) Note-on ve-loc-ity, 0 to 127. Ve-loc-ity 0 is an
  []
 
 
-Overfull \hbox (16.96367pt too wide) in paragraph at lines 135--135
-[]|\T1/lmr/m/n/10.95 (-20) Morph/mod 
+Underfull \hbox (badness 2600) in paragraph at lines 81--82
+[]|\T1/lmr/m/n/10 (+20) Retrigger rate: \T1/fvm/m/n/10 off 1/8 8tr 16 16t 32 32
+t 64
  []
 
-
-Overfull \hbox (13.20183pt too wide) in paragraph at lines 139--139
-[]|\T1/lmr/m/n/10.95 (-20) Decimation|  
+[19] [20]) [21]
+(/Users/bc/Helicase Project/Helicase/manual/build/chapters/06_operation_modes.t
+ex [22] [23] [24] [25] [26]) [27]
+(/Users/bc/Helicase Project/Helicase/manual/build/chapters/07_synth_modules.tex
+LaTeX Font Info:    Font shape `T1/fvm/m/it' in size <10.95> not available
+(Font)              Font shape `T1/fvm/m/sl' tried instead on input line 45.
+LaTeX Font Info:    Font shape `T1/fvm/m/sl' will be
+(Font)              scaled to size 9.30756pt on input line 45.
+[28] [29] [30] [31]) [32]
+(/Users/bc/Helicase Project/Helicase/manual/build/chapters/08_mixer_effects.tex
+[33] [34] [35]
+LaTeX Font Info:    Font shape `T1/fvm/b/n' will be
+(Font)              scaled to size 10.20007pt on input line 195.
+ [36{/usr/local/texlive/2026/texmf-dist/fonts/enc/dvips/lm/lm-mathit.enc}]
+ignored: Infin
+ite glue shrinkage found in box being split [37]) [38]
+(/Users/bc/Helicase Project/Helicase/manual/build/chapters/09_midi.tex [39]
+(/Users/bc/Helicase Project/Helicase/manual/build/../latex/midi_tables.tex
+ignored: Infin
+ite glue shrinkage found in box being split
+[40]) [41] [42]) [43]
+(/Users/bc/Helicase Project/Helicase/manual/build/chapters/10_storage.tex
+[44] [45]
+Overfull \hbox (20.67235pt too wide) in paragraph at lines 168--174
+ [] 
  []
 
-
-Overfull \hbox (7.33pt too wide) in paragraph at lines 140--140
-[]|\T1/lmr/m/n/10.95 (-20) Distortion|  
- []
-
-
-Overfull \hbox (4.11664pt too wide) in paragraph at lines 148--148
-[]|\T1/lmr/m/n/10.95 (-20) Mix/mod 
- []
-
-
-Overfull \hbox (3.58159pt too wide) in paragraph at lines 154--154
-[]|\T1/lmr/m/n/10.95 (-20) Transient 
- []
-
-
-Overfull \hbox (3.58159pt too wide) in paragraph at lines 155--155
-[]|\T1/lmr/m/n/10.95 (-20) Transient 
- []
-
-
-Overfull \hbox (3.58159pt too wide) in paragraph at lines 156--156
-[]|\T1/lmr/m/n/10.95 (-20) Transient 
- []
-
-
-Overfull \hbox (2.16692pt too wide) in paragraph at lines 173--173
-[]|\T1/lmr/m/n/10.95 (-20) Envelope 
- []
-
-
-Overfull \hbox (2.16692pt too wide) in paragraph at lines 176--176
-[]|\T1/lmr/m/n/10.95 (-20) Envelope 
- []
-
-
-Overfull \hbox (2.4772pt too wide) in paragraph at lines 179--179
-[]|\T1/lmr/m/n/10.95 (-20) FM/mod 
- []
-
-
-ignored: Infinite glue shrinkage found in box being split [42]
-ignored: Infinite glue shrinkage fo
-und in box being split [43]
-ignored: Infinite glue shrinkage found in box being split [44
-] [45])
-(/Users/bc/LXR1 Project/LXR/manual/build/../latex/midi_tables.tex
-ignored: Infinite glue 
-shrinkage found in box being split [46]
-ignored: Infinite glue shrinkage found in box bei
-ng split [47]
-[48]
-ignored: Infinite glue shrinkage found in box being split [49] [50]) [51]
-(/Users/bc/LXR1 Project/LXR/manual/build/chapters/08_firmware_update.tex)
-[52]
-(/Users/bc/LXR1 Project/LXR/manual/build/chapters/09_drum_synthesis_intro.tex
-[53] [54] [55]) [56]
-(/Users/bc/LXR1 Project/LXR/manual/build/chapters/10_specifications.tex)
-[57] (/Users/bc/LXR1 Project/LXR/manual/build/chapters/99_appendix.tex
-Overfull \hbox (4.66226pt too wide) in paragraph at lines 23--30
-[]\T1/lmr/bx/n/10.95 (-20) Crash sam-ple \T1/lmr/m/n/10.95 (-20) --- based on a
-n edited ver-sion of \T1/fvm/m/n/10.95 crashBv2.wav \T1/lmr/m/n/10.95 (-20) by 
-Ma-tias Rec-cius (freesound.org),
- []
-
-) [58] (/Users/bc/LXR1 Project/LXR/manual/build/main.aux)
+) [46] [47]
+(/Users/bc/Helicase Project/Helicase/manual/build/chapters/11_firmware_update.t
+ex) [48] [49]
+(/Users/bc/Helicase Project/Helicase/manual/build/chapters/12_drum_synthesis_in
+tro.tex [50] [51] [52]) [53]
+(/Users/bc/Helicase Project/Helicase/manual/build/chapters/13_specifications.te
+x [54]) [55]
+(/Users/bc/Helicase Project/Helicase/manual/build/chapters/99_appendix.tex)
+[56] (/Users/bc/Helicase Project/Helicase/manual/build/main.aux)
  ***********
 LaTeX2e <2025-11-01>
 L3 programming layer <2026-01-19>
@@ -1094,32 +900,30 @@ L3 programming layer <2026-01-19>
 LaTeX Warning: There were multiply-defined labels.
 
 Package rerunfilecheck Info: File `main.out' has not changed.
-(rerunfilecheck)             Checksum: 7D8D9B275A5FD6FD89F17D4980583B5F;25095.
+(rerunfilecheck)             Checksum: 99CBBF77E2AEABC8E51BE13760433B7B;27210.
  ) 
 Here is how much of TeX's memory you used:
- 17170 strings out of 467525
- 288953 string characters out of 5418981
- 831891 words of memory out of 5000000
- 45208 multiletter control sequences out of 15000+600000
- 704986 words of font info for 208 fonts, out of 8000000 for 9000
+ 17225 strings out of 467525
+ 287735 string characters out of 5418981
+ 761498 words of memory out of 5000000
+ 45148 multiletter control sequences out of 15000+600000
+ 715649 words of font info for 263 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
- 81i,13n,82p,1241b,632s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 81i,13n,82p,1250b,622s stack positions out of 10000i,1000n,20000p,200000b,200000s
 </usr/local/texlive/2026/texmf-dist/fonts/type1/public/bera/fvmb8a.pfb></usr/
 local/texlive/2026/texmf-dist/fonts/type1/public/bera/fvmr8a.pfb></usr/local/te
-xlive/2026/texmf-dist/fonts/type1/public/lm/lmbx10.pfb></usr/local/texlive/2026
-/texmf-dist/fonts/type1/public/lm/lmbx12.pfb></usr/local/texlive/2026/texmf-dis
-t/fonts/type1/public/lm/lmr10.pfb></usr/local/texlive/2026/texmf-dist/fonts/typ
-e1/public/lm/lmr12.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/l
-m/lmr7.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/lm/lmr8.pfb><
-/usr/local/texlive/2026/texmf-dist/fonts/type1/public/lm/lmri10.pfb></usr/local
-/texlive/2026/texmf-dist/fonts/type1/public/lm/lmsy10.pfb></usr/local/texlive/2
-026/texmf-dist/fonts/type1/public/lm/lmsy7.pfb></usr/local/texlive/2026/texmf-d
-ist/fonts/type1/public/lm/lmsy8.pfb>
-Output written on "/Users/bc/LXR1 Project/LXR/manual/build/main.pdf" (59 pages,
- 834476 bytes).
+xlive/2026/texmf-dist/fonts/type1/public/bera/fvmro8a.pfb></usr/local/texlive/2
+026/texmf-dist/fonts/type1/public/lm/lmbx10.pfb></usr/local/texlive/2026/texmf-
+dist/fonts/type1/public/lm/lmbx12.pfb></usr/local/texlive/2026/texmf-dist/fonts
+/type1/public/lm/lmmi10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/pub
+lic/lm/lmr10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/lm/lmr1
+2.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/lm/lmri10.pfb></us
+r/local/texlive/2026/texmf-dist/fonts/type1/public/lm/lmsy10.pfb>
+Output written on "/Users/bc/Helicase Project/Helicase/manual/build/main.pdf" (
+57 pages, 368479 bytes).
 PDF statistics:
- 1413 PDF objects out of 1440 (max. 8388607)
- 1292 compressed objects within 13 object streams
+ 1460 PDF objects out of 1728 (max. 8388607)
+ 1365 compressed objects within 14 object streams
  338 named destinations out of 1000 (max. 500000)
- 46546 words of extra memory for PDF output out of 51595 (max. 10000000)
+ 47649 words of extra memory for PDF output out of 51595 (max. 10000000)
 
