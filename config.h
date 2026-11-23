@@ -88,6 +88,31 @@
 #define DEV_MODE_LOGGING    1
 
 /*
+ * MIXER_PROBE_MAX: the S101 (S1) per-slot and per-section maxima of the
+ * mixer's cycle probe (S101 P2, S101_P2_REDUCTIONS.md Q-C9; user 2026-11-22:
+ * "build option P as recommended").
+ *
+ * What: value 1 compiles, inside a DEV_MODE_LOGGING build, the max words of
+ * mixer.c's probe (mixer_probe_async_max[], _sync_max[], _sec_max[]), the
+ * range test and saturating add that every mixer_probeAdd() call makes on
+ * them, their per-block fold and their fifteen trace records per window
+ * (decoder codes 6 | (9..15) << 3 and 6 | (16..22) << 3). Value 0 removes
+ * them; the averages, the whole-block maximum and the outside-mixer span
+ * (codes 6 | 24 << 3, 6 | 25 << 3) stay with DEV_MODE_LOGGING.
+ * Why: the maxima cost about 1.5k cycles a block inside the mixer (measured
+ * on SD_CARD_S101_P2: the send-add section 10.7k -> 11.9k with no change to
+ * its code, S101_P2_REDUCTIONS.md §A.1b item 7). That is diagnostic time
+ * inside the audio render, which the trace rule says a diagnostic must not
+ * take, and it made the logging build the user runs read about 1 % above a
+ * release build. Off by default; set to 1 for an investigation that needs
+ * the single-block maxima.
+ * Inputs: none (compile time). Outputs: when 1, the S1 records and 76 B of
+ * logging-only RAM. Affiliates: mixer_probeAdd(), mixer_probeEnd(),
+ * decode_devlogs.py (decodes the codes whether or not they are present).
+ */
+#define MIXER_PROBE_MAX     0
+
+/*
  * DEV_STALL_DETECTION enables cooperative stall detectors inside every
  * foreground filesystem state machine. Each detector fires once after its
  * phase stays unchanged for a site-specific tick threshold (20,000 to 50,000),
@@ -333,6 +358,16 @@
 #define MIDI_LEARN_FULL_SHOW_MS    1000u
 
 /*
+ * MIDI note modes (S096 P3, plan §4.2; SRAM approved 2026-11-17, "every key,
+ * full detail"). MIDI_NOTEMODE_KEYS: held keys per group (a note number can
+ * be held once per group, so 128 never overflows). MIDI_NOTEMODE_GROUPS: one
+ * per slot at most (a group needs at least one voice slot). RAM: 6 x (4 +
+ * 128 x 3) + 6 x 8 + 4 = 2,380 B SRAM1. Affiliate: MidiNoteModes.c.
+ */
+#define MIDI_NOTEMODE_KEYS         128u
+#define MIDI_NOTEMODE_GROUPS       6u
+
+/*
  * Parameter transmit interval (S083 plan 3.9 C, R5): the minimum time
  * between two parameter messages of a knob sweep (the latest value of the
  * pending target is sent). A full NRPN is 9 bytes, ~2.9 ms on DIN; 10 ms
@@ -546,8 +581,43 @@
  * write that carries dirty bits forward uses the shorter continuation cadence
  * below instead. Neither cadence is a synchronous deadline: Load/Save pages
  * and ordinary filesystem work may defer the next background start.
+ * S099 P3 (user's device test, 2026-11-20: edit, wait 5 s, power off, the
+ * edit was lost): 5,000 -> 2,000 ms. The interval runs from the FIRST change,
+ * and the save itself takes time after it, so a 5 s debounce could never make
+ * an edit durable within 5 s. With 2 s and the faster drain
+ * (AUTOSAVE_CRC_BYTES_PER_TICK, the kept winner cache) an edit is on the card
+ * about 3-4 s after it is made. S099_P3_AUTOSAVE_TRACE_FIX.md §9.
+ * S099 P3 §10 (device trace SD_CARD_ATS_4: still 14 s): 2,000 -> 1,000 ms,
+ * with the trace flush held off while a save is pending and the drain polled
+ * at full SD rate (AUTOSAVE_DRAIN_POLL_BUDGET_US).
+ * S101 (device trace SD_CARD_S100, Bank 076 Scene 5 playing at a 93 % render
+ * load): one parameter drain then takes 7.2-8.6 s (about 390 passes of at
+ * least 1 ms each; the longest 16-20 s). The 3-4 s figure holds only at a
+ * lower load: the drain's speed is bounded by the foreground share the render
+ * leaves. S101_P1_CPU_INVESTIGATION.md §3.4.
  */
-#define AUTOSAVE_WRITER_INTERVAL_MS 5000u
+#define AUTOSAVE_WRITER_INTERVAL_MS 1000u
+
+/*
+ * Lower-layer SD poll time per main-loop pass for core AutoSave storage work.
+ *
+ * What: while the AutoSave parameter drain, an AutoSave Pattern drain, or the
+ * final sync after any operation owns the facade, filesystem_tick() repeats
+ * afatfs_poll() until this many microseconds have passed, instead of polling
+ * once. Why (S099 P3 §10, device trace SD_CARD_ATS_4): the bit-banged SD
+ * driver clocks 16 bytes per poll, so a 512-byte sector takes 32 polls; at one
+ * poll per 4-24 ms main-loop pass the 34,768-byte parameter copy took 7.2 s
+ * and an edit was lost at power-off. About 1 ms moves one sector per pass.
+ * A trace flush gets it only while core work waits (a save, or Load/Save),
+ * to free the facade sooner; none starts while a save is pending (§0). S101: that
+ * condition is now in the code (filesystem_drainPollEligible(); before S101
+ * every trace flush got the burst), and Flush Finish ends its burst once
+ * AsyncFATFS has nothing left to write (afatfs_isFlushed()). Each burst is
+ * foreground time: at a 93 % render load 1 ms of it stretches one main-loop
+ * pass to about 20 ms (S101_P1_CPU_INVESTIGATION.md §3.1). Inputs: TIM2 time.
+ * Outputs: SD progress only. RAM: none (compile-time).
+ */
+#define AUTOSAVE_DRAIN_POLL_BUDGET_US 1000u
 
 /*
  * Short pause between bounded writes while a durable backlog still exists.
@@ -645,8 +715,14 @@
  * an SD transfer delay, timer interval, or filesystem pacing mechanism.
  * Affiliates: Autosave.c's bounded initial-image updater and filesystem.c's
  * AutoSave ensure/writer state machines.
+ * S099 P3: 128 -> 512 bytes (the whole staging_buf, asserted in filesystem.c).
+ * At 128 a 34,768-byte record took 272 passes: validating two candidates took
+ * about 3.7 s and the copy about 4.8 s, so a save needed 8-9 s after its
+ * debounce. The CRC is about 30 cycles a byte (bitwise CRC32C), so 512 bytes
+ * is about 70 us of a pass that already runs 2-6 ms: audio keeps its main-loop
+ * opportunities. S099_P3_AUTOSAVE_TRACE_FIX.md §9.
  */
-#define AUTOSAVE_CRC_BYTES_PER_TICK 128u
+#define AUTOSAVE_CRC_BYTES_PER_TICK 512u
 
 /*
  * Retained autosave-trace capacity. The default is 64 records (512 bytes);
@@ -686,7 +762,7 @@
  *
  * What: BACKGROUND_CPU_BUDGET_US_PER_MS_PLAYING is the microseconds of
  * background work allowed per millisecond of wall time while the sequencer
- * transport is running (2.5% CPU). BACKGROUND_CPU_BUDGET_US_PER_MS_STOPPED
+ * transport is running (3% CPU; 2.5% until S097 P3 §14). BACKGROUND_CPU_BUDGET_US_PER_MS_STOPPED
  * is the allowance while stopped (5% CPU). Zero disables the budget
  * (unlimited -- debugging only).
  *
@@ -698,7 +774,7 @@
  * budget state/refill/drain gates, PatternStackService.c repair gating, and
  * seq_isRunning(). These constants consume no RAM.
  */
-#define BACKGROUND_CPU_BUDGET_US_PER_MS_PLAYING  25u
+#define BACKGROUND_CPU_BUDGET_US_PER_MS_PLAYING  30u
 #define BACKGROUND_CPU_BUDGET_US_PER_MS_STOPPED  50u
 
 /*

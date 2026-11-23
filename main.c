@@ -62,10 +62,10 @@
 #include "PatternStackService.h"
 #include "copyClearSession.h"
 #include "EuklidGenerator.h"
-#include "SomGenerator.h"
 
 #include "MidiDin.h"
 #include "MidiIn.h"
+#include "MidiNoteModes.h"   /* S096 P3: the note-mode module */
 #include "MidiVoiceControl.h"
 #include "usb_manager.h"
 #include "filesystem.h"
@@ -210,15 +210,32 @@ static void audio_check_and_render(void)
 
         for (uint32_t frame = 0; frame < AUDIO_DMA_FRAMES; frame += OUTPUT_DMA_SIZE) {
             uint32_t basepri;
+#if DEV_MODE_LOGGING
+            /* S101 (S1): the cycle probe's span outside the mixer (the
+            ** trigger drain and the ramps), DEV only; mixer.h. */
+            const uint32_t probe_start = mixer_probeNow();
+#endif
             voiceControl_processPending();
             /* S081 P2 / S087 A: ramps after the step values land (the drain
             ** runs inside voiceControl_processPending()). */
             seq_rampService();
+#if DEV_MODE_LOGGING
+            mixer_probeOutside(probe_start);
+#endif
             basepri = dsp_maskLowPriorityIrqs();
             mixer_calcNextSampleBlock(&buf[frame * 2], &buf2[frame * 2]);
             irq_setBasepri(basepri);
         }
         audioCodec_commitRenderBuffer();
+        /*
+         * S101 (S101_P1_CPU_INVESTIGATION.md §3.2): the 500 Hz panel input scan
+         * after every committed DMA half, so buttons are sampled about every
+         * 2.2 ms even when one main-loop pass takes 20 ms or more (a 93 %
+         * render load with a 1 ms SD burst in the pass). Returns at once when
+         * no scan is due. After the commit, outside the 32-frame loop: no
+         * render work moves, and the slot just committed is already queued.
+         */
+        timebase_serviceFrontPanelInput();
     }
 }
 
@@ -282,6 +299,8 @@ static void midi_service(void)
 	 * Context: main loop only. Affiliates: midiIn_service().
 	 */
 	midiIn_service();
+	/* S096 P3: the note-mode module's revalidation (MidiNoteModes.c) */
+	midiNoteMode_service();
 }
 
 static uint8_t prevBtn;
@@ -646,7 +665,6 @@ int main(void)
 #endif
     seq_init();
     euklid_init();
-    som_init();
 
     midiDin_init();
     usb_init();
@@ -1429,6 +1447,8 @@ boot_filesystem_done:
      * liveRec_init, menu_getActiveVoice, copyClear_init.
      */
     liveRec_init(menu_getActiveVoice());
+    /* S096 P3: the note-mode pools are empty before audio starts. */
+    midiNoteMode_init();
 
     /*
      * Repair the directional VOICE edit masks before the AutoSave settle stage

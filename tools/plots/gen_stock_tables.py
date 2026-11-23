@@ -50,7 +50,10 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))          # tools/plots
 ROOT = os.path.dirname(os.path.dirname(HERE))
 CSV_PATH = os.path.join(HERE, "stock_wave_harmonics.csv")
-TABLE_PATH = os.path.join(ROOT, "Core", "DSPAudio", "wavetable.c")
+# S101: the firmware keeps only levels 1..10 of sawTable/recTable (one
+# stockTableRows[] array); the band limits are measured from every level, so
+# the full pre-S101 tables are read from their archived copy.
+TABLE_PATH = os.path.join(HERE, "archive", "stock_tables_s100.c")
 # S093 P3: Re3/Sw3 are no longer in the firmware; the output is archived
 # outside the build so --check keeps proving the recipe reproduces.
 OUT_PATH = os.path.join(HERE, "archive", "wavetableStock.c")
@@ -77,7 +80,7 @@ LEVEL_H[10] = 1
 def read_table(name, text):
     m = re.search(name + r"\[11\]\[1024\]\s*=\s*\{(.*?)\};", text, re.S)
     if not m:
-        sys.exit("gen_stock_tables.py: %s not found in wavetable.c" % name)
+        sys.exit("gen_stock_tables.py: %s not found in %s" % (name, TABLE_PATH))
     v = [int(x) for x in re.findall(r"-?\d+", m.group(1))]
     if len(v) != LEVELS * N:
         sys.exit("gen_stock_tables.py: %s has %d values" % (name, len(v)))

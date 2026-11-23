@@ -188,6 +188,8 @@ void Drum_initVoice(DrumVoice *voice, uint8_t seed_index)
 	voice->lastFmDepth = 0.0f;
 	voice->decimationCnt = 0;
 	voice->decimationRate = 1;
+	/* S101 P3: no unit until the voice_chain writer binds one (Spc). */
+	voiceSpace_init(&voice->space);
 }
 //---------------------------------------------------
 /*
@@ -915,7 +917,8 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	if (voice->chainType == VOICE_CHAIN_WAVEFOLDER) {
 		voiceFold_process(&voice->transGen, &voice->snapEg, buf, size,
 		                  1.0f, 1.0f);
-	} else {
+	} else if (voice->chainType == VOICE_CHAIN_DEFAULT) {
+		/* S101 P3: T+D only; Spc has no transient (its rows are the space's) */
 		//calc transient sample
 		transient_calcBlock(&voice->transGen,modBuf,size);
 
@@ -962,8 +965,29 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 		const float lastVeloGain = voice->ampRampArm
 			? voice->lastVeloGain : veloGain;
 
-		voicePost_drum(buf, voice->ampFilterInput, voice->lastGain,
-		               veloGain, lastVeloGain, &voice->distortion, size);
+		/*
+		 * The Spc chain (S101 P3 §6.1).
+		 *
+		 * What:       the spatializer in place of the post-chain: the amp x
+		 *             velocity ramp is fused into its loop (one linear ramp
+		 *             between the same endpoints voicePost_drum() ramps
+		 *             between), no drive, and the mixer runs no SRR for the
+		 *             slot (instrumentManager_slotUsesSrr()). Spread and
+		 *             feedback are the transient_wave and transient_vol rows.
+		 * Why:        the decided design: the chain replaces the transient,
+		 *             the drive and the SRR.
+		 * Outputs:    buf (left), voice->space.right (right), the space state.
+		 * Affiliates: voiceSpace_process(); voicePost_drum() (T+D, WFd).
+		 */
+		if (voice->chainType == VOICE_CHAIN_SPACE)
+			voiceSpace_process(&voice->space, buf,
+			                   voice->lastGain * lastVeloGain,
+			                   voice->ampFilterInput * veloGain,
+			                   voice->transGen.waveform,
+			                   voice->transGen.volume);
+		else
+			voicePost_drum(buf, voice->ampFilterInput, voice->lastGain,
+			               veloGain, lastVeloGain, &voice->distortion, size);
 		voice->lastVeloGain = veloGain;
 	}
 	#endif

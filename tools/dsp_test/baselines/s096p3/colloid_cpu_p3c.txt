@@ -1,0 +1,19 @@
+# S096 P3c host CPU record (the wavetable scan type wts).
+# Command: python3 tools/dsp_test/colloid_cpu.py --elf build/lxr02.elf --count 12
+# COL_SCAN_COUNT = 6 (the pair loop measured 67 per pair per sample; the
+# plan's 8 gate is <= 52, so 6 is the decided count).
+#
+# Note: the tool takes the longest path through col_oscControl(), which now
+# contains the scan branch. That inflates the plain and pwm rows by an upper
+# bound the device does not execute (the branch is taken only under wts):
+# plain12 was 435.7 at P3b, pwm6 421.5, pwmw6 424.6. The scan row is real.
+plain12-par: loops 322 + per block 4515/32 = 463.1
+plain12-ser: loops 293 + per block 4518/32 = 434.2
+pwm6-par: loops 343 + per block 3042/32 = 438.1
+pwm6-ser: loops 314 + per block 3045/32 = 409.2
+pwmw6-par: loops 346 + per block 3046/32 = 441.2
+pwmw6-ser: loops 317 + per block 3049/32 = 412.3
+scan6-par: loops 344 + per block 3017/32 = 438.3
+scan6-ser: loops 315 + per block 3020/32 = 409.4
+
+# ITCM: 16,000 / 16,384 B (the two scan loops add 632 B; 384 B free).

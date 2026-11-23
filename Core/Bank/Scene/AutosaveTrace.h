@@ -344,11 +344,63 @@ typedef enum {
      * n = 1..7: value32 = the average of mixer section n - 1
      * (MIXER_PROBE_SEC_*: control/LFO, effects_service, set-up, SRR,
      * output/send adds, Effect, compressor); n = 8: value32 = MPU region
-     * 0's RASR (bit 18 S set: SRAM not D-cached). 216 MHz / 1378.4 blocks per
+     * 0's RASR (bit 18 S set: SRAM not D-cached). S101 (S1): fifteen more
+     * records per window (31 in all): n = 9..14 (slot n - 9): value32 bits
+     * 16..31 = that slot's largest single-block block-rate work, bits 0..15
+     * = its largest render; n = 16..22: section n - 16's largest block;
+     * n = 24: the average cycles per block of voiceControl_processPending()
+     * + seq_rampService() (outside the mixer, main.c); n = 25: their
+     * largest block. Maxima saturate at 0xFFFF. 216 MHz / 1378.4 blocks per
      * second = 156,705 cycles per block. Producer: mixer_probeEnd().
      * Consumer: tools/diagnostic_tools/decode_devlogs.py ('p' branch).
      */
     AUTOSAVE_TRACE_STAGE_CPU_PROBE = 'p',
+    /*
+     * f: filesystem pass probe (S097 P3, DEV only).
+     * Times every filesystem_tick() call (TIM2 microseconds) while audio
+     * runs, tagged with the operation and phase it entered with.
+     * flags 0 (slow pass): one call took >= FS_PASS_PROBE_SLOW_US.
+     * flags 1 (operation maximum): the operation in bits 16..23 has ended (the
+     * next call entered with another operation); its longest call.
+     * flags 2 (underrun): audioCodec_underrunCount rose during or before this
+     * call; bits 0..15 = the increase.
+     * flags 3 (main-loop gap): once per second, the longest time between two
+     * filesystem_tick() starts in that second (one main-loop pass, render
+     * included), with the operation and phase at the call that ended it.
+     * value32 = microseconds (flags 0/1/3) or underruns (flags 2), saturated at
+     * 0xFFFF, in bits 0..15 | fs_internal_op_t bits 16..23 | op_phase bits
+     * 24..31.
+     * Never written for the trace-flush or boot-log operations, so a record
+     * can never start the next trace flush (SD_CARD_TEST_6 boot freeze).
+     * Producer: filesystem_passProbe(). Consumer:
+     * tools/diagnostic_tools/decode_devlogs.py ('f' branch).
+     */
+    AUTOSAVE_TRACE_STAGE_FS_PASS = 'f',
+    /*
+     * k: one Load/Save page OK click and what happened to it (S097 P3, DEV
+     * only). flags = outcome: 0 accepted (the Load/Save command started),
+     * 1 dropped (a command was still running), 2 dropped (Load name still
+     * blank), 3 dropped (Bank copy held), 4 refused (the Preset/filesystem
+     * request returned 0), 5 an ordinary edit-mode toggle on a type/number
+     * row, 6 held (storage busy; the OK is replayed when idle), 7 a held OK
+     * replayed (its own outcome record follows). Outcomes 2 and 4 on the OK
+     * row also hold the press. value32 = menu_activePage bits 0..7 | menu_saveOptions.what bits
+     * 8..15 | menu_saveOptions.state bits 16..23 | filesystem_status() bits
+     * 24..31. Producer: menu_loadSaveTraceClick() (menu.c). Consumer:
+     * tools/diagnostic_tools/decode_devlogs.py ('k' branch).
+     */
+    AUTOSAVE_TRACE_STAGE_LOADSAVE_CLICK = 'k',
+    /*
+     * x: one executed whole-Scene change and what it kept (S098 P1, DEV
+     * only). flags bits 0..6 = the keep mask (bit t = track t continued
+     * untouched), bit 7 = the Effect was identical (rebound, not reset).
+     * value32 = target Scene bits 0..7 | outgoing active Scene bits 8..15
+     * (16 = Scene 17) | the identity compare time in microseconds bits
+     * 16..31 (saturated at 0xFFFF). Producer: preset_sceneSwitchKeepMask()
+     * (presetManager.c). Consumer: tools/diagnostic_tools/decode_devlogs.py
+     * ('x' branch).
+     */
+    AUTOSAVE_TRACE_STAGE_SCENE_SWITCH = 'x',
 } autosave_trace_stage_t;
 
 #define AUTOSAVE_TRACE_MLRN_WRITE    0x01u

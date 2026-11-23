@@ -1,0 +1,68 @@
+\section{Firmware Update}\label{firmware-update}
+
+Firmware is updated from the SD card by the bootloader.
+
+\draftnote{The project documents describe the update at build level only. Confirm the file name,
+the bootloader messages and the recovery behaviour with the project owner and replace the text
+below with what the device actually shows.}
+
+\subsection{Update procedure}\label{update-procedure}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  Make sure the SD card uses \textbf{FAT32}.
+\item
+  Copy the firmware image, \texttt{LXRV2\_lxr02.img}, to the
+  \textbf{root folder} of the card.
+  \verify{Image file name in the released package.}
+\item
+  Insert the card into the powered-off LXR.
+\item
+  Push and hold the \textbf{main encoder}, then switch the power on.
+\end{enumerate}
+
+The device starts the bootloader instead of the application. The
+bootloader reads the image from the card, checks the image header and
+checksum, and writes the application. When it has finished, power the
+device off and on again.
+
+\oledsingle{Bootloader}
+
+\verify{Bootloader display texts for ``updating'', ``success'' and the error cases. The previous product showed \texttt{Bootloader v1.1}, \texttt{updating... (1/2)} and \texttt{success! please reboot...}.}
+
+\figplaceholder{firmware_update_steps.png}{Entering the bootloader.}{Three panels: SD card inserted in the slot, a finger holding the main encoder, power switch turned on. Add the expected display text below the third panel.}
+
+\subsection{Image format}\label{image-format}
+
+The image is a binary file with an 8-byte marker \texttt{LXRV2IMG}, the
+payload size, a checksum and then the program. The bootloader occupies
+the first 32 KB of flash and the application starts above it. The area
+at the top of flash (five 256 KB sectors) is reserved for samples and is
+never touched by a firmware update.
+
+\subsection{After an update}\label{after-an-update}
+
+\begin{itemize}
+\tightlist
+\item
+  A flash image check verifies a stored checksum for every program
+  sector. If a sector is wrong the display shows
+  \texttt{Img\ BAD\ s:...} and waits for BAR1.
+\item
+  A device that was updated from an older firmware may report the sample
+  catalogue as stale; reinstall the samples (see the Storage chapter).
+\end{itemize}
+
+\subsection{Rolling back}\label{rolling-back}
+
+\attention{Firmware older than the current sample layout plays program code as audio if it reads an
+enlarged image. Reinstall samples at low volume before rolling back to a version older than the
+one that introduced the current layout.}
+
+\verify{The exact firmware version boundary for the rollback hazard (the engineering notes name Session 073).}
+
+\subsection{Bootloader error messages}\label{bootloader-error-messages}
+
+\verify{Replace with the real list. The previous product reported: Firmware error (image not found or card not FAT32), Header error (corrupt image), EOF error (truncated image) and Mainboard error.}

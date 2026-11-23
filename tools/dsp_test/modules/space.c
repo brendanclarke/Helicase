@@ -72,18 +72,32 @@ void fxbuf_effectShare(fx_share_t *out) { *out = sp_share; }
  *       delay (+-2 samples) at spr 63; at spr 126 R plays `tim` and L half
  *       of it (relative spread, §S18);
  *   SP2 Delay stability: noise at -6 dBFS for 4 s through fbk 127, deg 127,
- *       every `hed` stop, `rev` and `hld` on and off, `spr` and `tim`
- *       moving:
+ *       `wid` 0 and 127 (S100 P2), `rev` and `hld` on and off, `spr` and
+ *       `tim` moving:
  *       finite and below 4.0 every sample;
  *   SP3 Reverb: an impulse's tail is present (energy 0.2-0.7 s > 0) and
  *       decays (0.7-1.2 s below 0.2-0.7 s at dcy 64); 10 s of frz 2 with
  *       shm 127 after noise stays finite and below 8.0 (R-7, shortened);
  *   SP4 Echo: each routing gives a finite, bounded, non-silent output for
  *       an impulse, and the three differ;
- *   SP6-SP10 (§S18): `hed` steps 0..6 in knob order (S095 P4); the longest `tim` returns
- *       on the long channel (spr relative); `hld` does not build; Reverb
+ *   SP7, SP9, SP10 (§S18): the longest `tim` returns
+ *       on the long channel (spr relative); Reverb
  *       `ton` darkens below 127; the stopped-transport idle ramps, idles and
  *       wakes;
+ *   SP12 (S100 P2) ping-pong: `xfb` 127, an impulse on L only returns
+ *       on L at D, R at 2D, L at 3D, the other side below 1 % each time,
+ *       every repeat the input's polarity; SP12b at `xfb` 32 and 64 with
+ *       `spr` 62 and fbk 110, kicks build; SP12c `str` 0 (mono) keeps
+ *       its level at every `xfb`; SP12d the mix keeps the loop's energy;
+ *   SP13 (S100 P2) the loop band-pass: no DC latch (a DC input at fbk 127
+ *       leaves the output's mean below the input's); `wid` 0 rings at the
+ *       `ton` centre (+-5 %); `wid` 127 passes 200 Hz and 4 kHz repeats
+ *       at the `fbk` gain (+-1 dB);
+ *   SP8 (S100 P2) `hld` follows `fbk`; SP14 `deg` adds no noise and keeps
+ *       the level; SP15 `wow` depth as pitch; SP16 `str`; SP17 `spr`'s
+ *       darkening; SP18 no clicks as `hld` engages or with `rev`; SP19
+ *       `ton` bipolar and `wid` slow at the top; SP20 `dck` depth (each
+ *       law's own comment);
  *   SP5 the feed: a Delay holding a tone exports, a Reverb enters with the
  *       record: the feed runs with the slot lock set; at full wet its output
  *       carries the tail while the feed runs; the feed and
@@ -154,11 +168,17 @@ static int sp_bounded(const float *x, uint32_t n, float lim)
     return 1;
 }
 
-/* tim spr fbk xfb ton deg wow hld rev hed dck (S095 P4: no `mix`) */
-#define SP_DLY_ROWS 11u
-static const uint8_t sp_dlyRows[SP_DLY_ROWS] = { 64u, 63u, 0u, 0u, 63u,
-                                                 0u, 0u, 0u, 0u,
-                                                 SPACE_HEADS_DEFAULT, 0u };
+/* A row's column in a rows[] array (rows 3.. of the type). */
+#define SP_COL(row_) ((row_) - 3u)
+
+/*
+ * tim fbk ton wid xfb spr str wow deg dck hld rev (S100 P2; `ton` and `str`
+ * bipolar, 63 = 0 on the page)
+ */
+#define SP_DLY_ROWS 12u
+static const uint8_t sp_dlyRows[SP_DLY_ROWS] = { 64u, 0u, 63u, 127u, 0u,
+                                                 63u, 63u, 0u, 0u, 0u, 0u,
+                                                 0u };
 
 static void law_sp1(void)
 {
@@ -179,7 +199,7 @@ static void law_sp1(void)
         float mr = 0.0f;
 
         memcpy(rows, sp_dlyRows, sizeof(rows));
-        rows[1] = pass ? 126u : 63u;
+        rows[SP_COL(SPACE_DLY_SPREAD)] = pass ? 126u : 63u;
         cb_bpm = 120u;
         sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
         /* Settle the delay glide from the floor (150 ms one-pole). */
@@ -201,11 +221,11 @@ static void law_sp1(void)
         }
         /* spr relative (§S18): at 126 R plays `tim` and L half of it. */
         snprintf(msg, sizeof msg, "SP1 spr %u: L at %u want %.0f (peak %.3f)",
-                 rows[1], pl - at, pass ? 0.5f * t : t, ml);
+                 rows[SP_COL(SPACE_DLY_SPREAD)], pl - at, pass ? 0.5f * t : t, ml);
         expect(fabsf((float)(pl - at) - (pass ? 0.5f * t : t)) <= 2.0f &&
                    ml > 0.3f, msg);
         snprintf(msg, sizeof msg, "SP1 spr %u: R at %u want %.0f (peak %.3f)",
-                 rows[1], pr - at, t, mr);
+                 rows[SP_COL(SPACE_DLY_SPREAD)], pr - at, t, mr);
         expect(fabsf((float)(pr - at) - t) <= 2.0f && mr > 0.3f, msg);
     }
 }
@@ -220,17 +240,19 @@ static void law_sp2(void)
     int ok = 1;
 
     memcpy(rows, sp_dlyRows, sizeof(rows));
-    rows[0] = 40u;
-    rows[2] = 127u;
-    rows[3] = 64u;
-    rows[5] = 127u;
-    rows[6] = 127u;
-    rows[7] = 1u;   /* hld on part of the time (written below too) */
+    rows[SP_COL(SPACE_DLY_TIME)] = 40u;
+    rows[SP_COL(SPACE_DLY_FEEDBACK)] = 127u;
+    rows[SP_COL(SPACE_DLY_XFEED)] = 64u;
+    rows[SP_COL(SPACE_DLY_DEGRADE)] = 127u;
+    rows[SP_COL(SPACE_DLY_WOW)] = 127u;
+    rows[SP_COL(SPACE_DLY_HOLD)] = 1u;   /* hld on part of the time (written below too) */
     sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
     for (b = 0u; b < 5513u && ok; b++) {
         if ((b & 511u) == 0u) {
-            space_delayOps.write_param(&sp_rt, SPACE_DLY_HEADS,
-                                       (uint8_t)((b >> 9) % SPACE_HEADS_STOPS));
+            space_delayOps.write_param(&sp_rt, SPACE_DLY_WIDTH,
+                                       ((b >> 9) & 1u) ? 0u : 127u);
+            space_delayOps.write_param(&sp_rt, SPACE_DLY_TONE,
+                                       (uint8_t)((b >> 6) & 127u));
             space_delayOps.write_param(&sp_rt, SPACE_DLY_HOLD,
                                        (uint8_t)((b >> 10) & 1u));
             space_delayOps.write_param(&sp_rt, SPACE_DLY_REVERSE,
@@ -305,11 +327,11 @@ static void law_sp3(void)
     expect(ok, "SP3 Reverb freeze+shimmer: a sample is not finite or above 8.0");
 }
 
-/* tim fbk ton deg wow e>r bln dcy lsh hsh hed dck rtg */
-#define SP_ECH_ROWS 13u
-static const uint8_t sp_echRows[SP_ECH_ROWS] = { 64u, 64u, 63u, 0u, 0u,
-                                                 64u, 48u, 48u, 63u, 40u,
-                                                 SPACE_HEADS_DEFAULT, 0u, 0u };
+/* tim fbk ton wid spr str wow deg dck e>r bln dcy lsh hsh rtg (S100 P2) */
+#define SP_ECH_ROWS 15u
+static const uint8_t sp_echRows[SP_ECH_ROWS] = { 64u, 64u, 63u, 127u, 63u,
+                                                 63u, 0u, 0u, 0u, 64u, 48u,
+                                                 48u, 63u, 40u, 0u };
 
 static void law_sp4(void)
 {
@@ -326,7 +348,7 @@ static void law_sp4(void)
         int ok = 1;
 
         memcpy(rows, sp_echRows, sizeof(rows));
-        rows[12] = (uint8_t)route;   /* rtg stops 0, 1, 2 */
+        rows[SP_COL(SPACE_ECH_ROUTING)] = (uint8_t)route;   /* rtg stops 0, 1, 2 */
         sp_enter(&space_echoOps, NULL, rows, SP_ECH_ROWS);
         sum[route] = 0.0;
         for (b = 0u; b < 3000u; b++) {
@@ -396,41 +418,6 @@ static void law_sp5(void)
 }
 
 /*
- * SP6 (§S18; S095 P4): `hed` steps A B C AB AC BC ABC for the stored
- * values 0..6, in order, each its own head set; a value above 6 plays ABC;
- * the default is C (D only).
- */
-static void law_sp6(void)
-{
-    static const uint8_t sets[SPACE_HEADS_STOPS] = { 1u, 2u, 4u, 3u, 5u, 6u, 7u };
-    uint32_t v;
-    uint8_t seen = 0u;
-    int ok = 1;
-    char msg[120];
-
-    sp_enter(&space_delayOps, NULL, sp_dlyRows, SP_DLY_ROWS);
-    for (v = 0u; v <= SPACE_HEADS_STOPS; v++) {
-        /* v == SPACE_HEADS_STOPS is one past the last stop: it plays ABC. */
-        const uint8_t st = (v < SPACE_HEADS_STOPS) ? (uint8_t)v
-                                                   : (uint8_t)(SPACE_HEADS_STOPS - 1u);
-        fx_share_t sh;
-        const space_tapeK_t *k;
-        uint8_t mask;
-
-        space_delayOps.write_param(&sp_rt, SPACE_DLY_HEADS, (uint8_t)v);
-        fxbuf_effectShare(&sh);
-        k = &space_hdr(&sh)->k;
-        mask = (uint8_t)((k->hg[0] > 0.0f) | ((k->hg[1] > 0.0f) << 1) |
-                         ((k->hg[2] > 0.0f) << 2));
-        ok = ok && mask == sets[st];
-        seen |= (uint8_t)(1u << st);
-    }
-    snprintf(msg, sizeof msg, "SP6 hed: stops %d, seen 0x%02x, default %u",
-             ok, seen, (unsigned)SPACE_HEADS_DEFAULT);
-    expect(ok && seen == 0x7Fu && SPACE_HEADS_DEFAULT == 2u, msg);
-}
-
-/*
  * SP7 (§S18): the longest `tim` the arena holds (its clamp) returns on the
  * long channel at the curve's time, for spr 0 (L long) and 127 (R long).
  */
@@ -457,11 +444,12 @@ static void law_sp7(void)
         lim = space_timeLimit(SPACE_TAG_DELAY, &sp_share);
         t = crumpBit_delaySamples(lim, 120u);
         memcpy(rows, sp_dlyRows, sizeof(rows));
-        rows[0] = lim;
-        rows[1] = pass ? 127u : 0u;
+        rows[SP_COL(SPACE_DLY_TIME)] = lim;
+        rows[SP_COL(SPACE_DLY_SPREAD)] = pass ? 127u : 0u;
         sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
         /* Start at the target: no glide from the floor. */
         sp_rt.d[0] = sp_rt.d[1] = (float)(sp_rt.tape_n - 3u);
+        sp_rt.dr[0] = sp_rt.dr[1] = sp_rt.d[0];
         sp_rt.v = (float)(sp_rt.tape_n - 3u) / t;
         for (b = 0u; b < (uint32_t)(1.1f * t) / 32u + 8u; b++) {
             for (n = 0u; n < 32u; n++)
@@ -475,43 +463,77 @@ static void law_sp7(void)
         }
         snprintf(msg, sizeof msg,
                  "SP7 tim %u (limit) spr %u: the long side returns at %u, "
-                 "want %.0f +-1%% (peak %.3f)", lim, rows[1], pk - at, t, mk);
+                 "want %.0f +-1%% (peak %.3f)", lim, rows[SP_COL(SPACE_DLY_SPREAD)],
+                 pk - at, t, mk);
         expect(mk > 0.1f && fabsf((float)(pk - at) - t) < 0.01f * t, msg);
     }
 }
 
-/* SP8 (§S18): `hld` sustains without building (4 s, fbk 127, deg 0). */
-static void law_sp8(void)
+/*
+ * SP8 (S100 P2): `hld` follows `fbk`. tim 40, a noise burst below about
+ * 3 kHz, then hold; the L+R energy of the hold's second 4 against the
+ * second from 0.25 s to 1.25 s (after the 50 ms crossfade and the first
+ * passes, which still carry the pre-hold level):
+ * (a) fbk 20, wid 127: the same level, +-1 dB;
+ * (b) fbk 64, wid 127: grows slowly, +1 .. +6 dB (the law: 0.74 dB/s);
+ * (c) fbk 120, wid 0: grows although the band is narrow, at least +6 dB.
+ */
+static double sp8_run(uint8_t fbk, uint8_t wid, double *e1)
 {
     uint8_t rows[SP_DLY_ROWS];
     float l[32];
     float r[32];
-    double e1 = 0.0;
     double e4 = 0.0;
+    float lp_l = 0.0f;
+    float lp_r = 0.0f;
     uint32_t b;
     uint32_t n;
-    char msg[160];
 
     memcpy(rows, sp_dlyRows, sizeof(rows));
-    rows[0] = 40u;
-    rows[2] = 127u;
+    rows[SP_COL(SPACE_DLY_TIME)] = 40u;
+    rows[SP_COL(SPACE_DLY_FEEDBACK)] = fbk;
+    rows[SP_COL(SPACE_DLY_WIDTH)] = wid;
+    cb_bpm = 120u;
     sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
+    *e1 = 0.0;
     for (b = 0u; b < 7000u; b++) {
         if (b == 1500u)
             space_delayOps.write_param(&sp_rt, SPACE_DLY_HOLD, 1u);
-        for (n = 0u; n < 32u; n++)
-            l[n] = r[n] = (b < 1400u) ? 0.2f * sp_noise() : 0.0f;
+        for (n = 0u; n < 32u; n++) {
+            /* Noise below about 3 kHz (a one-pole), as programme. */
+            lp_l += 0.35f * (((b < 1400u) ? 0.1f * sp_noise() : 0.0f) - lp_l);
+            lp_r += 0.35f * (((b < 1400u) ? 0.1f * sp_noise() : 0.0f) - lp_r);
+            l[n] = lp_l;
+            r[n] = lp_r;
+        }
         sp_block(&space_delayOps, l, r);
         for (n = 0u; n < 32u; n++) {
-            if (b >= 1500u && b < 2878u)
-                e1 += (double)l[n] * l[n];
+            const double v = (double)l[n] * l[n] + (double)r[n] * r[n];
+
+            if (b >= 1845u && b < 3223u)
+                *e1 += v;
             else if (b >= 5622u)
-                e4 += (double)l[n] * l[n];
+                e4 += v;
         }
     }
-    snprintf(msg, sizeof msg,
-             "SP8 hld: energy second 1 %.3g, second 4 %.3g (no growth)", e1, e4);
-    expect(e1 > 1e-3 && e4 <= 1.05 * e1, msg);
+    return 10.0 * log10(e4 / *e1);
+}
+
+static void law_sp8(void)
+{
+    double e1;
+    double g;
+    char msg[160];
+
+    g = sp8_run(20u, 127u, &e1);
+    snprintf(msg, sizeof msg, "SP8a hld fbk 20 wid 127: second 4 %+.2f dB on second 1 (+-1)", g);
+    expect(e1 > 1e-3 && fabs(g) <= 1.0, msg);
+    g = sp8_run(64u, 127u, &e1);
+    snprintf(msg, sizeof msg, "SP8b hld fbk 64 wid 127: second 4 %+.2f dB on second 1 (+1 .. +6)", g);
+    expect(e1 > 1e-3 && g >= 1.0 && g <= 6.0, msg);
+    g = sp8_run(120u, 0u, &e1);
+    snprintf(msg, sizeof msg, "SP8c hld fbk 120 wid 0: second 4 %+.2f dB on second 1 (>= +6)", g);
+    expect(e1 > 1e-9 && g >= 6.0, msg);
 }
 
 /* SP9 (§S18): Reverb `ton` 0 darkens the tail; 127 matches the flat path. */
@@ -602,16 +624,16 @@ static void law_sp10(void)
 }
 
 /*
- * SP11 (S096 P2 F1): no frame slips in the extra heads or the reverse head.
+ * SP11 (S096 P2 F1): no frame slips in the heads or the reverse head.
  *
  * What:       a 440 Hz sine at 0.5 into the Delay (feedback 0) and the Echo
  *             (feedback 0), 4 s after the glides settle; the largest third
  *             difference of the output L. A smooth (or smoothly wobbled)
  *             sine gives about 1.2e-4 and the linear main head's moving
  *             fraction about 4e-3; a one-frame slip of this sine 0.06 ..
- *             0.09. Cases: Delay heads ABC at wow 127; Delay reverse (heads
- *             C) at wow 0 and 127; Echo heads ABC at wow 127. Each must stay
- *             below 0.012.
+ *             0.09. Cases: Delay at wow 127; Delay reverse at wow 0 and
+ *             127; Echo at wow 127 (S100 P2: one head, no `hed`). Each must
+ *             stay below 0.012.
  * Why:        the D/3 and 2D/3 heads and the reverse windows read the
  *             nearest frame before S096 P2, which slipped as soon as wow
  *             (or the reverse ramp) moved their positions by fractions: the
@@ -651,10 +673,10 @@ static float sp11_run(const effect_type_ops_t *ops, const uint8_t *rows, uint32_
 
 static void law_sp11(void)
 {
-    static const struct { uint8_t hed, rev, wow; const char *what; } dly[3] = {
-        { 6u, 0u, 127u, "Delay heads ABC, wow 127" },
-        { SPACE_HEADS_DEFAULT, 1u, 0u, "Delay reverse, wow 0" },
-        { SPACE_HEADS_DEFAULT, 1u, 127u, "Delay reverse, wow 127" },
+    static const struct { uint8_t rev, wow; const char *what; } dly[3] = {
+        { 0u, 127u, "Delay, wow 127" },
+        { 1u, 0u, "Delay reverse, wow 0" },
+        { 1u, 127u, "Delay reverse, wow 127" },
     };
     char msg[160];
     uint32_t c;
@@ -664,10 +686,9 @@ static void law_sp11(void)
         float mx;
 
         memcpy(rows, sp_dlyRows, sizeof(rows));
-        rows[2] = 0u;            /* fbk */
-        rows[6] = dly[c].wow;    /* wow */
-        rows[8] = dly[c].rev;    /* rev */
-        rows[9] = dly[c].hed;    /* hed */
+        rows[SP_COL(SPACE_DLY_FEEDBACK)] = 0u;
+        rows[SP_COL(SPACE_DLY_WOW)] = dly[c].wow;
+        rows[SP_COL(SPACE_DLY_REVERSE)] = dly[c].rev;
         mx = sp11_run(&space_delayOps, rows, SP_DLY_ROWS);
         snprintf(msg, sizeof msg, "SP11 %s: largest third difference %.4f (< 0.012)",
                  dly[c].what, mx);
@@ -678,14 +699,851 @@ static void law_sp11(void)
         float mx;
 
         memcpy(rows, sp_echRows, sizeof(rows));
-        rows[1] = 0u;            /* fbk */
-        rows[4] = 127u;          /* wow */
-        rows[10] = 6u;           /* hed ABC */
+        rows[SP_COL(SPACE_ECH_FEEDBACK)] = 0u;
+        rows[SP_COL(SPACE_ECH_WOW)] = 127u;
         mx = sp11_run(&space_echoOps, rows, SP_ECH_ROWS);
-        snprintf(msg, sizeof msg, "SP11 Echo heads ABC, wow 127: largest third difference %.4f (< 0.012)",
+        snprintf(msg, sizeof msg, "SP11 Echo, wow 127: largest third difference %.4f (< 0.012)",
                  mx);
         expect(mx < 0.012f, msg);
     }
+}
+
+/*
+ * SP12 (S100 P2): `xfb` 127 ping-pongs. An impulse on L only (spr 63, fbk
+ * 100, wid 127): the first three repeats land on L at D, R at 2D and L at
+ * 3D (+-2 samples), each with the other side below 1 % of it.
+ */
+static void law_sp12(void)
+{
+    uint8_t rows[SP_DLY_ROWS];
+    const float t = crumpBit_delaySamples(64u, 120u);
+    const uint32_t at = 3200u;
+    float pkl[3] = { 0.0f, 0.0f, 0.0f };
+    float pkr[3] = { 0.0f, 0.0f, 0.0f };
+    float sg[3] = { 0.0f, 0.0f, 0.0f };
+    uint32_t pos[3] = { 0u, 0u, 0u };
+    float l[32];
+    float r[32];
+    uint32_t b;
+    uint32_t n;
+    uint32_t k;
+    int ok = 1;
+    char msg[200];
+
+    memcpy(rows, sp_dlyRows, sizeof(rows));
+    rows[SP_COL(SPACE_DLY_FEEDBACK)] = 100u;
+    rows[SP_COL(SPACE_DLY_XFEED)] = 127u;
+    cb_bpm = 120u;
+    sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
+    for (b = 0u; b < 9000u; b++) {
+        memset(l, 0, sizeof(l));
+        memset(r, 0, sizeof(r));
+        sp_block(&space_delayOps, l, r);
+    }
+    for (b = 0u; b < (uint32_t)(3.5f * t + (float)at) / 32u; b++) {
+        for (n = 0u; n < 32u; n++) {
+            l[n] = (b * 32u + n == at) ? 1.0f : 0.0f;
+            r[n] = 0.0f;
+        }
+        sp_block(&space_delayOps, l, r);
+        for (n = 0u; n < 32u; n++) {
+            const float f = (float)(b * 32u + n) - (float)at;
+
+            /* Window k: (k + 0.5) D .. (k + 1.5) D around repeat k + 1. */
+            for (k = 0u; k < 3u; k++)
+                if (f > ((float)k + 0.5f) * t && f < ((float)k + 1.5f) * t) {
+                    if (fabsf(l[n]) > pkl[k]) {
+                        pkl[k] = fabsf(l[n]);
+                        if (k != 1u) {
+                            pos[k] = (uint32_t)f;
+                            sg[k] = l[n];
+                        }
+                    }
+                    if (fabsf(r[n]) > pkr[k]) {
+                        pkr[k] = fabsf(r[n]);
+                        if (k == 1u) {
+                            pos[k] = (uint32_t)f;
+                            sg[k] = r[n];
+                        }
+                    }
+                }
+        }
+    }
+    for (k = 0u; k < 3u; k++) {
+        const float on = (k == 1u) ? pkr[k] : pkl[k];
+        const float off = (k == 1u) ? pkl[k] : pkr[k];
+
+        ok = ok && on > 0.2f && off < 0.01f * on && sg[k] > 0.0f &&
+             fabsf((float)pos[k] - (float)(k + 1u) * t) <= 2.0f;
+    }
+    snprintf(msg, sizeof msg,
+             "SP12 ping-pong: L %.3f/%.3f at %u, R %.3f/%.3f at %u, "
+             "L %.3f/%.3f at %u (D %.0f)", pkl[0], pkr[0], pos[0], pkr[1],
+             pkl[1], pos[1], pkl[2], pkr[2], pos[2], t);
+    expect(ok, msg);
+}
+
+/*
+ * SP12b (S100 P2): at `xfb` 64, `spr` 62 (R 1 % shorter) and fbk 110, a
+ * 55 Hz kick every beat builds: the L+R level of second 8 is at least 4 dB
+ * above second 1 (measured +6.6; the L/R average +0.6, the old law +2.5). An L/R average at this row cancelled the low end where
+ * the two times differ, and the loop sat at one level.
+ */
+/*
+ * SP12b/SP12c helper (S100 P2): the Delay at tim 90, 120 bpm, with the
+ * given fbk / spr / xfb / str, fed a 55 Hz kick every beat (0.5 peak, a
+ * 45 ms decay) on both inputs for 8 s; e[0..7] gets the L+R output energy
+ * of each second.
+ */
+static void sp12_kicks(uint8_t fbk, uint8_t spr, uint8_t xfb, uint8_t str,
+                       double *e)
+{
+    uint8_t rows[SP_DLY_ROWS];
+    float l[32];
+    float r[32];
+    uint32_t b;
+    uint32_t n;
+    uint32_t t = 0u;
+
+    memcpy(rows, sp_dlyRows, sizeof(rows));
+    rows[SP_COL(SPACE_DLY_TIME)] = 90u;
+    rows[SP_COL(SPACE_DLY_FEEDBACK)] = fbk;
+    rows[SP_COL(SPACE_DLY_SPREAD)] = spr;
+    rows[SP_COL(SPACE_DLY_XFEED)] = xfb;
+    rows[SP_COL(SPACE_DLY_STEREO)] = str;
+    for (b = 0u; b < 8u; b++)
+        e[b] = 0.0;
+    cb_bpm = 120u;
+    sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
+    for (b = 0u; b < 8u * 1378u; b++) {
+        for (n = 0u; n < 32u; n++, t++) {
+            const uint32_t ph = t % 22054u;
+
+            l[n] = r[n] = (ph < 8000u)
+                ? 0.5f * expf(-(float)ph / 2000.0f) *
+                      sinf(6.2831853f * 55.0f * (float)ph / 44108.07f)
+                : 0.0f;
+        }
+        sp_block(&space_delayOps, l, r);
+        for (n = 0u; n < 32u; n++)
+            e[b / 1378u] += (double)l[n] * l[n] + (double)r[n] * r[n];
+    }
+}
+
+static void law_sp12b(void)
+{
+    static const uint8_t xfb[2] = { 32u, 64u };
+    double e[8];
+    char msg[160];
+    uint32_t c;
+
+    for (c = 0u; c < 2u; c++) {
+        sp12_kicks(110u, 62u, xfb[c], 63u, e);
+        snprintf(msg, sizeof msg,
+                 "SP12b xfb %u, spr 62, fbk 110: second 8 is %+.1f dB on second 1 (>= +4)",
+                 xfb[c], 10.0 * log10(e[7] / e[0]));
+        expect(e[7] >= 2.51 * e[0], msg);
+    }
+}
+
+/*
+ * SP12c (S100 P2): `str` 0 (mono) keeps its level as `xfb` rises: kicks,
+ * fbk 90, spr 63; the energy of seconds 2..8 at xfb 64 and 127 within 1 dB
+ * of xfb 0 (a rotation lost cos(angle) of the mid each pass: every other
+ * repeat cancelled in mono at 127).
+ */
+static void law_sp12c(void)
+{
+    static const uint8_t xfb[3] = { 0u, 64u, 127u };
+    double e[8];
+    double s[3];
+    char msg[200];
+    uint32_t c;
+    uint32_t k;
+
+    for (c = 0u; c < 3u; c++) {
+        sp12_kicks(90u, 63u, xfb[c], 0u, e);
+        s[c] = 0.0;
+        for (k = 1u; k < 8u; k++)
+            s[c] += e[k];
+    }
+    snprintf(msg, sizeof msg,
+             "SP12c str 0: xfb 64 %+.2f dB, xfb 127 %+.2f dB on xfb 0 (+-1)",
+             10.0 * log10(s[1] / s[0]), 10.0 * log10(s[2] / s[0]));
+    expect(fabs(10.0 * log10(s[1] / s[0])) <= 1.0 &&
+               fabs(10.0 * log10(s[2] / s[0])) <= 1.0, msg);
+}
+
+/* SP13 helper: run the Delay (tim 20) on a source for nb blocks. */
+static void sp13_run(uint8_t fbk, uint8_t ton, uint8_t wid,
+                     float (*src)(uint32_t), uint32_t nb, float *out)
+{
+    uint8_t rows[SP_DLY_ROWS];
+    float l[32];
+    float r[32];
+    uint32_t b;
+    uint32_t n;
+
+    memcpy(rows, sp_dlyRows, sizeof(rows));
+    rows[SP_COL(SPACE_DLY_TIME)] = 20u;
+    rows[SP_COL(SPACE_DLY_FEEDBACK)] = fbk;
+    rows[SP_COL(SPACE_DLY_TONE)] = ton;
+    rows[SP_COL(SPACE_DLY_WIDTH)] = wid;
+    cb_bpm = 120u;
+    sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
+    /* Settle the delay glide from the floor (150 ms one-pole), as SP1. */
+    for (b = 0u; b < 9000u; b++) {
+        memset(l, 0, sizeof(l));
+        memset(r, 0, sizeof(r));
+        sp_block(&space_delayOps, l, r);
+    }
+    for (b = 0u; b < nb; b++) {
+        for (n = 0u; n < 32u; n++)
+            l[n] = r[n] = src(b * 32u + n);
+        sp_block(&space_delayOps, l, r);
+        for (n = 0u; n < 32u; n++)
+            out[b * 32u + n] = l[n];
+    }
+}
+
+static float sp13_dc(uint32_t i) { (void)i; return 0.25f; }
+static float sp13_burst(uint32_t i) { return (i < 2000u) ? 0.3f * sp_noise() : 0.0f; }
+static float sp13_f;
+static float sp13_tone(uint32_t i)
+{
+    return (i < 1500u) ? 0.25f * sinf(6.2831853f * sp13_f * (float)i / 44108.07f)
+                       : 0.0f;
+}
+static float sp13_buf[44100u * 6u];
+
+/*
+ * The peak of out[] in [a, b).
+ */
+static float sp13_peak(const float *x, uint32_t a, uint32_t b)
+{
+    float m = 0.0f;
+
+    for (; a < b; a++)
+        m = __builtin_fmaxf(m, fabsf(x[a]));
+    return m;
+}
+
+/*
+ * SP13 (S100 P2): the loop band-pass.
+ * (a) no DC latch: a constant 0.25 input at fbk 127 for 6 s: the output's
+ *     mean (last second) is the input's own DC played once, 0.25 +-0.01
+ *     (before S100 P2 the loop latched to about 0.65 against the clip);
+ * (b) wid 0 resonates at the ton centre: a noise burst at fbk 110, ton 0
+ *     (row 63: 458 Hz, the room's centre) rings; zero crossings over the
+ *     last second give 458 Hz +-5 %;
+ * (c) wid 127 is nearly flat: 200 Hz and 4 kHz bursts at fbk 80 keep the
+ *     repeat-to-repeat ratio (repeats 2 and 3) at 0.8 +-1 dB.
+ */
+static void law_sp13(void)
+{
+    const uint32_t nb = (44100u * 6u) / 32u;
+    const float d = crumpBit_delaySamples(20u, 120u);
+    /* S100 P2: `ton` 0 (row 63) centres the band in 10 Hz .. 21 kHz. */
+    const float fc = 458.257569f;
+    double mean = 0.0;
+    uint32_t zc = 0u;
+    uint32_t i;
+    uint32_t c;
+    char msg[200];
+
+    sp13_run(127u, 63u, 127u, sp13_dc, nb, sp13_buf);
+    for (i = nb * 32u - 44108u; i < nb * 32u; i++)
+        mean += sp13_buf[i];
+    mean /= 44108.0;
+    snprintf(msg, sizeof msg, "SP13a no DC latch: output mean %.4f (0.25 +-0.01)", mean);
+    expect(fabs(mean - 0.25) < 0.01, msg);
+
+    sp13_run(110u, 63u, 0u, sp13_burst, nb, sp13_buf);
+    for (i = nb * 32u - 44108u; i < nb * 32u; i++)
+        zc += (sp13_buf[i - 1u] < 0.0f) != (sp13_buf[i] < 0.0f);
+    snprintf(msg, sizeof msg,
+             "SP13b wid 0 rings at %.0f Hz, want %.0f +-5 %% (peak %.3f)",
+             0.5f * (float)zc, fc, sp13_peak(sp13_buf, nb * 32u - 44108u, nb * 32u));
+    expect(fabsf(0.5f * (float)zc - fc) < 0.05f * fc &&
+               sp13_peak(sp13_buf, nb * 32u - 44108u, nb * 32u) > 0.05f, msg);
+
+    for (c = 0u; c < 2u; c++) {
+        float p2;
+        float p3;
+        float db;
+
+        sp13_f = c ? 4000.0f : 200.0f;
+        sp13_run(80u, 63u, 127u, sp13_tone, (uint32_t)(4.0f * d) / 32u + 8u,
+                 sp13_buf);
+        p2 = sp13_peak(sp13_buf, (uint32_t)(1.9f * d), (uint32_t)(2.9f * d));
+        p3 = sp13_peak(sp13_buf, (uint32_t)(2.9f * d), (uint32_t)(3.9f * d));
+        db = 20.0f * log10f(p3 / p2 / 0.8f);
+        snprintf(msg, sizeof msg,
+                 "SP13c wid 127, %.0f Hz: repeat ratio %.3f, %+.2f dB from fbk 0.8",
+                 sp13_f, p3 / p2, db);
+        expect(p2 > 0.05f && fabsf(db) < 1.0f, msg);
+    }
+}
+
+/*
+ * SP14 (S100 P2): `deg` adds no noise and keeps the level.
+ * (a) deg 127, fbk 90, wid 127, from init with zero input: exact 0.0 for
+ *     4 s; after a 0.3 s noise burst, exact 0.0 again within 8 s (fbk 40:
+ *     below the row where the makeup's quiet-signal gain, 1.79 at deg 127,
+ *     takes the loop to unity);
+ * (b) a -12 dBFS 1 kHz burst, fbk 100: the second repeat's RMS at deg 127
+ *     is within 1.5 dB of deg 0's (equal amplitude).
+ */
+static float sp14_rep2(uint8_t deg)
+{
+    uint8_t rows[SP_DLY_ROWS];
+    const float d = crumpBit_delaySamples(64u, 120u);
+    float l[32];
+    float r[32];
+    double pk = 0.0;
+    uint32_t b;
+    uint32_t n;
+
+    memcpy(rows, sp_dlyRows, sizeof(rows));
+    rows[SP_COL(SPACE_DLY_FEEDBACK)] = 100u;
+    rows[SP_COL(SPACE_DLY_DEGRADE)] = deg;
+    cb_bpm = 120u;
+    sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
+    for (b = 0u; b < 9000u; b++) {
+        memset(l, 0, sizeof(l));
+        memset(r, 0, sizeof(r));
+        sp_block(&space_delayOps, l, r);
+    }
+    for (b = 0u; b < (uint32_t)(2.9f * d) / 32u; b++) {
+        for (n = 0u; n < 32u; n++) {
+            const uint32_t i = b * 32u + n;
+
+            l[n] = r[n] = (i < 4000u)
+                ? 0.25f * sinf(6.2831853f * 1000.0f * (float)i / 44108.07f)
+                : 0.0f;
+        }
+        sp_block(&space_delayOps, l, r);
+        for (n = 0u; n < 32u; n++)
+            if ((float)(b * 32u + n) > 1.9f * d)
+                pk += (double)l[n] * l[n];
+    }
+    return (float)sqrt(pk);
+}
+
+static void law_sp14(void)
+{
+    uint8_t rows[SP_DLY_ROWS];
+    float l[32];
+    float r[32];
+    uint32_t b;
+    uint32_t n;
+    uint32_t nz = 0u;
+    uint32_t last = 0u;
+    float p0;
+    float p1;
+    char msg[160];
+
+    memcpy(rows, sp_dlyRows, sizeof(rows));
+    rows[SP_COL(SPACE_DLY_FEEDBACK)] = 90u;
+    rows[SP_COL(SPACE_DLY_DEGRADE)] = 127u;
+    sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
+    for (b = 0u; b < 5513u; b++) {
+        memset(l, 0, sizeof(l));
+        memset(r, 0, sizeof(r));
+        sp_block(&space_delayOps, l, r);
+        for (n = 0u; n < 32u; n++)
+            nz += (l[n] != 0.0f) || (r[n] != 0.0f);
+    }
+    snprintf(msg, sizeof msg, "SP14a deg 127 from init, no input: %u non-zero samples in 4 s", nz);
+    expect(nz == 0u, msg);
+    rows[SP_COL(SPACE_DLY_FEEDBACK)] = 40u;
+    sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
+    for (b = 0u; b < 11025u; b++) {
+        for (n = 0u; n < 32u; n++)
+            l[n] = r[n] = (b < 413u) ? 0.3f * sp_noise() : 0.0f;
+        sp_block(&space_delayOps, l, r);
+        for (n = 0u; n < 32u; n++)
+            if (l[n] != 0.0f || r[n] != 0.0f)
+                last = b;
+    }
+    snprintf(msg, sizeof msg, "SP14a deg 127 fbk 40 after a burst: last non-zero at %.2f s (< 7.5)",
+             (double)last * 32.0 / 44108.0);
+    expect(last < 11025u - 690u, msg);
+    p0 = sp14_rep2(0u);
+    p1 = sp14_rep2(127u);
+    snprintf(msg, sizeof msg, "SP14b deg 127 second repeat RMS %.3f, deg 0 %.3f (%+.2f dB, +-1.5)",
+             p1, p0, 20.0f * log10f(p1 / p0));
+    expect(p0 > 1.0f && fabsf(20.0f * log10f(p1 / p0)) <= 1.5f, msg);
+}
+
+/*
+ * SP15 (S100 P2): `wow` depth as pitch. A 1 kHz tone (fbk 0, tim 64): the
+ * largest deviation of the wet's zero-crossing rate over 2 s (after 2 s
+ * of settling) at wow 127 is 1.2 .. 3.5 % (the law: 2 % wow + 0.3 %
+ * flutter), at wow 0 below 0.1 %.
+ */
+static float sp15_run(uint8_t wow)
+{
+    uint8_t rows[SP_DLY_ROWS];
+    float l[32];
+    float r[32];
+    float prev = 0.0f;
+    float last = -1.0f;
+    float lo = 1e9f;
+    float hi = 0.0f;
+    uint32_t b;
+    uint32_t n;
+    uint32_t i = 0u;
+    uint32_t k = 0u;
+    float iv[8] = { 0 };
+    float acc = 0.0f;
+
+    memcpy(rows, sp_dlyRows, sizeof(rows));
+    rows[SP_COL(SPACE_DLY_WOW)] = wow;
+    cb_bpm = 120u;
+    sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
+    for (b = 0u; b < 5513u; b++) {
+        for (n = 0u; n < 32u; n++, i++)
+            l[n] = r[n] = 0.5f * sinf(6.2831853f * 1000.0f * (float)i / 44108.07f);
+        sp_block(&space_delayOps, l, r);
+        for (n = 0u; n < 32u; n++) {
+            const float x = l[n];
+
+            if (b > 2757u && prev < 0.0f && x >= 0.0f) {
+                /* The crossing by linear interpolation. */
+                const float at = (float)(b * 32u + n) - x / (x - prev);
+
+                if (last >= 0.0f) {
+                    /* An 8-period mean, so the reading is smooth. */
+                    acc += (at - last) - iv[k & 7u];
+                    iv[k & 7u] = at - last;
+                    if (++k >= 8u) {
+                        const float f = 8.0f * 44108.07f / acc;
+
+                        lo = __builtin_fminf(lo, f);
+                        hi = __builtin_fmaxf(hi, f);
+                    }
+                }
+                last = at;
+            }
+            prev = x;
+        }
+    }
+    return 100.0f * 0.5f * (hi - lo) / 1000.0f;
+}
+
+static void law_sp15(void)
+{
+    const float d0 = sp15_run(0u);
+    const float d1 = sp15_run(127u);
+    char msg[160];
+
+    snprintf(msg, sizeof msg, "SP15 wow pitch: 127 +-%.2f %% (1.2 .. 3.5), 0 +-%.3f %% (< 0.1)", d1, d0);
+    expect(d1 >= 1.2f && d1 <= 3.5f && d0 < 0.1f, msg);
+}
+
+/*
+ * SP16 (S100 P2): `str`. (a) str 0: L and R are the same, sample for
+ * sample, for a stereo input; (b) str 127, spr 126 (L at D/2, R at D): an
+ * impulse on both returns on L at D/2 and at 2D/3 (tap A, L's lane a third
+ * of the way to R's time), on R at D and at 5D/6 (tap B), each tap at least
+ * 0.2 of its head; and the taps are only in the field: L's tap at 2D/3 is
+ * louder on L than on R.
+ */
+static void law_sp16(void)
+{
+    uint8_t rows[SP_DLY_ROWS];
+    const float t = crumpBit_delaySamples(64u, 120u);
+    const uint32_t at = 3200u;
+    float l[32];
+    float r[32];
+    float hl = 0.0f;
+    float ml = 0.0f;
+    float hr = 0.0f;
+    float mr = 0.0f;
+    float xr = 0.0f;
+    uint32_t b;
+    uint32_t n;
+    int same = 1;
+    char msg[200];
+
+    memcpy(rows, sp_dlyRows, sizeof(rows));
+    rows[SP_COL(SPACE_DLY_STEREO)] = 0u;
+    rows[SP_COL(SPACE_DLY_SPREAD)] = 100u;
+    rows[SP_COL(SPACE_DLY_FEEDBACK)] = 60u;
+    sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
+    for (b = 0u; b < 3000u; b++) {
+        for (n = 0u; n < 32u; n++) {
+            l[n] = 0.3f * sp_noise();
+            r[n] = 0.3f * sinf((float)(b * 32u + n) * 0.03f);
+        }
+        sp_block(&space_delayOps, l, r);
+        for (n = 0u; n < 32u; n++)
+            same = same && l[n] == r[n];
+    }
+    expect(same, "SP16a str 0: L and R the same, sample for sample");
+
+    memcpy(rows, sp_dlyRows, sizeof(rows));
+    rows[SP_COL(SPACE_DLY_STEREO)] = 127u;
+    rows[SP_COL(SPACE_DLY_SPREAD)] = 126u;
+    cb_bpm = 120u;
+    sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
+    for (b = 0u; b < 9000u; b++) {
+        memset(l, 0, sizeof(l));
+        memset(r, 0, sizeof(r));
+        sp_block(&space_delayOps, l, r);
+    }
+    for (b = 0u; b < (uint32_t)(1.2f * t + (float)at) / 32u; b++) {
+        for (n = 0u; n < 32u; n++)
+            l[n] = r[n] = (b * 32u + n == at) ? 1.0f : 0.0f;
+        sp_block(&space_delayOps, l, r);
+        for (n = 0u; n < 32u; n++) {
+            const float f = (float)(b * 32u + n) - (float)at;
+
+            if (fabsf(f - 0.5f * t) < 4.0f) hl = __builtin_fmaxf(hl, fabsf(l[n]));
+            if (fabsf(f - (2.0f / 3.0f) * t) < 4.0f) {
+                ml = __builtin_fmaxf(ml, fabsf(l[n]));
+                xr = __builtin_fmaxf(xr, fabsf(r[n]));
+            }
+            if (fabsf(f - t) < 4.0f) hr = __builtin_fmaxf(hr, fabsf(r[n]));
+            if (fabsf(f - (5.0f / 6.0f) * t) < 4.0f) mr = __builtin_fmaxf(mr, fabsf(r[n]));
+        }
+    }
+    snprintf(msg, sizeof msg,
+             "SP16b str 127 spr 126: L head %.3f tap %.3f (on R %.3f), R head %.3f tap %.3f",
+             hl, ml, xr, hr, mr);
+    expect(hl > 0.2f && hr > 0.2f && ml > 0.2f * hl && mr > 0.2f * hr &&
+               ml > xr, msg);
+}
+
+/*
+ * SP17 (S100 P2): `spr` darkens the loop that runs ahead of `tim`. fbk 100,
+ * xfb 0, wid 127, a noise burst: the high share (first-difference energy /
+ * energy) of L's repeats against R's from 1.4 D on, (a) at spr 126 (L at
+ * D/2) below 0.6 (0.86 without the darkening: the shorter loop makes more
+ * passes), (b) at spr 63 (no spread, no darkening) 0.9 .. 1.1. The scaling
+ * by `wid` / 127 is the law itself (space_tapeBegin()); a narrower band
+ * changes both loops' high share, so it is not measured here.
+ */
+static float sp17_run(uint8_t spr, uint8_t wid)
+{
+    uint8_t rows[SP_DLY_ROWS];
+    const float t = crumpBit_delaySamples(64u, 120u);
+    float l[32];
+    float r[32];
+    float pl = 0.0f;
+    float pr = 0.0f;
+    double el = 0.0;
+    double dl = 0.0;
+    double er = 0.0;
+    double dr = 0.0;
+    uint32_t b;
+    uint32_t n;
+
+    memcpy(rows, sp_dlyRows, sizeof(rows));
+    rows[SP_COL(SPACE_DLY_SPREAD)] = spr;
+    rows[SP_COL(SPACE_DLY_FEEDBACK)] = 100u;
+    rows[SP_COL(SPACE_DLY_WIDTH)] = wid;
+    cb_bpm = 120u;
+    sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
+    for (b = 0u; b < 9000u; b++) {
+        memset(l, 0, sizeof(l));
+        memset(r, 0, sizeof(r));
+        sp_block(&space_delayOps, l, r);
+    }
+    for (b = 0u; b < (uint32_t)(3.4f * t) / 32u; b++) {
+        for (n = 0u; n < 32u; n++)
+            l[n] = r[n] = (b * 32u + n < 400u) ? 0.3f * sp_noise() : 0.0f;
+        sp_block(&space_delayOps, l, r);
+        for (n = 0u; n < 32u; n++) {
+            const float f = (float)(b * 32u + n);
+
+            if (f > 1.4f * t) {
+                el += (double)l[n] * l[n];
+                dl += (double)(l[n] - pl) * (l[n] - pl);
+            }
+            if (f > 1.4f * t) {
+                er += (double)r[n] * r[n];
+                dr += (double)(r[n] - pr) * (r[n] - pr);
+            }
+            pl = l[n];
+            pr = r[n];
+        }
+    }
+    return (float)((dl / el) / (dr / er));
+}
+
+static void law_sp17(void)
+{
+    const float sp = sp17_run(126u, 127u);
+    const float s0 = sp17_run(63u, 127u);
+    char msg[160];
+
+    snprintf(msg, sizeof msg,
+             "SP17 spr darkening: L/R high share spr 126 %.3f (< 0.6), spr 63 %.3f (0.9 .. 1.1)",
+             sp, s0);
+    expect(sp < 0.6f && s0 >= 0.9f && s0 <= 1.1f, msg);
+}
+
+/*
+ * SP12d (S100 P2): the `xfb` mix keeps the loop's energy. fbk 100, spr 30
+ * (R 0.71 x L's time), a quiet stereo noise burst (independent L and R, so
+ * the side is as large as the mid): the L+R energy of second 4 against
+ * second 1 of the tail at xfb 32 and 64 is within 1 dB of the same at
+ * xfb 0 (two independent loops). A side scaled by the coefficient, or an
+ * L/R average, loses the side every pass.
+ */
+static double sp12d_run(uint8_t xfb)
+{
+    uint8_t rows[SP_DLY_ROWS];
+    float l[32];
+    float r[32];
+    double e1 = 0.0;
+    double e4 = 0.0;
+    uint32_t b;
+    uint32_t n;
+
+    memcpy(rows, sp_dlyRows, sizeof(rows));
+    rows[SP_COL(SPACE_DLY_TIME)] = 40u;
+    rows[SP_COL(SPACE_DLY_FEEDBACK)] = 100u;
+    rows[SP_COL(SPACE_DLY_SPREAD)] = 30u;
+    rows[SP_COL(SPACE_DLY_XFEED)] = xfb;
+    cb_bpm = 120u;
+    sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
+    for (b = 0u; b < 9000u; b++) {
+        memset(l, 0, sizeof(l));
+        memset(r, 0, sizeof(r));
+        sp_block(&space_delayOps, l, r);
+    }
+    for (b = 0u; b < 6000u; b++) {
+        for (n = 0u; n < 32u; n++) {
+            l[n] = (b < 100u) ? 0.05f * sp_noise() : 0.0f;
+            r[n] = (b < 100u) ? 0.05f * sp_noise() : 0.0f;
+        }
+        sp_block(&space_delayOps, l, r);
+        for (n = 0u; n < 32u; n++) {
+            const double v = (double)l[n] * l[n] + (double)r[n] * r[n];
+
+            if (b >= 200u && b < 1578u)
+                e1 += v;
+            else if (b >= 4334u && b < 5712u)
+                e4 += v;
+        }
+    }
+    return 10.0 * log10(e4 / e1);
+}
+
+static void law_sp12d(void)
+{
+    const double d0 = sp12d_run(0u);
+    const double d32 = sp12d_run(32u);
+    const double d64 = sp12d_run(64u);
+    char msg[200];
+
+    snprintf(msg, sizeof msg,
+             "SP12d energy kept: second 4 on second 1 at xfb 0 %+.2f, 32 %+.2f, 64 %+.2f dB (32, 64 within 1 of 0)",
+             d0, d32, d64);
+    expect(fabs(d32 - d0) <= 1.0 && fabs(d64 - d0) <= 1.0, msg);
+}
+
+/*
+ * SP18 (S100 P2, after the first build clicked under `hld` and `rev`): a
+ * 220 Hz sine at 0.3 into the Delay (tim 64, fbk 60), `hld` on at 2 s and,
+ * where listed, off again at 5 s; the largest third difference of L from
+ * 1 s to 8 s stays below 0.01 (the sine itself gives about 0.002; the
+ * first build's splice gave 0.2 .. 0.5 on every pass). Cases: hold; hold
+ * with wow 64; hold then release; rev + hold; rev + hold with wow 64; rev
+ * alone.
+ */
+static float sp18_run(uint8_t rev, uint8_t wow, int on_at, int off_at)
+{
+    uint8_t rows[SP_DLY_ROWS];
+    float l[32];
+    float r[32];
+    float hi[3] = { 0.0f, 0.0f, 0.0f };
+    float mx = 0.0f;
+    uint32_t b;
+    uint32_t n;
+    uint32_t i = 0u;
+
+    memcpy(rows, sp_dlyRows, sizeof(rows));
+    rows[SP_COL(SPACE_DLY_FEEDBACK)] = 60u;
+    rows[SP_COL(SPACE_DLY_REVERSE)] = rev;
+    rows[SP_COL(SPACE_DLY_WOW)] = wow;
+    cb_bpm = 120u;
+    sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
+    for (b = 0u; b < 8u * 1378u; b++) {
+        if ((int)b == on_at)
+            space_delayOps.write_param(&sp_rt, SPACE_DLY_HOLD, 1u);
+        if ((int)b == off_at)
+            space_delayOps.write_param(&sp_rt, SPACE_DLY_HOLD, 0u);
+        for (n = 0u; n < 32u; n++, i++)
+            l[n] = r[n] = 0.3f * sinf(6.2831853f * 220.0f * (float)i / 44108.07f);
+        sp_block(&space_delayOps, l, r);
+        for (n = 0u; n < 32u; n++) {
+            const float d3 = l[n] - 3.0f * hi[0] + 3.0f * hi[1] - hi[2];
+
+            if (b > 1378u)
+                mx = __builtin_fmaxf(mx, fabsf(d3));
+            hi[2] = hi[1];
+            hi[1] = hi[0];
+            hi[0] = l[n];
+        }
+    }
+    return mx;
+}
+
+static void law_sp18(void)
+{
+    static const struct { uint8_t rev, wow; int on, off; const char *what; } c[6] = {
+        { 0u, 0u, 2756, -1, "hold" },
+        { 0u, 64u, 2756, -1, "hold, wow 64" },
+        { 0u, 0u, 2756, 6890, "hold, then release" },
+        { 1u, 0u, 2756, -1, "rev + hold" },
+        { 1u, 64u, 2756, -1, "rev + hold, wow 64" },
+        { 1u, 0u, -1, -1, "rev" },
+    };
+    char msg[160];
+    uint32_t k;
+
+    for (k = 0u; k < 6u; k++) {
+        const float mx = sp18_run(c[k].rev, c[k].wow, c[k].on, c[k].off);
+
+        snprintf(msg, sizeof msg, "SP18 %s: largest third difference %.4f (< 0.01)",
+                 c[k].what, mx);
+        expect(mx < 0.01f, msg);
+    }
+}
+
+/*
+ * SP19 helper (S100 P2): the Delay at tim 64 (7,890 frames), fbk 80, the
+ * given `ton` and `wid`, a 6,000-frame sine burst of f at 0.25 at the start;
+ * returns the RMS of repeat 3 over repeat 2 in dB relative to fbk's 0.8.
+ */
+static float sp19_ratio(uint8_t ton, uint8_t wid, float f)
+{
+    uint8_t rows[SP_DLY_ROWS];
+    const float d = crumpBit_delaySamples(64u, 120u);
+    float l[32];
+    float r[32];
+    double e2 = 0.0;
+    double e3 = 0.0;
+    uint32_t b;
+    uint32_t n;
+
+    memcpy(rows, sp_dlyRows, sizeof(rows));
+    rows[SP_COL(SPACE_DLY_FEEDBACK)] = 80u;
+    rows[SP_COL(SPACE_DLY_TONE)] = ton;
+    rows[SP_COL(SPACE_DLY_WIDTH)] = wid;
+    cb_bpm = 120u;
+    sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
+    for (b = 0u; b < 9000u; b++) {
+        memset(l, 0, sizeof(l));
+        memset(r, 0, sizeof(r));
+        sp_block(&space_delayOps, l, r);
+    }
+    for (b = 0u; b < (uint32_t)(3.95f * d) / 32u; b++) {
+        for (n = 0u; n < 32u; n++) {
+            const uint32_t i = b * 32u + n;
+
+            l[n] = r[n] = (i < 6000u)
+                ? 0.25f * sinf(6.2831853f * f * (float)i / 44108.07f) : 0.0f;
+        }
+        sp_block(&space_delayOps, l, r);
+        for (n = 0u; n < 32u; n++) {
+            const float t = (float)(b * 32u + n);
+
+            if (t > 2.0f * d && t < 2.0f * d + 6000.0f)
+                e2 += (double)l[n] * l[n];
+            else if (t > 3.0f * d && t < 3.0f * d + 6000.0f)
+                e3 += (double)l[n] * l[n];
+        }
+    }
+    return (float)(10.0 * log10(e3 / e2)) - 20.0f * log10f(0.8f);
+}
+
+/*
+ * SP19 (S100 P2, user 2026-11-21): `ton` bipolar and `wid`'s top.
+ * (a) `ton` 0 (row 63), `wid` 127 cuts nothing: a 40 Hz repeat keeps fbk's
+ *     ratio within 1 dB;
+ * (b) `ton` +63 cuts the lows (100 Hz at least 6 dB below `ton` 0's) and
+ *     keeps 8 kHz (within 1 dB of `ton` 0's); `ton` -63 cuts the highs
+ *     (8 kHz at least 6 dB below) and keeps 100 Hz (within 1 dB);
+ * (c) `wid` 111 (16 rows below the top) still passes 40 Hz and 8 kHz
+ *     within 1.5 dB of `wid` 127 (the earlier law had narrowed to 47 Hz ..
+ *     4.5 kHz there).
+ * The comparisons are against `ton` 0 / `wid` 127 at the same frequency,
+ * so the tape LP and the linear read's own losses cancel.
+ */
+static void law_sp19(void)
+{
+    const float r40 = sp19_ratio(63u, 127u, 40.0f);
+    const float r100 = sp19_ratio(63u, 127u, 100.0f);
+    const float r8k = sp19_ratio(63u, 127u, 8000.0f);
+    const float up100 = sp19_ratio(127u, 127u, 100.0f) - r100;
+    const float up8k = sp19_ratio(127u, 127u, 8000.0f) - r8k;
+    const float dn100 = sp19_ratio(0u, 127u, 100.0f) - r100;
+    const float dn8k = sp19_ratio(0u, 127u, 8000.0f) - r8k;
+    const float w40 = sp19_ratio(63u, 111u, 40.0f) - r40;
+    const float w8k = sp19_ratio(63u, 111u, 8000.0f) - r8k;
+    char msg[200];
+
+    snprintf(msg, sizeof msg, "SP19a ton 0 wid 127: 40 Hz %+.2f dB from fbk (+-1)", r40);
+    expect(fabsf(r40) <= 1.0f, msg);
+    snprintf(msg, sizeof msg,
+             "SP19b ton +63: 100 Hz %+.2f dB (<= -6), 8 kHz %+.2f dB (+-1); "
+             "ton -63: 8 kHz %+.2f dB (<= -6), 100 Hz %+.2f dB (+-1)",
+             up100, up8k, dn8k, dn100);
+    expect(up100 <= -6.0f && fabsf(up8k) <= 1.0f && dn8k <= -6.0f &&
+               fabsf(dn100) <= 1.0f, msg);
+    snprintf(msg, sizeof msg, "SP19c wid 111: 40 Hz %+.2f dB, 8 kHz %+.2f dB on wid 127 (+-1.5)",
+             w40, w8k);
+    expect(fabsf(w40) <= 1.5f && fabsf(w8k) <= 1.5f, msg);
+}
+
+/*
+ * SP20 (S100 P2, user 2026-11-21: "dck doesn't seem to do much"): a steady
+ * 0.25 sine on both inputs (a -12 dBFS send), tim 20, fbk 0; the output's
+ * RMS over the second half of 2 s at `dck` 127 is at least 30 dB below
+ * `dck` 0's (fully ducked: the law is now twice as deep, and the follower
+ * reads 0.5), and at `dck` 64 between 3 and 12 dB below.
+ */
+static double sp20_rms(uint8_t dck)
+{
+    uint8_t rows[SP_DLY_ROWS];
+    float l[32];
+    float r[32];
+    double e = 0.0;
+    uint32_t b;
+    uint32_t n;
+    uint32_t i = 0u;
+
+    memcpy(rows, sp_dlyRows, sizeof(rows));
+    rows[SP_COL(SPACE_DLY_TIME)] = 20u;
+    rows[SP_COL(SPACE_DLY_DUCK)] = dck;
+    cb_bpm = 120u;
+    sp_enter(&space_delayOps, NULL, rows, SP_DLY_ROWS);
+    for (b = 0u; b < 2756u; b++) {
+        for (n = 0u; n < 32u; n++, i++)
+            l[n] = r[n] = 0.25f * sinf(6.2831853f * 440.0f * (float)i / 44108.07f);
+        sp_block(&space_delayOps, l, r);
+        if (b >= 1378u)
+            for (n = 0u; n < 32u; n++)
+                e += (double)l[n] * l[n];
+    }
+    return sqrt(e / (1378.0 * 32.0)) + 1e-12;
+}
+
+static void law_sp20(void)
+{
+    const double r0 = sp20_rms(0u);
+    const double d64 = 20.0 * log10(sp20_rms(64u) / r0);
+    const double d127 = 20.0 * log10(sp20_rms(127u) / r0);
+    char msg[160];
+
+    snprintf(msg, sizeof msg, "SP20 dck: 64 %+.1f dB (-3 .. -12), 127 %+.1f dB (<= -30)",
+             d64, d127);
+    expect(r0 > 0.05 && d64 <= -3.0 && d64 >= -12.0 && d127 <= -30.0, msg);
 }
 
 int main(void)
@@ -695,12 +1553,23 @@ int main(void)
     law_sp3();
     law_sp4();
     law_sp5();
-    law_sp6();
     law_sp7();
     law_sp8();
     law_sp9();
     law_sp10();
     law_sp11();
+    law_sp12();
+    law_sp12b();
+    law_sp12c();
+    law_sp12d();
+    law_sp13();
+    law_sp14();
+    law_sp15();
+    law_sp16();
+    law_sp17();
+    law_sp18();
+    law_sp19();
+    law_sp20();
     printf("space failures: %d\n", failures);
     return failures ? 1 : 0;
 }

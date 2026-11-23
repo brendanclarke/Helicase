@@ -74,39 +74,51 @@
 /* ---------------------------------------------------------------------- */
 
 /*
- * One tape channel's loop filters: play (the playback LP, which also
- * carries `ton`'s low-pass side), hp (`ton`'s high-pass one-pole state),
- * rec (the record LP).
+ * One tape channel's loop filters: play (the playback LP), s1/s2 (the
+ * loop band-pass's two integrator states, S100 P2), rec (the record LP).
  */
 typedef struct {
     float play;
-    float hp;
+    float s1;
+    float s2;
     float rec;
 } space_chan_t;
 
 /*
  * The tape's coefficients (write_param, from the rows' laws): fbk (D4), spr
  * (D23), bw (the playback LP at speed 1), comp (O8: its level-dependent
- * loss), tlp/thp (`ton`: below 63 the playback LP's cutoff ceiling, above
- * 63 a one-pole high-pass; flat at 63: 1 and 0), drive/makeup/hiss (`deg`,
- * D5), hg[3] (the heads D/3, 2D/3, D, O6, normalised), wow/dck/xfb (the
- * linear rows: wow depth, ducking, cross-feed). S095 P4 T1: no wet mix;
- * the Space types are 100 % wet.
+ * loss), a1/a2/a3 (the loop band-pass, S100 P2: `ton` the centre, `wid`
+ * the width), kb (its 2R, the peak normalisation), hq (Q x fs / centre:
+ * `hld`'s narrow-band compensation), dg (the `deg` drive), drive (dg x kb,
+ * into the clip), makeup (`deg`'s equal-amplitude makeup), wr/fr/aw/af (`wow`:
+ * the wow and flutter phase steps per block and their depths in samples),
+ * dck (ducking), xa (`xfb`'s side allpass coefficient, S100 P2).
+ * bsc/bsh: `deg`'s bit reduction, the record scaled by bsc = 2^-bsh before
+ * its int16 conversion (which rounds toward zero: magnitude truncation, so
+ * the loop cannot hold a limit cycle) and shifted back by bsh.
+ * S095 P4 T1: no wet mix; the Space types are 100 % wet. S100 P2: no hiss.
  */
 typedef struct {
     float fbk;
     float spr;
     float bw;
     float comp;
-    float tlp;
-    float thp;
+    float a1;
+    float a2;
+    float a3;
+    float kb;
+    float hq;
+    float dg;
     float drive;
     float makeup;
-    float hiss;
-    float hg[3];
-    float wow;
+    float bsc;
+    uint32_t bsh;
+    float wr;
+    float fr;
+    float aw;
+    float af;
     float dck;
-    float xfb;
+    float xa;
 } space_tapeK_t;
 
 /*
@@ -170,8 +182,8 @@ typedef struct {
 
 /*
  * The header: the tape's coefficients, two channels' filters, the wow LFO
- * (wph/fph: wow and flutter phases -1..1, walk: the drift, rnd: the noise
- * word), then the plate. The Delay uses the tape part, the Reverb the
+ * (wph/fph: wow and flutter phases -1..1, walk: the drift, rnd: the drift's
+ * random word), xs (the Delay's side allpass state, `xfb`), then the plate. The Delay uses the tape part, the Reverb the
  * plate part, the Echo both (channel 0 of the tape).
  */
 typedef struct {
@@ -181,6 +193,7 @@ typedef struct {
     float fph;
     float walk;
     uint32_t rnd;
+    float xs;
     space_plate_t pl;
 } space_hdr_t;
 
@@ -246,13 +259,13 @@ static inline __attribute__((always_inline)) int32_t space_idx(float x,
 }
 
 /*
- * Linear reads at tape position x (S096 P2 F1): the extra heads (D/3, 2D/3)
- * and the reverse head's two windows, which read the nearest frame before.
+ * A linear read at tape position x (S096 P2 F1): the reverse head's two
+ * windows, which read the nearest frame before (S100 P2: the D/3 and 2D/3
+ * heads and their mono read space_lin1() are gone with `hed`).
  *
- * What:       space_lin1(): the Echo's mono int16 tape, t[i] + f (t[i + 1] -
- *             t[i]). space_lin2(): the Delay's stereo frames (L low, R high
- *             in one 32-bit word), the same per channel; one load for frame
- *             i and one for i + 1.
+ * What:       space_lin2(): the Delay's stereo frames (L low, R high in one
+ *             32-bit word), t[i] + f (t[i + 1] - t[i]) per channel; one
+ *             load for frame i and one for i + 1.
  * Why:        a nearest-frame read is clean only while its position moves
  *             exactly one frame per sample. Wow, flutter and drift (and the
  *             reverse windows, and a slowed tape at long delays) move it by
@@ -264,16 +277,6 @@ static inline __attribute__((always_inline)) int32_t space_idx(float x,
  * Cost:       per head about 15 instructions a frame more than the nearest
  *             read (S096 P2 §1.6).
  */
-static inline __attribute__((always_inline)) float space_lin1(
-    const int16_t *t, float x, int32_t nw)
-{
-    float f;
-    const int32_t i = space_idx(x, nw, &f);
-    const float a = (float)t[i];
-
-    return a + f * ((float)t[i + 1] - a);
-}
-
 static inline __attribute__((always_inline)) void space_lin2(
     const uint32_t *tape, float x, int32_t nw, float *l, float *r)
 {
@@ -316,11 +319,22 @@ static inline __attribute__((always_inline)) float space_clip1(float x)
  * One block of the tape, per block: p (the write position at the block
  * start), va (frames per output frame), n/nw (the
  * length), d[c]/dd[c] (each channel's delay and its per-frame ramp),
- * ph[c]/dph[c] (the reverse heads' phases and steps), g1..g3 (the heads,
- * O6; each x the valid gate: 0 until `valid` covers both channels' heads,
- * else 1/32768), fbk, xfb,
- * ing (the loop: feedback, cross-feed, input), rk (the record LP), bw (the
- * playback LP at this speed), dry/ddry and wg/dwg (the output's ramps).
+ * ph[c]/dph[c] (the reverse heads' phases and steps), fbk/dfbk, ing/ding
+ * (the loop gain and the input at the block start and their per-frame
+ * ramps: S100 P2, the `hld` crossfade glides both across the block), rk
+ * (the record LP), bw[c] (each loop's playback LP:
+ * the tape speed, O8, `spr`'s darkening; 1 under `hld`), and S100 P2:
+ * - kc/kx: the loop inputs. The Delay: mid = kc (L + R), side = kc (L - R)
+ *   (kc = gate / 2), the side through the `xfb` allpass of coefficient kx,
+ *   L loop = mid + side', R loop = mid - side'. The Echo: kc x the head at
+ *   `tim`, one loop;
+ * - cm/cx/cn/cf: the output, L = cm x L head + cx x R head + cn x tap A +
+ *   cf x tap B, R mirrored (`str`);
+ * every one of these x the valid gate (0 until `valid` covers both
+ * channels' heads, else 1/32768);
+ * - c3/drv/mk/bsc/bsh: the shaper's cubic, drive and makeup, the record's
+ *   bit reduction (`deg`; under `hld` linear: 0, kb, 1, none: 1, 0);
+ * dry/ddry and wg/dwg (the output's ramps).
  */
 typedef struct {
     float p;
@@ -330,71 +344,127 @@ typedef struct {
     float dd[2];
     float ph[2];
     float dph[2];
-    float g1;
-    float g2;
-    float g3;
     float fbk;
-    float xfb;
+    float dfbk;
     float ing;
+    float ding;
     float rk;
-    float bw;
+    float bw[2];
+    float kc;
+    float kx;
+    float cm;
+    float cx;
+    float cn;
+    float cf;
+    float c3;
+    float drv;
+    float mk;
+    float bsc;
+    uint32_t bsh;
     float dry;
     float ddry;
     float wg;
     float dwg;
 } space_pass_t;
 
+
+
 /*
  * One loop channel after its heads (plan §4.1): the playback LP (its
- * bandwidth falls with the level per block, O8, and `ton`'s low side caps
- * it), `ton`'s high-pass, the drive and soft clip (unity small-signal
- * gain, §S18) with makeup, the hiss,
- * then the record LP of in x ing + fbk x loop. The cubic clip is odd, so
- * the loop makes no DC (no DC block, §S18). Returns the record value.
+ * bandwidth falls with the level per block, O8), the loop band-pass (S100
+ * P2), the drive and soft clip x - c3 x^3 with makeup (`deg`; c3 0 under
+ * `hld`: linear to the clip), then the record LP of in x ing + fbk x loop.
+ * Returns the record value. S100 P2: no hiss.
  */
 static inline __attribute__((always_inline)) float space_loop(
-    space_chan_t *c, float x, float in, float nz, float bw, float thp,
-    float drive, float makeup, float rk, float ing, float fbk)
+    space_chan_t *c, float x, float in, float bw, float a1, float a2,
+    float a3, float c3, float drive, float makeup, float rk, float ing,
+    float fbk)
 {
+    float v1;
+    float v2;
+    float v3;
     float y;
 
     c->play += bw * (x - c->play);
-    c->hp += thp * (c->play - c->hp);
-    y = space_clip1((c->play - c->hp) * drive);
+    /*
+     * S100 P2: the loop band-pass (TPT state-variable filter, band output
+     * v1; drive carries its normalisation, so the peak gain is 1 at every
+     * `wid`). It has no gain at DC, so the loop cannot latch onto DC.
+     */
+    v3 = c->play - c->s2;
+    v1 = a1 * c->s1 + a2 * v3;
+    v2 = c->s2 + a2 * c->s1 + a3 * v3;
+    c->s1 = 2.0f * v1 - c->s1;
+    c->s2 = 2.0f * v2 - c->s2;
+    y = space_clip1(v1 * drive);
     /*
      * x - x^3 / 3: slope 1 at 0 (§S18: the 1.5 x - 0.5 x^3 clip had a small-
      * signal gain of 1.5, so `fbk` unity and `hld` grew), 2/3 at the clip.
      */
-    y = y * (1.0f - (1.0f / 3.0f) * y * y) * makeup + nz;
+    y = y * (1.0f - c3 * y * y) * makeup;
     c->rec += rk * (in * ing + fbk * y - c->rec);
     return c->rec;
+}
+
+/*
+ * A linear read of one lane of the Delay's stereo tape (S100 P2).
+ *
+ * What:   the lane (0 L, 1 R) of the frames i and i + 1 around tape
+ *         position x, t[2i + lane] + f (t[2i + 2 + lane] - t[2i + lane]),
+ *         with i and f from space_idx() (i is 1 .. n; frame n + 1 is the
+ *         guard's copy of frame 1, so i + 1 never wraps).
+ * Why:    the main heads (L's lane at L's time, R's at R's) and `str`'s
+ *         two taps each read a single lane at their own time; the frame
+ *         pair loaded by space_lin2() would load the other lane for
+ *         nothing. Linear, not Hermite: Hermite on the two main heads
+ *         measured +35 .. +39 a frame, over the cap (plan §4.9).
+ * Cost:   two halfword loads, two conversions, a subtract and a fused
+ *         multiply-add, plus space_idx().
+ */
+static inline __attribute__((always_inline)) float space_lane(
+    const int16_t *t, float x, int32_t nw, uint32_t lane)
+{
+    float f;
+    const int32_t i = space_idx(x, nw, &f);
+    const int16_t *q = t + 2 * i + lane;
+
+    return (float)q[0] + f * ((float)q[2] - (float)q[0]);
 }
 
 /*
  * The Delay's block (plan §4.1): both channels in one pass.
  *
  * What, per frame (the write position p advancing by va):
- * 1. heads per channel: D through a linear read (§S18; the plan's Hermite
- *    was over the cap), or with
- *    `rev` two heads reading backwards through L's last D in triangular
- *    crossfaded windows, both channels from each frame load (O4); D/3 and
- *    2D/3 at L's time for both channels (O6); the weighted sum, gated by
- *    `valid`, is the wet (the clean read, D5). S096 P2 F1: the reverse
- *    windows and the D/3, 2D/3 heads read linearly (space_lin2(), two
- *    frame loads each); they read the nearest frame before, which slipped a
- *    frame whenever wow or the reverse ramp moved them by fractions;
- * 2. the output: in x dry + wet x wg (both ramped), and the input peak
- *    (the ducking follower, per block);
- * 3. the loop: the cross-feed (D23: each channel takes xfb of the other's
- *    heads, the same frame), each channel's chain (space_loop()), one hiss
- *    word for both;
- * 4. the record: L,R packed into one saturating 32-bit write at floor(p),
- *    and into the guard when floor(p) < 3.
+ * 1. heads: L's lane at L's delay dl, R's lane at R's delay dr, linear (or
+ *    with `rev` two windows reading backwards through L's last D, both
+ *    lanes from each frame load, O4; S096 P2 F1: linear);
+ * 2. `str`'s taps (S100 P2): A on L's lane at dl + (dr - dl) / 3, B on R's
+ *    lane at dr - (dr - dl) / 3, panned +-1/3, so the four reads spread
+ *    across the field in time order and move with `spr`; with `spr` 0 they
+ *    fall on the heads. Not read under `rev` (silent there);
+ * 3. the output: in x dry + wg x (cm L + cx R + cn A + cf B), R mirrored
+ *    (`str`: mono .. one head a side .. the taps in the field), and the
+ *    input peak (the ducking follower, per block);
+ * 4. the loop (S100 P2): mid and side of the heads; the side through a
+ *    first-order allpass (`xfb`: its turnover 22 kHz .. 5 Hz), so the band
+ *    above the turnover swaps sides each pass and the band below stays
+ *    (127: all of it, a true ping-pong, no polarity flip); the mid is never
+ *    touched, so a mono fold (`str` 0) keeps its level at every `xfb`, and
+ *    the loop's gain is exactly `fbk` at every frequency (no stall where
+ *    `spr` sets the heads apart); then each channel's chain (space_loop()),
+ *    with the loop gain and the input stepped per frame by dfbk / ding (the
+ *    `hld` crossfade, S100 P2: the first build switched them once a block,
+ *    and the held loop kept that step as a click on every pass);
+ * 5. the record: L,R packed into one saturating 32-bit write at floor(p)
+ *    (`deg`'s bit reduction: x bsc, << bsh), and into the guard when
+ *    floor(p) < 3.
+ * The heads and taps are output reads: the band-pass is only in the loop.
  * Every read lands at least SPACE_D_MIN behind the block start, so no read
  * sees this block's writes.
  * Inputs: the tape (L,R frames), the header, the pass, io. Outputs: io in
- * place, the tape, the header's channel states and noise word; returns the
- * block's input peak (|L| + |R|).
+ * place, the tape, the header's channel states; returns the block's input
+ * peak (|L| + |R|).
  * Out of line and unswitched: one copy of the loop (flash, §S18).
  */
 static SPACE_LOOP float
@@ -402,24 +472,34 @@ space_delayRun(uint32_t *tape, space_hdr_t *h, const space_pass_t *ps,
                uint8_t rev, float *l, float *r, uint32_t frames)
 {
     const int16_t *t = (const int16_t *)(const void *)tape;
-    const float third = 1.0f / 3.0f;
     const float n = ps->n;
     const int32_t nw = (int32_t)n;
     const float va = ps->va;
-    const float g1 = ps->g1;
-    const float g2 = ps->g2;
-    const float g3 = ps->g3;
-    const float xfb = ps->xfb;
-    const float fbk = ps->fbk;
-    const float ing = ps->ing;
+    const float kc = ps->kc;
+    const float kx = ps->kx;
+    const float cm = ps->cm;
+    const float cx = ps->cx;
+    const float cn = ps->cn;
+    const float cf = ps->cf;
+    /*
+     * S100 P2: the loop gain and the input, ramped across the block by the
+     * `hld` crossfade (dfbk, ding are 0 outside it). Two adds a frame.
+     */
+    const float dfbk = ps->dfbk;
+    const float ding = ps->ding;
+    float fbk = ps->fbk;
+    float ing = ps->ing;
     const float rk = ps->rk;
-    /* O8 per block: louder repeats are duller (the level at the start). */
-    const float bwl = ps->bw * (1.0f - h->k.comp * fabsf(h->ch[0].play));
-    const float bwr = ps->bw * (1.0f - h->k.comp * fabsf(h->ch[1].play));
-    const float hiss = h->k.hiss;
-    const float thp = h->k.thp;
-    const float drive = h->k.drive;
-    const float makeup = h->k.makeup;
+    const float bwl = ps->bw[0];
+    const float bwr = ps->bw[1];
+    const float a1 = h->k.a1;
+    const float a2 = h->k.a2;
+    const float a3 = h->k.a3;
+    const float c3 = ps->c3;
+    const float drive = ps->drv;
+    const float makeup = ps->mk;
+    const float bsc = ps->bsc;
+    const uint32_t bsh = ps->bsh;
     const float ddry = ps->ddry;
     const float dwg = ps->dwg;
     const float ddl = ps->dd[0];
@@ -435,7 +515,7 @@ space_delayRun(uint32_t *tape, space_hdr_t *h, const space_pass_t *ps,
     float dry = ps->dry;
     float wg = ps->wg;
     float peak = 0.0f;
-    uint32_t rn = h->rnd;
+    float xs = h->xs;
     uint32_t m;
 
     SPACE_ONCE
@@ -444,11 +524,10 @@ space_delayRun(uint32_t *tape, space_hdr_t *h, const space_pass_t *ps,
         const float xr = r[m];
         float yl;
         float yr;
-        float f;
+        float ta;
+        float tb;
         float al;
         float ar;
-        float nz;
-        int32_t i;
 
         /* 1. Heads. */
         if (rev) {
@@ -460,8 +539,6 @@ space_delayRun(uint32_t *tape, space_hdr_t *h, const space_pass_t *ps,
             const float pb = pl + 0.5f - (float)(int32_t)(pl + 0.5f);
             const float wl = 1.0f - fabsf(2.0f * pl - 1.0f);
             const float x0 = p + n - SPACE_D_MIN;
-            float al;
-            float ar;
             float bl;
             float br;
 
@@ -472,50 +549,48 @@ space_delayRun(uint32_t *tape, space_hdr_t *h, const space_pass_t *ps,
             yr = br + wl * (ar - br);
             pl += dpl;
             pl -= (float)(int32_t)pl;
+            /* No taps under `rev` (their gains are 0, space_tapeBegin()). */
+            ta = 0.0f;
+            tb = 0.0f;
         } else {
-            /* Linear (§S18: the Hermite read cost 30 a frame over the cap). */
-            const int16_t *q;
+            /*
+             * Linear (§S18: the Hermite read cost 30 a frame over the cap;
+             * S100 P2 measured +39 here, still over).
+             */
+            yl = space_lane(t, p - dl + n, nw, 0u);
+            yr = space_lane(t, p - dr + n, nw, 1u);
+            /* 2. `str`'s taps a third of the way in from each head (S100 P2). */
+            const float dz = (dr - dl) * (1.0f / 3.0f);
 
-            i = space_idx(p - dl + n, nw, &f);
-            q = t + 2 * i;
-            yl = (float)q[0] + f * ((float)q[2] - (float)q[0]);
-            i = space_idx(p - dr + n, nw, &f);
-            q = t + 1 + 2 * i;
-            yr = (float)q[0] + f * ((float)q[2] - (float)q[0]);
+            ta = space_lane(t, p - (dl + dz) + n, nw, 0u);
+            tb = space_lane(t, p - (dr - dz) + n, nw, 1u);
         }
-        /*
-         * D/3 and 2D/3 at L's time for both channels: each 32-bit frame load
-         * gives L and R (§S18); S096 P2 F1: read linearly (were nearest).
-         */
-        {
-            float h1l;
-            float h1r;
-            float h2l;
-            float h2r;
-
-            space_lin2(tape, p - dl * third + n, nw, &h1l, &h1r);
-            space_lin2(tape, p - dl * (2.0f * third) + n, nw, &h2l, &h2r);
-            yl = g3 * yl + g1 * h1l + g2 * h2l;
-            yr = g3 * yr + g1 * h1r + g2 * h2r;
-        }
-        /* 2. The output and the input peak. */
-        l[m] = xl * dry + yl * wg;
-        r[m] = xr * dry + yr * wg;
+        /* 3. The output and the input peak. */
+        l[m] = xl * dry + wg * (cm * yl + cx * yr + cn * ta + cf * tb);
+        r[m] = xr * dry + wg * (cm * yr + cx * yl + cn * tb + cf * ta);
         dry += ddry;
         wg += dwg;
         peak = __builtin_fmaxf(peak, fabsf(xl) + fabsf(xr));
-        /* 3. The loop. */
-        rn = rn * 1664525u + 1013904223u;
-        nz = hiss * (float)(int32_t)rn;
-        al = space_loop(&cl, yl + xfb * (yr - yl), xl, nz, bwl, thp, drive,
-                        makeup, rk, ing, fbk);
-        ar = space_loop(&cr, yr + xfb * (yl - yr), xr, nz, bwr, thp, drive,
-                        makeup, rk, ing, fbk);
-        /* 4. The record: L low, R high. */
+        /* 4. The loop: mid as is, side through the `xfb` allpass. */
+        {
+            const float mid = kc * (yl + yr);
+            const float sd = kc * (yl - yr);
+            const float sp = kx * sd + xs;
+
+            xs = sd - kx * sp;
+            al = space_loop(&cl, mid + sp, xl, bwl, a1, a2, a3, c3, drive,
+                            makeup, rk, ing, fbk);
+            ar = space_loop(&cr, mid - sp, xr, bwr, a1, a2, a3, c3, drive,
+                            makeup, rk, ing, fbk);
+            fbk += dfbk;
+            ing += ding;
+        }
+        /* 5. The record: L low, R high, `deg`'s bit reduction. */
         {
             const uint32_t w = (uint32_t)p;
-            const uint32_t v = ((uint32_t)space_q15(al) & 0xFFFFu) |
-                               ((uint32_t)space_q15(ar) << 16);
+            const uint32_t v =
+                (((uint32_t)space_q15(al * bsc) << bsh) & 0xFFFFu) |
+                ((uint32_t)space_q15(ar * bsc) << (bsh + 16u));
 
             tape[w] = v;
             if (w < SPACE_TAPE_GUARD)
@@ -528,68 +603,89 @@ space_delayRun(uint32_t *tape, space_hdr_t *h, const space_pass_t *ps,
     }
     h->ch[0] = cl;
     h->ch[1] = cr;
-    h->rnd = rn;
+    h->xs = xs;
     return peak;
 }
 
 /*
- * The Echo's mono tape (plan §4.3: the Delay's laws on one channel, a
- * linear main read, the Delay's D/3 and 2D/3 heads, no `rev` or cross-feed).
- * S096 P2 F1: the D/3 and 2D/3 heads read linearly (space_lin1(); they read
- * the nearest frame before, which slipped under wow).
- * What, per frame: heads -> e[m] (the echo, gated: the wet), the loop
- * chain, the record of in[m] + ka x pmq[m / 4] (the routed plate, quarter
- * rate) at floor(p), int16 mono with the guard; and the plate's input
- * pi[m] = ce x echo + cm x in[m] (the routings fold in here, §S18).
+ * A linear read of the Echo's mono tape (S100 P2).
+ *
+ * What:   t[i] + f (t[i + 1] - t[i]) at tape position x (space_idx(): i
+ *         1 .. n, the guard holds frame n + 1).
+ * Why:    the Echo's two heads (the long one at `tim`, the short one at
+ *         `tim` / `spr`) read one tape at two times. The former space_lin1()
+ *         served the D/3 and 2D/3 heads that `hed` had; this is the same
+ *         read for the heads that replaced them.
+ * Cost:   two halfword loads, two conversions, a subtract and a fused
+ *         multiply-add, plus space_idx().
+ */
+static inline __attribute__((always_inline)) float space_mono(
+    const int16_t *t, float x, int32_t nw)
+{
+    float f;
+    const int32_t i = space_idx(x, nw, &f);
+    const float a = (float)t[i];
+
+    return a + f * ((float)t[i + 1] - a);
+}
+
+/*
+ * The Echo's mono tape (plan §4.3: the Delay's laws on one loop, no `rev`
+ * or cross-feed). S100 P2: two heads on the one tape, the long one at `tim`
+ * (d[0] here; it is the loop's) and the short one `tim` / `spr` (d[1]).
+ * No extra taps (a centre tap measured +21 a frame, over the cap). The
+ * caller passes the outputs so that e0 is the long head's side.
+ * What, per frame: the heads -> e0[m], e1[m] (`str`'s mix,
+ * gated: the wet), the long head (gated) -> the loop chain, the record of
+ * in[m] + ka x pmq[m / 4] (the routed plate, quarter rate) at floor(p),
+ * int16 mono with `deg`'s bit reduction and the guard; and the plate's
+ * input pi[m] = ce x the loop head + cmi x in[m] (the routings fold in
+ * here, §S18). No `hld` on the Echo: input 1, cubic 1/3.
  */
 static SPACE_LOOP void space_echoTapeRun(
     int16_t *t, space_hdr_t *h, const space_pass_t *ps, const float *in,
-    const float *pmq, float ka, float *pi, float ce, float cm, float *e,
-    uint32_t frames)
+    const float *pmq, float ka, float *pi, float ce, float cmi, float *e0,
+    float *e1, uint32_t frames)
 {
-    const float third = 1.0f / 3.0f;
     const float n = ps->n;
     const int32_t nw = (int32_t)n;
     const float va = ps->va;
-    const float g1 = ps->g1;
-    const float g2 = ps->g2;
-    const float g3 = ps->g3;
+    const float kc = ps->kc;
+    const float cm = ps->cm;
+    const float cx = ps->cx;
     const float fbk = ps->fbk;
-    const float ing = ps->ing;
     const float rk = ps->rk;
-    const float bw = ps->bw * (1.0f - h->k.comp * fabsf(h->ch[0].play));
-    const float hiss = h->k.hiss;
-    const float thp = h->k.thp;
-    const float drive = h->k.drive;
-    const float makeup = h->k.makeup;
-    const float dd = ps->dd[0];
+    const float bw = ps->bw[0];
+    const float a1 = h->k.a1;
+    const float a2 = h->k.a2;
+    const float a3 = h->k.a3;
+    const float drive = ps->drv;
+    const float makeup = ps->mk;
+    const float bsc = ps->bsc;
+    const uint32_t bsh = ps->bsh;
+    const float dd0 = ps->dd[0];
+    const float dd1 = ps->dd[1];
     space_chan_t c = h->ch[0];
     float p = ps->p;
-    float d = ps->d[0];
-    uint32_t rn = h->rnd;
+    float d0 = ps->d[0];
+    float d1 = ps->d[1];
     uint32_t m;
 
     SPACE_ONCE
     for (m = 0u; m < frames; m++) {
-        float f;
+        const float y0 = space_mono(t, p - d0 + n, nw);
+        const float y1 = space_mono(t, p - d1 + n, nw);
+        const float lp = kc * y0;
         float y;
-        int32_t i;
 
-        i = space_idx(p - d + n, nw, &f);
-        y = (float)t[i];
-        y += f * ((float)t[i + 1] - y);
-        /* S096 P2 F1: the extra heads read linearly (were nearest) */
-        y = g3 * y + g1 * space_lin1(t, p - d * third + n, nw) +
-            g2 * space_lin1(t, p - d * (2.0f * third) + n, nw);
-        e[m] = y;
-        pi[m] = ce * y + cm * in[m];
-        rn = rn * 1664525u + 1013904223u;
-        y = space_loop(&c, y, in[m] + ka * pmq[m >> 2],
-                       hiss * (float)(int32_t)rn, bw, thp, drive, makeup, rk,
-                       ing, fbk);
+        e0[m] = cm * y0 + cx * y1;
+        e1[m] = cm * y1 + cx * y0;
+        pi[m] = ce * lp + cmi * in[m];
+        y = space_loop(&c, lp, in[m] + ka * pmq[m >> 2], bw, a1, a2, a3,
+                       1.0f / 3.0f, drive, makeup, rk, 1.0f, fbk);
         {
             const uint32_t w = (uint32_t)p;
-            const int16_t v = (int16_t)space_q15(y);
+            const int16_t v = (int16_t)((uint32_t)space_q15(y * bsc) << bsh);
 
             t[w] = v;
             if (w < SPACE_TAPE_GUARD)
@@ -597,10 +693,10 @@ static SPACE_LOOP void space_echoTapeRun(
         }
         p += va;
         p -= (p >= n) ? n : 0.0f;
-        d += dd;
+        d0 += dd0;
+        d1 += dd1;
     }
     h->ch[0] = c;
-    h->rnd = rn;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1131,13 +1227,14 @@ static SPACE_SIZE float space_onePoleHalf(float fc)
 /* The laws a row drives (write_param), per type in row order (3..). */
 enum {
     SPACE_LAW_NONE = 0, SPACE_LAW_TIME, SPACE_LAW_SPR,
-    SPACE_LAW_FBK, SPACE_LAW_XFB, SPACE_LAW_TONE, SPACE_LAW_DEG,
+    SPACE_LAW_FBK, SPACE_LAW_XFB, SPACE_LAW_DEG,
     SPACE_LAW_WOW, SPACE_LAW_HOLD, SPACE_LAW_REV,
-    SPACE_LAW_HED, SPACE_LAW_DCK, SPACE_LAW_PRE, SPACE_LAW_SIZ,
+    SPACE_LAW_DCK, SPACE_LAW_PRE, SPACE_LAW_SIZ,
     SPACE_LAW_DCY, SPACE_LAW_DIF, SPACE_LAW_LSH, SPACE_LAW_LSF,
     SPACE_LAW_HSH, SPACE_LAW_HSF, SPACE_LAW_MOD, SPACE_LAW_WID,
     SPACE_LAW_FRZ, SPACE_LAW_SHM, SPACE_LAW_INT, SPACE_LAW_ENV,
-    SPACE_LAW_E2R, SPACE_LAW_BLN, SPACE_LAW_RTG, SPACE_LAW_RTONE
+    SPACE_LAW_E2R, SPACE_LAW_BLN, SPACE_LAW_RTG, SPACE_LAW_RTONE,
+    SPACE_LAW_BAND
 };
 
 /*
@@ -1145,25 +1242,118 @@ enum {
  * column 0 is now row 3, `tim` / `pre`).
  */
 static const uint8_t space_laws[3][SPACE_ROWS_MAX] = {
-    /* Delay: tim spr fbk xfb ton deg wow hld rev hed dck */
-    { SPACE_LAW_TIME, SPACE_LAW_SPR, SPACE_LAW_FBK, SPACE_LAW_XFB,
-      SPACE_LAW_TONE, SPACE_LAW_DEG, SPACE_LAW_WOW, SPACE_LAW_HOLD,
-      SPACE_LAW_REV, SPACE_LAW_HED, SPACE_LAW_DCK },
+    /*
+     * Delay (S100 P2): tim fbk ton wid xfb spr str wow deg dck hld rev
+     * (`str` is read per block from its row: no law).
+     */
+    { SPACE_LAW_TIME, SPACE_LAW_FBK, SPACE_LAW_BAND, SPACE_LAW_BAND,
+      SPACE_LAW_XFB, SPACE_LAW_SPR, SPACE_LAW_NONE, SPACE_LAW_WOW,
+      SPACE_LAW_DEG, SPACE_LAW_DCK, SPACE_LAW_HOLD, SPACE_LAW_REV },
     /* Reverb: pre siz dcy dif lsh lsf hsh hsf mod wid frz shm int dtn env dck ton */
     { SPACE_LAW_PRE, SPACE_LAW_SIZ, SPACE_LAW_DCY, SPACE_LAW_DIF,
       SPACE_LAW_LSH, SPACE_LAW_LSF, SPACE_LAW_HSH, SPACE_LAW_HSF,
       SPACE_LAW_MOD, SPACE_LAW_WID, SPACE_LAW_FRZ, SPACE_LAW_SHM,
       SPACE_LAW_INT, SPACE_LAW_INT, SPACE_LAW_ENV, SPACE_LAW_DCK,
       SPACE_LAW_RTONE },
-    /* Echo: tim fbk ton deg wow e>r bln dcy lsh hsh hed dck rtg */
-    { SPACE_LAW_TIME, SPACE_LAW_FBK, SPACE_LAW_TONE, SPACE_LAW_DEG,
-      SPACE_LAW_WOW, SPACE_LAW_E2R, SPACE_LAW_BLN, SPACE_LAW_DCY,
-      SPACE_LAW_LSH, SPACE_LAW_HSH, SPACE_LAW_HED, SPACE_LAW_DCK,
-      SPACE_LAW_RTG },
+    /* Echo (S100 P2): tim fbk ton wid spr str wow deg dck e>r bln dcy lsh hsh rtg */
+    { SPACE_LAW_TIME, SPACE_LAW_FBK, SPACE_LAW_BAND, SPACE_LAW_BAND,
+      SPACE_LAW_SPR, SPACE_LAW_NONE, SPACE_LAW_WOW, SPACE_LAW_DEG,
+      SPACE_LAW_DCK, SPACE_LAW_E2R, SPACE_LAW_BLN, SPACE_LAW_DCY,
+      SPACE_LAW_LSH, SPACE_LAW_HSH, SPACE_LAW_RTG },
 };
 
 _Static_assert((int)SPACE_ECH_TIME == (int)SPACE_DLY_TIME,
                "the tape types share the `tim` row index");
+_Static_assert((int)SPACE_ECH_FEEDBACK == (int)SPACE_DLY_FEEDBACK &&
+               (int)SPACE_ECH_TONE == (int)SPACE_DLY_TONE &&
+               (int)SPACE_ECH_WIDTH == (int)SPACE_DLY_WIDTH,
+               "the tape types share the `fbk` `ton` `wid` row indices");
+
+/*
+ * The loop band-pass (S100 P2), from the stored rows, so the order the rows
+ * arrive in does not matter.
+ *
+ * What:
+ * - the band's room: 10 Hz .. 21 kHz, 11.04 octaves around its geometric
+ *   centre 458 Hz;
+ * - `ton`, bipolar (user, 2026-11-21: "ton=0 wid=127 cuts nothing; raising
+ *   or lowering ton cuts low or high"): t = (row - 63) / 63, the centre
+ *   458 Hz x 2^(t x 4.71) above 0 (to 12 kHz at +63) and 458 Hz x
+ *   2^(t x 2.52) below (to 80 Hz at -63);
+ * - `wid`: the width N = 0.18 x 61.3^(1 - (1 - w)^2) octaves, w = row / 127:
+ *   0.18 (Q 8, a resonant peak) at 0 and the whole 11.04 at 127, as
+ *   before, but the curve's slope is 0 at the top (user: "lowering wid
+ *   cuts frequencies too fast"): 10 rows below 127 the band is still
+ *   10.8 octaves (the earlier law: 8), 4.0 at 64, 1.1 at 32;
+ * - the edges centre x 2^(-+N/2), held inside 10 Hz .. 21 kHz: so at `ton`
+ *   0 and `wid` 127 the band is exactly the room, `ton` up then moves the
+ *   low edge up (the high one stays at the 21 kHz bound), `ton` down
+ *   moves the high edge down;
+ * - the filter for those edges, exact after the bilinear warp: each edge
+ *   warped, W = tan(pi f / fs) (sinf / cosf, already linked), g = the
+ *   warped centre sqrt(W1 W2), kb = 2R = (W2 - W1) / g; drive = dg x kb
+ *   (the peak gain is 1 at every width, so `fbk` unity stays at row 100);
+ *   hq = fs / (kb x sqrt(f1 f2)), `hld`'s narrow-band compensation
+ *   (space_tapeBegin()). Warping only the centre had put the digital top
+ *   edge of a full-width band at 12.7 kHz.
+ * Why the band never passes below 10 Hz: the loop can then never latch
+ * onto DC or slow sub-audio (the S100 "no feedback" fault).
+ * Callers: space_writeParam() (SPACE_LAW_BAND, SPACE_LAW_DEG). Cold.
+ */
+static SPACE_SIZE void space_bandLaw(const SpaceRuntime *rt, space_tapeK_t *k)
+{
+    const float t = __builtin_fminf(
+        ((float)rt->rows[SPACE_DLY_TONE - 3u] - 63.0f) * (1.0f / 63.0f), 1.0f);
+    const float w = (float)rt->rows[SPACE_DLY_WIDTH - 3u] * (1.0f / 127.0f);
+    const float c = 458.257569f * exp2f(t * ((t > 0.0f) ? 4.7116e0f : 2.5174e0f));
+    const float h = exp2f(0.5f * 0.18f *
+                          exp2f(5.9378f * (1.0f - (1.0f - w) * (1.0f - w))));
+    const float f1 = __builtin_fmaxf(c / h, 10.0f);
+    const float f2 = __builtin_fminf(c * h, 21000.0f);
+    const float x1 = 3.14159265f * f1 * (1.0f / SK_FS);
+    const float x2 = 3.14159265f * f2 * (1.0f / SK_FS);
+    const float w1 = sinf(x1) / cosf(x1);
+    const float w2 = sinf(x2) / cosf(x2);
+    const float g = sqrtf(w1 * w2);
+    const float kb = (w2 - w1) / g;
+    const float a1 = 1.0f / (1.0f + g * (g + kb));
+
+    k->a1 = a1;
+    k->a2 = g * a1;
+    k->a3 = g * g * a1;
+    k->kb = kb;
+    k->hq = SK_FS / (kb * sqrtf(f1 * f2));
+    k->drive = k->dg * kb;
+}
+
+/*
+ * `deg`'s equal-amplitude makeup (S100 P2): the RMS of a -12 dBFS sine
+ * through drive d and the clip x - x^3 / 3, matched to the sine's own RMS,
+ * relative to drive 1 (so `deg` 0 keeps makeup 1). Sixteen points of a
+ * quarter period (the clip is odd and symmetric). Cold: `deg` changes only.
+ */
+static SPACE_SIZE float space_degRms(float d)
+{
+    static const float q[16] = {
+    0.0490677f, 0.1467305f, 0.2429802f, 0.3368899f,
+    0.4275551f, 0.5141027f, 0.5956993f, 0.6715590f,
+    0.7409511f, 0.8032075f, 0.8577286f, 0.9039893f,
+    0.9415441f, 0.9700313f, 0.9891765f, 0.9987955f
+    };
+    float si = 0.0f;
+    float so = 0.0f;
+    uint32_t j;
+
+    for (j = 0u; j < 16u; j++) {
+        const float x = 0.25f * q[j];
+        const float u = space_clip1(d * x);
+        const float y = u * (1.0f - (1.0f / 3.0f) * u * u);
+
+        si += x * x;
+        so += y * y;
+    }
+    return sqrtf(si / so);
+}
 
 /* A flag bit of rt->flags set or cleared. */
 static SPACE_SIZE void space_flag(SpaceRuntime *rt, uint8_t bit, uint8_t on)
@@ -1212,42 +1402,65 @@ static __attribute__((cold)) SPACE_SIZE void space_writeParam(void *rt_void,
     switch (space_laws[rt->tag][index - EFFECT_COMMON_PARAM_COUNT]) {
     case SPACE_LAW_SPR: k->spr = space_sprRatio(value); break;
     case SPACE_LAW_FBK: k->fbk = space_fbkGain(value); break;
-    case SPACE_LAW_XFB: k->xfb = 0.5f * g; break;
-    case SPACE_LAW_WOW: k->wow = 0.005f * g; break;
-    case SPACE_LAW_DCK: k->dck = g; break;
-    case SPACE_LAW_TONE: {
-        /* Bipolar: LP 200 Hz..18 kHz below 63, HP 20 Hz..2 kHz above. */
-        const float t = ((float)value - 63.0f) * (1.0f / 63.0f);
+    case SPACE_LAW_XFB: {
+        /*
+         * S100 P2: the side allpass's turnover, 22 kHz x (5 / 22000)^g
+         * (22 kHz .. 5 Hz), coefficient (tan - 1) / (tan + 1): DC keeps
+         * its side, Nyquist swaps, the turnover between. Row 0: exactly 1
+         * (no swap). A frequency-independent mix cannot both keep the loop
+         * gain at `fbk` and keep the mid (a swap and the identity are not
+         * joined by any rotation without a polarity flip); an allpass on
+         * the side does both.
+         */
+        const float x = 3.14159265f * 22000.0f * exp2f(-12.1032155f * g) *
+                        (1.0f / SK_FS);
+        const float t = sinf(x) / cosf(x);
 
-        k->tlp = (t < 0.0f) ? space_onePoleK(18000.0f * exp2f(6.5f * t))
-                            : 1.0f;
-        k->thp = (t > 0.0f) ? space_onePoleK(20.0f * exp2f(6.6f * t)) : 0.0f;
+        k->xa = (value == 0u) ? 1.0f : (t - 1.0f) / (t + 1.0f);
         break;
     }
-    case SPACE_LAW_DEG:
-        /* D5: drive x1..x6, bandwidth 16 kHz down 2 octaves, hiss -72..-48 dBFS. */
-        k->drive = 1.0f + 5.0f * g;
-        k->makeup = 1.0f / (1.0f + 2.0f * g);
+    case SPACE_LAW_WOW: {
+        /*
+         * S100 P2: depth as pitch, so it is the same at every `tim`, and
+         * rates that rise with the row: wow 0.5 .. 2.5 Hz, peak pitch
+         * 0 .. 2 % (34 cents); flutter 6 .. 12 Hz, 0 .. 0.3 %; both depths
+         * x g^2. The parabolic LFO's peak slope is 8 f per unit depth, so
+         * a depth of p fs / (8 f) samples gives a pitch peak of p.
+         */
+        const float fw = 0.5f * (1.0f + 4.0f * g);
+        const float ff = 6.0f * (1.0f + g);
+
+        k->wr = 2.0f * fw * (float)SK_FRAMES_MAX / SK_FS;
+        k->fr = 2.0f * ff * (float)SK_FRAMES_MAX / SK_FS;
+        k->aw = 0.02f * g * g * SK_FS / (8.0f * fw);
+        k->af = 0.003f * g * g * SK_FS / (8.0f * ff);
+        break;
+    }
+    /*
+     * O1, S100 P2: the wet is 1 - duck x dck, held at 0 or above (duck the
+     * input-peak follower, 0..1). The law was dck = g: at 127 the cut only
+     * equalled the input's peak level (a -12 dBFS send ducked by about
+     * 6 dB), so it did little (user, 2026-11-21); now 2 g, twice as deep.
+     */
+    case SPACE_LAW_DCK: k->dck = 2.0f * g; break;
+    case SPACE_LAW_BAND: space_bandLaw(rt, k); break;
+    case SPACE_LAW_DEG: {
+        /*
+         * D5, S100 P2: no noise. Drive x1..x6 into the clip with an
+         * equal-amplitude makeup (space_degRms(): a -12 dBFS sine keeps its
+         * level), bandwidth 16 kHz down 2 octaves, the O8 loss, and above
+         * row 63 the record's bit reduction, 16 -> 8 bits at 127.
+         */
+        const uint32_t bits = (value <= 63u) ? 16u
+                            : 16u - ((uint32_t)(value - 63u) * 8u + 32u) / 64u;
+
+        k->dg = 1.0f + 5.0f * g;
+        k->makeup = space_degRms(k->dg) / space_degRms(1.0f);
+        space_bandLaw(rt, k);
         k->bw = space_onePoleK(16000.0f * exp2f(-2.0f * g));
         k->comp = 0.25f + 0.5f * g;
-        k->hiss = (value == 0u) ? 0.0f
-                : exp2f((-72.0f + 24.0f * g) * 0.16609640f) *
-                  (1.0f / 2147483648.0f);
-        break;
-    case SPACE_LAW_HED: {
-        /*
-         * O6: the stops' head sets in knob order A B C AB AC BC ABC (bit 0
-         * D/3, bit 1 2D/3, bit 2 D; S095 P4: the stored value is the stop).
-         */
-        static const uint8_t sets[SPACE_HEADS_STOPS] = { 1u, 2u, 4u, 3u, 5u,
-                                                         6u, 7u };
-        const uint8_t s = sets[space_step(value, SPACE_HEADS_STOPS)];
-        const float h = 1.0f / sqrtf((float)((s & 1u) + ((s >> 1) & 1u) +
-                                             ((s >> 2) & 1u)));
-
-        k->hg[0] = (s & 1u) ? h : 0.0f;
-        k->hg[1] = (s & 2u) ? h : 0.0f;
-        k->hg[2] = (s & 4u) ? h : 0.0f;
+        k->bsh = 16u - bits;
+        k->bsc = 1.0f / (float)(1u << k->bsh);
         break;
     }
     case SPACE_LAW_HOLD: space_flag(rt, SPACE_F_HOLD, value != 0u); break;
@@ -1345,6 +1558,7 @@ static SPACE_SIZE uint32_t space_enter(SpaceRuntime *rt, uint8_t tag,
     rt->v = 1.0f;
     rt->siz = 1.0f;
     rt->d[0] = rt->d[1] = SPACE_D_MIN;
+    rt->dr[0] = rt->dr[1] = SPACE_D_MIN;
     /*
      * The dry starts at the outgoing type's (plan §5.3 step 5) and glides
      * to 0. S095 P4 (SD2): with no handoff written (OFF, boot) it starts
@@ -1358,6 +1572,11 @@ static SPACE_SIZE uint32_t space_enter(SpaceRuntime *rt, uint8_t tag,
         return 0u;
     memset(sk_state(share), 0, sizeof(space_hdr_t));
     space_hdr(share)->rnd = 0x5DE1A9u;
+    /* S100 P2: a clean shaper and record until the rows arrive. */
+    space_hdr(share)->k.dg = 1.0f;
+    space_hdr(share)->k.makeup = 1.0f;
+    space_hdr(share)->k.bsc = 1.0f;
+    space_hdr(share)->k.xa = 1.0f;
     /* The Echo's plate has no rows for these (plan §4.3). */
     space_hdr(share)->pl.dif = 0.7f;
     space_hdr(share)->pl.wid = 1.0f;
@@ -1555,30 +1774,75 @@ static __attribute__((cold)) SPACE_SIZE void space_export(const void *rt_void,
 }
 
 /*
+ * `hld`'s growth (S100 P2): 6 dB a second at `fbk` 127, as the factor's
+ * first-order slope (ln 10 / 20 x 6) per second of one pass; `spr`'s
+ * darkening of the loop that runs ahead of `tim`, at full spread and full
+ * width (the playback LP's coefficient x 0.7: 16 kHz -> about 7 kHz).
+ */
+#define SPACE_HOLD_RATE      0.6907755f
+#define SPACE_HOLD_ROW       30u
+#define SPACE_SPR_DARK       0.3f
+/*
+ * `hld`'s crossfade (S100 P2, after the first build clicked): 69 blocks,
+ * 50 ms, from normal play to the held loop and back (SpaceRuntime.hx).
+ * Long enough that the splice the held loop keeps (the last input against
+ * the material one pass earlier) is a smooth crossfade rather than a step,
+ * and that the wow swing fading out moves the read no faster than the
+ * wow itself (its largest swing, 56 frames, over 69 blocks: 0.8 a block).
+ */
+#define SPACE_HOLD_XF        69u
+
+/*
  * The tape's block set-up (Delay, Echo; plan §4.1).
  *
  * What:
  * 1. the time: CrumpBit's `dly` curve at the tempo (D3; only when the row
- *    or the tempo moved), R = L x spr (D23, the Delay); the tape slows to
- *    fit the longer delay (floor 1/4); wow (0.6 Hz), flutter (7 Hz) and a
- *    drift move the delays by up to +-0.5 % (R's inverted); each delay is
- *    floored at SPACE_D_MIN and clamped to the tape, and glides (150 ms),
- *    as does the speed (`spr` relative: the longer channel plays `tim`);
- * 2. the heads' gains (O6) x the valid gate; the loop's gains (`hld`: no
- *    input, unity loop, D10); the record LP and the playback bandwidth at
- *    the tape speed;
- * 3. the output ramps: dry from the outgoing type's to 0 (plan §5.3 step
+ *    or the tempo moved), the shorter channel `tim` / ratio (D23: `spr` is
+ *    relative, the longer plays `tim`); the tape slows to fit the longer
+ *    delay (floor 1/4); each delay is floored at SPACE_D_MIN and clamped
+ *    to the tape, and glides (150 ms), as does the speed; S100 P2 wow:
+ *    wow, flutter and a drift add a swing in samples set as pitch (k.aw,
+ *    k.af) after the glide, R's inverted, held within half of the delay
+ *    above the floor and inside the tape; `hld` fades the swing and reads
+ *    on a whole frame (no interpolation loss in the held loop); dr[c] is
+ *    the delay the reads used last;
+ * 2. the loop (S100 P2): the inputs (the Delay's mid and side with the
+ *    `xfb` allpass; the Echo's head at `tim`), and either
+ *    - `hld`: no input; the shaper linear (no cubic, no `deg` drive or bit
+ *      reduction) and the playback LP open, so the held loop keeps its
+ *      level; the loop gain 1 up to `fbk` row 30, above it 1 + 6 dB/s x
+ *      ((row - 30) / 97)^2 per pass, times the narrow band's worst comb
+ *      tooth loss sqrt(1 + (hq / D)^2), so it grows even at `wid` 0;
+ *    - else `fbk`, the input, `deg`'s shaper and bit reduction, and each
+ *      loop's playback LP: the tape speed, O8, and `spr`'s darkening of the
+ *      loop that runs ahead of `tim` (x (1 - 0.3 x spread x width));
+ * 3. `str` (S100 P2): the output's head and tap gains: 0 .. 64 mono to one
+ *    head a side (cm, cx), 64 .. 127: the Delay's taps in (constant power,
+ *    cn, cf at +-1/3 pan; none under `rev`), the Echo's heads wider (M/S,
+ *    the side up to x 2, constant power); all x the valid gate;
+ * 4. the output ramps: dry from the outgoing type's to 0 (plan §5.3 step
  *    5; S095 P4 T1: only the handoff uses it); wet = 1 x the ducking (O1).
- * Inputs: runtime, header, frames, nch (2 Delay, 1 Echo). Outputs: the
- * pass; v1o: the block-end speed (space_tapeEnd()).
+ * Inputs: runtime, header, frames. Outputs: the pass; v1o: the block-end
+ * speed (space_tapeEnd()).
  */
 static SPACE_SIZE void space_tapeBegin(SpaceRuntime *rt, space_hdr_t *h,
                                        space_pass_t *ps, uint32_t frames,
-                                       uint32_t nch, float *v1o)
+                                       float *v1o)
 {
     const float inv = 1.0f / (float)frames;
     const float cap = (float)(rt->tape_n - SPACE_TAPE_GUARD);
     const uint16_t bpm = seq_getBpm();
+    const uint8_t echo = (uint8_t)(rt->tag == SPACE_TAG_ECHO);
+    const float str = (float)rt->rows[(echo ? SPACE_ECH_STEREO
+                                            : SPACE_DLY_STEREO) - 3u];
+    /* The channel that runs ahead of `tim` (`spr` relative). */
+    const uint32_t sh = (h->k.spr >= 1.0f) ? 0u : 1u;
+    /*
+     * S100 P2: the `hld` crossfade at the block's start (x0) and end (x1),
+     * 0 normal play .. 1 held; rt->hx steps one block toward the row.
+     */
+    const float x0 = (float)rt->hx * (1.0f / (float)SPACE_HOLD_XF);
+    float x1;
     float gate = 1.0f / 32768.0f;
     float t[2];
     float v1;
@@ -1587,6 +1851,11 @@ static SPACE_SIZE void space_tapeBegin(SpaceRuntime *rt, space_hdr_t *h,
     float wg1;
     uint32_t c;
 
+    if (rt->flags & SPACE_F_HOLD)
+        rt->hx = (uint8_t)((rt->hx < SPACE_HOLD_XF) ? rt->hx + 1u : rt->hx);
+    else if (rt->hx != 0u)
+        rt->hx--;
+    x1 = (float)rt->hx * (1.0f / (float)SPACE_HOLD_XF);
     if (bpm != rt->t_bpm || rt->rows[SPACE_DLY_TIME - 3u] != rt->t_row) {
         rt->t_bpm = bpm;
         rt->t_row = rt->rows[SPACE_DLY_TIME - 3u];
@@ -1599,39 +1868,56 @@ static SPACE_SIZE void space_tapeBegin(SpaceRuntime *rt, space_hdr_t *h,
      */
     t[0] = rt->t_samples;
     t[1] = t[0];
-    if (nch == 2u) {
-        if (h->k.spr >= 1.0f)
-            t[0] = t[1] / h->k.spr;
-        else
-            t[1] = t[0] * h->k.spr;
-    }
+    if (sh == 0u)
+        t[0] = t[1] / h->k.spr;
+    else
+        t[1] = t[0] * h->k.spr;
     v1 = cap / rt->t_samples;
     v1 = __builtin_fminf(__builtin_fmaxf(v1, SPACE_SPEED_MIN), 1.0f);
-    h->wph += 2.0f * 0.6f * SK_FRAMES_MAX / SK_FS;
+    h->wph += h->k.wr;
     h->wph -= (h->wph >= 1.0f) ? 2.0f : 0.0f;
-    h->fph += 2.0f * 7.0f * SK_FRAMES_MAX / SK_FS;
+    h->fph += h->k.fr;
     h->fph -= (h->fph >= 1.0f) ? 2.0f : 0.0f;
     h->rnd = h->rnd * 1664525u + 1013904223u;
     h->walk += 0.005f * ((float)(int32_t)h->rnd * (1.0f / 2147483648.0f) -
                          h->walk);
-    /* Parabolic sines, +-1; wow and flutter 0.6 : 0.25, plus the drift. */
-    s = (2.4f * h->wph * (1.0f - fabsf(h->wph)) +
-         h->fph * (1.0f - fabsf(h->fph)) + h->walk) * h->k.wow;
-    for (c = 0u; c < nch; c++) {
-        float d = t[c] * v1 * (c ? 1.0f - s : 1.0f + s);
+    /*
+     * Parabolic sines, +-1 (x 4), in output samples, plus the drift. S100
+     * P2: the swing is added after the glide (the 150 ms glide had filtered
+     * it: 0.39 of a 2.5 Hz wow, 0.09 of 12 Hz flutter). The `hld`
+     * crossfade blends each read delay from glide + swing to the glide's
+     * nearest whole frame (x1 1: exactly that frame, so the held loop's
+     * reads are exact), and back. The delay ramps across the block (dd),
+     * so the read never jumps: the first build rounded the delay and faded
+     * the swing in whole-frame steps, a click at each step.
+     */
+    s = 4.0f * (h->wph * (1.0f - fabsf(h->wph)) * h->k.aw +
+                h->fph * (1.0f - fabsf(h->fph)) * h->k.af) +
+        h->walk * h->k.aw;
+    for (c = 0u; c < 2u; c++) {
+        float b = __builtin_fminf(__builtin_fmaxf(t[c] * v1, SPACE_D_MIN), cap);
+        float sw = (c ? -s : s) * v1;
+        float d;
 
-        d = __builtin_fminf(__builtin_fmaxf(d, SPACE_D_MIN), cap);
-        d = rt->d[c] + SPACE_GLIDE_K32 * (d - rt->d[c]);
-        ps->d[c] = rt->d[c];
-        ps->dd[c] = (d - rt->d[c]) * inv;
+        b = rt->d[c] + SPACE_GLIDE_K32 * (b - rt->d[c]);
+        sw = __builtin_fminf(__builtin_fmaxf(sw, 0.5f * (SPACE_D_MIN - b)),
+                             __builtin_fminf(0.5f * (b - SPACE_D_MIN), cap - b));
+        d = b + sw;
+        if (rt->hx >= SPACE_HOLD_XF)
+            d = (float)(int32_t)(b + 0.5f);
+        else if (rt->hx != 0u)
+            d += x1 * ((float)(int32_t)(b + 0.5f) - d);
+        ps->d[c] = rt->dr[c];
+        ps->dd[c] = (d - ps->d[c]) * inv;
         /*
          * The heads sound once the tape holds them: valid covers the delay
          * and the read's next frame (§S18: the old `+ 4` never opened at
          * the longest delays, where valid saturates at the tape length).
          */
-        if ((float)rt->valid < __builtin_fmaxf(d, rt->d[c]) + 2.0f)
+        if ((float)rt->valid < __builtin_fmaxf(d, ps->d[c]) + 2.0f)
             gate = 0.0f;
-        rt->d[c] = d;
+        rt->d[c] = b;
+        rt->dr[c] = d;
     }
     v1 = rt->v + SPACE_GLIDE_K32 * (v1 - rt->v);
     ps->p = rt->pos;
@@ -1639,14 +1925,128 @@ static SPACE_SIZE void space_tapeBegin(SpaceRuntime *rt, space_hdr_t *h,
     ps->n = (float)rt->tape_n;
     ps->ph[0] = rt->rph[0];
     ps->dph[0] = 2.0f * ps->va / __builtin_fmaxf(ps->d[0] - SPACE_D_MIN, 1.0f);
-    ps->g1 = gate * h->k.hg[0];
-    ps->g2 = gate * h->k.hg[1];
-    ps->g3 = gate * h->k.hg[2];
-    ps->fbk = (rt->flags & SPACE_F_HOLD) ? 1.0f : h->k.fbk;
-    ps->ing = (rt->flags & SPACE_F_HOLD) ? 0.0f : 1.0f;
-    ps->xfb = h->k.xfb;
-    ps->bw = __builtin_fminf(h->k.bw * ps->va, h->k.tlp);
     ps->rk = 0.25f + 0.75f * ps->va;
+    /*
+     * 2. The loop. The Delay: mid gain kc = gate / 2 (mid and side are
+     * (L +- R) / 2, so L = mid + side when the allpass passes the side
+     * unchanged), the side allpass coefficient kx = k.xa (`xfb`). The Echo:
+     * kc = the gate on its long head (the run takes it first), no kx.
+     */
+    ps->kc = echo ? gate : 0.5f * gate;
+    ps->kx = echo ? 0.0f : h->k.xa;
+    {
+        /*
+         * Normal play: `fbk`, the input, `deg`'s shaper and bit reduction.
+         * Each loop's playback LP: the tape speed, O8 (louder is duller, from
+         * the loop's level at the block start) and, on the Delay only,
+         * `spr`'s darkening (plan §4.8) of the loop that runs ahead of `tim`:
+         * x (1 - 0.3 x the spread 0..1 (|spr - 63| / 63) x wid / 127), so a
+         * wide band darkens most and a narrow one hardly at all. (The Echo's
+         * loop is its head at `tim`; S100 P2 fix: the first build darkened
+         * it when `spr` was above 0.)
+         *
+         * `hld` (plan §4.5): no input, a linear shaper (no cubic, the drive
+         * only the band-pass's normalisation kb, makeup 1, no bit
+         * reduction) and the playback LP open, so the held loop loses
+         * nothing but the band's skirts. The held gain gh: 1 up to `fbk`
+         * row 30; above it 1 + SPACE_HOLD_RATE x ((row - 30) / 97)^2 x the
+         * pass time in seconds (first order in the growth per pass), times
+         * sqrt(1 + (hq / D)^2), the narrow band's loss at a comb tooth
+         * half a tooth spacing from its centre (D the pass in output
+         * frames), so even `wid` 0 grows.
+         *
+         * S100 P2 crossfade (the first build switched all of this in one
+         * block, and the held loop kept the step as a click on every pass):
+         * the input and the loop gain glide from their block-start to their
+         * block-end blend across the block (ing/ding, fbk/dfbk: per-frame
+         * ramps in space_delayRun()); the shaper, the playback LP and the
+         * drive blend once a block by x1; the bit reduction switches at the
+         * crossfade's middle. Only the Delay has `hld` (the Echo's hx stays
+         * 0). One division and one square root a block while x0 or x1 is
+         * above 0.
+         */
+        const float bw = h->k.bw * ps->va;
+        const float dev = echo ? 0.0f : __builtin_fminf(
+            fabsf((float)rt->rows[SPACE_DLY_SPREAD - 3u] - 63.0f) *
+                (1.0f / 63.0f), 1.0f);
+        const float dk = 1.0f - SPACE_SPR_DARK * dev *
+                                    (float)rt->rows[SPACE_DLY_WIDTH - 3u] *
+                                    (1.0f / 127.0f);
+        float gh = 1.0f;
+        float b0;
+        float b1;
+
+        if (x0 > 0.0f || x1 > 0.0f) {
+            const uint8_t row = rt->rows[SPACE_DLY_FEEDBACK - 3u];
+
+            if (row > SPACE_HOLD_ROW) {
+                const float x = (float)(row - SPACE_HOLD_ROW) * (1.0f / 97.0f);
+                /* One pass in output frames, and the half comb-tooth term. */
+                const float dp = __builtin_fmaxf(rt->d[0], rt->d[1]) / ps->va;
+                const float q = h->k.hq / dp;
+
+                gh = (1.0f + SPACE_HOLD_RATE * x * x * dp * (1.0f / SK_FS)) *
+                     sqrtf(1.0f + q * q);
+            }
+        }
+        b0 = bw * (1.0f - h->k.comp * fabsf(h->ch[0].play)) *
+             ((sh == 0u) ? dk : 1.0f);
+        b1 = bw * (1.0f - h->k.comp * fabsf(h->ch[1].play)) *
+             ((sh == 1u) ? dk : 1.0f);
+        ps->bw[0] = b0 + x1 * (1.0f - b0);
+        ps->bw[1] = b1 + x1 * (1.0f - b1);
+        ps->fbk = h->k.fbk + x0 * (gh - h->k.fbk);
+        ps->dfbk = (x1 - x0) * (gh - h->k.fbk) * inv;
+        ps->ing = 1.0f - x0;
+        ps->ding = (x0 - x1) * inv;
+        ps->c3 = (1.0f / 3.0f) * (1.0f - x1);
+        ps->drv = h->k.drive + x1 * (h->k.kb - h->k.drive);
+        ps->mk = h->k.makeup + x1 * (1.0f - h->k.makeup);
+        ps->bsc = (x1 < 0.5f) ? h->k.bsc : 1.0f;
+        ps->bsh = (x1 < 0.5f) ? h->k.bsh : 0u;
+    }
+    /*
+     * 3. `str` (S100 P2, plan §4.4; bipolar after the first build, user
+     * 2026-11-21), the output gains, every one x the valid gate. s = row -
+     * 63 (the page shows it: -63 .. +64, 0 the default):
+     * - s -63 .. 0: a = 1 + s / 63, L = (1 + a) / 2 x L head + (1 - a) / 2
+     *   x R head (R mirrored): -63 the mono sum, 0 one head a side;
+     * - s above 0, the Echo: the same form with a = 1 + s / 64 (1 .. 2: M/S,
+     *   the side up to x 2), normalised to constant power; no taps (a
+     *   centre tap measured +21 a frame, over the Echo's cap);
+     * - s above 0, the Delay: u = s / 64, the heads x 1 / sqrt(1 + u^2) and
+     *   the taps x u / sqrt(1 + u^2), each tap panned to -+1/3 (cos / sin
+     *   of 30 degrees: 0.866 to its own side, 0.5 to the other), so every
+     *   side's power is constant; u = 0 under `rev`.
+     */
+    if (str <= 63.0f) {
+        const float a = str * (1.0f / 63.0f);
+
+        ps->cm = gate * 0.5f * (1.0f + a);
+        ps->cx = gate * 0.5f * (1.0f - a);
+        ps->cn = 0.0f;
+        ps->cf = 0.0f;
+    } else if (echo) {
+        /* The Echo: no taps; wider than one head a side (M/S, side x 2). */
+        const float a = 1.0f + (str - 63.0f) * (1.0f / 64.0f);
+        const float cm = 0.5f * (1.0f + a);
+        const float cx = 0.5f * (1.0f - a);
+        const float nr = gate / sqrtf(cm * cm + cx * cx);
+
+        ps->cm = cm * nr;
+        ps->cx = cx * nr;
+        ps->cn = 0.0f;
+        ps->cf = 0.0f;
+    } else {
+        const float u = (rt->flags & SPACE_F_REVERSE)
+                            ? 0.0f : (str - 63.0f) * (1.0f / 64.0f);
+        const float nr = gate / sqrtf(1.0f + u * u);
+
+        ps->cm = nr;
+        ps->cx = 0.0f;
+        ps->cn = 0.8660254f * u * nr;
+        ps->cf = 0.5f * u * nr;
+    }
     /*
      * S095 P4 T1: the dry glides to 0 (one-pole, 0.1 per block, as before;
      * -20 dB after about 22 blocks, 16 ms) and the wet is the ducking alone.
@@ -1654,7 +2054,8 @@ static SPACE_SIZE void space_tapeBegin(SpaceRuntime *rt, space_hdr_t *h,
      * plan D-a); dry is 0 once the handoff has faded.
      */
     dry1 = 0.9f * rt->dry;
-    wg1 = 1.0f - rt->duck * h->k.dck;
+    /* S100 P2: dck reaches 2, so the ducking gain is held at 0 or above. */
+    wg1 = __builtin_fmaxf(1.0f - rt->duck * h->k.dck, 0.0f);
     ps->dry = rt->dry;
     ps->ddry = (dry1 - rt->dry) * inv;
     ps->wg = rt->wet;
@@ -1712,7 +2113,7 @@ static SPACE_SIZE void space_delayProcess(void *rt_void, effect_io_t *io)
     if (!space_ioOk(rt, io) || rt->tape_n < 2u * (uint32_t)SPACE_D_MIN)
         return;
     h = space_hdr(io->share);
-    space_tapeBegin(rt, h, &ps, io->frames, 2u, &v1);
+    space_tapeBegin(rt, h, &ps, io->frames, &v1);
     peak = space_delayRun((uint32_t *)(void *)(io->share->base +
                                                SK_PREFIX_BYTES),
                           h, &ps, (uint8_t)(rt->flags & SPACE_F_REVERSE),
@@ -1768,7 +2169,8 @@ static SPACE_SIZE float space_plateGains(SpaceRuntime *rt, space_hdr_t *h,
         eg = __builtin_fminf((float)pl->env_n / -pl->env, 1.0f);
     pl->env_g += 0.3f * (eg - pl->env_g);
     *dry1 = 0.9f * rt->dry;
-    return pl->env_g * (1.0f - rt->duck * h->k.dck);
+    /* S100 P2: dck reaches 2, so the ducking gain is held at 0 or above. */
+    return pl->env_g * __builtin_fmaxf(1.0f - rt->duck * h->k.dck, 0.0f);
 }
 
 /*
@@ -1856,13 +2258,15 @@ static SPACE_SIZE void space_reverbProcess(void *rt_void, effect_io_t *io)
 
 /*
  * The Echo's output: the plate (quarter rate) to full rate by linear
- * interpolation (four frames per tick), blended with the echo, wet =
- * e + bln (plate - e), and mixed in, both gains ramped. Also returns the
+ * interpolation (four frames per tick), blended with the echo (S100 P2:
+ * L and R, `str`), wet = e + bln (plate - e), and mixed in, both gains
+ * ramped. Also returns the
  * plate's mono at its rate into pm[ticks] (the loop routing's input next
  * block).
  */
-static SPACE_LOOP void space_echoOut(float *l, float *r, const float *e,
-                                     const float *ol, const float *orr,
+static SPACE_LOOP void space_echoOut(float *l, float *r, const float *el,
+                                     const float *er, const float *ol,
+                                     const float *orr,
                                      float *prev, float bln, float *pm,
                                      float dry, float ddry, float wg,
                                      float dwg, uint32_t ticks)
@@ -1879,12 +2283,13 @@ static SPACE_LOOP void space_echoOut(float *l, float *r, const float *e,
 
         for (j = 0u; j < 4u; j++) {
             const uint32_t n = 4u * t + j;
-            const float en = e[n];
+            const float enl = el[n];
+            const float enr = er[n];
 
             al += dl;
             ar += dr;
-            l[n] = l[n] * dry + (en + bln * (al - en)) * wg;
-            r[n] = r[n] * dry + (en + bln * (ar - en)) * wg;
+            l[n] = l[n] * dry + (enl + bln * (al - enl)) * wg;
+            r[n] = r[n] * dry + (enr + bln * (ar - enr)) * wg;
             dry += ddry;
             wg += dwg;
         }
@@ -1911,7 +2316,10 @@ static SPACE_SIZE void space_echoProcess(void *rt_void, effect_io_t *io)
     space_pass_t ps;
     float m[SK_FRAMES_MAX];
     float ti[SK_FRAMES_MAX];
-    float e[SK_FRAMES_MAX];
+    float el[SK_FRAMES_MAX];
+    float er[SK_FRAMES_MAX];
+    float *e0 = el;
+    float *e1 = er;
     float ol[SK_FRAMES_MAX / 4u];
     float orr[SK_FRAMES_MAX / 4u];
     int16_t *ring;
@@ -1927,7 +2335,22 @@ static SPACE_SIZE void space_echoProcess(void *rt_void, effect_io_t *io)
     ring = (int16_t *)(void *)(io->share->base + SK_PREFIX_BYTES);
     e2r = h->pl.e2r;
     peak = space_monoPeak(io->l, io->r, m, io->frames);
-    space_tapeBegin(rt, h, &ps, io->frames, 1u, &v1);
+    space_tapeBegin(rt, h, &ps, io->frames, &v1);
+    /*
+     * S100 P2: the run takes the long head (`tim`, the loop's) first; with
+     * L the short one (`spr` above 63) the heads and the outputs swap.
+     */
+    if (h->k.spr >= 1.0f) {
+        float x = ps.d[0];
+
+        ps.d[0] = ps.d[1];
+        ps.d[1] = x;
+        x = ps.dd[0];
+        ps.dd[0] = ps.dd[1];
+        ps.dd[1] = x;
+        e0 = er;
+        e1 = el;
+    }
     /*
      * The tape's input takes the plate's last mono block (r>e, loop); the
      * plate's input is built by the tape pass (e>r: e2r x echo + 0.1 x in;
@@ -1941,11 +2364,11 @@ static SPACE_SIZE void space_echoProcess(void *rt_void, effect_io_t *io)
                           : ((route == SPACE_ROUTING_LOOP) ? 1.0f : 0.0f),
                       (route == SPACE_ROUTING_E2R) ? 0.1f
                           : ((route == SPACE_ROUTING_LOOP) ? 0.0f : 1.0f),
-                      e, io->frames);
+                      e0, e1, io->frames);
     ticks = space_plateBlock(rt, &h->pl, ring, NULL, 1u, ti, NULL, ol, orr,
                              io->frames);
     space_tapeEnd(rt, &ps, io->frames, v1, 2.0f * peak);
-    space_echoOut(io->l, io->r, e, ol, orr, h->pl.up, h->pl.bln,
+    space_echoOut(io->l, io->r, el, er, ol, orr, h->pl.up, h->pl.bln,
                   h->pl.sh, ps.dry, ps.ddry, ps.wg, ps.dwg, ticks);
     /* S095 P4 T1: the outgoing tail is heard at full wet (no `mix` row). */
     sk_feedMix(io->share, EFFECT_TYPE_ECHO, io->l, io->r, io->frames,

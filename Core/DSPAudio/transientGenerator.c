@@ -51,9 +51,10 @@ void transient_init(TransientGenerator* transient)
 /*
  * Select the transient entry (S087 P3: user one-shots).
  *
- * What:       stores any row value 0..127 as it is: 0 Snp, 1 Ofs, the
- *             built-in clicks, then the user samples from TRANSIENT_USER_FIRST
- *             on. A value past the installed samples is resolved by
+ * What:       stores any row value 0..127 as it is: 0 Snp, 1 Ofs, then the
+ *             installed samples from TRANSIENT_USER_FIRST (2) on (S101: the
+ *             twelve built-in clicks left the firmware for the card files
+ *             samples/LXR*.wav). A value past the installed samples is resolved by
  *             transient_calcBlock() to the last entry that exists. Values
  *             above 127 (not producible by the row) fall back to 0 as before.
  * Why:        the stored byte is used as it is and clamped to an existing entry
@@ -97,9 +98,9 @@ void transient_trigger(TransientGenerator* transient)
  *             transient_trigger() sets the phase to 0.
  * Why:        S087 P3: user one-shots in the transient list. The entry is read
  *             from the catalogue each block, so the generator gains no RAM and
- *             a reinstall can never leave a stale pointer. A phase left from a
- *             built-in click (Q20, larger) is clamped to the end, so a change of
- *             entry mid-hit is silent until the next trigger.
+ *             a reinstall can never leave a stale pointer. A phase past the
+ *             sample's end is clamped to the end, so a change of entry mid-hit
+ *             is silent until the next trigger.
  * Inputs:     transient (phase, pitch, volume), index (< sample count), buf,
  *             size.
  * Outputs:    buf[0..size-1]; transient->phase.
@@ -153,47 +154,18 @@ static void transient_calcSampleBlock(TransientGenerator* transient,
 	}
 	transient->phase = ph;
 }
-/*
- * One block of a built-in click (S087 P3: moved here unchanged).
- *
- * What:       the original transient PCM loop: transientData row
- *             (waveform - 2), Q20 phase, nearest read, held at the table end.
- * Why:        S087 P3: transient_calcBlock() now dispatches the user entries
- *             first; keeping the click loop as one always-inlined helper with
- *             its original text compiles it exactly as before (22 instructions
- *             per sample, the same per-block setup).
- * Inputs:     transient (waveform 2..TRANSIENT_USER_FIRST-1), buf, size.
- * Outputs:    buf; transient->phase.
- * Accessors:  transient_calcBlock() only (a second inlined copy compiled
- *             one instruction longer per sample).
- * Affiliates: transientData, TRANSIENT_SAMPLE_LENGTH.
- */
-static inline __attribute__((always_inline)) void transient_calcClickBlock(
-	TransientGenerator* transient, int16_t* buf, const uint8_t size)
-{
-	uint8_t i;
-	for(i=0;i<size;i++)
-	{
-		uint32_t phase = transient->phase;
-		phase = phase >> 20;
-
-		buf[i] = transient->volume*(transientData[transient->waveform-2][phase]<<8) * (phase < TRANSIENT_SAMPLE_LENGTH);//* transientVolumeTable[phase>>5];
-
-		//if phase is < then table size, we increment it
-		transient->phase += (transient->phase<2311061504u) * (transient->pitch*(1<<20)); //2311061504 => 2204<<20
-
-	}
-}
 //---------------------------------------------------------------
 /*
  * Resolve and play a user one-shot entry (S087 P3).
  *
  * What:       a value from TRANSIENT_USER_FIRST on plays catalogue sample
  *             (value - TRANSIENT_USER_FIRST). A value past the installed
- *             samples is clamped in place to the last sample; with no sample
- *             installed it is clamped to the last built-in click, this one
- *             block is silent, and the click plays from the next block through
- *             transient_calcBlock()'s own loop.
+ *             samples is clamped in place to the last sample. With no sample
+ *             installed the block is silent and the value is kept (S101: there
+ *             is no built-in click left to fall back to, and clamping to the
+ *             entry below would select Ofs, the offset mode, which changes the
+ *             oscillator's start phase; the row then plays again as soon as
+ *             samples are installed).
  * Why:        S087 P0 r8 / A23 rule, as the modulator wav list: the render
  *             always plays an entry that exists. Kept out of line (noinline) so
  *             the built-in click path of transient_calcBlock() keeps its
@@ -213,9 +185,7 @@ static __attribute__((noinline)) void transient_calcUserBlock(
 
 	if(samples == 0u)
 	{
-		/* No sample installed (e.g. a Kit saved with a user entry, then a
-		 * reinstall without samples): clamp to the last built-in click. */
-		transient->waveform = (uint8_t)(TRANSIENT_USER_FIRST - 1u);
+		/* No sample installed: silence, the row value kept (see above). */
 		memset(buf, 0, size * sizeof(int16_t));
 		return;
 	}
@@ -230,44 +200,23 @@ static __attribute__((noinline)) void transient_calcUserBlock(
 void transient_calcBlock(TransientGenerator* transient, int16_t* buf, const uint8_t size)
 {
 	/*
-	 * Entry dispatch (S087 P3).
+	 * Entry dispatch (S087 P3; S101).
 	 *
-	 * What:       one range test leaves the built-in clicks (2..13) on the
-	 *             unchanged loop below; 0/1 (snap EG, offset) render silence as
-	 *             before; user one-shots (14..) go to transient_calcUserBlock().
-	 * Why:        the built-in click path keeps a single compare per block, as
-	 *             before the user entries existed.
+	 * What:       0/1 (snap EG, offset) render silence as before; every other
+	 *             value is a card sample (transient_calcUserBlock()).
+	 * Why:        S101 (S101_P2_REDUCTIONS.md §B.3 F4, user 2026-11-21): the
+	 *             twelve built-in 8-bit clicks (transientData, 26,460 B of
+	 *             flash, and their 22-instruction loop) left the firmware. Their
+	 *             data is now SD_CARD/samples/LXRClk.wav .. LXRSp2.wav, one-shot
+	 *             samples played by the user path, as the crash wave became
+	 *             LXRcym.wav in S094. No migration (standing rule): a stored
+	 *             value 2..13 now selects installed sample 0..11.
 	 */
-	if((uint32_t)(transient->waveform - 2u) >= NUM_TRANSIENTS)   /* 0, 1 wrap high */
+	if(transient->waveform<=1)
 	{
-		if(transient->waveform<=1)
-		{
-			memset(buf,0,size*sizeof(int16_t));
-			return; //snapEg and offset
-		}
-		transient_calcUserBlock(transient, buf, size);
-		return;
+		memset(buf,0,size*sizeof(int16_t));
+		return; //snapEg and offset
 	}
-	transient_calcClickBlock(transient, buf, size);
+	transient_calcUserBlock(transient, buf, size);
 }
-//---------------------------------------------------------------
-void transient_calc(TransientGenerator* transient)
-{
-	uint32_t phase = transient->phase;
-	//if phase is < than table size we increment it
-	phase += (phase<2311061504u) * (transient->pitch*(1<<20)); //2311061504 => 2204<<20
-	transient->phase = phase;
-	phase = phase >> 20;
-	if(transient->waveform==0)
-	{
-		//click
-		transient->output = transient->volume * 32512 * transientVolumeTable[phase>>5];
-
-	}
-	else
-	{
-		transient->output = transient->volume*(transientData[transient->waveform-1][phase]<<8) * transientVolumeTable[phase>>5];
-	}
-
-};
 //---------------------------------------------------------------

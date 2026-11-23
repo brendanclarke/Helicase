@@ -93,6 +93,15 @@ void midiOut_service(void);
 void midiOut_trackTrigger(uint8_t track, uint8_t scene_index,
                           uint8_t internal, uint8_t velocity);
 /*
+ * Transmit a wide (Tetrakt) track's trigger (S096 P3 T1): ends the track's
+ * sounding notes, then one note-on per layer in `mask`, the inverse note for
+ * that (track, internal, sub). Stores the base note and mask for the
+ * note-offs. Context: foreground (the trigger fire). A non-wide track is
+ * passed to midiOut_trackTrigger(). Full contract in MidiOut.c.
+ */
+void midiOut_trackLayers(uint8_t track, uint8_t scene_index, uint8_t internal,
+                         uint8_t velocity, uint8_t mask);
+/*
  * A panel edit changed target `id` (plan 3.9 C).
  * What: marks it pending; midiOut_service() sends its current value as the
  * learned CC (first row for the current type) or as NRPN, at most every

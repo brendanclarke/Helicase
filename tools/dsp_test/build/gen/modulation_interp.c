@@ -14,9 +14,8 @@ void modNode_setItpReserved(uint8_t slots)
 	modNode_itpReserved = slots;
 }
 
-void modNode_resetTargets()
+static void modNode_blockBegin(void)
 {
-	uint8_t i;
 	/*
 	 * Slot reservations for the new block (S087 P1; S087 stage E).
 	 *
@@ -82,9 +81,52 @@ void modNode_resetTargets()
 		modNode_interpReserved = (lock && reserve > cap) ? cap : reserve;
 		modNode_waveInterpActiveCount = lock;
 	}
+}
+
+static void modNode_restoreAll(void)
+{
+	uint8_t i;
+
 	for(i=0;i<6;i++)
 		modNode_restoreTarget(&velocityModulators[i]);
 	instrumentManager_visitRuntimeLfoNodes(modNode_restoreLfoPair, 0);
+}
+
+void modNode_resetTargets()
+{
+	/*
+	 * S101 P2 A1: unchanged for its foreground callers
+	 * (modNode_setDestination()): the block accounting and every restore.
+	 * The restores leave every modulated target at its base, so the next
+	 * block must run the full control whatever its phase.
+	 */
+	modNode_blockBegin();
+	modNode_restoreAll();
+	modNode_ctlState |= MODNODE_CTL_FORCE;
+}
+
+void modNode_controlBlock(void)
+{
+	const uint8_t st = modNode_ctlState;
+	uint8_t i;
+
+	modNode_blockBegin();
+	if (st & (MODNODE_CTL_OWED | MODNODE_CTL_FORCE)) {
+		modNode_restoreAll();
+		modNode_reassignVeloMod();
+		instrumentManager_dispatchRuntimeLfos((st & MODNODE_CTL_OWED) ? 2u : 1u);
+		modNode_ctlState = 0u;
+		return;
+	}
+	for (i = 0u; i < 6u; i++) {
+		if (st & (1u << i)) {
+			modNode_restoreTarget(&velocityModulators[i]);
+			modNode_updateValue(&velocityModulators[i],
+								velocityModulators[i].lastVal);
+		}
+	}
+	instrumentManager_reapplyDirtyLfos();
+	modNode_ctlState = MODNODE_CTL_OWED;
 }
 
 uint8_t modNode_interpClaim(void* oscp)

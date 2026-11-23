@@ -103,9 +103,9 @@ const effect_param_descriptor_t crumpBit_descriptors[] = {
     EFFECT_COMMON_ROWS(INSTRUMENT_PARAM_FLAG_AUTOMATABLE,
                        EFFECT_FLAGS_IMAGE,
                        EFFECT_FLAGS_IMAGE),
-    EFFECT_ROW("crump_bit_off", "Bits", "BitOff", "bof", DTYPE_0B255,
+    EFFECT_ROW("crump_bit_off", CAT_BITS, LONG_BITOFF, SHORT_BOF, DTYPE_0B255,
                0u, EFFECT_MOD_NONE, 0u, 255u),
-    EFFECT_ROW("crump_bit_invert", "Bits", "BitInv", "biv", DTYPE_0B255,
+    EFFECT_ROW("crump_bit_invert", CAT_BITS, LONG_BITINV, SHORT_BIV, DTYPE_0B255,
                0u, EFFECT_MOD_NONE, 0u, 255u),
     /*
      * S091 P6: the sub-type rows' descriptor names are CrumpBit's neutral
@@ -113,9 +113,9 @@ const effect_param_descriptor_t crumpBit_descriptors[] = {
      * crumpBit_ui.labels (crumpBit_labels). `mix` is the shared MIX stage,
      * no longer filed under "Delay".
      */
-    EFFECT_ROW("crump_mix", "CrumpBit", "Mix", "mix", DTYPE_0B127,
+    EFFECT_ROW("crump_mix", CAT_CRUMPBIT, LONG_MIX, SHORT_MIX, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
-    EFFECT_ROW("crump_feedback", "CrumpBit", "Feedback", "fbk", DTYPE_0B127,
+    EFFECT_ROW("crump_feedback", CAT_CRUMPBIT, LONG_FEEDBACK, SHORT_FBK, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
     /*
      * S091 P2: EFFECT_ROW_FLAGS adds EFFECT_PARAM_FLAG_BUFFER_DEPENDENT, so
@@ -123,36 +123,36 @@ const effect_param_descriptor_t crumpBit_descriptors[] = {
      * (S091 P6: in `dly` the last row of its delay-time curve that fits at
      * the current tempo).
      */
-    EFFECT_ROW_FLAGS("crump_rate", "CrumpBit", "Rate", "rte", DTYPE_0B127,
+    EFFECT_ROW_FLAGS("crump_rate", CAT_CRUMPBIT, LONG_RATE, SHORT_RTE, DTYPE_0B127,
                      EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u,
                      EFFECT_PARAM_FLAG_BUFFER_DEPENDENT),
     /* S091 P3: five sub-engines; Pattern-automatable only (S7, OQ2). */
-    EFFECT_ROW("crump_subtype", "CrumpBit", "SubType", "sub", DTYPE_0B127,
+    EFFECT_ROW("crump_subtype", CAT_CRUMPBIT, LONG_SUBTYPE, SHORT_SUB, DTYPE_0B127,
                INSTRUMENT_PARAM_FLAG_AUTOMATABLE, EFFECT_MOD_NONE,
                CRUMPBIT_SUBTYPE_DELAY, CRUMPBIT_SUBTYPE_COUNT - 1u),
     /* S091 P6: "Switch" (polarity in `cmb`, freeze in `grn`/`rvb`). */
-    EFFECT_ROW("crump_sync", "CrumpBit", "Switch", "snc", DTYPE_ON_OFF,
+    EFFECT_ROW("crump_sync", CAT_CRUMPBIT, LONG_SWITCH, SHORT_SYNC, DTYPE_ON_OFF,
                INSTRUMENT_PARAM_FLAG_AUTOMATABLE, EFFECT_MOD_NONE, 0u, 1u),
     /*
      * S091 P5 A: the `grn` Position clamp is the engine's; no flag. S091 P6:
      * `spn` "SubPan" (the file key keeps its S074 name).
      */
-    EFFECT_ROW("crump_dly_pan", "CrumpBit", "SubPan", "spn", DTYPE_PM63,
+    EFFECT_ROW("crump_dly_pan", CAT_CRUMPBIT, LONG_SUBPAN, SHORT_SPN, DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
     /* S091 P2, delay sub-type: tone tilt on the feedback return. */
-    EFFECT_ROW("crump_tone", "CrumpBit", "Tone", "ton", DTYPE_PM63,
+    EFFECT_ROW("crump_tone", CAT_CRUMPBIT, LONG_TONE, SHORT_TON, DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, CRUMPBIT_TONE_FLAT, 127u),
     /* S091 P2, output stage: voice-aligned filter rows (U1, U2). */
-    EFFECT_ROW_MENU("crump_filter_type", "Filter", "Type", "typ", MENU_FILTER,
+    EFFECT_ROW_MENU("crump_filter_type", CAT_FILTER, LONG_TYPE, SHORT_FIL_TYPE, MENU_FILTER,
                     INSTRUMENT_PARAM_FLAG_MORPHABLE |
                     INSTRUMENT_PARAM_FLAG_AUTOMATABLE,
                     EFFECT_MOD_NONE, CRUMPBIT_FILTER_OFF, CRUMPBIT_FILTER_OFF),
-    EFFECT_ROW("crump_filter_freq", "Filter", "Frequncy", "frq", DTYPE_0B127,
+    EFFECT_ROW("crump_filter_freq", CAT_FILTER, LONG_FREQ, SHORT_FREQ, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
-    EFFECT_ROW("crump_filter_reso", "Filter", "Resnance", "res", DTYPE_0B127,
+    EFFECT_ROW("crump_filter_reso", CAT_FILTER, LONG_RESONANCE, SHORT_FIL_RESO, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     /* S091 P3: the per-sub-type pitch row (pit interval, grn root). */
-    EFFECT_ROW("crump_aux", "CrumpBit", "Aux", "aux", DTYPE_PM63,
+    EFFECT_ROW("crump_aux", CAT_CRUMPBIT, LONG_AUX, SHORT_AUX, DTYPE_PM63,
                EFFECT_FLAGS_IMAGE,
                EFFECT_MOD_RANGE(CRUMPBIT_PITCH_ROW_MIN,
                                 CRUMPBIT_PITCH_ROW_MAX),
@@ -162,26 +162,26 @@ const effect_param_descriptor_t crumpBit_descriptors[] = {
      * as `aux`), spread, bipolar Density, bipolar Length (row 20, was the
      * level jitter), width.
      */
-    EFFECT_ROW("crump_grain_st2", "Grain", "Pitch2", "p2", DTYPE_PM63,
+    EFFECT_ROW("crump_grain_st2", CAT_GRAIN, LONG_PITCH2, SHORT_P2, DTYPE_PM63,
                EFFECT_FLAGS_IMAGE,
                EFFECT_MOD_RANGE(CRUMPBIT_PITCH_ROW_MIN,
                                 CRUMPBIT_PITCH_ROW_MAX),
                63u, CRUMPBIT_PITCH_ROW_MAX),
-    EFFECT_ROW("crump_grain_st3", "Grain", "Pitch3", "p3", DTYPE_PM63,
+    EFFECT_ROW("crump_grain_st3", CAT_GRAIN, LONG_PITCH3, SHORT_P3, DTYPE_PM63,
                EFFECT_FLAGS_IMAGE,
                EFFECT_MOD_RANGE(CRUMPBIT_PITCH_ROW_MIN,
                                 CRUMPBIT_PITCH_ROW_MAX),
                63u, CRUMPBIT_PITCH_ROW_MAX),
-    EFFECT_ROW("crump_grain_spread", "Grain", "Spread", "spr", DTYPE_0B127,
+    EFFECT_ROW("crump_grain_spread", CAT_GRAIN, LONG_SPREAD, SHORT_SPR, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
-    EFFECT_ROW("crump_grain_density", "Grain", "Density", "den", DTYPE_PM63,
+    EFFECT_ROW("crump_grain_density", CAT_GRAIN, LONG_DENSITY, SHORT_DEN, DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
-    EFFECT_ROW("crump_grain_length", "Grain", "Length", "lng", DTYPE_PM63,
+    EFFECT_ROW("crump_grain_length", CAT_GRAIN, LONG_LENGTH, SHORT_LNG, DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 127u, 127u),
-    EFFECT_ROW("crump_grain_width", "Grain", "Width", "wid", DTYPE_0B127,
+    EFFECT_ROW("crump_grain_width", CAT_GRAIN, LONG_WIDTH, SHORT_WID, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     /* S091 P4, output stage: stereo balance of the filter cutoff. */
-    EFFECT_ROW("crump_filter_bal", "Filter", "Balance", "bal", DTYPE_PM63,
+    EFFECT_ROW("crump_filter_bal", CAT_FILTER, LONG_BALANCE, SHORT_BAL, DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
     /*
      * S091 P5 follow-up (user), `pit` only: the fine pitch, a copy of the
@@ -190,7 +190,7 @@ const effect_param_descriptor_t crumpBit_descriptors[] = {
      * midiPitch_detune(). Default 63; an older file without the key loads
      * it.
      */
-    EFFECT_ROW("crump_pit_fine", "CrumpBit", "FinePtch", "fin", DTYPE_PM63,
+    EFFECT_ROW("crump_pit_fine", CAT_CRUMPBIT, LONG_FINEPTCH, SHORT_FINE, DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
     /*
      * S095 P4 (F1, user), `rvb` only: the line damping, low-pass only,
@@ -202,7 +202,7 @@ const effect_param_descriptor_t crumpBit_descriptors[] = {
      * before the row existed loads whatever byte its slot held (no
      * migration).
      */
-    EFFECT_ROW("crump_rvb_damp", "Reverb", "Damping", "dmp", DTYPE_0B127,
+    EFFECT_ROW("crump_rvb_damp", CAT_REVERB, LONG_DAMPING, SHORT_DMP, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, CRUMPBIT_RVB_DAMP_FLAT,
                127u),
 };

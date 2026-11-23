@@ -4,8 +4,9 @@
  *
  * CONCURRENCY:
  *   buttonHandler_buttonPressed / buttonReleased are called from the
- *   foreground scan (din_dout_exchange via timebase_serviceFrontPanel at
- *   500 Hz), not from an ISR. They write to the event ring and btn_held[].
+ *   foreground scan (din_dout_exchange via timebase_serviceFrontPanelInput
+ *   at 500 Hz, after each audio render commit and once per main-loop pass,
+ *   S101), not from an ISR. They write to the event ring and btn_held[].
  *
  *   buttonHandler_processEvents() is called from the main loop (two call
  *   sites, separated by audio_check_and_render). It drains the ring and
@@ -38,6 +39,7 @@
 #include "MidiOut.h"
 #include "MidiLearn.h"
 #include "MidiNotes.h"
+#include "MidiNoteModes.h"   /* S096 P3: the overlay's layer mask */
 #include <string.h>
 #include <stdint.h>
 #include "AutosaveTrace.h"
@@ -70,6 +72,9 @@ static volatile uint8_t btn_held[BUT_COUNT];
 ** Inputs: evt_push() is called by the foreground din_dout_exchange() scan at
 ** 500 Hz. Outputs: buttonHandler_processEvents() drains one event per call
 ** from the main loop. Two call sites give roughly 30 events per scan.
+** S101: the scan also runs after each audio render commit, so at a high
+** render load several scans can fall in one main-loop pass (about ten in a
+** 20 ms pass); the ring holds their events until the pass drains them.
 **
 ** RAM: 64 bytes ring plus one unconditional overflow flag and one
 ** DEV_MODE_LOGGING-only drop counter (66 bytes at the approved maximum).
@@ -380,8 +385,10 @@ static uint8_t bh_overlayActive = 0u;
  * table only owns the gesture. Why: S080-S083 timed repeats here with a
  * 1 ms timer from PAR_BPM, off the master clock (S084 P0 F4). MIDI notes on
  * several tracks (and several held VOICE buttons) roll at once (S083 Q5).
- * RAM: 7 x 4 B = 28 B SRAM1 static (S084: -28 B; pos, interval and next
- * removed, rate added). Writers: overlay start, drain, end and
+ * S096 P3: layers is the Tetrakt layer mask of the note (0 = the lon row),
+ * repeated on every hit of the gesture (decided Q16).
+ * RAM: 7 x 5 B = 35 B SRAM1 static (S084: -28 B; pos, interval and next
+ * removed, rate added; S096 P3: +7 B layers). Writers: overlay start, drain, end and
  * re-configure below (all foreground). Affiliates: buttonHandler_tick(),
  * MidiNotes, seq_liveRollStart(), seq_liveTakeHits().
  */
@@ -390,6 +397,7 @@ typedef struct {
 	uint8_t note;
 	uint8_t count;
 	uint8_t rate;
+	uint8_t layers;         /* S096 P3: the Tetrakt layer mask of the note */
 } bh_overlay_track_t;
 
 #define BH_OVERLAY_NOTE_DEFAULT  0x80u
@@ -415,6 +423,55 @@ static uint8_t bh_overlayVoiceMask = 0u;
  * buttonHandler_overlayTrigger(), buttonHandler_overlaySwitchHeld().
  */
 static uint8_t bh_overlayHeldType = 0xFFu;
+
+/*
+ * Chromatic keyboard overlay (S102 P1).
+ *
+ * What: SHIFT+BAR `<` or `>` in any mode turns the SEQ row into a 16-key
+ * chromatic keyboard for the selected track; SHIFT+either BAR leaves it.
+ *  which:    0 off; 1 entered with BAR `<`, 2 with BAR `>`. Each key fires
+ *            the trigger type of that BAR's PERF overlay setting (`pb<` /
+ *            `pb>`, PAR_PERF_BTN_LT/RT) through the overlay engine
+ *            (buttonHandler_overlayStart()), and a roll uses that BAR's `pv`;
+ *            the key sets the pitch (`pn<` / `pn>` are not used).
+ *  octave:   -3..+3 octaves from middle C (internal note 60) on SEQ1. Set
+ *            by BAR `<` / `>` inside the overlay; 0 at boot, kept across
+ *            exits (never saved).
+ *  track:    the track whose overlay entry the keyboard started and still
+ *            owns, 0xFF none; cleared when any other gesture starts or ends
+ *            that entry (overlayStart(), overlayEndTrack()).
+ *  key:      the sounding key 0..15, 0xFF none (one sounding key: a new
+ *            key replaces the note, as a new gesture does on a track).
+ *  keyMask:  SEQ keys pressed inside the overlay; their releases belong to
+ *            the overlay even after it is left, and buttonHandler_
+ *            seqHeldMask() hides them from Menu's held-step logic.
+ *  barMask:  BAR presses taken by the overlay (bit 0 `<`, bit 1 `>`);
+ *            their releases are consumed.
+ *  pulseKey/pulseEnd: the key showing a note just played by the selected
+ *            track (one brief inversion), 0xFF none; time_sysTick deadline.
+ * Why: the user's S102 brief. The PERF BAR overlay (bh_overlayActive) is
+ * untouched: it keeps working for VOICE buttons and MIDI notes, and the BAR
+ * buttons cannot change it while the keyboard is up.
+ * RAM: 10 B SRAM1 (S102 P1). Writers: buttonHandler_chroma*() below,
+ * overlayStart()/overlayEndTrack() (ownership).
+ */
+typedef struct {
+    uint8_t  which;
+    int8_t   octave;
+    uint8_t  track;
+    uint8_t  key;
+    uint16_t keyMask;
+    uint8_t  barMask;
+    uint8_t  pulseKey;
+    uint16_t pulseEnd;
+} bh_chroma_t;
+
+static bh_chroma_t bh_chroma = { 0u, 0, 0xFFu, 0xFFu, 0u, 0u, 0xFFu, 0u };
+
+#define BH_CHROMA_MIDDLE_C    60u      /* internal note shown as C5 (step `nte`) */
+#define BH_CHROMA_OCTAVE_MAX  3
+#define BH_CHROMA_BLACK_KEYS  0xA54Au  /* C#, D#, F#, G#, A#, C#, D# from SEQ1 = C */
+#define BH_CHROMA_PULSE_MS    50u      /* = the VOICE LED trigger pulse */
 
 #define DBLCLICK_FIRST  0u
 #define DBLCLICK_DOUBLE 1u
@@ -464,7 +521,8 @@ uint16_t buttonHandler_seqHeldMask(void)
         if (btn_held[seq_buttons[i]])
             mask |= (uint16_t)(1u << i);
     }
-    return mask;
+    /* S102 P1: keys played on the chromatic keyboard are not held steps. */
+    return (uint16_t)(mask & (uint16_t)~bh_chroma.keyMask);
 }
 
 static void buttonHandler_setMorphVoiceMode(uint8_t onOff)
@@ -910,7 +968,8 @@ static void buttonHandler_overlayReport(uint8_t voiceNr, uint8_t note,
                                         uint8_t noteIsDefault,
                                         uint8_t velocity, uint8_t kind,
                                         uint8_t roll, uint8_t rhythm,
-                                        uint8_t source, uint16_t ageUs)
+                                        uint8_t source, uint16_t ageUs,
+                                        uint8_t layers)
 {
     liveRec_trigger_t t;
 
@@ -926,6 +985,8 @@ static void buttonHandler_overlayReport(uint8_t voiceNr, uint8_t note,
     t.source = source;
     t.note_is_default = noteIsDefault;
     t.age_us = ageUs;
+    t.layers = layers;
+    t.autoCount = 0u;
     liveRec_triggerIn(&t);
 }
 
@@ -971,17 +1032,19 @@ static void buttonHandler_overlayDrain(uint8_t track)
     if (flamMain) {
         buttonHandler_overlayReport(track, pitch, isDef, BH_OVERLAY_VEL,
                                     LIVEREC_HIT_FLAM_MAIN, 0u, 0u, source,
-                                    (uint16_t)age);
+                                    (uint16_t)age, e->layers);
         e->count = 0u;
         e->heldMidiNote = BH_OVERLAY_NO_MIDI_NOTE;
         return;
     }
+    /* S102 P1: a chromatic keyboard roll reports its own BAR's rhythm. */
     if (e->count == 0xFFu)
         buttonHandler_overlayReport(track, pitch, isDef, BH_OVERLAY_VEL,
                                     LIVEREC_HIT_ROLL_HIT, e->rate,
                                     buttonHandler_overlayRhythm(
-                                        bh_overlayActive),
-                                    source, (uint16_t)age);
+                                        (track == bh_chroma.track)
+                                        ? bh_chroma.which : bh_overlayActive),
+                                    source, (uint16_t)age, e->layers);
 }
 
 /*
@@ -1033,7 +1096,8 @@ static void buttonHandler_overlayDrainAll(void)
  */
 static void buttonHandler_overlayStart(uint8_t track, uint8_t which,
                                        uint8_t note, uint8_t heldMidiNote,
-                                       uint8_t source, uint16_t ageUs)
+                                       uint8_t source, uint16_t ageUs,
+                                       uint8_t layers)
 {
     bh_overlay_track_t *e;
     uint8_t type = (which == 1u) ? parameter_values[PAR_PERF_BTN_LT]
@@ -1055,33 +1119,49 @@ static void buttonHandler_overlayStart(uint8_t track, uint8_t which,
         if (wasRoll)
             liveRec_rollRelease(track);
     }
+    /* S102 P1: a new gesture takes the entry from the chromatic keyboard
+     * after the old one's last drain (the keyboard re-claims it after this
+     * call when it is the caller). */
+    if (track == bh_chroma.track)
+        bh_chroma.track = 0xFFu;
     e->note = note;
+    e->layers = layers;
     if (type < BH_OVERLAY_TYPE_FLAM_FIRST) {
         static const uint8_t singleVel[4] = {127u, 100u, 64u, 32u};
 
-        seq_triggerVoice(track, singleVel[type], pitch, 1);
+        if (layers)
+            seq_triggerVoiceLayers(track, singleVel[type], pitch, layers);
+        else
+            seq_triggerVoice(track, singleVel[type], pitch, 1);
         buttonHandler_overlayReport(track, pitch, isDef, singleVel[type],
-                                    LIVEREC_HIT_SINGLE, 0u, 0u, source, ageUs);
+                                    LIVEREC_HIT_SINGLE, 0u, 0u, source, ageUs,
+                                    layers);
         e->heldMidiNote = BH_OVERLAY_NO_MIDI_NOTE;
         return;
     }
     if (type < BH_OVERLAY_TYPE_ROLL_FIRST) {
-        seq_triggerVoice(track, 64u, pitch, 1);
+        if (layers)
+            seq_triggerVoiceLayers(track, 64u, pitch, layers);
+        else
+            seq_triggerVoice(track, 64u, pitch, 1);
         buttonHandler_overlayReport(track, pitch, isDef, 64u,
                                     LIVEREC_HIT_FLAM_GRACE, 0u, 0u,
-                                    source, ageUs);
-        seq_liveFlamArm(track, pitch, BH_OVERLAY_VEL, BH_FLAM_TICKS);
+                                    source, ageUs, layers);
+        seq_liveFlamArm(track, pitch, BH_OVERLAY_VEL, BH_FLAM_TICKS, layers);
         e->count = 1u;
     } else {
         uint8_t idx = (uint8_t)(type - (BH_OVERLAY_TYPE_ROLL_FIRST - 1u));
         uint8_t rhythm = buttonHandler_overlayRhythm(which);
 
-        seq_triggerVoice(track, BH_OVERLAY_VEL, pitch, 1);
+        if (layers)
+            seq_triggerVoiceLayers(track, BH_OVERLAY_VEL, pitch, layers);
+        else
+            seq_triggerVoice(track, BH_OVERLAY_VEL, pitch, 1);
         buttonHandler_overlayReport(track, pitch, isDef, BH_OVERLAY_VEL,
                                     LIVEREC_HIT_ROLL_START, idx, rhythm,
-                                    source, ageUs);
+                                    source, ageUs, layers);
         seq_liveSetRhythm(rhythm);
-        seq_liveRollStart(track, idx, pitch, BH_OVERLAY_VEL, 1u);
+        seq_liveRollStart(track, idx, pitch, BH_OVERLAY_VEL, 1u, layers);
         e->rate = idx;
         e->count = 0xFFu;
     }
@@ -1112,7 +1192,7 @@ static void buttonHandler_overlayTrigger(uint8_t voiceNr)
     bh_overlayHeldType = (type > BH_OVERLAY_TYPE_MAX) ? 0u : type;
     buttonHandler_overlayStart(voiceNr, bh_overlayActive, note,
                                BH_OVERLAY_NO_MIDI_NOTE,
-                               LIVEREC_SRC_OVERLAY, 0u);
+                               LIVEREC_SRC_OVERLAY, 0u, 0u);
 }
 
 /*
@@ -1133,6 +1213,8 @@ static void buttonHandler_overlayEndTrack(uint8_t track)
 {
     seq_liveStop(track);
     buttonHandler_overlayDrain(track);
+    if (track == bh_chroma.track)        /* S102 P1: the keyboard's note ends */
+        bh_chroma.track = 0xFFu;
     bh_overlay[track].count = 0u;
     bh_overlay[track].heldMidiNote = BH_OVERLAY_NO_MIDI_NOTE;
     voiceControl_noteOff(track);
@@ -1247,7 +1329,7 @@ static void buttonHandler_overlayReconfigure(uint8_t which)
         } else {
             /* single/flam -> roll: the hit already played was hit 0. */
             seq_liveRollStart(track, idx, (uint8_t)(e->note & 0x7Fu),
-                              BH_OVERLAY_VEL, 1u);
+                              BH_OVERLAY_VEL, 1u, e->layers);
             e->count = 0xFFu;
         }
         e->rate = idx;
@@ -1318,8 +1400,13 @@ static void buttonHandler_liveEraseEnd(void)
 static void buttonHandler_overlayTick(void)
 {
     uint8_t track;
+    /* S102 P1: while the chromatic keyboard holds a roll, the live engine's
+     * one rhythm is the keyboard BAR's `pv`; otherwise the PERF overlay's. */
+    uint8_t which = (bh_chroma.track < NUM_TRACKS &&
+                     bh_overlay[bh_chroma.track].count == 0xFFu)
+                    ? bh_chroma.which : bh_overlayActive;
 
-    seq_liveSetRhythm(buttonHandler_overlayRhythm(bh_overlayActive));
+    seq_liveSetRhythm(buttonHandler_overlayRhythm(which));
     for (track = 0u; track < NUM_TRACKS; track++)
         buttonHandler_overlayDrain(track);
 }
@@ -1356,14 +1443,17 @@ void buttonHandler_setOverlay(uint8_t which)
 
 void buttonHandler_overlayMidiNoteOn(uint8_t track, uint8_t which,
                                      uint8_t internal, uint8_t midiNote,
-                                     uint16_t ageUs)
+                                     uint16_t ageUs, uint8_t sub)
 {
     if (track >= NUM_TRACKS || which == 0u || which > 2u)
         return;
+    /* S096 P3 T1: a MIDI overlay gesture on a Tetrakt track plays the
+     * note's layer (sub), for every hit (decided Q16). */
     buttonHandler_overlayStart(track, which,
                                (uint8_t)(internal & 0x7Fu),
                                (uint8_t)((midiNote & 0x7Fu) + 1u),
-                               LIVEREC_SRC_MIDI, ageUs);
+                               LIVEREC_SRC_MIDI, ageUs,
+                               midiNoteMode_layerMask(track, sub));
 }
 
 void buttonHandler_overlayMidiNoteOff(uint8_t track, uint8_t midiNote)
@@ -1392,10 +1482,203 @@ void buttonHandler_overlayMidiNoteOff(uint8_t track, uint8_t midiNote)
         bh_overlay[t].heldMidiNote = BH_OVERLAY_NO_MIDI_NOTE;
 }
 
+/*
+ * Chromatic keyboard overlay (S102 P1). State: bh_chroma (above).
+ *
+ * Layout: SEQ1 = C, chromatic upwards to SEQ16 = D# an octave and a third
+ * higher; the black keys are always lit. SEQ1 plays internal note
+ * 60 + 12 x octave (middle C, which the step `nte` cell shows as C5; the
+ * voice's own pitch is internal 63). BAR LEDs: both lit at the middle
+ * octave, only `>` above it, only `<` below it.
+ * Keys: a press plays the selected track (menu_getActiveVoice() at the
+ * press) through the overlay engine with the entry BAR's trigger type
+ * (single at its velocity, flam, or roll at its rate and `pv` rhythm),
+ * reported to LiveRecord as a MIDI hit, so it records whenever live record
+ * is on. A muted track stays silent, as for a received MIDI note. The
+ * release of the sounding key ends the gesture as a panel VOICE release
+ * does (buttonHandler_overlayEndTrack()). Keys and BARs pressed inside the
+ * overlay keep their releases even after it is left. No other button,
+ * knob or screen function changes.
+ */
+
+/* The internal note of SEQ1 at the current octave (24..96). */
+static uint8_t buttonHandler_chromaBaseNote(void)
+{
+    return (uint8_t)((int16_t)BH_CHROMA_MIDDLE_C + 12 * (int16_t)bh_chroma.octave);
+}
+
+/* Paint the keyboard over the SEQ and BAR LEDs (led_ownedShow()). */
+static void buttonHandler_chromaPaint(void)
+{
+    uint16_t keys = BH_CHROMA_BLACK_KEYS;
+
+    if (bh_chroma.pulseKey < 16u)
+        keys ^= (uint16_t)(1u << bh_chroma.pulseKey);
+    led_ownedShow(keys, (uint8_t)(bh_chroma.octave <= 0),
+                  (uint8_t)(bh_chroma.octave >= 0));
+}
+
+/* End the keyboard's sounding note, if it still owns its track's entry. */
+static void buttonHandler_chromaEndNote(void)
+{
+    if (bh_chroma.track < NUM_TRACKS)
+        buttonHandler_overlayEndTrack(bh_chroma.track);
+    bh_chroma.track = 0xFFu;
+    bh_chroma.key = 0xFFu;
+}
+
+/*
+ * One keyboard key down: one sounding note at a time. A note still owned on
+ * another track (the selection changed while it was held) ends first; on the
+ * same track the new gesture replaces it (buttonHandler_overlayStart()).
+ */
+static void buttonHandler_chromaKeyOn(uint8_t key)
+{
+    uint8_t track = menu_getActiveVoice();
+    uint8_t note = (uint8_t)(buttonHandler_chromaBaseNote() + key);
+
+    bh_chroma.keyMask |= (uint16_t)(1u << key);
+    if (bh_chroma.track < NUM_TRACKS && bh_chroma.track != track)
+        buttonHandler_chromaEndNote();
+    if (track >= NUM_TRACKS || seq_isTrackMuted(track))
+        return;
+    buttonHandler_overlayStart(track, bh_chroma.which, note,
+                               BH_OVERLAY_NO_MIDI_NOTE, LIVEREC_SRC_MIDI,
+                               0u, 0u);
+    bh_chroma.track = track;
+    bh_chroma.key = key;
+}
+
+static void buttonHandler_chromaExit(void)
+{
+    buttonHandler_chromaEndNote();
+    bh_chroma.which = 0u;
+    bh_chroma.pulseKey = 0xFFu;
+    led_ownedRelease();       /* the mode's own SEQ/BAR display, as it is now */
+}
+
+/*
+ * Press router (processPress(), before every other routing).
+ *
+ * What: SHIFT+BAR enters (remembering the BAR) or leaves the overlay in any
+ * mode. Inside it, BAR `<` / `>` step the octave (-3..+3) and SEQ keys play.
+ * A taken BAR press still counts as a PERF VOICE-hold action and ends a SEQ
+ * double-click window, as any non-SEQ press does. Output: 1 when the press
+ * is taken.
+ */
+static uint8_t buttonHandler_chromaPress(uint8_t buttonNr)
+{
+    uint8_t bar = (buttonNr == BUT_BAR1) ? 1u
+                  : ((buttonNr == BUT_BAR2) ? 2u : 0u);
+    int8_t seq;
+
+    if (bar != 0u && (buttonHandler_getShift() || bh_chroma.which != 0u)) {
+        bh_chroma.barMask |= bar;
+        if (perf_heldVoiceMask != 0u)
+            perf_voiceActionOccurred = 1u;
+        dblclick_cancel();
+        if (buttonHandler_getShift()) {
+            if (bh_chroma.which == 0u) {
+                bh_chroma.which = bar;
+                bh_chroma.pulseKey = 0xFFu;
+                buttonHandler_chromaPaint();
+            } else {
+                buttonHandler_chromaExit();
+            }
+            return 1u;
+        }
+        if (bar == 1u && bh_chroma.octave > -BH_CHROMA_OCTAVE_MAX)
+            bh_chroma.octave--;
+        else if (bar == 2u && bh_chroma.octave < BH_CHROMA_OCTAVE_MAX)
+            bh_chroma.octave++;
+        bh_chroma.pulseKey = 0xFFu;
+        buttonHandler_chromaPaint();
+        return 1u;
+    }
+    if (bh_chroma.which == 0u)
+        return 0u;
+    seq = btn_to_seq(buttonNr);
+    if (seq < 0)
+        return 0u;
+    buttonHandler_chromaKeyOn((uint8_t)seq);
+    return 1u;
+}
+
+/* Release router (processRelease(), first): releases of taken presses. */
+static uint8_t buttonHandler_chromaRelease(uint8_t buttonNr)
+{
+    uint8_t bar = (buttonNr == BUT_BAR1) ? 1u
+                  : ((buttonNr == BUT_BAR2) ? 2u : 0u);
+    int8_t seq;
+
+    if (bar != 0u) {
+        if ((bh_chroma.barMask & bar) == 0u)
+            return 0u;
+        bh_chroma.barMask = (uint8_t)(bh_chroma.barMask & ~bar);
+        return 1u;
+    }
+    seq = btn_to_seq(buttonNr);
+    if (seq < 0 || (bh_chroma.keyMask & (uint16_t)(1u << seq)) == 0u)
+        return 0u;
+    bh_chroma.keyMask = (uint16_t)(bh_chroma.keyMask & ~(uint16_t)(1u << seq));
+    if ((uint8_t)seq == bh_chroma.key)
+        buttonHandler_chromaEndNote();
+    return 1u;
+}
+
+/*
+ * Event-ring overflow: a lost key release must not hold a roll. The note
+ * ends and the taken-press masks clear; the overlay itself stays up (it is
+ * a latch, left only by SHIFT+BAR).
+ */
+static void buttonHandler_chromaForceRelease(void)
+{
+    buttonHandler_chromaEndNote();
+    bh_chroma.keyMask = 0u;
+    bh_chroma.barMask = 0u;
+}
+
+/*
+ * Played-note pulse, every buttonHandler_tick().
+ *
+ * What: takes the latest note triggered on the selected track
+ * (voiceControl_noteWatch(), which also re-arms the watch for the track
+ * selected now) and blinks its key once for BH_CHROMA_PULSE_MS: a black key
+ * goes dark, a white key lights, then it returns to its key colour. Notes
+ * outside the 16 keys show nothing. Sequencer steps, MIDI, rolls, previews
+ * and the keyboard itself all count. Off the overlay the watch is 0xFF.
+ */
+static void buttonHandler_chromaPulseService(void)
+{
+    uint8_t hit = voiceControl_noteWatch(
+        (bh_chroma.which != 0u) ? menu_getActiveVoice() : 0xFFu);
+    uint8_t dirty = 0u;
+    int16_t key;
+
+    if (bh_chroma.pulseKey != 0xFFu &&
+        (int16_t)(time_sysTick - bh_chroma.pulseEnd) >= 0) {
+        bh_chroma.pulseKey = 0xFFu;
+        dirty = 1u;
+    }
+    if (hit != 0u && bh_chroma.which != 0u) {
+        key = (int16_t)((int16_t)(hit - 1u) -
+                        (int16_t)buttonHandler_chromaBaseNote());
+        if (key >= 0 && key <= 15) {
+            bh_chroma.pulseKey = (uint8_t)key;
+            bh_chroma.pulseEnd = (uint16_t)(time_sysTick + BH_CHROMA_PULSE_MS);
+            dirty = 1u;
+        }
+    }
+    if (dirty && bh_chroma.which != 0u)
+        buttonHandler_chromaPaint();
+}
+
 void buttonHandler_tick(void)
 {
     /* S080 E12 / S084 P2: publish the overlay rhythm and report live hits. */
     buttonHandler_overlayTick();
+    /* S102 P1: the chromatic keyboard's played-note pulse. */
+    buttonHandler_chromaPulseService();
     /* S080 F9: run a deferred/queued scene change when its boundary has fired. */
     menu_serviceDeferredSceneChange();
     /*
@@ -1499,8 +1782,14 @@ static void buttonHandler_selectActiveStep(uint8_t ledNr, uint8_t seqButtonPress
      * Risk: this is UI selection only. Any caller that wants to actually toggle
      * a step must call pat_toggleStep() separately.
      */
-    led_setBlinkLed(selectedStepLed, 0);
-    led_setValue(0, selectedStepLed);
+    /* S099 P3: a previous selected step that is still held keeps flashing
+     * (STEP mode: every held step flashes) */
+    if (selectedStepLed < LED_STEP1 ||
+        (buttonHandler_seqHeldMask() &
+         (uint16_t)(1u << (uint8_t)(selectedStepLed - LED_STEP1))) == 0u) {
+        led_setBlinkLed(selectedStepLed, 0);
+        led_setValue(0, selectedStepLed);
+    }
 
     buttonHandler_selectedStep = buttonHandler_visibleStep(seqButtonPressed);
     selectedStepLed = ledNr;
@@ -1626,6 +1915,8 @@ static void buttonHandler_perfVoiceHeldSeqPressed(uint8_t seqButtonPressed)
  *       PAR_FOLLOW off, single click: view change only via menu_setShownPattern()
  *         + menu_refreshPerfSceneLeds(); playback and per-track overrides stay.
  *       PAR_FOLLOW off, double click: full Scene change + coalesce + realign.
+ *       (S098 P1: the realign is an explicit call in both branches; a Scene
+ *       change keeps identical tracks in place.)
  * Why: PAR_FOLLOW off lets the user navigate the viewed Scene without changing
  * playback; a deliberate double-click then commits the change. Inputs:
  * seqButtonPressed 0..15, parameter_values[PAR_FOLLOW], and the double-click
@@ -1654,8 +1945,23 @@ static void buttonHandler_perfScenePressed(uint8_t seqButtonPressed)
         /* Single click changes only the viewed Scene, not playback. */
         menu_setShownPattern(seqButtonPressed);
         menu_refreshPerfSceneLeds();
-        if (isDouble)
+        if (isDouble) {
             menu_perfModeSceneButtonPressed(seqButtonPressed);
+            /*
+             * The double-click realign is explicit (S098 P1).
+             *
+             * What: after the full Scene change, every track is put back on
+             * the master clock, as the PAR_FOLLOW-on double click does.
+             * Why: this branch relied on the Scene change realigning every
+             * track. A switch now keeps identical tracks where they are
+             * (target T1), so the documented "+ realign" of this gesture is
+             * made explicit. With a deferred (scd) change the realign runs
+             * at the press, as in the PAR_FOLLOW-on branch; when the change
+             * fires, its changed tracks are realigned again.
+             * Affiliates: seq_realignActivePatternToMasterClock().
+             */
+            seq_realignActivePatternToMasterClock();
+        }
     }
 }
 
@@ -1827,6 +2133,80 @@ static void buttonHandler_perfVoiceReleased(uint8_t voiceNr)
     buttonHandler_perfRefreshHeldSceneLeds();
 }
 
+/*
+ * VOICE-mode step edit (S099 P3, user 2026-11-19).
+ *
+ * What:       SHIFT + a step in VOICE mode opens the step edit page (SEQ_PAGE
+ *             subpage 1, the page a STEP-mode step press shows) on that step;
+ *             further steps pressed while it is open (with or without SHIFT)
+ *             join it, and every held step flashes. menu_broadcastStepSpecial()
+ *             writes an edit to every physically held step, as in STEP mode.
+ *             A released step stops flashing; when the last held step is
+ *             released the page the VOICE mode showed before returns and no
+ *             step flashes. The steps' releases never toggle them (the press
+ *             consumed the tap timer).
+ * Why:        the user: the menu is only active while steps are held in VOICE
+ *             mode, and steps flash only while held. Before this, SHIFT + step
+ *             called buttonHandler_selectActiveStep() alone, whose
+ *             menu_showStepEditPage() set subpage 1 of the VOICE page (AEG)
+ *             and left the step flashing after its release.
+ * State:      bh_voiceStepEdit (0 closed; else the menu cursor to restore
+ *             + 1, which fits: menuIndex <= 63), bh_voiceStepPrevPage (the page
+ *             to restore). RAM: 2 B. The user: releasing the edit must return
+ *             to the subpage they were on, not the AEG subpage the step edit
+ *             leaves in menuIndex.
+ * Accessors:  buttonHandler_seqButtonPressed(), buttonHandler_seqButtonReleased().
+ */
+static uint8_t bh_voiceStepEdit = 0u;
+static uint8_t bh_voiceStepPrevPage = 0u;
+
+static void buttonHandler_voiceStepEditPress(uint8_t ledNr, uint8_t seqButtonPressed)
+{
+    const uint8_t first = (uint8_t)(bh_voiceStepEdit == 0u);
+
+    if (first) {
+        bh_voiceStepEdit = (uint8_t)(menu_getMenuIndex() + 1u);
+        bh_voiceStepPrevPage = menu_activePage;
+    }
+    buttonHandler_selectedStep = buttonHandler_visibleStep(seqButtonPressed);
+    selectedStepLed = ledNr;
+    parameter_values[PAR_ACTIVE_STEP] = buttonHandler_selectedStep;
+    led_setBlinkLed(ledNr, 1);
+    if (first) {
+        menu_switchPage(SEQ_PAGE);
+        menu_showStepEditPage();
+    } else {
+        /* a joining step: the cells show its values; the subpage stays */
+        pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(),
+                            buttonHandler_selectedStep);
+        menu_repaintAll();
+    }
+    /* the release is not a tap: it never toggles the step */
+    buttonHandler_buttonTimerStepNr = TIMER_ACTION_OCCURED;
+}
+
+static void buttonHandler_voiceStepEditRelease(uint8_t ledNr, uint8_t seqButtonPressed)
+{
+    const uint16_t still = (uint16_t)(buttonHandler_seqHeldMask() &
+                                      (uint16_t)~(1u << seqButtonPressed));
+
+    led_setBlinkLed(ledNr, 0);
+    if (still == 0u) {
+        uint8_t i;
+        const uint8_t prev_index = (uint8_t)(bh_voiceStepEdit - 1u);
+
+        bh_voiceStepEdit = 0u;
+        for (i = 0u; i < 16u; i++)
+            led_setBlinkLed((uint8_t)(LED_STEP1 + i), 0);
+        menu_switchPage(bh_voiceStepPrevPage);
+        /* back to the subpage and column shown before the edit opened */
+        if (menu_activePage == bh_voiceStepPrevPage)
+            menu_restoreMenuIndex(prev_index);
+    }
+    buttonHandler_updateSubSteps();
+    buttonHandler_buttonTimerStepNr = TIMER_ACTION_OCCURED;
+}
+
 static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
 {
     uint8_t ledNr = (uint8_t)(seqButtonPressed + LED_STEP1);
@@ -1834,7 +2214,8 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
     if (buttonHandler_getShift()) {
         switch (bh_state.selectButtonMode) {
         case SELECT_MODE_VOICE:
-            buttonHandler_selectActiveStep(ledNr, seqButtonPressed);
+            /* S099 P3: SHIFT + step opens (or joins) the VOICE step edit */
+            buttonHandler_voiceStepEditPress(ledNr, seqButtonPressed);
             break;
         case SELECT_MODE_STEP:
             buttonHandler_setRemoveStep(ledNr, seqButtonPressed);
@@ -1875,6 +2256,12 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
     } else {
         switch (bh_state.selectButtonMode) {
         case SELECT_MODE_VOICE:
+            if (bh_voiceStepEdit) {
+                /* S099 P3: a step pressed while the VOICE step edit is open
+                 * joins it */
+                buttonHandler_voiceStepEditPress(ledNr, seqButtonPressed);
+                break;
+            }
             if (menu_voiceAutoOverlayActive()) {
                 /* An overlay-owned press is not a new tap/hold timer. Reuse
                  * the existing timer sentinel so its release is consumed. */
@@ -1904,7 +2291,13 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
                 (menu_getSubPage() == 1u || menu_getSubPage() == 2u)) {
                 menu_toggleStepEditSubpage();
             } else {
-                led_clearAllBlinkLeds();
+                /* S099 P3: every held step flashes; only a press with no
+                 * other step held clears the old blinks */
+                const uint16_t others = (uint16_t)(buttonHandler_seqHeldMask() &
+                                                   (uint16_t)~(1u << seqButtonPressed));
+
+                if (others == 0u)
+                    led_clearAllBlinkLeds();
                 buttonHandler_selectActiveStep(ledNr, seqButtonPressed);
             }
             break;
@@ -1955,6 +2348,21 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
 static void buttonHandler_seqButtonReleased(uint8_t seqButtonPressed)
 {
     uint8_t ledNr = (uint8_t)(seqButtonPressed + LED_STEP1);
+
+    /* S099 P3: a VOICE step edit step's release (SHIFT held or not): it
+     * stops flashing, and the last one closes the edit */
+    if (bh_voiceStepEdit && bh_state.selectButtonMode == SELECT_MODE_VOICE) {
+        buttonHandler_voiceStepEditRelease(ledNr, seqButtonPressed);
+        return;
+    }
+    /* S099 P3: in STEP mode every held step flashes; a released step that is
+     * not the selected one stops (the selected step keeps flashing, as
+     * before) */
+    if (bh_state.selectButtonMode == SELECT_MODE_STEP &&
+        ledNr != selectedStepLed && !buttonHandler_getShift()) {
+        led_setBlinkLed(ledNr, 0);
+        buttonHandler_updateSubSteps();
+    }
 
     if (buttonHandler_getShift())
         return;
@@ -2030,6 +2438,15 @@ static void buttonHandler_closeLatchedSurfaces(uint8_t restore_page,
     }
     if (menu_chainMenuIsOpen())
         menu_chainMenuClose();
+    /* S099 P3: a mode change ends a VOICE step edit (the new mode's page
+     * replaces it; the held steps' releases then take the new mode's path) */
+    if (bh_voiceStepEdit) {
+        uint8_t i;
+
+        bh_voiceStepEdit = 0u;
+        for (i = 0u; i < 16u; i++)
+            led_setBlinkLed((uint8_t)(LED_STEP1 + i), 0);
+    }
     if (liveRec_mode() == LIVEREC_MODE_ERASE) {
         liveRec_eraseReleaseHeld();
         bh_eraseSeqMask = 0u;
@@ -2069,6 +2486,17 @@ static void handleModeButtons(uint8_t mode)
      * Affiliates: menu_switchPage() backstop, preset_tickBackgroundBankLoad().
      */
     if (preset_backgroundBankLoadLocked())
+        return;
+    /*
+     * SHIFT+MODE STEP has no action (S097).
+     *
+     * What: the press returns before any mode, page, LED or latched surface
+     * changes. Why: it selected the SOM generator page (mode 0x06); the
+     * generator is archived (archive/som/), and without this return the press
+     * would leave the panel in a mode with no page. Inputs: SHIFT state and
+     * the MODE STEP press. Outputs: none.
+     */
+    if (buttonHandler_getShift() && mode == SELECT_MODE_STEP)
         return;
     {
         uint8_t next;
@@ -2192,10 +2620,6 @@ static void handleModeButtons(uint8_t mode)
         led_clearSequencerLeds();
         led_clearSelectLeds();
         menu_switchPage(EFFECT_PAGE);
-        break;
-
-    case SELECT_MODE_SOM_GEN:
-        menu_switchPage(SOM_PAGE);
         break;
 
     default:
@@ -2895,6 +3319,13 @@ static void processPress(uint8_t buttonNr)
      * active, a button that is neither a VOICE nor a SEQ button cancels the mute
      * gesture by marking the hold as action-occurred.
      */
+    /*
+     * S102 P1: the chromatic keyboard overlay takes SHIFT+BAR in every mode,
+     * and BAR and SEQ while it is up, before any other routing (Load/Save
+     * text helpers, Effect hooks, live erase, held COPY, Scene buttons).
+     */
+    if (buttonHandler_chromaPress(buttonNr))
+        return;
     (void)dblclick_onPress(buttonNr);
     /*
      * Learn cancel (S083 C5): while Learn is active, a press of SHIFT, PLAY
@@ -2933,7 +3364,7 @@ static void processPress(uint8_t buttonNr)
      * What: while live erase is enabled, implements the per-mode table:
      *  - SEQ in VOICE/STEP erases the ACTIVE track's triggers/specials while
      *    held; SEQ in FX erases the FX sequence; SEQ in PERF (Scene buttons),
-     *    Load/Save, global settings and SOM_GEN is consumed with no action;
+     *    Load/Save and global settings is consumed with no action;
      *  - VOICE in VOICE/STEP/PERF/FX erases that whole track while held, and is
      *    consumed elsewhere; except VOICE in PERF while the loop is engaged: it
      *    keeps its looper function (S081 P3 Q4) and falls through to
@@ -2964,7 +3395,7 @@ static void processPress(uint8_t buttonNr)
                 bh_eraseFxSeqMask |= bit;
                 liveRec_eraseFxSeqHeld(1u);
             }
-            /* PERF, LOAD_SAVE, MENU, SOM_GEN: consumed */
+            /* PERF, LOAD_SAVE, MENU: consumed */
             return;
         }
         if (eraseVoice >= 0 &&
@@ -3365,6 +3796,9 @@ void buttonHandler_setLearnLeds(uint8_t on)
 
 static void processRelease(uint8_t buttonNr)
 {
+    /* S102 P1: releases of presses the chromatic keyboard took. */
+    if (buttonHandler_chromaRelease(buttonNr))
+        return;
     if (buttonNr == BUT_COPY) {
         if (bh_bankCopyPressTick) {
             menu_bankCopyReleased();
@@ -3822,6 +4256,7 @@ void buttonHandler_processEvents(void)
         bh_overlayActive = 0u;
         /* S083: per-track entries stop with the overlay. */
         buttonHandler_overlayReconfigure(0u);
+        buttonHandler_chromaForceRelease();     /* S102 P1 */
         if (bh_shiftRecMenuActive)
             buttonHandler_shiftRecMenuExit();
         if (menu_chainMenuIsOpen())

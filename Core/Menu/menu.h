@@ -87,11 +87,15 @@ enum PageNames {
     EUKLID_PAGE,
     PATTERN_SETTINGS_PAGE,
     RECORDING_PAGE,
+    /*
+     * Unused since S097: the SOM generator is archived (archive/som/) and no
+     * button opens this page. The id stays so EFFECT_PAGE keeps its value.
+     */
     SOM_PAGE,
     /*
      * Effect page (SHIFT+PERF, Session 072 step 7). Cells are resolved by
-     * menuEffects.c, not by menuPages[][]; the table row exists only so the
-     * page-indexed array stays dense. Appended so earlier page ids keep values.
+     * menuEffects.c, not by the static page table (menuPages.h). Appended so
+     * earlier page ids keep values.
      */
     EFFECT_PAGE,
     NUM_PAGES
@@ -200,7 +204,13 @@ enum catNamesEnum {
     /* S080 G10: "Chain" category for the scene chain parameters. */
     CAT_CHAIN,
     /* S083 follow-up: "Automtn" category of the track ramp cell `rmp`. */
-    CAT_AUTOMATION
+    CAT_AUTOMATION,
+    /* S097 P1 item 2: descriptor labels (MenuLabels.c, same order). */
+    CAT_AMP_EG, CAT_PITCH, CAT_UNISON, CAT_FILT_EG, CAT_PITCH_ENV,
+    CAT_SAMPLE, CAT_ENVELOPE, CAT_SPACE, CAT_TONE, CAT_EFFECT, CAT_BITS,
+    CAT_CRUMPBIT, CAT_GRAIN, CAT_REVERB, CAT_DELAY, CAT_SHIMMER, CAT_ECHO,
+    CAT_PLATE,
+    CAT_LABEL_COUNT
 };
 
 enum longNamesEnum {
@@ -250,6 +260,32 @@ enum longNamesEnum {
     LONG_TRACK_AUTO_SMOOTH,
     /* S083 follow-up: "Rhythm<" / "Rhythm>" (category Prfrmnc). */
     LONG_PERF_VEL_LT, LONG_PERF_VEL_RT,
+    /* S097 P1 item 2: descriptor labels (MenuLabels.c, same order). */
+    LONG_SAMPLERT, LONG_AMOUNT_2, LONG_POLARITY, LONG_DSTVOICE2,
+    LONG_DSTPARAM2, LONG_POSITION, LONG_RUN_MODE, LONG_CHAIN, LONG_TUNING,
+    LONG_SLIDE, LONG_CUTOFF, LONG_ENV_MOD, LONG_ACCENT, LONG_TONE,
+    LONG_POSSPRD, LONG_SUSTLVL, LONG_RELEASE, LONG_SUSTAIN, LONG_SLEW,
+    LONG_INTRVL1, LONG_INTRVL2, LONG_INTRVL3, LONG_DETUNE, LONG_SPREAD,
+    LONG_MOTION, LONG_DRIVE_WORD, LONG_RESO, LONG_FILTTYPE, LONG_ROUTE,
+    LONG_CUTOFS, LONG_RESOFS, LONG_ENVOFS, LONG_DRVOFS, LONG_LEVEL,
+    LONG_WIDTH, LONG_PAN_WORD, LONG_SAMPLE, LONG_TUNE, LONG_TRIGGER,
+    LONG_SPACE, LONG_TIME, LONG_FEEDBACK, LONG_ENVELOPE, LONG_BITOFF,
+    LONG_BITINV, LONG_RATE, LONG_SUBTYPE, LONG_SWITCH, LONG_SUBPAN, LONG_AUX,
+    LONG_PITCH2, LONG_PITCH3, LONG_DENSITY, LONG_BALANCE, LONG_FINEPTCH,
+    LONG_DAMPING, LONG_XFEED, LONG_DEGRADE, LONG_WOWFLUTR, LONG_HOLD,
+    /*
+     * S100 P2: LONG_STEREO ("Stereo") is the former LONG_HEADS ("Heads"),
+     * renamed in place: the Space types' `hed` row became `str` (the
+     * stereo field: mono .. one head a side .. taps), and nothing else used
+     * the entry, so the table keeps its size and every later id.
+     */
+    LONG_REVERSE, LONG_STEREO, LONG_DUCKING, LONG_PREDELAY, LONG_SIZE,
+    LONG_DIFFUSN, LONG_LOWSHELF, LONG_LOWFREQ, LONG_HIGHDAMP, LONG_HIGHFREQ,
+    LONG_MODULATN, LONG_FREEZE, LONG_INTERVAL, LONG_GATEBLOM, LONG_ECHORVB,
+    LONG_BLEND,
+    /* S099 P1: the chorus rows (Depth, Source) */
+    LONG_DEPTH, LONG_SOURCE,
+    LONG_LABEL_COUNT
 };
 
 enum shortNamesEnum {
@@ -296,7 +332,37 @@ enum shortNamesEnum {
     /* S081 P2: "rmp" (was "asm", S083 follow-up). */
     SHORT_TRACK_AUTO_SMOOTH,
     /* S083 follow-up: "pv<" / "pv>". */
-    SHORT_PERF_VEL_LT, SHORT_PERF_VEL_RT
+    SHORT_PERF_VEL_LT, SHORT_PERF_VEL_RT,
+    /* S097 P1 item 2: descriptor labels (MenuLabels.c, same order). */
+    SHORT_SRT, SHORT_AM1, SHORT_AM2, SHORT_POL, SHORT_VO1, SHORT_DS1,
+    SHORT_VO2, SHORT_DS2, SHORT_POS, SHORT_CHN, SHORT_TUN, SHORT_SLD,
+    SHORT_CUT, SHORT_ENV, SHORT_ACC, SHORT_TON, SHORT_PSP, SHORT_SLV,
+    SHORT_REL, SHORT_SUS, SHORT_SLW, SHORT_IN1, SHORT_IN2, SHORT_IN3,
+    SHORT_DTN, SHORT_SPR, SHORT_MOT, SHORT_FAT, SHORT_FDE, SHORT_FSL,
+    SHORT_FRE, SHORT_FAM, SHORT_RTE, SHORT_FRO, SHORT_REO, SHORT_ENO,
+    SHORT_DRO, SHORT_PAT, SHORT_PDE, SHORT_PSL, SHORT_PRE, SHORT_PAM,
+    SHORT_NLV, SHORT_NTO, SHORT_NWD, SHORT_NPN, SHORT_SMA, SHORT_SMB,
+    SHORT_SMC, SHORT_SMD, SHORT_TUA, SHORT_TUB, SHORT_TUC, SHORT_TUD,
+    SHORT_LVA, SHORT_LVB, SHORT_LVC, SHORT_LVD, SHORT_DYA, SHORT_DYB,
+    SHORT_DYC, SHORT_DYD, SHORT_PNA, SHORT_PNB, SHORT_PNC, SHORT_PND,
+    SHORT_LON, SHORT_DRA, SHORT_DRB, SHORT_DRC, SHORT_DRD, SHORT_SRA,
+    SHORT_SRB, SHORT_SRC, SHORT_SRD, SHORT_SPA, SHORT_SPB, SHORT_SPC,
+    SHORT_SPD, SHORT_STM, SHORT_SFB, SHORT_SDT, SHORT_STO, SHORT_TNA,
+    SHORT_TNB, SHORT_TNC, SHORT_TND, SHORT_TEA, SHORT_TEB, SHORT_TEC,
+    SHORT_TED, SHORT_WID, SHORT_BOF, SHORT_BIV, SHORT_FBK, SHORT_SUB,
+    SHORT_SPN, SHORT_AUX, SHORT_P2, SHORT_P3, SHORT_DEN, SHORT_LNG,
+    SHORT_BAL, SHORT_DMP, SHORT_XFB, SHORT_DEG, SHORT_WOW, SHORT_HLD,
+    /*
+     * S100 P2: SHORT_STR ("str") is the former SHORT_HED ("hed"), renamed
+     * in place for the Space types' stereo-field row (see LONG_STEREO).
+     */
+    SHORT_REV, SHORT_STR, SHORT_DCK, SHORT_SIZ, SHORT_DCY, SHORT_DIF,
+    SHORT_LSH, SHORT_LSF, SHORT_HSH, SHORT_HSF, SHORT_FRZ, SHORT_SHM,
+    SHORT_INT, SHORT_E_TO_R, SHORT_BLN,
+    /* S099 P1: the chorus rows; S099 P2: the effect's fx rte dpt mix (were
+     * cho crt cdp cmx; csr, cbw, cdv and cwd removed) */
+    SHORT_FX, SHORT_FXR, SHORT_FXD, SHORT_FXM,
+    SHORT_LABEL_COUNT
 };
 
 #define PAR_RUNTIME_CPU_USE 0xFFFEu
@@ -399,6 +465,23 @@ enum Datatypes {
     DTYPE_1B128,
 };
 
+/*
+ * A tagged DTYPE_0B127 (S099 P2): the Advanced types' Effect Depth (dpt).
+ *
+ * What:       DTYPE_0B127 with the high nibble DTYPE_TAG_FX_DEPTH: a plain
+ *             0..127 row (range, clamp, edit, automation and modulation as
+ *             DTYPE_0B127: every dtype switch masks the low nibble or treats
+ *             its default as 0..127) whose 0, 1, 2 display "I", "II", "1+2"
+ *             (the chorus's Juno modes, BBD_DPT_*); 3..127 display the number.
+ * Why:        one row for the chorus's mode and depth (the user's layout)
+ *             without a new dtype for every switch: menu_formatDtype3() and
+ *             the single-parameter painter name the three values.
+ * Accessors:  ColloidParameters.c, AlkalineParameters.c (fx_depth);
+ *             menu.c menu_formatDtype3(), the painter.
+ */
+#define DTYPE_TAG_FX_DEPTH   1u
+#define DTYPE_0B127_FX_DEPTH ((uint8_t)(DTYPE_0B127 | (DTYPE_TAG_FX_DEPTH << 4)))
+
 typedef struct PageStruct {
     uint8_t  top1, top2, top3, top4, top5, top6, top7, top8;
     uint16_t bot1, bot2, bot3, bot4, bot5, bot6, bot7, bot8;
@@ -425,8 +508,6 @@ extern uint8_t parameter_values[NUM_PARAMS];
 extern uint8_t parameters2[END_OF_SOUND_PARAMETERS];
 extern char currentDisplayBuffer[2][16];
 extern char editDisplayBuffer[2][17];
-
-extern const Page menuPages[NUM_PAGES][NUM_SUB_PAGES];
 
 extern const ModTarg modTargets[];
 extern const ModTargetVoiceOffset modTargetVoiceOffsets[6];
@@ -727,6 +808,8 @@ void menu_toggleStepEditSubpage(void);
 void menu_enterStepTrackAutomationOverlay(uint8_t voiceNr);
 void menu_resetActiveParameter(void);
 uint8_t menu_getSubPage(void);
+uint8_t menu_getMenuIndex(void);
+void menu_restoreMenuIndex(uint8_t index);
 /*
  * Repaint the PERF SELECT row from looper state (S080 A5, P2 Defect 4).
  *

@@ -413,3 +413,95 @@ static __attribute__((noinline)) void mixer_addVoiceStereoToOutputAndFx(uint8_t 
 #undef MIXER_FX_SEND_STEREO_SAMPLE
 #undef MIXER_STEREO_MONO
 }
+
+static inline sample_mx_t mixer_floatToMxScaled(float value)
+{
+	if (value > 255.0f * 8388352.0f)
+		value = 255.0f * 8388352.0f;
+	else if (value < -255.0f * 8388352.0f)
+		value = -255.0f * 8388352.0f;
+	return (sample_mx_t)value;
+}
+
+static void mixer_addFxReturnToOutput(uint8_t dest,
+		const float *l,
+		const float *r,
+		float gainL,
+		float gainR,
+		sample_mx_t *outL,
+		sample_mx_t *outR,
+		sample_mx_t *outL2,
+		sample_mx_t *outR2)
+{
+	sample_mx_t *mono = 0;
+	sample_mx_t *stereoL = 0;
+	sample_mx_t *stereoR = 0;
+	uint8_t stereo_route = 0u;
+	uint8_t i;
+	const float inv_size = 1.f / (OUTPUT_DMA_SIZE - 1.f);
+	/*
+	 * S101 P2 E1 (S101_P2_REDUCTIONS.md §A.6b E1; S101_P2_IMPLEMENTATION.md
+	 * §2.5): the return ramps' constants per block.
+	 * What: both ramps carry the 8,388,352 scale of mixer_floatToMx()
+	 * (lastK, dK), the sample index is a float count fi (exactly (float)i),
+	 * and mixer_floatToMxScaled() clamps in the scaled domain (+-255 x
+	 * 8,388,352). Why: the linked loop converted i to float and multiplied
+	 * by 8,388,352 per channel per sample. 8,388,352 is not a power of two,
+	 * so x (g x K) can differ from (x g) x K by one float rounding, at most
+	 * one int16 LSB of the return (S1).
+	 */
+	const float lastKL = mixer_fx_return_last_gain[0] * 8388352.0f;
+	const float lastKR = mixer_fx_return_last_gain[1] * 8388352.0f;
+	const float deltaKL = (gainL - mixer_fx_return_last_gain[0]) * 8388352.0f;
+	const float deltaKR = (gainR - mixer_fx_return_last_gain[1]) * 8388352.0f;
+	float fi;
+
+	switch (dest) {
+	case MIXER_ROUTING_DAC1_STEREO:
+		stereoL = outL2;
+		stereoR = outR2;
+		stereo_route = 1u;
+		break;
+	case MIXER_ROUTING_DAC2_STEREO:
+		stereoL = outL;
+		stereoR = outR;
+		stereo_route = 1u;
+		break;
+	case MIXER_ROUTING_DAC1_L:
+		mono = outL2;
+		break;
+	case MIXER_ROUTING_DAC1_R:
+		mono = outR2;
+		break;
+	case MIXER_ROUTING_DAC2_L:
+		mono = outL;
+		break;
+	case MIXER_ROUTING_DAC2_R:
+		mono = outR;
+		break;
+	default:
+		return;
+	}
+
+	for (i = 0u, fi = 0.0f; i < OUTPUT_DMA_SIZE; i++, fi += 1.0f) {
+		const float currentL = lastKL + fi * inv_size * deltaKL;
+		const float currentR = lastKR + fi * inv_size * deltaKR;
+		if (stereo_route) {
+			*stereoL = bufferTool_satAdd32(*stereoL,
+					mixer_floatToMxScaled(l[i] * currentL));
+			stereoL += 2;
+			*stereoR = bufferTool_satAdd32(*stereoR,
+					mixer_floatToMxScaled((r ? r[i] : l[i]) * currentR));
+			stereoR += 2;
+		} else {
+			const float monoSample = r
+					? (0.5f * (l[i] * currentL
+							+ r[i] * currentR))
+					: (l[i] * currentL);
+			*mono = bufferTool_satAdd32(*mono, mixer_floatToMxScaled(monoSample));
+			mono += 2;
+		}
+	}
+	mixer_fx_return_last_gain[0] = gainL;
+	mixer_fx_return_last_gain[1] = gainR;
+}

@@ -235,6 +235,19 @@ void DiodeLadder_renderB2OscPwmWt(DiodeLadder *dl, int16_t *buf, const int16_t *
                                   uint32_t *phase, uint32_t phaseInc, uint32_t wPh,
                                   uint32_t wRa, uint32_t wRb, float sScale,
                                   float iLadEnd, float iAbcEnd);
+/*
+ * B2R with the chopped pwm wave fused (S099 P1): R-S (mode 5; REx until S099
+ * P2), the
+ * gate (a saw-row difference at twice the phase plus chC) times the curve
+ * table at the 1x ramp wrapped at 7/8, minus chDc, s = (C G - chDc) x
+ * sScale. Contract in DiodeLadder.c.
+ * Accessors: AlkalineVoice.c alk_renderChop().
+ */
+void DiodeLadder_renderB2OscChop(DiodeLadder *dl, int16_t *buf, const int16_t *row,
+                                 const int16_t *curve, uint32_t *phase,
+                                 uint32_t phaseInc, uint32_t pwD, float chC,
+                                 float chDc, float sScale, float iLadEnd,
+                                 float iAbcEnd);
 void DiodeLadder_renderB(DiodeLadder *dl, int16_t *buf, float sScale,
                          float iLadEnd, float iAbcEnd);
 void DiodeLadder_renderA(DiodeLadder *dl, int16_t *buf, float sScale,

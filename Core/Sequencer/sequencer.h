@@ -218,6 +218,11 @@ void seq_refreshTrackEffectiveParams(void);
  * definition in sequencer.c for the full description.
  */
 void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note, uint8_t reset);
+/* Trigger one Tetrakt layer set (S096 P3 T1): a resetting trigger with a
+** layer mask, without dropping queued triggers of the voice and without the
+** TIM3 MIDI TX (a wide track transmits at its fire). layers 1..15. */
+void seq_triggerVoiceLayers(uint8_t voiceNr, uint8_t vol, uint8_t note,
+                            uint8_t layers);
 /*
  * Roll velocity rhythm rule (S079 §5), shared (S083 follow-up).
  *
@@ -235,7 +240,7 @@ uint8_t seq_rollRhythmVelocity(uint8_t rhythm, uint8_t vel, uint8_t pos);
  * Live overlay roll/flam engine (S084 P2). Contracts; the definitions in
  * sequencer.c carry the full description.
  *
- * seq_liveRollStart(track, rate, note, vel, pos): arm a held roll on the
+ * seq_liveRollStart(track, rate, note, vel, pos, layers): arm a held roll on the
  * master tick. The caller has already fired hit 0. rate is the step-roll
  * index 1..9 (0 or invalid: stops). The first repeat follows one rate
  * interval after the press (ppq - 1 whole ticks from the next tick); pos is
@@ -243,9 +248,10 @@ uint8_t seq_rollRhythmVelocity(uint8_t rhythm, uint8_t vel, uint8_t pos);
  * track's mailbox.
  * seq_liveRollSetRate(track, rate): change a running roll's rate and keep
  * the time since its last hit (S081 F-B). No effect unless a roll runs.
- * seq_liveFlamArm(track, note, vel, ticks): arm a flam main hit `ticks`
+ * seq_liveFlamArm(track, note, vel, ticks, layers): arm a flam main hit `ticks`
  * master ticks after the press (12 = 1/32), fired with reset = 1. Clears
- * the mailbox.
+ * the mailbox. S096 P3: `layers` is a Tetrakt layer mask repeated on every
+ * hit (0 = the lon row), decided Q16.
  * seq_liveStop(track): disarm the track; the mailbox keeps unreported hits
  * for a final seq_liveTakeHits().
  * seq_liveSetRhythm(rhythm): the packed rhythm byte applied to every live
@@ -257,10 +263,10 @@ uint8_t seq_rollRhythmVelocity(uint8_t rhythm, uint8_t vel, uint8_t pos);
  * overlay. Affiliates: seq_processLiveTicks().
  */
 void    seq_liveRollStart(uint8_t track, uint8_t rate, uint8_t note,
-                          uint8_t vel, uint8_t pos);
+                          uint8_t vel, uint8_t pos, uint8_t layers);
 void    seq_liveRollSetRate(uint8_t track, uint8_t rate);
 void    seq_liveFlamArm(uint8_t track, uint8_t note, uint8_t vel,
-                        uint8_t ticks);
+                        uint8_t ticks, uint8_t layers);
 void    seq_liveStop(uint8_t track);
 void    seq_liveSetRhythm(uint8_t rhythm);
 uint8_t seq_liveTakeHits(uint8_t track, uint32_t *stampUs,
@@ -331,17 +337,23 @@ void seq_setExtSyncSource(uint8_t source);
 uint8_t seq_getExtSyncSource(void);
 void seq_noteExtSyncActivity(uint8_t source, uint32_t timestampUs);
 /*
- * Immediately select the active Scene/Pattern for front-panel PERF switching.
+ * Select the active Scene, decided per track (S098 P1; user, Q2).
  *
- * Inputs: pattern is a resident Scene/Pattern index validated against
- * PatternData. Outputs: seq_activePattern and seq_pendingPattern are aligned,
- * deferred pattern-load flags are cleared, track counters are recalculated from
- * the existing master tick/step position, UI follow/chase state is notified, and
- * any sounding notes are released. Clients: menu_perfModeSceneButtonPressed().
- * Pattern-only queued switching is retired; callers that need a musical switch
- * must use this Scene-aligned path or a future Scene-level scheduler.
+ * Inputs: pattern, a resident Scene (or 16) validated against PatternData;
+ * keep_mask, bit t set when track t and its voice slot are identical in the
+ * Scene the track plays and in `pattern` (preset_sceneSwitchKeepMask();
+ * tracks 5 and 6 are forced to agree); effect_same, the Effect record and
+ * Effect Morph amount are identical.
+ * Outputs: every track reads `pattern`. Changed tracks are reset, realigned
+ * to the master clock, have their queued triggers dropped and their MIDI note
+ * ended, and get the Colloid change mark. Kept tracks continue untouched. The
+ * FX sequence is realigned only when the Effect changed. The LEDs and the
+ * program change follow, and Scene 17 is released when left.
+ * Client: menu_perfSceneChangeExecute(). The voice half is
+ * preset_startSceneSwitchApply().
  */
-void seq_selectActivePattern(uint8_t pattern);
+void seq_selectActivePattern(uint8_t pattern, uint8_t keep_mask,
+                             uint8_t effect_same);
 /*
  * Realign playback to a Scene selection that another owner has already made.
  *
@@ -418,6 +430,26 @@ void seq_drainPendingAutomationTo(uint8_t limit);
  * seq_drainPendingAutomationTo(), seq_queueStepAutomations().
  */
 uint8_t seq_pendingAutomationMark(void);
+/* Queue one transient voice automation entry from the foreground (S096 P3
+** C3): drained after the pass's restores, before its triggers; never starts
+** an automation ramp. Returns 1 queued, 0 when the queue is full. */
+uint8_t seq_queueForegroundAutomation(uint8_t track, uint16_t target,
+                                      uint8_t value);
+/*
+ * Take the published Scene/track change masks (S096 P3 C1).
+ *
+ * What: returns and clears the tracks whose played Scene changed (*changed,
+ * bit t = track t) and the tracks whose first step event in the new Scene
+ * has been fired (*stepped). Must be called with interrupts masked, as
+ * voiceControl_popPendingBatch() does, so a change, its first step's entries
+ * and its trigger belong to one render pass. Affiliates:
+ * seq_markTrackChange(), instrumentManager_changeArm()/changeDecide().
+ */
+void seq_takeChangeMasks(uint8_t *changed, uint8_t *stepped);
+/* 1 while a track's step roll window is open (S096 P3 assessment F6): a
+** leftover reset with a running roll is a carry, which renews a Colloid's
+** gate; any other leftover reset (a dropped trigger) does not. Foreground. */
+uint8_t seq_rollRunning(uint8_t track);
 /*
  * Automation ramp service (S081 P2, rmp).
  *

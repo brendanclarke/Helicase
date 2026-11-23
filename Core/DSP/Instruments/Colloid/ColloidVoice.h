@@ -3,7 +3,7 @@
  *
  * What:       one Colloid voice: a Basic-class stack of free-running
  *             band-limited oscillators (Saw, Rec, Tri, Sin or wavetable
- *             frames, or the Sin/Tri/Saw/Rec pulse forms under pwm), each at
+ *             frames, or the Tri/Saw/Rec/R-S pulse forms under pwm), each at
  *             its own slewed pitch (root or one of three intervals, plus
  *             detune) and its own stereo position (spr, mot), summed into a
  *             mid and a side bus; one smooth TPT state-variable filter
@@ -17,6 +17,11 @@
  * Why:        S095_P2_DRAFT_COLLOID.md (user briefs 2026-11-10 and
  *             2026-11-12; decisions C-D1..C-D21), as amended by
  *             S095_P3_COLLOID_FOLLOW_UPS.md (F2-F11, Q1-Q12).
+ * S096 P3 (S096_P3_COLLOID_TETRAKT_INST_MIDI.md, decisions 2026-11-17):
+ *             a real note gate (§2: step length, the length special,
+ *             sustain, Scene/track change, mute), a pitch envelope, one
+ *             noise source, the wavetable scan type wts, and the hooks the
+ *             MIDI note-mode module needs (midiHold).
  * Inputs:     descriptor writes into the parameter members (TYPE_FLT rows
  *             store byte / 127, TYPE_UINT8 rows the byte); triggers with
  *             velocity and note.
@@ -71,7 +76,7 @@
  *             and Rec (the two-read pair loops), and the most pwm renders.
  *             COL_PWM_WARP_COUNT (6) is the count of the warp forms, Sin and
  *             Tri (col_warpStore/Add, one oscillator per call). The form is
- *             osc.waveform under typ pwm (COL_PWM_SIN..COL_PWM_REC; past Rec
+ *             osc.waveform under typ pwm (COL_PWM_TRI..COL_PWM_REC; past Rec
  *             plays Rec), the same rule col_oscControl() and the sync block
  *             use; COL_PWM_IS_WARP() below is that test.
  *   Why:      pwm Sin 8 (host pwmw8-par 389.4, about 18,300 cycles per block)
@@ -114,15 +119,45 @@
  *   Level:    COL_NORM_PWM is 1 / sqrt(6) again (ColloidVoice.c).
  *   Tables:   the first six colDetC / colHome entries balance (as before
  *             S095 P5; gen_col_tables.py asserts it).
+ * S096 P3 (user, 2026-11-17): wav and wtb to 10.
+ *   What:     COL_OSC_COUNT 12 -> 10: five pairs under typ wav and wtb. pwm
+ *             (6) and wts (6) are unchanged (user: not below 6).
+ *   Why:      the device run on a mixed Scene (tools/dsp_test/baselines/
+ *             s096p3/device_probe_p3_noiseB.txt) measured wav Saw 12 at
+ *             21,250 and wtb 12 at 21,902 cycles per block against the Basic
+ *             19,620. One pair less saves about 42 instructions per sample
+ *             (the pair loop 30 + two control-loop passes), about 2,200
+ *             cycles at that Scene's 1.65..1.72 cycles per instruction.
+ *   Level:    COL_INV_SQRT_COUNT has the 10 case (1 / sqrt(10),
+ *             ColloidVoice.c).
+ *   Tables:   the first ten colDetC / colHome entries sum to 0 and keep every
+ *             pitch group two-sided (gen_col_tables.py now asserts 10 too),
+ *             so the stack stays balanced; groups 2 and 3 have two members,
+ *             0 and 1 three.
  * Constant:   the count follows the mode, never a parameter value: every
  *             block of a given typ and form renders exactly this many
  *             oscillators.
  */
 #ifndef COL_OSC_COUNT
-#define COL_OSC_COUNT         12u
+#define COL_OSC_COUNT         10u   /* S096 P3: was 12 */
 #endif
 #define COL_PWM_COUNT         6u    /* S096 P2 F5: was 8 (S095 P5) */
 #define COL_PWM_WARP_COUNT    6u
+/*
+ * S096 P3 (plan §3.5, decided): the wts scan renders COL_SCAN_COUNT.
+ *
+ * What:       8 if col_scanPairAdd costs at most 52 instructions per pair per
+ *             sample and the device run is inside the Basic share (est.
+ *             18,900-19,600 of 19,620 with the S096 P3 noise and pitch
+ *             envelope), else 6 (est. 16,040). 10 does not fit (≈ 21,400).
+ * Level:      COL_NORM_SCAN is 1 / sqrt(COL_SCAN_COUNT) (asserted).
+ * Rejoin:     the oscillators past the count land on their targets when
+ *             they rejoin (oscLive), as for pwm.
+ */
+#define COL_SCAN_COUNT        6u   /* S096 P3 gate: the pair loop is 67 > 52 */
+_Static_assert(COL_SCAN_COUNT >= 2u && COL_SCAN_COUNT <= COL_OSC_COUNT &&
+               (COL_SCAN_COUNT % 2u) == 0u,
+               "COL_SCAN_COUNT: an even 2..COL_OSC_COUNT");
 #define COL_PAIR_MAX          (COL_OSC_MAX / 2u)
 _Static_assert(COL_OSC_COUNT >= 2u && COL_OSC_COUNT <= COL_OSC_MAX &&
                (COL_OSC_COUNT % 2u) == 0u, "COL_OSC_COUNT: an even 2..12");
@@ -148,54 +183,73 @@ _Static_assert(COL_PWM_WARP_COUNT >= 2u && COL_PWM_WARP_COUNT <= COL_PWM_COUNT &
 #define COL_WAVE_COUNT        4u
 
 /*
- * osc.waveform under typ pwm (S095 P3 F2, Q10; was C-D21's Rec alone).
+ * osc.waveform under typ pwm (S095 P3 F2, Q10; S099 P1 the chopped waves).
  *
- * What:       the platform's pwm list and order (Oscillator.h SINE, TRI,
- *             SAW, REC; OSC_PWM_WAVE_COUNT): 0 Sin and 1 Tri are the phase-warp
- *             forms (col_warpStore/Add on sine_table or a triTable octave
- *             row, W/Ra/Rb from oscPwmSin* / oscPwmTri*), 2 Saw and 3 Rec the
- *             two-read form (col_pwmPairStore/Add with sign +1 / -1 on a
- *             sawTable octave row, the width from oscPwmDSaw / oscPwmDRec). A
- *             byte past Rec plays Rec (the platform's S087 r8 rule).
- * Why:        the same names and order as the drum engines' pwm cell, so the
- *             menu's shared pwm branch names them (waveformNames) and a Scene
- *             reads alike across engines; the width law per form is the
- *             shipped S094 P4 tables.
- * Accessors:  col_oscControl(), Colloid_calcVoiceSyncBlock(),
+ * What:       the platform's pwm list and order (Oscillator.h OSC_PWM_TRI,
+ *             OSC_PWM_SAW, OSC_PWM_REC; OSC_PWM_WAVE_COUNT) and then the
+ *             Colloid's chopped wave: 0 Tri is the phase-warp form
+ *             (col_warpStore/Add), 1 Saw and 2 Rec the two-read form
+ *             (col_pwmPairStore/Add, sign +1 / -1), 3 R-S (the Alpha Juno
+ *             chopped saw): the chop form (col_chopBlock(): col_chopDcInit()
+ *             and three col_chopPairAdd() calls). A byte past R-S plays Rec
+ *             (the unchanged clamp in col_oscControl() and the sync block).
+ * Why:        the first four keep the drum engines' names and order, so a
+ *             Scene reads alike across engines; the chopped waves are the
+ *             Colloid's (S099 P1, D-1; the drum family's chop is deferred,
+ *             plan P-F, Q-2), so the Colloid's pwm names are its own list
+ *             (MenuText.h colPwmWaveNames).
+ *             S099 P1 §15.10 (user, 2026-11-19): pwm Sin (was 0) is dropped
+ *             from every engine and the values collapsed down by one (no
+ *             migration: a stored byte plays the next wave up).
+ *             S099 P2 (user, 2026-11-19): REx (was 4, the same chop on a
+ *             rising exponential) is dropped, too close to R-S by ear; a
+ *             stored 4 plays Rec through the clamp.
+ * Accessors:  col_oscControl(), Colloid_calcVoiceSyncBlock(), col_chopBlock(),
  *             Colloid_setOscType(); InstrumentManager.c waveDomainMax.
  */
-#define COL_PWM_SIN           0u
-#define COL_PWM_TRI           1u
-#define COL_PWM_SAW           2u
-#define COL_PWM_REC           3u
+#define COL_PWM_TRI           0u
+#define COL_PWM_SAW           1u
+#define COL_PWM_REC           2u
+#define COL_PWM_RS            3u    /* S099 P1: the chopped saw */
 #define COL_PWM_WAVE_COUNT    4u
 
 /*
  * The pwm form's oscillator count (S095 P5, user 2026-11-14).
  *
- * What:       COL_PWM_IS_WARP(w) is 1 for the warp forms, Sin (0) and Tri
- *             (1), given osc.waveform under typ pwm; a byte past Rec plays
- *             Rec, a pulse form, so the test is w <= COL_PWM_TRI.
+ * What:       COL_PWM_IS_WARP(w) is 1 for the warp form, Tri (0; S099 P1
+ *             §15.10 dropped Sin, the other one), given osc.waveform under
+ *             typ pwm; a byte past R-S plays Rec, a pulse form, so the test
+ *             is w == COL_PWM_TRI.
  *             COL_PWM_FORM_COUNT(w) is that form's oscillator count:
- *             COL_PWM_WARP_COUNT (6) for Sin/Tri, COL_PWM_COUNT for Saw/Rec
- *             (8 in S095 P5, 6 again since S096 P2 F5).
+ *             COL_PWM_WARP_COUNT (6) for Tri, COL_PWM_COUNT for Saw/Rec
+ *             (8 in S095 P5, 6 again since S096 P2 F5). The chop form (R-S)
+ *             is not a warp form: it renders COL_PWM_COUNT (6)
+ *             oscillators, as Saw/Rec.
  * Why:        one definition for the async (count, level) and the sync block
  *             (the warp loop's bound), so the two can never render different
  *             counts in the same block.
  * Accessors:  Colloid_calcVoiceAsync(), Colloid_calcVoiceSyncBlock();
  *             tools/dsp_test/modules/colloid.c.
  */
-#define COL_PWM_IS_WARP(w)    ((uint32_t)(w) <= COL_PWM_TRI)
+#define COL_PWM_IS_WARP(w)    ((uint32_t)(w) == COL_PWM_TRI)
 #define COL_PWM_FORM_COUNT(w) (COL_PWM_IS_WARP(w) ? COL_PWM_WARP_COUNT : COL_PWM_COUNT)
-_Static_assert(COL_PWM_WAVE_COUNT == OSC_PWM_WAVE_COUNT,
-               "the Colloid's pwm list is the platform's");
+/* S099 P1: 1 for the chop form R-S (S099 P2: REx dropped). osc.waveform
+ * under typ pwm; col_oscControl() and the sync block clamp a byte past the
+ * list to Rec before testing, so the test is w >= COL_PWM_RS. */
+#define COL_PWM_IS_CHOP(w)    ((uint32_t)(w) >= COL_PWM_RS)
+_Static_assert(COL_PWM_WAVE_COUNT == OSC_PWM_WAVE_COUNT + 1u,
+               "the Colloid's pwm list is the platform's, then R-S "
+               "(S099 P1; the drum family's chop is deferred)");
 
-/* typ (C-D20): the descriptor byte 0 wav, 1 wtb, 2 pwm (the Alkaline's
- * ONOFF_TAG_ALK_TYPE list); Colloid_setOscType() maps it to OSC_TYPE_*. */
+/* typ (C-D20; S096 P3): the descriptor byte 0 wav, 1 wtb, 2 pwm, 3 wts
+ * (the Colloid's ONOFF_TAG_COL_TYPE list, colTypeNames);
+ * Colloid_setOscType() maps it to OSC_TYPE_* (wts is OSC_TYPE_WTB plus the
+ * scan flag). */
 #define COL_TYP_WAV           0u
 #define COL_TYP_WTB           1u
 #define COL_TYP_PWM           2u
-#define COL_TYP_COUNT         3u
+#define COL_TYP_WTS           3u    /* S096 P3: the wavetable scan */
+#define COL_TYP_COUNT         4u
 
 /* osc.sampleCacheLooped as the wavetable bind tag (the Alkaline's use):
  * COL_BIND_WTB once col_wtbBind() has bound the table; anything else
@@ -245,7 +299,7 @@ _Static_assert(COL_PWM_WAVE_COUNT == OSC_PWM_WAVE_COUNT,
  * What:       oscillator o plays group o mod 4: 0 the root, 1..3 the intervals
  *             in1..in3 (interval[0..2], PM63 bytes, 63 = 0 semitones). Twelve
  *             oscillators are three per group. Under pwm (S095 P5) the eight
- *             Saw/Rec oscillators are two per group; the six Sin/Tri
+ *             Saw/Rec oscillators are two per group; the six Tri
  *             oscillators are 2, 2, 1, 1 (in2 and in3 one each), as all six
  *             were in S095 P3.
  * Why:        three literal bipolar intervals (the user's note) in place of
@@ -319,6 +373,7 @@ typedef struct ColloidVoiceStruct
 	ColSvf   svfB;                    /* str: on R; mono: second */
 	ColEg    ampEg;
 	ColEg    fltEg;
+	ColEg    pitchEg;                 /* S096 P3 C2a: same gate as the filter's */
 	/* --- parameters (descriptor-bound) --- */
 	float    posSpread;     /* psp: frame (wtb) or width (pwm) spread, F7 curve */
 	float    sustainLevel;  /* slv */
@@ -349,6 +404,17 @@ typedef struct ColloidVoiceStruct
 	uint8_t  route;         /* rte: COL_RTE_STR or 1 + COL_FT_* */
 	uint8_t  vcaDrive;      /* drv (mix page): the post-filter overdrive 0..127 (F10) */
 	uint8_t  tone;          /* ton: 0..127, 127 open (F10) */
+	/* S096 P3: the pitch envelope (pat pde psl pre) and its amount (pam) */
+	float    pSustain;      /* psl (S096 P3) */
+	float    pAmount;       /* pam: 63/127 = none, bipolar (S096 P3) */
+	uint8_t  pAttack;       /* pat (S096 P3) */
+	uint8_t  pDecay;        /* pde */
+	uint8_t  pRelease;      /* pre */
+	/* S096 P3: the noise (nlv nto nwd npn) */
+	uint8_t  nLevel;        /* nlv (S096 P3) */
+	uint8_t  nTone;         /* nto: PM63 */
+	uint8_t  nWidth;        /* nwd */
+	uint8_t  nPan;          /* npn: PM63 */
 	/* --- state: control --- */
 	uint8_t  note;          /* last trigger note */
 	uint8_t  pitchJump;     /* 1 from init until a trigger, 2 for that trigger's block */
@@ -369,6 +435,50 @@ typedef struct ColloidVoiceStruct
 	 *             sizeof(ColloidVoice) stays 1,112 B.
 	 */
 	uint8_t  oscLive;
+	/*
+	 * The note gate (S096 P3 C1, plan §2).
+	 *
+	 * What:       gateLeft: samples of gate left, set by a first trigger to
+	 *             the triggering track's step length (seq_trackStepSamples()),
+	 *             renewed by a roll carry, set to 0 by a release request (the
+	 *             length special's window end, a roll window's end, a forced
+	 *             release); the async subtracts OUTPUT_DMA_SIZE per block,
+	 *             floored at 0.
+	 *             susBreak: 1 after a forced release (Scene/track change
+	 *             with no sus-on step, mute); it makes the effective sustain
+	 *             0 until the next trigger clears it, so a patch whose sus is
+	 *             on cannot hold the released note.
+	 *             midiHold: 1 while the MIDI note-mode module holds
+	 *             paraphonic keys on this slot (MidiNoteModes.c); it lets sus
+	 *             hold with the transport stopped.
+	 *             changeArm / susSeen: the Scene/track change decision (plan
+	 *             §2.2): changeArm is set when the track's played Scene
+	 *             changes; susSeen is set when the drain writes sus = on; the
+	 *             first step event in the new Scene then releases the note
+	 *             unless a trigger fired (which clears changeArm) or susSeen
+	 *             is set.
+	 * Why:        the brief (2026-11-17): a step plays its length (or the
+	 *             length special's), then releases (S099 P1 §15: no
+	 *             amp-attack minimum); sustain holds until the track or Scene
+	 *             changes.
+	 *             Before S096 P3 nothing told the engine that a note ended
+	 *             (C-D8/C-D19).
+	 * RAM:        4 B in the padding after oscLive, 4 B for gateLeft; the
+	 *             slot reserve (1,264 B) is asserted in InstrumentManager.c.
+	 * Accessors:  Colloid_triggerVoice(), Colloid_gateRelease(),
+	 *             Colloid_gateRenew(), Colloid_setMidiHold(),
+	 *             Colloid_changeArm(), Colloid_changeDecide(),
+	 *             Colloid_noteSustainWrite(), Colloid_calcVoiceAsync().
+	 */
+	uint8_t  susBreak;
+	uint8_t  midiHold;
+	uint8_t  changeArm;
+	uint8_t  susSeen;
+	uint8_t  scan;                  /* S096 P3: 1 under typ wts (oscType is
+	                                 * OSC_TYPE_WTB for both wtb and wts) */
+	uint8_t  nPhase;                /* S096 P3: the noise corner updated last
+	                                 * (1 HP, 0 LP; col_noiseControl()) */
+	int32_t  gateLeft;
 	float    ampLast;       /* the amp level at the end of the previous block */
 	float    inGain;        /* this block's bus-to-drive gain, left / first filter */
 	float    inGainR;       /* this block's bus-to-drive gain, right (str) or
@@ -379,6 +489,65 @@ typedef struct ColloidVoiceStruct
 	float    toneC;         /* F10: the one-pole's c (alkToneC; 0 = open) */
 	float    toneZL;        /* F10: the left one-pole's state */
 	float    toneZR;        /* F10: the right one-pole's state */
+	/*
+	 * The noise source (S096 P3 C2b, plan §3.4; decided Q1; form B, user
+	 * 2026-11-17).
+	 *
+	 * What:       per sample n = the hardware RNG (full signed value, ±1)
+	 *             -> one-pole TPT high-pass at the corner h (state nHpZ,
+	 *             G = nG1) -> one-pole TPT low-pass at the corner l (state
+	 *             nLpZ, G = nG2) -> into each channel's drive input with
+	 *             nGL / nGR (level x pan x COL_HEADROOM x the drive gain x
+	 *             the width make-up). The corners are slewed per block
+	 *             (nHSt, nLSt, semitones above 20 Hz) and track the note by
+	 *             0.85 x (1 - width) (none at width 127). No per-sample
+	 *             coefficient ramp (registers).
+	 * Why:        form B (S096 P3 noise decision): the first form (one-pole
+	 *             HP + TPT SVF) cost 39 instructions per sample in the filter
+	 *             loop, mostly register spills, and the device measured every
+	 *             Colloid mode over the Basic share. Two one-poles keep tone,
+	 *             width and pan with 8 floats of state instead of 11; the
+	 *             narrow band at width 0 becomes a broad peak (6 dB per octave
+	 *             each side), its level made up by the width law. The RNG read
+	 *             stays in the filter loop (≈ 150 cycles per sample against
+	 *             one RNG value per ≈ 180 cycles: a fresh value at nearly
+	 *             every sample).
+	 * Accessors:  col_noiseControl() (async), col_renderPar() /
+	 *             col_renderSer() (sync).
+	 */
+	float    nHpZ;          /* the high-pass one-pole's state */
+	float    nLpZ;          /* the low-pass one-pole's state */
+	float    nG1;           /* G = g / (1 + g) at the high-pass corner */
+	float    nG2;           /* G = g / (1 + g) at the low-pass corner */
+	float    nGL, nGR;      /* the noise's gain into each channel's drive */
+	float    nHSt, nLSt;    /* the slewed corners (semitones above 20 Hz) */
+	/*
+	 * The Advanced Colloid's chorus (S099 P1; DRAFT_ADVANCED_BBD_CHORUS.md
+	 * §2, §7).
+	 *
+	 * What:       choUnit: the slot's FxBuffer voice unit while fx is not
+	 *             off (the rings, guards and BbdChorusState, BbdChorus.h), else
+	 *             NULL; fxType fx (ADV_FX_*), fxDepth dpt (BBD_DPT_*: the
+	 *             chorus's mode and depth), fxRate rte, fxMix mix: the clx
+	 *             type's four rows, the descriptor bytes as they are (S099
+	 *             P2: the fx rows, were cho crt cdp cmx; csr removed, the
+	 *             source follows the route).
+	 * Why:        the clx type runs this engine unchanged, then the chorus pass
+	 *             (instrumentManager_calcSlotSyncBlock()). A Basic Colloid (col,
+	 *             59 rows) never writes these bytes, and choUnit stays NULL
+	 *             (the slot reset clears the whole member).
+	 * RAM:        12 B in the 1,264 B slot reserve (1,212 -> 1,224 B, measured
+	 *             at step 0.5): appended, so no existing member moves and no
+	 *             loop's offsets change.
+	 * Accessors:  ColloidParameters.c (rows 59..62); InstrumentManager.c
+	 *             (IM_SPECIAL_FX_TYPE, the clx async and sync, the quiet
+	 *             test); colloidParameters_cellInactive().
+	 */
+	int16_t *choUnit;
+	uint8_t  fxType;
+	uint8_t  fxRate;
+	uint8_t  fxDepth;
+	uint8_t  fxMix;
 } ColloidVoice;
 
 /*
@@ -389,7 +558,26 @@ typedef struct ColloidVoiceStruct
  *                              keeps one copy (S095 P2 measured two).
  * Colloid_triggerVoice()       LFO retrigger, velocity, new note; both
  *                              attacks restart from their levels; new draws
- *                              (main loop, sequencer).
+ *                              (main loop, sequencer). S096 P3: stepSamples
+ *                              (the triggering track's step,
+ *                              seq_trackStepSamples()) and first (the
+ *                              trigger's reset flag: 1 for a step's first
+ *                              hit, a live press, a MIDI note; 0 for roll
+ *                              retriggers 2+). first sets the gate to
+ *                              stepSamples; a retrigger keeps it.
+ * Colloid_gateRelease()        S096 P3: closes the gate (gateLeft = 0);
+ *                              brk 1 also sets susBreak (forced release).
+ *                              Main loop / render context (InstrumentManager
+ *                              consumes the per-slot request in the slot
+ *                              async; mute and the change decision call it
+ *                              from the foreground).
+ * Colloid_gateRenew()          S096 P3: a roll carried across a step keeps
+ *                              the gate (gateLeft = stepSamples).
+ * Colloid_setMidiHold()        S096 P3: the paraphonic hold (MIDI note-mode
+ *                              module through InstrumentManager).
+ * Colloid_changeArm/Decide()   S096 P3: the Scene/track change rule (plan
+ *                              §2.1 rule 6), from voiceControl_processPending().
+ * Colloid_noteSustainWrite()   S096 P3: the drain wrote the sus row (value).
  * Colloid_calcVoiceAsync()     the block's control work (render context).
  * Colloid_calcVoiceSyncBlock() the block's audio: left into buf, right into
  *                              voice->right (render context).
@@ -398,7 +586,14 @@ typedef struct ColloidVoiceStruct
  */
 void Colloid_initVoice(ColloidVoice *voice) __attribute__((noinline, noclone));
 void Colloid_triggerVoice(ColloidVoice *voice, uint8_t source_slot,
-                          uint8_t velocity, uint8_t note);
+                          uint8_t velocity, uint8_t note,
+                          uint32_t stepSamples, uint8_t first);
+void Colloid_gateRelease(ColloidVoice *voice, uint8_t brk);
+void Colloid_gateRenew(ColloidVoice *voice, uint32_t stepSamples);
+void Colloid_setMidiHold(ColloidVoice *voice, uint8_t on);
+void Colloid_changeArm(ColloidVoice *voice);
+void Colloid_changeDecide(ColloidVoice *voice);
+void Colloid_noteSustainWrite(ColloidVoice *voice, uint8_t value);
 void Colloid_calcVoiceAsync(ColloidVoice *voice) __attribute__((noinline));
 void Colloid_calcVoiceSyncBlock(ColloidVoice *voice, int16_t *buf, uint8_t size)
 	__attribute__((noinline));

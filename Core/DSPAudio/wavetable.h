@@ -82,9 +82,25 @@ extern const int16_t sine_table[TABLESIZE+1];
 10 - 120- 8372.02
  */
 
-extern const int16_t recTable[11][1024];
-extern const int16_t triTable[11][1024];
-extern const int16_t sawTable[11][1024];
+/*
+ * The stock tables as row pointers into one array (S101, wavetable.c).
+ *
+ * What:       triTable / recTable / sawTable keep their type for every
+ *             reader (const int16_t (*)[1024], indexed by the octave level
+ *             1..10); they point into stockTableRows[] at rows 0, 10 and 20.
+ *             Level 0 of recTable and sawTable is not stored: every saw/rec
+ *             table choice lifts octave 0 to 1 (osc_calcWavetableFreqValue(),
+ *             the Alkaline's Saw sites, the Colloid's stock row), so no reader
+ *             asks for it. Never index recTable or sawTable with 0; triTable
+ *             keeps level 0 (it is the array's first table).
+ * Why:        S101 F3: -4,096 B of flash (two unreachable sub-16 Hz levels).
+ * Accessors:  Oscillator.c, AlkalineVoice.c, AlkalineChop.c, ColloidVoice.c.
+ */
+#define STOCK_TABLE_ROWS 31u
+extern const int16_t stockTableRows[STOCK_TABLE_ROWS][1024];
+#define triTable (stockTableRows)
+#define recTable (stockTableRows + 10)
+#define sawTable (stockTableRows + 20)
 
 
 #endif /* WAVETABLES_H_ */

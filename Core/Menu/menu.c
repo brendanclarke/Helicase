@@ -57,7 +57,6 @@
 #include "Autosave.h"
 #include "AutosaveTrace.h"
 #include "EuklidGenerator.h"
-#include "SomGenerator.h"
 #include "menuEffects.h"
 #include "triggerJacks.h"
 #include "MidiIn.h"
@@ -67,6 +66,7 @@
 #include "Oscillator.h"
 #include "AlkalineVoice.h"     /* S094 P4: ALK_WAVE_COUNT (the name assert) */
 #include "ColloidVoice.h"      /* S095 P2: COL_WAVE_COUNT, the COL_* counts (the name asserts) */
+#include "BbdChorus.h"         /* S099 P2: BBD_DPT_VAR (the dpt names and their assert) */
 #include "TetraktVoice.h"      /* S096 P1: TKT_LAYER_MASK_COUNT (the name assert) */
 #include "transientGenerator.h"   /* S087 P3: transient list with user one-shots */
 #include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* (name asserts) */
@@ -130,6 +130,32 @@ static uint8_t menu_pendingPageSwitch;
  * completion paths.
  */
 static uint8_t menu_loadSaveCommandActive = 0u;
+/*
+ * Held Load/Save OK press (S097 P3 §11).
+ *
+ * What: attempts left for an OK press that could not act yet: storage was busy
+ * (menu_parseEncoder() gate), the name was not read yet, or the request was
+ * refused. 0 = nothing held. menu_pollPresetStatus() replays it as an ordinary
+ * OK click once storage and Preset are idle; a refusal there spends one
+ * attempt. Any turn or click, or leaving the OK row, drops it.
+ * Why: index and name reads keep storage busy for seconds while playing (more
+ * with FS_OS=1), and an OK press then did nothing at all; the user had to
+ * press until one landed in an idle moment.
+ * Affiliates: menu_loadSaveHoldOk(), menu_loadSaveRetryOk(),
+ * menu_handleLoadSaveMenu().
+ */
+static uint8_t menu_loadSaveOkRetry = 0u;
+#define MENU_LS_OK_ATTEMPTS 4u
+/* Load/Save click outcomes for the DEV trace, stage 'k' (S097 P3; see
+ * menu_loadSaveTraceClick()). */
+#define MENU_LS_CLICK_ACCEPTED       0u
+#define MENU_LS_CLICK_COMMAND_ACTIVE 1u
+#define MENU_LS_CLICK_NAME_BLANK     2u
+#define MENU_LS_CLICK_COPY_HELD      3u
+#define MENU_LS_CLICK_REFUSED        4u
+#define MENU_LS_CLICK_EDIT           5u
+#define MENU_LS_CLICK_HELD           6u
+#define MENU_LS_CLICK_RETRY          7u
 static uint8_t menu_deferSelectionRequest = 0;
 /*
  * Load/Save selection-coordinate generation.
@@ -441,17 +467,39 @@ static uint8_t menu_tickGlobalApply(void)
     return 1u;
 }
 
+/*
+ * Make room for a two-line LCD overlay (S097 P3 §14).
+ *
+ * What: before audio starts, waits for the LCD queue to drain (the former
+ * behaviour). Once audio runs, never waits: returns 0 when the queue lacks
+ * room for an overlay (clear, home, two lines), so the caller tries again on a
+ * later pass. Why: lcd_waitForIdle() spins without rendering audio; the boot
+ * "Last Bank / loaded" notice called it after audio start and the device
+ * logged 63 audio underruns at that moment (SD_CARD_ATS_TEST).
+ */
+#define MENU_LCD_OVERLAY_OPS 40u
+
+static uint8_t menu_lcdOverlayRoom(void)
+{
+    if (audioCodec_renderCount == 0u) {
+        lcd_waitForIdle();
+        return 1u;
+    }
+    return (uint8_t)(lcd_queueFree() >= MENU_LCD_OVERLAY_OPS);
+}
+
 static void menu_showStaleSettingsWarning(fs_stale_warning_source_t src)
 {
     const char *line2 = (src == FS_STALE_WARNING_ALL) ? "check&save .all" : "check&save .glo";
 
-    lcd_waitForIdle();
+    (void)menu_lcdOverlayRoom();
     lcd_clear();
     lcd_home();
     lcd_string("old settings");
     lcd_setcursor(0, 2);
     lcd_string(line2);
-    lcd_waitForIdle();
+    if (audioCodec_renderCount == 0u)
+        lcd_waitForIdle();
 
     if (audioCodec_renderCount == 0u) {
         uint16_t t0 = time_sysTick;
@@ -469,7 +517,11 @@ static void menu_showStaleSettingsWarning(fs_stale_warning_source_t src)
  *
  * What: shows sequential non-blocking LCD overlays for each Case-3
  * invalidated Scene and the bank-fallback event. Bank notice first (if
- * pending), then each Scene in index order. Each overlay runs ~2 seconds
+ * pending), then each Scene in index order. The bank-fallback notice reads
+ * "Last Bank / loaded": no AutoSave was restored; boot loaded the Bank that
+ * settings.cfg names (canonical Bank Load or the HCNAMES-authoritative load).
+ * Until S097 P3 §14 it read "AutoSave / bank load", which suggested the
+ * opposite. Each overlay runs ~2 seconds
  * and auto-advances. Inputs: menu_bootNotice* state, time_sysTick.
  * Outputs: LCD overlays, menu_storageBusy toggled. No early-dismiss, no
  * input suppression beyond storageBusy. Affiliates: §9
@@ -487,13 +539,13 @@ static void menu_drainAutosaveBootNotices(void)
         return;
     }
     if (menu_bootNoticeBankFlag) {
-        lcd_waitForIdle();
+        if (!menu_lcdOverlayRoom())
+            return;
         lcd_clear();
         lcd_home();
-        lcd_string("AutoSave");
+        lcd_string("Last Bank");
         lcd_setcursor(0, 2);
-        lcd_string("bank load");
-        lcd_waitForIdle();
+        lcd_string("loaded");
         menu_bootNoticeBankFlag = 0u;
         menu_storageBusy = 1u;
         menu_bootNoticeActive = 1u;
@@ -505,6 +557,8 @@ static void menu_drainAutosaveBootNotices(void)
         uint8_t i;
         uint8_t pos = 0u;
 
+        if (!menu_lcdOverlayRoom())
+            return;
         for (i = 0u; i < 16u; i++) {
             if (menu_bootNoticeSceneMask & (uint16_t)(1u << i))
                 break;
@@ -523,19 +577,29 @@ static void menu_drainAutosaveBootNotices(void)
         line2[pos++] = 't';
         line2[pos++] = 'y';
         line2[pos] = '\0';
-        lcd_waitForIdle();
         lcd_clear();
         lcd_home();
         lcd_string("AutoSave");
         lcd_setcursor(0, 2);
         lcd_string(line2);
-        lcd_waitForIdle();
         menu_storageBusy = 1u;
         menu_bootNoticeActive = 1u;
         menu_bootNoticeStart = time_sysTick;
         return;
     }
 }
+
+/*
+ * Destination Scenes of the Load whose sound apply is being started (S097 P3).
+ *
+ * What: MENU_SOUND_APPLY_ALL_SCENES (the default) keeps the full active-Scene
+ * apply; a Scene or Kit Load completion sets the Load's destination mask just
+ * before menu_startSoundApply(), which consumes and resets it and hands it to
+ * preset_startLoadApply(). Why: a Load into other Scenes must not reset the
+ * playing voices (the device "stumble"). Affiliates: preset_startLoadApply().
+ */
+#define MENU_SOUND_APPLY_ALL_SCENES 0xffffu
+static uint16_t menu_soundApplyLoadMask = MENU_SOUND_APPLY_ALL_SCENES;
 
 /* Start loaded-sound apply.
 **
@@ -553,6 +617,9 @@ static void menu_startSoundApply(uint8_t updateGap,
                                  uint8_t showStaleWarning,
                                  fs_stale_warning_source_t staleWarning)
 {
+    const uint16_t load_mask = menu_soundApplyLoadMask;
+
+    menu_soundApplyLoadMask = MENU_SOUND_APPLY_ALL_SCENES;
     /*
      * Kit/Scene/Bank/All/Performance Load has committed retained types into
      * one or more Scenes. Repair directional VOICE masks before any later
@@ -626,7 +693,10 @@ static void menu_startSoundApply(uint8_t updateGap,
     menu_soundApplyClearStorageBusy = clearStorageBusy;
     menu_soundApplyShowStaleWarning = showStaleWarning;
     menu_soundApplyStaleWarning = staleWarning;
-    preset_startDrumsetApply();
+    if (load_mask == MENU_SOUND_APPLY_ALL_SCENES)
+        preset_startDrumsetApply();
+    else
+        preset_startLoadApply(load_mask);
 }
 
 static void menu_finishSoundApply(void)
@@ -1392,7 +1462,8 @@ static const Name valueNames[NUM_NAMES] = {
     {SHORT_BUS_COMP_GR,CAT_SCENE,LONG_BUS_COMP_GR},
     /* S078 per-track run mode: run / Track / RunMode (S078 P4 relabel). */
     {SHORT_PLAY_MODE,CAT_TRACK,LONG_PLAY_MODE},
-    /* S079 step specials: cdn/tim/rol/rtm/rfl on the STEP page. */
+    /* S079 step specials: cdn/tim/rol/rtm/rfl on the STEP page (S099 P3: rfl
+     * shows as fil, Step Fill, on the first step screen). */
     {SHORT_CONDITION,CAT_STEP,LONG_CONDITION},
     {SHORT_MICROTIMING,CAT_STEP,LONG_MICROTIMING},
     {SHORT_ROLL_RATE,CAT_STEP,LONG_ROLL_RATE},
@@ -2283,6 +2354,20 @@ static uint8_t menu_cellIsFoldWave(const menu_cell_t *cell);
 static void menu_instrumentCellLabels(uint8_t slot,
                                       const ParamDescriptor *descriptor,
                                       const char **cat, const char **lng);
+/* S101 P3: the Spc chain's five cells; defined beside the WFd rules. */
+/* The roles menu_spaceRole() returns (the five cells, S101 P3 §6.4). */
+#define MENU_SPC_NONE      0u
+#define MENU_SPC_SPREAD    1u
+#define MENU_SPC_FEEDBACK  2u
+#define MENU_SPC_TIME      3u
+#define MENU_SPC_TONE      4u
+#define MENU_SPC_LEVEL     5u
+#define MENU_SPC_COUNT     6u
+static uint8_t menu_spaceRole(uint8_t slot, const ParamDescriptor *descriptor);
+static uint8_t menu_cellSpaceRole(const menu_cell_t *cell);
+static uint8_t menu_formatSpaceValue3(uint8_t role, uint8_t value, char *out);
+static const char *menu_instrumentShortLabel(uint8_t slot,
+                                             const ParamDescriptor *descriptor);
 
 /* S078 P2 §B STEP overlay helpers. Definitions stay adjacent to the va_*
  * state/logic below; these declarations keep the same forward-reference style
@@ -3336,6 +3421,78 @@ static void va_queueMarkerTransaction(const uint8_t desired_base[4],
 }
 
 /*
+ * Shared 3-character value text (S097 P1 item 5, J).
+ *
+ * What: menu_formatDtype3() renders the dtypes that menu_formatCellValue3(),
+ * va_formatValue3() and menu_formatAutomationValue3() all rendered with the
+ * same code: DTYPE_PM63, DTYPE_NOTE_NAME, DTYPE_MIX_FM (S085 P1: fm / mix /
+ * snc / rng), DTYPE_LFO_POLARITY and a tagged DTYPE_ON_OFF (S088 P0 §2.1 D12:
+ * a non-zero high nibble names the tag table, menu_onoffTagNames(); S089 P2:
+ * the table follows the tag). It returns 1 when it wrote out[0..2] and 0 for
+ * every other dtype, including an untagged on/off: the callers keep their own
+ * rule for that (`value == 1` for cells, `value != 0` for automation).
+ * menu_formatMenuCell3() renders a DTYPE_MENU cell, as the cell and
+ * automation-marker formatters did: a WFd slot's wav cell shows the fold type
+ * (S089 P2), wav follows osc1's type or the modulator list
+ * (menu_formatWaveValue3(), S087 P2), every other menu uses its table.
+ * Why: one copy of each branch. Each caller calls these where its switch
+ * began, after its own special cases, so the text is the same.
+ * Inputs: the full dtype byte (low nibble type, high nibble tag or menu id).
+ */
+static uint8_t __attribute__((noinline))
+menu_formatDtype3(uint8_t dtype, uint8_t value, char *out)
+{
+    switch (dtype & 0x0fu) {
+    case DTYPE_0B127:
+        /* S099 P2: the Effect Depth (dpt) names 0..2, the Juno modes; every
+         * other 0..127 value, and every untagged row, prints its number */
+        if ((uint8_t)(dtype >> 4) == DTYPE_TAG_FX_DEPTH && value < BBD_DPT_VAR) {
+            memcpy(out, fxDepthNames[1u + value], 3);
+            return 1u;
+        }
+        return 0u;
+    case DTYPE_PM63:
+        numtostrps(out, (int8_t)(value - 63));
+        return 1u;
+    case DTYPE_NOTE_NAME:
+        setNoteName(value, out);
+        return 1u;
+    case DTYPE_MIX_FM:
+        menu_getMixFmName(value, out);
+        return 1u;
+    case DTYPE_LFO_POLARITY:
+        menu_getLfoPolarityName(value, out);
+        return 1u;
+    case DTYPE_ON_OFF:
+        if ((uint8_t)(dtype >> 4) != 0u) {
+            const char (*names)[4] = menu_onoffTagNames((uint8_t)(dtype >> 4));
+            const uint8_t idx = (value < (uint8_t)names[0][0])
+                ? (uint8_t)value : 0u;
+            memcpy(out, names[1 + idx], 3);
+            return 1u;
+        }
+        return 0u;
+    default:
+        return 0u;
+    }
+}
+
+static void __attribute__((noinline))
+menu_formatMenuCell3(const menu_cell_t *cell, uint8_t value, char *out)
+{
+    if (menu_cellIsFoldWave(cell)) {
+        memcpy(out, foldTypeNames[1u + ((value < VOICE_FOLD_COUNT)
+                                        ? value : VOICE_FOLD_COUNT - 1u)], 3);
+        return;
+    }
+    if ((uint8_t)(menu_cellDtype(cell) >> 4) == MENU_WAVEFORM) {
+        menu_formatWaveValue3(cell, value, out);
+        return;
+    }
+    getMenuItemNameForValue((uint8_t)(menu_cellDtype(cell) >> 4), value, out);
+}
+
+/*
  * Format one automation value using the cell's dtype vocabulary.
  *
  * Mirrors the dtype switch in menu_formatCellValue3() but accepts an explicit
@@ -3355,6 +3512,10 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value,
      */
     if (cell && cell->kind == MENU_CELL_INSTRUMENT && cell->bit_plus1)
         value = (uint8_t)((value >> (cell->bit_plus1 - 1u)) & 1u);
+
+    /* S101 P3: the Spc spread and feedback texts. */
+    if (menu_formatSpaceValue3(menu_cellSpaceRole(cell), value, out))
+        return;
 
     /* Per-track play mode shows its 0..5 name (S078 §4.1). */
     if (cell && cell->kind == MENU_CELL_STATIC &&
@@ -3383,63 +3544,15 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value,
     if (menu_getS080StaticName(cell, value, out))
         return;
 
+    if (menu_formatDtype3(menu_cellDtype(cell), value, out))
+        return;
+
     switch (dtype) {
-    case DTYPE_PM63:
-        numtostrps(out, (int8_t)(value - 63));
-        break;
-    case DTYPE_MIX_FM:
-        /* S085 P1: fm / mix / snc / rng (menu_getMixFmName()). */
-        menu_getMixFmName(value, out);
-        break;
-    case DTYPE_ON_OFF:
-        /*
-         * S088 P0 §2.1 D12: high-nibble tag on DTYPE_ON_OFF.
-         *
-         * What:       when the descriptor's dtype high nibble is non-zero the
-         *             cell is a tagged on/off sub-type (currently only
-         *             ONOFF_TAG_OSC_RUN = 1) and shows the tag table's name
-         *             (rst/fre/itp). With a zero high nibble the ordinary
-         *             on/off path runs unchanged, bit for bit.
-         * Why:        all 16 DTYPE_MENU ids are taken; the tag reuses the same
-         *             packing pattern on a dtype whose high nibble was free.
-         * Inputs:     the cell's dtype byte and value.
-         * Outputs:    3 characters into out[].
-         * Accessors:  every DTYPE_ON_OFF cell whose descriptor is tagged.
-         * Affiliates: menu_onoffTagNames(), oscRunNames, voiceChainNames,
-         *             ONOFF_TAG_* (MenuText.h).
-         */
-        if ((uint8_t)(menu_cellDtype(cell) >> 4) != 0u) {
-            /* S089 P2: the table follows the tag (run mode or voice chain). */
-            const char (*names)[4] = menu_onoffTagNames(
-                (uint8_t)(menu_cellDtype(cell) >> 4));
-            const uint8_t idx = (value < (uint8_t)names[0][0])
-                ? (uint8_t)value : 0u;
-            memcpy(out, names[1 + idx], 3);
-        } else {
-            memcpy(out, (value == 1u) ? menuText_on : menuText_off, 3);
-        }
-        break;
-    case DTYPE_LFO_POLARITY:
-        menu_getLfoPolarityName(value, out);
+    case DTYPE_ON_OFF:              /* untagged: tagged lists are above */
+        memcpy(out, (value == 1u) ? menuText_on : menuText_off, 3);
         break;
     case DTYPE_MENU:
-        /* S087 P2: wav follows osc1's type or the modulator list
-         * (menu_formatWaveValue3()), as in menu_formatCellValue3(). */
-        /* S089 P2: a WFd slot's wav cell shows the fold type. */
-        if (menu_cellIsFoldWave(cell)) {
-            memcpy(out, foldTypeNames[1u + ((value < VOICE_FOLD_COUNT)
-                                            ? value : VOICE_FOLD_COUNT - 1u)], 3);
-            break;
-        }
-        if ((uint8_t)(menu_cellDtype(cell) >> 4) == MENU_WAVEFORM) {
-            menu_formatWaveValue3(cell, value, out);
-            break;
-        }
-        getMenuItemNameForValue((uint8_t)(menu_cellDtype(cell) >> 4),
-                                value, out);
-        break;
-    case DTYPE_NOTE_NAME:
-        setNoteName(value, out);
+        menu_formatMenuCell3(cell, value, out);
         break;
     case DTYPE_0b1:
         numtostrpu(out, (uint8_t)(value + 1u), ' ');
@@ -4651,6 +4764,27 @@ void menu_enterStepTrackAutomationOverlay(uint8_t voiceNr)
     menu_repaint();
 }
 
+/*
+ * One static-page row (S097 P1 item 1).
+ *
+ * What: the row of a page id and sub-page from menuStaticPages[] (menuPages.h),
+ * or the shared all-zero row (every cell TEXT_EMPTY / PAR_NONE) for a page with
+ * no table block. Why: the former menuPages[NUM_PAGES][NUM_SUB_PAGES] held
+ * all-zero rows for those pages; this returns the same contents.
+ * Inputs: page < NUM_PAGES, subPage < NUM_SUB_PAGES (all callers bound it).
+ * Outputs: pointer to a const row. Affiliates: menuStaticPageSlot[].
+ */
+static const Page menu_emptyPageRow;
+
+static const Page *menu_pageRow(uint8_t page, uint8_t subPage)
+{
+    uint8_t slot = (page < NUM_PAGES) ? menuStaticPageSlot[page] : 0u;
+
+    if (slot == 0u)
+        return &menu_emptyPageRow;
+    return &menuStaticPages[slot - 1u][subPage];
+}
+
 static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position)
 {
     menu_cell_t cell;
@@ -4666,7 +4800,7 @@ static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position)
      * Resolve one absolute menu cell without assuming one global parameter ID
      * namespace.
      *
-     * Static pages still come from menuPages[][] and parameter_values[]. Voice
+     * Static pages still come from menuStaticPages[][] and parameter_values[]. Voice
      * pages now come from the active Scene slot's instrument descriptors: the
      * descriptor supplies text/dtype and descriptor_index supplies the storage
      * cell in SceneData. This keeps old global/Pattern pages stable while
@@ -4766,7 +4900,7 @@ static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position)
 
     if (position >= MENU_STATIC_SUBPAGE_CELLS)
         return cell;
-    page = &menuPages[menu_activePage][subPage];
+    page = menu_pageRow(menu_activePage, subPage);
     cell.text_id = (&page->top1)[position];
     cell.static_param = (&page->bot1)[position];
     if (cell.text_id == TEXT_EMPTY || cell.static_param == PAR_NONE)
@@ -6376,7 +6510,8 @@ static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText)
         return;
     }
 
-    menu_copyPaddedField(valueAsText, descriptor->short_name, 3u);
+    /* S101 P3: an Spc cell's name */
+    menu_copyPaddedField(valueAsText, menu_instrumentShortLabel(slot, descriptor), 3u);
 }
 
 static void menu_displayInstrumentTargetFull(uint16_t target)
@@ -6449,8 +6584,8 @@ static void menu_displayInstrumentTargetFull(uint16_t target)
      */
     {
         /* S089 P2: WFd relabels the transient cells. */
-        const char *cat = descriptor->category;
-        const char *lng = descriptor->long_name;
+        const char *cat = menuLabel_cat(descriptor->cat_id);
+        const char *lng = menuLabel_long(descriptor->long_id);
 
         menu_instrumentCellLabels(slot, descriptor, &cat, &lng);
         menu_copyPaddedField(&editDisplayBuffer[1][0], cat, 8u);
@@ -6589,6 +6724,10 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         return;
     }
 
+    /* S101 P3: the Spc spread and feedback texts. */
+    if (menu_formatSpaceValue3(menu_cellSpaceRole(cell), value, valueAsText))
+        return;
+
     /* Per-track play mode shows its 0..5 name (S078 §4.1). */
     if (cell && cell->kind == MENU_CELL_STATIC &&
         cell->static_param == PAR_TRACK_PLAY_MODE) {
@@ -6660,6 +6799,8 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
     if (cell && cell->kind == MENU_CELL_STATIC &&
         menu_busCompValueText(cell->static_param, value, valueAsText))
         return;
+    if (menu_formatDtype3(menu_cellDtype(cell), value, valueAsText))
+        return;
 
     switch (dtype) {
     case DTYPE_TARGET_SELECTION_VELO:
@@ -6683,52 +6824,12 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
          */
         menu_displayModTargetShort(value, valueAsText);
         break;
-    case DTYPE_PM63:
-        numtostrps(valueAsText, (int8_t)(value - 63));
-        break;
-    case DTYPE_NOTE_NAME:
-        setNoteName(value, valueAsText);
-        break;
-    case DTYPE_MIX_FM:
-        /* S085 P1: fm / mix / snc / rng (menu_getMixFmName()). */
-        menu_getMixFmName(value, valueAsText);
-        break;
-    case DTYPE_ON_OFF:
-        /*
-         * S088 P0 §2.1 D12: tagged on/off sub-type display.
-         * What: high nibble != 0 shows the tag table's name
-         *       (menu_onoffTagNames(): run modes, voice chains or the
-         *       Alkaline type), otherwise
-         *       on/off as before. Same rule as va_formatValue3().
-         */
-        if ((uint8_t)(menu_cellDtype(cell) >> 4) != 0u) {
-            /* S089 P2: the table follows the tag (run mode or voice chain). */
-            const char (*names)[4] = menu_onoffTagNames(
-                (uint8_t)(menu_cellDtype(cell) >> 4));
-            const uint8_t idx = (value < (uint8_t)names[0][0])
-                ? (uint8_t)value : 0u;
-            memcpy(valueAsText, names[1 + idx], 3);
-        } else if (value == 1u) memcpy(valueAsText, menuText_on, 3);
-        else                    memcpy(valueAsText, menuText_off, 3);
-        break;
-    case DTYPE_LFO_POLARITY:
-        menu_getLfoPolarityName(value, valueAsText);
+    case DTYPE_ON_OFF:              /* untagged: tagged lists are above */
+        if (value == 1u) memcpy(valueAsText, menuText_on, 3);
+        else             memcpy(valueAsText, menuText_off, 3);
         break;
     case DTYPE_MENU:
-        /* S087 P2: wav follows osc1's type or the modulator list
-         * (menu_formatWaveValue3()); every other menu uses its table. */
-        /* S089 P2: a WFd slot's wav cell shows the fold type. */
-        if (menu_cellIsFoldWave(cell)) {
-            memcpy(valueAsText, foldTypeNames[1u + ((value < VOICE_FOLD_COUNT)
-                                                    ? value : VOICE_FOLD_COUNT - 1u)], 3);
-            break;
-        }
-        if ((uint8_t)(menu_cellDtype(cell) >> 4) == MENU_WAVEFORM) {
-            menu_formatWaveValue3(cell, value, valueAsText);
-            break;
-        }
-        getMenuItemNameForValue((uint8_t)(menu_cellDtype(cell) >> 4),
-                                value, valueAsText);
+        menu_formatMenuCell3(cell, value, valueAsText);
         break;
     case DTYPE_0b1:
         numtostrpu(valueAsText, (uint8_t)(value + 1u), ' ');
@@ -7027,6 +7128,9 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
         /* S089 P2: a WFd wav cell holds a fold type (0..VOICE_FOLD_COUNT-1). */
         if (menu_cellIsFoldWave(cell))
             n = (uint8_t)VOICE_FOLD_COUNT;
+        /* S101 P3: an Spc wav cell is the spread, 0..127. */
+        if (menu_cellSpaceRole(cell) == MENU_SPC_SPREAD)
+            n = 128u;
         if (n == 0u)
             *value = 0u;
         else if (*value >= n)
@@ -9980,6 +10084,11 @@ static void menu_instrumentLoadStepType(int8_t inc)
     }
 }
 
+/* S099 P2: defined with the Load/Save click bookkeeping below (S097 P3). */
+static void menu_loadSaveDropClick(uint8_t outcome);
+static void menu_loadSaveTraceClick(uint8_t outcome);
+static uint8_t menu_loadSaveOkRowHoldable(void);
+
 static void menu_instrumentSaveRequestSelection(void)
 {
     uint8_t accepted;
@@ -10006,6 +10115,27 @@ static void menu_instrumentSaveRequestSelection(void)
                                 menu_instrumentSaveName);
     if (accepted) {
         menu_beginLoadSaveCommand();
+        menu_loadSaveTraceClick(MENU_LS_CLICK_ACCEPTED);
+    } else {
+        /*
+         * A refused root Instrument Save (S099 P2, the device report: OK
+         * "froze" the Instrument Save page).
+         *
+         * What:       restores the click's edit-mode toggle and holds the
+         *             press for replay (menu_loadSaveRetryOk() calls
+         *             menu_handleLoadSaveMenu() again once storage and
+         *             Preset are idle, up to MENU_LS_OK_ATTEMPTS times), as
+         *             the top-level Load/Save OK rows have done since S097 P3.
+         * Why:        filesystem_requestSaveInstrumentMode() refuses while the
+         *             filesystem is busy (a trace flush, an AutoSave drain, a
+         *             name read). Before this the refusal was silent and the
+         *             toggled flag left the OK row in edit mode, where the
+         *             encoder does nothing: the page looked frozen until a
+         *             mode change, and no save was ever requested.
+         */
+        menu_loadSaveDropClick(MENU_LS_CLICK_REFUSED);
+        if (menu_loadSaveOkRowHoldable())
+            menu_loadSaveOkRetry = MENU_LS_OK_ATTEMPTS;
     }
 }
 
@@ -10274,6 +10404,9 @@ void menu_perfModeSceneButtonPressed(uint8_t scene_index)
 
 static void menu_perfSceneChangeExecute(uint8_t scene_index, uint8_t restart)
 {
+    uint8_t keep;
+    uint8_t effect_same;
+
     /* S082 P3 D52: only an available Scene; a direct, deferred or queued
      * change to a Scene the load has not finished is dropped (including one
      * armed before a direct load). */
@@ -10281,6 +10414,23 @@ static void menu_perfSceneChangeExecute(uint8_t scene_index, uint8_t restart)
         !bank_sceneAvailable(scene_index)) {
         return;
     }
+    /*
+     * Decide per track what the switch keeps, then carry the kept slots'
+     * derived state (S098 P1; user, Q2).
+     *
+     * What: preset_sceneSwitchKeepMask() compares each track and its voice
+     * slot in the Scene it plays and in scene_index, and the Effect.
+     * preset_prepareSceneSwitch() copies the kept slots' Morph image into
+     * scene_index and retargets the Morph worker. Both run before any switch
+     * state moves, because they read the outgoing Scenes.
+     * Why: target T1. An instant switch to an identical Scene is inaudible,
+     * whenever it happens. A partly identical Scene changes only what
+     * differs. One procedure serves PERF, MIDI PC, deferred, queued and
+     * chain-fired changes, which all arrive here.
+     * Affiliates: seq_selectActivePattern(), preset_startSceneSwitchApply().
+     */
+    keep = preset_sceneSwitchKeepMask(scene_index, &effect_same);
+    preset_prepareSceneSwitch(scene_index, keep);
     scene_selectActive(scene_index);
     bank_selectActiveSceneForEditMask(scene_index);
     /*
@@ -10292,7 +10442,7 @@ static void menu_perfSceneChangeExecute(uint8_t scene_index, uint8_t restart)
      * scene_mask_voice_edit and is not consulted by PatternData.
      */
     menu_setShownPattern(scene_index);
-    seq_selectActivePattern(scene_index);
+    seq_selectActivePattern(scene_index, keep, effect_same);
     /*
      * S080 F9/G12, P2: an executed switch cancels any pending direct change
      * and any chain fire, but never a user-queued change - only a transport
@@ -10310,10 +10460,19 @@ static void menu_perfSceneChangeExecute(uint8_t scene_index, uint8_t restart)
      * track to the running master clock. Inputs: restart. Outputs:
      * seq_resetToPatternStart(). Affiliates: menu_perfModeSceneButtonPressed(),
      * menu_serviceDeferredSceneChange(), seq_loopRebaseToStart().
+     * S098 P1 (Q1): with pcr on, a switch to an identical Scene still
+     * restarts; the restart is a musical action the user chose.
      */
     if (restart)
         seq_resetToPatternStart();
-    preset_startDrumsetApply();
+    /*
+     * The voice half of the switch (S098 P1): only the changed slots go
+     * through the Scene worker; kept voices continue. With `restart` (pcr,
+     * Q1) the restart above already ran; it moves every cursor but applies
+     * nothing to the kept voices.
+     * Affiliates: preset_startSceneSwitchApply().
+     */
+    preset_startSceneSwitchApply(keep, effect_same);
     /*
      * PERF Scene LEDs only in PERF mode (S083 C-5).
      * What: the SEQ row shows PERF Scene state only while PERF is the mode;
@@ -10454,18 +10613,24 @@ void menu_serviceDeferredSceneChange(void)
 }
 
 /*
- * Owner of both fast-blink slots (S080 P2 Defect 10; S082 P3 W1).
+ * Owner of both fast-blink slots (S080 P2 Defect 10; S082 P3 W1; S098 P2).
  *
- * What: slot QUEUED_SCENE fast-blinks the queued Scene's SEQ LED in PERF;
- * slot BANK_LOAD fast-blinks the Load/Save mode LED (LED_MODE4) while an
- * unlocked background Bank load runs and the panel is not in Load/Save mode.
+ * What: slot QUEUED_SCENE fast-blinks the queued Scene's SEQ LED in PERF.
+ * Slot BANK_LOAD fast-blinks the Load/Save mode LED (LED_MODE4):
+ *  - whenever Scene 17 exists, that is while playback runs from it, in every
+ *    mode, transport running or stopped (S098 T3);
+ *  - while an unlocked background Bank load runs and the panel is not in
+ *    Load/Save mode (S082 P3).
  * Both clear when their condition ends.
  * Why: re-deriving from state on every tick covers every way a queue, a mode
- * change or a load can start or end without call sites in each path; in
- * Load/Save mode the frozen screen shows the load, so the mode LED stays as
- * led_setMode2() set it.
+ * change, a load or a Scene 17 lifetime can start or end, without call sites
+ * in each path. Scene 17 suspends AutoSave (D11) and has no Scene number or
+ * SEQ LED. The flashing mode LED is the one reminder that playback is on the
+ * temporary Scene until the user changes Scene (user, 2026-11-18: "should be
+ * enough to alert the user"). The fast layer sits above the base and blink
+ * states, so led_setMode2() repaints do not hide it.
  * Inputs: seq_queuedSceneTarget(), buttonHandler_getMode(),
- * preset_backgroundBankLoadUnlocked().
+ * preset_backgroundBankLoadUnlocked(), scene_backgroundExists().
  * Outputs: led_setFastBlinkSlot() on change only.
  * Accessors: menu_serviceDeferredSceneChange() (every buttonHandler_tick()).
  * Affiliates: LED_LAYER_FAST, LED_FAST_SLOT_*.
@@ -10481,7 +10646,8 @@ static void menu_syncQueuedSceneLed(void)
         want = (uint8_t)(LED_SEQ1 + target);
     if (led_getFastBlinkSlot(LED_FAST_SLOT_QUEUED_SCENE) != want)
         led_setFastBlinkSlot(LED_FAST_SLOT_QUEUED_SCENE, want);
-    if (preset_backgroundBankLoadUnlocked() && mode != SELECT_MODE_LOAD_SAVE)
+    if (scene_backgroundExists() ||
+        (preset_backgroundBankLoadUnlocked() && mode != SELECT_MODE_LOAD_SAVE))
         want_load = LED_MODE4;
     if (led_getFastBlinkSlot(LED_FAST_SLOT_BANK_LOAD) != want_load)
         led_setFastBlinkSlot(LED_FAST_SLOT_BANK_LOAD, want_load);
@@ -12358,7 +12524,8 @@ static void menu_formatUserShortName(char prefix, uint8_t index, char *buf)
  * What:       the 8-character name and the 3-character code of the entry a
  *             wave value selects:
  *             - osc1 under wav: the stock name, no code;
- *             - osc1 under pwm: Sin/Tri/Saw/Rec, without a compact code;
+ *             - osc1 under pwm: Tri/Saw/Rec (S099 P1 §15.10), without a
+ *               compact code;
  *             - osc1 under smp/slp/wtb: the item's catalogue name and
  *               sNN/lNN/wNN; both blank when the type has no item at that
  *               value;
@@ -12398,25 +12565,28 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
     memset(nameDst, ' ', SAMPLE_DISPLAY_NAME_LEN);
     memset(codeDst, ' ', 3u);
     /*
-     * S093 P8: an Alkaline slot's osc1 under wav lists Saw, Sqr, Tri.
+     * S093 P8: an Alkaline slot's osc1 under wav lists Saw, Sqr, Tri; S099
+     * P1: under pwm Saw, Sqr, Tri, R-S (S099 P2: REx dropped).
      *
-     * What:       value 0 -> "Saw", 1 -> "Sqr", 2 -> "Tri" (S094 P4)
-     *             (alkWaveNames), copied to the name and compact-code fields;
-     *             any other value names nothing (blank), as a Drum value past
-     *             its list.
+     * What:       value -> the list's name (alkWaveNames under wav,
+     *             alkPwmWaveNames under pwm), copied to the name and
+     *             compact-code fields; any other value names nothing (blank),
+     *             as a Drum value past its list.
      * Why:        the stock list (waveformNames: Sin, Tri, ...) is not the
-     *             Alkaline's; the voice plays Saw for 0, Sqr for 1 and Tri
-     *             for 2 (alk_renderWav()). Under wtb the Alkaline cell takes the
-     *             shared branch below (wNN, the table name).
+     *             Alkaline's; the voice plays Saw for 0, Sqr for 1, Tri for 2
+     *             and (pwm) R-S for 3. Under wtb the Alkaline
+     *             cell takes the shared branch below (wNN, the table name).
      * Accessors:  menu_formatWaveValue3() (compact cells, overlays, the voice
      *             automation display), the single-parameter painter.
      */
-    /* S094 P4: the Alkaline lists Saw Sqr Tri under both wav and pwm */
     if (isOsc1 && (type == OSC_TYPE_WAV || type == OSC_TYPE_PWM) &&
-        instrumentManager_runtimeType(cell->slot) == INSTRUMENT_TYPE_ALK) {
-        if (value < (uint8_t)alkWaveNames[0][0]) {
-            memcpy(nameDst, alkWaveNames[value + 1u], 3u);
-            memcpy(codeDst, alkWaveNames[value + 1u], 3u);
+        instrumentManager_runtimeEngine(cell->slot) == INSTRUMENT_TYPE_ALK) {
+        const char (*const names)[4] = (type == OSC_TYPE_PWM) ? alkPwmWaveNames
+                                                              : alkWaveNames;
+
+        if (value < (uint8_t)names[0][0]) {
+            memcpy(nameDst, names[value + 1u], 3u);
+            memcpy(codeDst, names[value + 1u], 3u);
         }
         return;
     }
@@ -12437,12 +12607,13 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
     }
     /*
      * S095 P2 (C-D20): a Colloid slot's osc1 under wav lists Saw, Rec, Tri,
-     * Sin (colWaveNames). S095 P3 F2: under pwm it takes the shared pwm
-     * branch below (Sin, Tri, Saw, Rec: the platform's list and order); under
-     * wtb the shared catalogue branch (wNN, the table name).
+     * Sin (colWaveNames); S099 P1: under pwm its own list Tri, Saw, Rec,
+     * R-S (colPwmWaveNames, the branch below; §15.10: no Sin; S099 P2: no
+     * REx); under wtb the shared
+     * catalogue branch (wNN, the table name).
      */
     if (isOsc1 && type == OSC_TYPE_WAV &&
-        instrumentManager_runtimeType(cell->slot) == INSTRUMENT_TYPE_COL) {
+        instrumentManager_runtimeEngine(cell->slot) == INSTRUMENT_TYPE_COL) {
         if (value < COL_WAVE_COUNT) {
             memcpy(nameDst, colWaveNames[value + 1u], 3u);
             memcpy(codeDst, colWaveNames[value + 1u], 3u);
@@ -12450,18 +12621,37 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
         return;
     }
     /*
-     * S094 P1 S3: osc1 under pwm names Sin, Tri, Saw, Rec.
+     * S099 P1: a Colloid slot's osc1 under pwm (Tri Saw Rec R-S; §15.10:
+     * Sin dropped; S099 P2: REx dropped).
      *
-     * What:       value 0..OSC_PWM_WAVE_COUNT - 1 maps to a stock name; an
+     * What:       value 0..COL_PWM_WAVE_COUNT - 1 -> colPwmWaveNames; any
+     *             other value names nothing. No compact code (the shared pwm
+     *             branch has none either).
+     * Why:        the shared branch below names the drum engines' four from
+     *             waveformNames, which ends at Noi; the drum family has no
+     *             chopped waves (plan P-F, deferred).
+     */
+    if (isOsc1 && type == OSC_TYPE_PWM &&
+        instrumentManager_runtimeEngine(cell->slot) == INSTRUMENT_TYPE_COL) {
+        if (value < COL_PWM_WAVE_COUNT)
+            memcpy(nameDst, colPwmWaveNames[value + 1u], 3u);
+        return;
+    }
+    /*
+     * S094 P1 S3: osc1 under pwm names Tri, Saw, Rec.
+     *
+     * What:       value 0..OSC_PWM_WAVE_COUNT - 1 maps to the stock name
+     *             TRI + value (S099 P1 §15.10: pwm Sin dropped, the pwm byte
+     *             is the pwm list's own index, OSC_PWM_TRI 0); an
      *             out-of-range value remains blank. PWM has no compact code.
-     * Why:        under pwm the wav byte selects one of four stock waves with
+     * Why:        under pwm the wav byte selects one of three stock waves with
      *             a pulse-width form. The catalogue branch below would read
      *             the same value as a sample or wavetable index.
      * Accessors:  menu_formatWaveValue3() and the single-parameter painter.
      */
     if (isOsc1 && type == OSC_TYPE_PWM) {
         if (value < OSC_PWM_WAVE_COUNT)
-            memcpy(nameDst, waveformNames[value + 1u], 3u);
+            memcpy(nameDst, waveformNames[TRI + value + 1u], 3u);
         return;
     }
     if (isOsc1 && type != OSC_TYPE_WAV) {
@@ -12564,6 +12754,89 @@ static uint8_t menu_cellIsFoldWave(const menu_cell_t *cell)
 }
 
 /*
+ * The Spc chain's five cells (S101 P3 §6.4, decided).
+ *
+ * What:       menu_spaceRole() names the role a descriptor plays on a slot
+ *             whose chain is Spc (VOICE_CHAIN_SPACE): transient_wave = spread,
+ *             transient_vol = feedback, transient_freq = time,
+ *             instrument_decimation = tone (`spt`), instrument_drive = level
+ *             (`spc`); MENU_SPC_NONE for every other row, chain or type
+ *             (instrumentManager_slotVoiceChain() is T+D for non-drum types).
+ *             menu_cellSpaceRole() is the same for a cell.
+ *             menu_formatSpaceValue3() writes the value text of the two cells
+ *             whose display changes: spread as a number 0..127 (the row's
+ *             dtype is the transient list), feedback with the one bipolar law
+ *             (value - 63, as DTYPE_PM63); 0 for the others (their numeric
+ *             display is already right).
+ *             menu_instrumentShortLabel() is the 3-character cell name: the
+ *             Spc name for those five, the descriptor's own otherwise.
+ * Why:        the stored rows and their bytes are unchanged in every chain
+ *             (switching back restores the transient, the drive and the
+ *             SRR); only the labels and two value texts follow the chain, as
+ *             under WFd. The mix-page cells read spt and spc, never empty
+ *             (your decision).
+ * Accessors:  the page header, the cell and automation value painters, the
+ *             single-parameter view, the value clamp and the automation max.
+ */
+/* MENU_SPC_* roles: defined with the forward declarations above. */
+
+static const char menu_spcShort[MENU_SPC_COUNT][4] = {
+    "", "spr", "fbk", "tim", "spt", "spc",
+};
+static const char *const menu_spcLong[MENU_SPC_COUNT] = {
+    "", "Spread", "Feedback", "Time", "Tone", "Level",
+};
+
+static uint8_t menu_spaceRole(uint8_t slot, const ParamDescriptor *descriptor)
+{
+    if (!descriptor ||
+        instrumentManager_slotVoiceChain(slot) != VOICE_CHAIN_SPACE)
+        return MENU_SPC_NONE;
+    if (strcmp(descriptor->file_key, "transient_wave") == 0)
+        return MENU_SPC_SPREAD;
+    if (strcmp(descriptor->file_key, "transient_vol") == 0)
+        return MENU_SPC_FEEDBACK;
+    if (strcmp(descriptor->file_key, "transient_freq") == 0)
+        return MENU_SPC_TIME;
+    if (strcmp(descriptor->file_key, "instrument_decimation") == 0)
+        return MENU_SPC_TONE;
+    if (strcmp(descriptor->file_key, "instrument_drive") == 0)
+        return MENU_SPC_LEVEL;
+    return MENU_SPC_NONE;
+}
+
+static uint8_t menu_cellSpaceRole(const menu_cell_t *cell)
+{
+    if (!cell || cell->kind != MENU_CELL_INSTRUMENT || !cell->descriptor)
+        return MENU_SPC_NONE;
+    return menu_spaceRole(cell->slot, cell->descriptor);
+}
+
+static uint8_t menu_formatSpaceValue3(uint8_t role, uint8_t value, char *out)
+{
+    switch (role) {
+    case MENU_SPC_SPREAD:
+        numtostrpu(out, (uint8_t)((value > 127u) ? 127u : value), ' ');
+        return 1u;
+    case MENU_SPC_FEEDBACK:
+        numtostrps(out, (int8_t)(((value > 127u) ? 127u : value) - 63));
+        return 1u;
+    default:
+        return 0u;
+    }
+}
+
+static const char *menu_instrumentShortLabel(uint8_t slot,
+                                             const ParamDescriptor *descriptor)
+{
+    const uint8_t role = menu_spaceRole(slot, descriptor);
+
+    if (role != MENU_SPC_NONE)
+        return menu_spcShort[role];
+    return descriptor ? menuLabel_short(descriptor->short_id) : "";
+}
+
+/*
  * Category and long name of an instrument cell, by chain (S089 P2).
  *
  * What:       the descriptor's category/long name, except for the three
@@ -12592,8 +12865,18 @@ static void menu_instrumentCellLabels(uint8_t slot,
         "Ratio",
     };
 
-    *cat = descriptor->category;
-    *lng = descriptor->long_name;
+    *cat = menuLabel_cat(descriptor->cat_id);
+    *lng = menuLabel_long(descriptor->long_id);
+    /* S101 P3: under Spc the five space cells read "Spatial" and their role. */
+    {
+        const uint8_t role = menu_spaceRole(slot, descriptor);
+
+        if (role != MENU_SPC_NONE) {
+            *cat = "Spatial";
+            *lng = menu_spcLong[role];
+            return;
+        }
+    }
     if (instrumentManager_slotVoiceChain(slot) != VOICE_CHAIN_WAVEFOLDER)
         return;
     if (strcmp(descriptor->file_key, "transient_wave") == 0) {
@@ -12640,8 +12923,9 @@ static void menu_formatTransientName(uint8_t value, char *nameDst)
  * What:       returns the 3-character name table for a dtype high-nibble tag:
  *             ONOFF_TAG_VOICE_CHAIN -> voiceChainNames (T+D, WFd);
  *             ONOFF_TAG_ALK_TYPE -> alkTypeNames (wav, wtb; S093 P8); every
- *             other non-zero tag -> oscRunNames (rst, fre, itp), exactly as
- *             before.
+ *             ONOFF_TAG_COL_* -> the Colloid's lists (S095 P2/P3, S096 P3);
+ *             ONOFF_TAG_TKT_LAYERS -> tktLayerNames; every other non-zero
+ *             tag -> oscRunNames (rst, fre, itp), exactly as before.
  *             Entry [0][0] is the count; names start at [1].
  * Why:        one helper keeps display, clamp, automation max and the
  *             step-edit line in agreement for every tag. Its six callers in
@@ -12661,7 +12945,9 @@ static const char (*menu_onoffTagNames(uint8_t tag))[4]
     /* S095 P2: the Colloid's selectors (MenuText.h ONOFF_TAG_COL_*) */
     case ONOFF_TAG_COL_ROUTE:      return colRouteNames;      /* S095 P3 F9 */
     case ONOFF_TAG_COL_FILT_TYPE:  return colFiltTypeNames;
+    case ONOFF_TAG_COL_TYPE:       return colTypeNames;      /* S096 P3 */
     case ONOFF_TAG_TKT_LAYERS:     return tktLayerNames;      /* S096 P1 */
+    case ONOFF_TAG_FX_TYPE:        return fxTypeNames;        /* S099 P1/P2 */
     default:                    return oscRunNames;
     }
 }
@@ -12671,8 +12957,9 @@ static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *bu
     const char *p = menuText_dash;
     switch (menuId) {
     case MENU_TRANS:
-        /* S087 P3: past the built-in names, the user one-shots as sNN
-         * (menu_formatTransientName() gives the 8-character name). */
+        /* S087 P3: past the named modes (Snp, Ofs), the installed one-shots
+         * as sNN (menu_formatTransientName() gives the 8-character name;
+         * S101: the former built-in clicks are among them, LXR*.wav). */
         if (curParmVal < (uint8_t)transientNames[0][0]) {
             p = transientNames[curParmVal+1]; break;
         }
@@ -12800,10 +13087,11 @@ _Static_assert(sizeof(mixFmNames) / sizeof(mixFmNames[0]) == 5u,
 /* S086 P2: the wav list (stock waves) ends where the user samples start. */
 _Static_assert((sizeof(waveformNames) / sizeof(waveformNames[0])) - 1u == OSC_SAMPLE_START,
                "waveformNames must list every waveform below OSC_SAMPLE_START");
-/* S087 P3: the user one-shots follow the last built-in transient name. */
+/* S087 P3: the user one-shots follow the last named transient entry
+ * (S101: Snp and Ofs only; the built-in clicks are card samples). */
 _Static_assert((sizeof(transientNames) / sizeof(transientNames[0])) - 1u ==
                TRANSIENT_USER_FIRST,
-               "transientNames must list Snp, Ofs and every built-in click");
+               "transientNames must list Snp, Ofs and nothing else");
 /* S089 P2: the chain and fold name tables must list every stored value. */
 _Static_assert((sizeof(voiceChainNames) / sizeof(voiceChainNames[0])) - 1u ==
                    VOICE_CHAIN_COUNT,
@@ -12813,6 +13101,11 @@ _Static_assert((sizeof(voiceChainNames) / sizeof(voiceChainNames[0])) - 1u ==
 _Static_assert((sizeof(alkWaveNames) / sizeof(alkWaveNames[0])) - 1u ==
                    ALK_WAVE_COUNT,
                "alkWaveNames must list Saw, Sqr and Tri");
+/* S099 P1: the Alkaline pwm list names every pwm value: Saw, Sqr, Tri, R-S
+ * (S099 P2: REx dropped; ALK_PWM_WAVE_COUNT, AlkalineVoice.h). */
+_Static_assert((sizeof(alkPwmWaveNames) / sizeof(alkPwmWaveNames[0])) - 1u ==
+                   ALK_PWM_WAVE_COUNT,
+               "alkPwmWaveNames must list Saw, Sqr, Tri and R-S");
 /* S093 P8 / S094 P1: the Alkaline typ list is wav, wtb, pwm (ALK_TYP_COUNT,
  * AlkalineVoice.h) */
 _Static_assert((sizeof(alkTypeNames) / sizeof(alkTypeNames[0])) - 1u == 3u,
@@ -12821,13 +13114,26 @@ _Static_assert((sizeof(alkTypeNames) / sizeof(alkTypeNames[0])) - 1u == 3u,
  * enumerations (ColloidVoice.h, ColloidTables.h). */
 _Static_assert((sizeof(colWaveNames) / sizeof(colWaveNames[0])) - 1u == COL_WAVE_COUNT,
                "colWaveNames must list Saw, Rec, Tri and Sin");
+/* S099 P1: the Colloid's pwm list names every pwm value (COL_PWM_WAVE_COUNT). */
+_Static_assert((sizeof(colPwmWaveNames) / sizeof(colPwmWaveNames[0])) - 1u ==
+                   COL_PWM_WAVE_COUNT,
+               "colPwmWaveNames must list Tri, Saw, Rec and R-S");
 _Static_assert((sizeof(colRouteNames) / sizeof(colRouteNames[0])) - 1u == COL_RTE_COUNT,
                "colRouteNames must list str and every filter type (S095 P3)");
 _Static_assert((sizeof(colFiltTypeNames) / sizeof(colFiltTypeNames[0])) - 1u == COL_FT_COUNT,
                "colFiltTypeNames must list every filter type");
+/* S096 P3: the Colloid's own typ list is wav, wtb, pwm, wts (COL_TYP_COUNT). */
+_Static_assert((sizeof(colTypeNames) / sizeof(colTypeNames[0])) - 1u == COL_TYP_COUNT,
+               "colTypeNames must list wav, wtb, pwm and wts");
 /* S096 P1: the layer-switch names list every 4-bit mask (TetraktVoice.h). */
 _Static_assert((sizeof(tktLayerNames) / sizeof(tktLayerNames[0])) - 1u == TKT_LAYER_MASK_COUNT,
                "tktLayerNames must list the 16 layer sets");
+/* S099 P1: the chorus lists name every stored value (BbdChorus.h). */
+_Static_assert((sizeof(fxTypeNames) / sizeof(fxTypeNames[0])) - 1u == ADV_FX_COUNT,
+               "fxTypeNames must list off and chr (ADV_FX_*)");
+/* S099 P2: dpt names its first three values, the Juno modes (BBD_DPT_*). */
+_Static_assert((sizeof(fxDepthNames) / sizeof(fxDepthNames[0])) - 1u == BBD_DPT_VAR,
+               "fxDepthNames must name dpt 0 .. BBD_DPT_VAR - 1 (I II 1+2)");
 _Static_assert((sizeof(foldTypeNames) / sizeof(foldTypeNames[0])) - 1u ==
                    VOICE_FOLD_COUNT &&
                (sizeof(foldTypeLongNames) / sizeof(foldTypeLongNames[0])) - 1u ==
@@ -13397,7 +13703,7 @@ static uint8_t checkScrollSign(uint8_t activePage, uint8_t activeParameter)
             return '^';
         if (is2ndPage) {
             if ((activePage < NUM_SUB_PAGES-1) &&
-                (menuPages[MENU_MIDI_PAGE][activePage+1].top1 != TEXT_EMPTY))
+                (menu_pageRow(MENU_MIDI_PAGE, activePage + 1)->top1 != TEXT_EMPTY))
                 return '*';
             else
                 return '<';
@@ -14243,6 +14549,8 @@ static void menu_formatAutomationValue3(const ParamDescriptor *descriptor,
         numtostrpu(buf, value, ' ');
         return;
     }
+    if (menu_formatDtype3(descriptor->dtype, value, buf))
+        return;
     dtype_lo = (uint8_t)(descriptor->dtype & 0x0fu);
     switch (dtype_lo) {
     case DTYPE_MENU: {
@@ -14255,31 +14563,8 @@ static void menu_formatAutomationValue3(const ParamDescriptor *descriptor,
             numtostrpu(buf, value, ' ');
         return;
     }
-    case DTYPE_ON_OFF:
-        /* S088 P0 §2.1 D12: tagged on/off automation display. */
-        if ((uint8_t)(descriptor->dtype >> 4) != 0u) {
-            /* S089 P2: the table follows the tag (run mode or voice chain). */
-            const char (*names)[4] = menu_onoffTagNames(
-                (uint8_t)(descriptor->dtype >> 4));
-            const uint8_t idx = (value < (uint8_t)names[0][0])
-                ? value : 0u;
-            memcpy(buf, names[1 + idx], 3);
-        } else {
-            memcpy(buf, value ? menuText_on : menuText_off, 3);
-        }
-        return;
-    case DTYPE_MIX_FM:
-        /* S085 P1: fm / mix / snc / rng (menu_getMixFmName()). */
-        menu_getMixFmName(value, buf);
-        return;
-    case DTYPE_LFO_POLARITY:
-        menu_getLfoPolarityName(value, buf);
-        return;
-    case DTYPE_PM63:
-        numtostrps(buf, (int8_t)(value - 63));
-        return;
-    case DTYPE_NOTE_NAME:
-        setNoteName(value, buf);
+    case DTYPE_ON_OFF:              /* untagged: tagged lists are above */
+        memcpy(buf, value ? menuText_on : menuText_off, 3);
         return;
     default:
         numtostrpu(buf, value, ' ');
@@ -14323,6 +14608,11 @@ static void menu_formatVoiceAutomationValue3(uint16_t target,
         menu_formatWaveValue3(&cell, value, buf);
         return;
     }
+    /* S101 P3: an Spc slot's spread and feedback automation texts. */
+    if (instrumentParam_isVoiceParameter(target) &&
+        menu_formatSpaceValue3(menu_spaceRole(instrumentParam_slot(target),
+                                              descriptor), value, buf))
+        return;
     /* S089 P2: a WFd slot's automated wav value names its fold type. */
     if (descriptor && instrumentParam_isVoiceParameter(target) &&
         strcmp(descriptor->file_key, "transient_wave") == 0 &&
@@ -14908,6 +15198,10 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
             instrumentManager_slotVoiceChain(instrumentParam_slot(vt)) ==
                 VOICE_CHAIN_WAVEFOLDER)
             max_val = (uint8_t)(VOICE_FOLD_COUNT - 1u);
+        /* S101 P3: under Spc the wav byte is the spread, 0..127. */
+        if (desc && instrumentParam_isVoiceParameter(vt) &&
+            menu_spaceRole(instrumentParam_slot(vt), desc) == MENU_SPC_SPREAD)
+            max_val = 127u;
         if (sceneModTarget_isSceneTarget(vt)) {
             const scene_mod_target_descriptor_t *scene_desc =
                 sceneModTarget_descriptor(vt);
@@ -15109,8 +15403,8 @@ static void menu_repaintStepAutomation(void)
                     : 0;
                 if (descriptor) {
                     /* S089 P2: WFd relabels the transient cells. */
-                    const char *cat = descriptor->category;
-                    const char *lng = descriptor->long_name;
+                    const char *cat = menuLabel_cat(descriptor->cat_id);
+                    const char *lng = menuLabel_long(descriptor->long_id);
                     uint8_t i = 0u;
                     uint8_t j = 0u;
 
@@ -15249,9 +15543,9 @@ static void menu_repaintStepAutomation(void)
                 descriptor = instrumentManager_descriptor(
                     instrument->type, instrumentParam_local(target));
             numtostru(&editDisplayBuffer[1][5], (uint8_t)(slot + 1u));
-            if (descriptor)
+            if (descriptor)   /* S101 P3: an Spc cell's name */
                 menu_copyPaddedField(&editDisplayBuffer[1][9],
-                                     descriptor->short_name, 3u);
+                                     menu_instrumentShortLabel(slot, descriptor), 3u);
             else
                 menu_copyPaddedField(&editDisplayBuffer[1][9], "inv", 3u);
         } else if (menu_stepAutomationIsEffect(target)) {
@@ -15262,7 +15556,7 @@ static void menu_repaintStepAutomation(void)
             memcpy(&editDisplayBuffer[1][5], "fx ", 3u);
             menu_copyPaddedField(&editDisplayBuffer[1][9],
                                  effect_descriptor
-                                     ? effect_descriptor->base.short_name
+                                     ? menuLabel_short(effect_descriptor->base.short_id)
                                      : "inv", 3u);
         } else if (menu_stepAutoCategory < 6u) {
             numtostru(&editDisplayBuffer[1][5],
@@ -15402,8 +15696,8 @@ static void menu_repaintGeneric(void)
                        cell.kind == MENU_CELL_KIT_SETTING ||
                        cell.kind == MENU_CELL_EFFECT) {
                 /* S089 P2: WFd relabels the transient cells. */
-                const char *cat = cell.descriptor->category;
-                const char *lng = cell.descriptor->long_name;
+                const char *cat = menuLabel_cat(cell.descriptor->cat_id);
+                const char *lng = menuLabel_long(cell.descriptor->long_id);
 
                 if (cell.kind == MENU_CELL_INSTRUMENT)
                     menu_instrumentCellLabels(cell.slot, cell.descriptor,
@@ -15428,6 +15722,9 @@ static void menu_repaintGeneric(void)
             } else if (menu_getMidiStaticName(&cell, value,
                                        &editDisplayBuffer[1][13])) {
                 /* S083 MIDI names: off / glb / on / channel / note. */
+            } else if (menu_formatSpaceValue3(menu_cellSpaceRole(&cell), value,
+                                              &editDisplayBuffer[1][13])) {
+                /* S101 P3: the Spc spread (number) and feedback (bipolar). */
             } else switch (dtype) {
             case DTYPE_TARGET_SELECTION_VELO:
             case DTYPE_TARGET_SELECTION_LFO:
@@ -15521,6 +15818,10 @@ static void menu_repaintGeneric(void)
                 /* S080 E6/F10: overlay/scene-global static-param names. */
                 if (menu_getS080StaticName(&cell, value,
                                            &editDisplayBuffer[1][13]))
+                    break;
+                /* S099 P2: the Effect Depth's Juno-mode names (0..2) */
+                if (menu_formatDtype3(menu_cellDtype(&cell), (uint8_t)value,
+                                      &editDisplayBuffer[1][13]))
                     break;
                 /* Per-track play mode shows its 0..5 name (S078 §4.1). */
                 if (cell.kind == MENU_CELL_STATIC &&
@@ -15619,8 +15920,11 @@ static void menu_repaintGeneric(void)
                                       &editDisplayBuffer[0][4u * i]);
             } else if (cell.kind == MENU_CELL_INSTRUMENT ||
                        cell.kind == MENU_CELL_KIT_SETTING) {
+                /* S101 P3: the Spc cells' names (instrument cells only). */
                 menu_copyPaddedField(&editDisplayBuffer[0][4u * i],
-                                     cell.descriptor->short_name, 3u);
+                                     (cell.kind == MENU_CELL_INSTRUMENT)
+                                         ? menu_instrumentShortLabel(cell.slot, cell.descriptor)
+                                         : menuLabel_short(cell.descriptor->short_id), 3u);
                 /* S096 P1 SD2: a bit cell is named on + its layer: onA .. onD. */
                 if (cell.kind == MENU_CELL_INSTRUMENT && cell.bit_plus1) {
                     editDisplayBuffer[0][4u * i]      = 'o';
@@ -16191,12 +16495,111 @@ static void menu_paintTypeStepWhileBusy(void)
 ** to Kit in the promoted type cycle and reuses the same numbered Kit browser
 ** while dispatching to the Morph Save/Load projection.
 ** ----------------------------------------------------------------------- */
+/*
+ * Load/Save OK click bookkeeping (S097 P3).
+ *
+ * What: menu_parseEncoder() toggles editModeActive for every click before it
+ * calls menu_handleLoadSaveMenu(). When this handler then drops the click
+ * (command still running, name not read yet, Bank copy held) or the requested
+ * Load/Save is refused (the filesystem is busy, for example with a name or
+ * index read or a trace flush), menu_loadSaveDropClick() toggles the flag back,
+ * so the next OK acts. Before S097 P3 the flag stayed flipped: the OK row sat
+ * in "edit mode", where the encoder does nothing (seen as a freeze until a
+ * mode change), and the next OK only toggled it back, so a Load or Save took
+ * two or three presses. In DEV builds each Load/Save-page click outcome is
+ * traced (stage 'k').
+ * Inputs: outcome (MENU_LS_CLICK_*). Outputs: editModeActive restored for
+ * every outcome except ACCEPTED and EDIT.
+ */
+/* MENU_LS_CLICK_*: defined with MENU_LS_OK_ATTEMPTS (S099 P2 moved them up
+ * for the nested Instrument Save refusal path). */
+
+static void menu_loadSaveTraceClick(uint8_t outcome)
+{
+#if DEV_MODE_LOGGING
+    autosaveTrace_record(AUTOSAVE_TRACE_STAGE_LOADSAVE_CLICK, outcome,
+                         (uint32_t)menu_activePage |
+                         ((uint32_t)menu_saveOptions.what << 8u) |
+                         ((uint32_t)menu_saveOptions.state << 16u) |
+                         ((uint32_t)filesystem_status() << 24u));
+#else
+    (void)outcome;
+#endif
+}
+
+static void menu_loadSaveDropClick(uint8_t outcome)
+{
+    editModeActive = (uint8_t)(1u - editModeActive);
+    menu_loadSaveTraceClick(outcome);
+}
+
+/* Nonzero while the cursor is on a Load/Save OK row that a held press may
+ * replay (numbered and test types; not Glo/Samples, not while a command
+ * runs). Nested Instrument Load is excluded; nested Instrument Save is
+ * included since S099 P2 (its OK posts one request, as the top-level rows'). */
+static uint8_t menu_loadSaveOkRowHoldable(void)
+{
+    return (uint8_t)(
+        (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
+        menu_saveOptions.state == SAVE_STATE_OK &&
+        menu_saveOptions.what < SAVE_TYPE_GLO &&
+        (!menu_instrumentLoadActive ||
+         (menu_instrumentSaveMode && menu_activePage == SAVE_PAGE)) &&
+        !menu_loadSaveCommandActive);
+}
+
+/* Hold an OK press the storage-busy input gate would drop. */
+static void menu_loadSaveHoldOk(void)
+{
+    if (!menu_loadSaveOkRowHoldable())
+        return;
+    menu_loadSaveOkRetry = MENU_LS_OK_ATTEMPTS;
+    menu_loadSaveTraceClick(MENU_LS_CLICK_HELD);
+}
+
+/*
+ * Replay a held OK press once storage and Preset are idle.
+ *
+ * What: with the cursor still on the OK row, sets edit mode as the click
+ * toggle would and runs the ordinary OK path. An accepted request starts the
+ * command; another refusal re-holds it with one attempt fewer. Called every
+ * main-loop pass from menu_pollPresetStatus() before its early returns.
+ */
+static void menu_loadSaveRetryOk(void)
+{
+    uint8_t left;
+
+    if (menu_loadSaveOkRetry == 0u)
+        return;
+    if (!menu_loadSaveOkRowHoldable()) {
+        menu_loadSaveOkRetry = 0u;
+        return;
+    }
+    if (menu_storageBusy || preset_getStatus() != PRESET_IDLE ||
+        filesystem_status() == FS_STATUS_BUSY)
+        return;
+    left = (uint8_t)(menu_loadSaveOkRetry - 1u);
+    menu_loadSaveTraceClick(MENU_LS_CLICK_RETRY);
+    editModeActive = 1u;
+    menu_handleLoadSaveMenu(0, 1u);
+    if (menu_loadSaveOkRetry != 0u)
+        menu_loadSaveOkRetry = left;
+    menu_repaintAll();
+}
+
 static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
 {
     uint8_t commandAccepted = 0u;
 
-    if (menu_loadSaveCommandActive)
+    /* New input replaces a held OK; a refusal below may hold this one. */
+    if (inc != 0 || btnClicked)
+        menu_loadSaveOkRetry = 0u;
+
+    if (menu_loadSaveCommandActive) {
+        if (btnClicked)
+            menu_loadSaveDropClick(MENU_LS_CLICK_COMMAND_ACTIVE);
         return;
+    }
 
     if (menu_instrumentLoadActive) {
         if (menu_instrumentSaveMode) {
@@ -16519,13 +16922,20 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 break;
             }
         }
-        if (name_blank)
+        if (name_blank) {
             btnClicked = 0u;
+            menu_loadSaveDropClick(MENU_LS_CLICK_NAME_BLANK);
+            /* The name may still be on its way: hold the press. */
+            if (menu_loadSaveOkRowHoldable())
+                menu_loadSaveOkRetry = MENU_LS_OK_ATTEMPTS;
+        }
     }
 
     if (btnClicked && menu_bankPageActive() &&
-        (menu_bankUiFlags & MENU_BANK_COPY_HELD))
+        (menu_bankUiFlags & MENU_BANK_COPY_HELD)) {
         btnClicked = 0u;
+        menu_loadSaveDropClick(MENU_LS_CLICK_COPY_HELD);
+    }
     if (btnClicked) {
         if ((editModeActive && menu_saveOptions.state == SAVE_STATE_OK) ||
             (menu_saveOptions.what >= SAVE_TYPE_GLO && menu_saveOptions.state > SAVE_STATE_EDIT_TYPE)) {
@@ -16619,9 +17029,17 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                         commandAccepted = 1u;
                     break;
                 case SAVE_TYPE_SCENE:
-                    if (preset_loadSceneForScenes(
+                    /*
+                     * S098 P2: the Scene Load goes through the background
+                     * request. While the transport runs and a destination
+                     * is played, playback first moves onto Scene 17 (as a
+                     * Bank Load does); otherwise it is posted at once as
+                     * before. A refusal (Preset or a load busy, slot
+                     * missing) is held and replayed like any refused OK.
+                     */
+                    if (preset_requestBackgroundSceneLoad(
                             menu_currentPresetNr[SAVE_TYPE_SCENE],
-                            menu_kitLoadSceneMask)) {
+                            menu_kitLoadSceneMask, PRESET_BG_KIND_SCENE)) {
                         commandAccepted = 1u;
                     }
                     break;
@@ -16659,9 +17077,11 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                     }
                     break; }
                 case SAVE_TYPE_PATTERN:
-                    if (preset_loadPatternForScenes(
+                    /* S098 P2: as the Scene Load above (Scene 17 when a
+                     * played Pattern is replaced while running). */
+                    if (preset_requestBackgroundSceneLoad(
                             menu_currentPresetNr[SAVE_TYPE_PATTERN],
-                            menu_kitLoadSceneMask))
+                            menu_kitLoadSceneMask, PRESET_BG_KIND_PATTERN))
                         commandAccepted = 1u;
                     break;
                 case SAVE_TYPE_GLO:
@@ -16670,16 +17090,24 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 case SAVE_TYPE_SAMPLES:
                     menu_beginLoadSaveCommand();
                     menu_loadSamplesModal();
+                    commandAccepted = 2u;   /* modal ran; not a refusal */
                     break;
                 default: break;
                 }
             }
-            if (commandAccepted) {
+            if (commandAccepted == 1u) {
                 /* Freeze this committed coordinate against older callbacks. */
                 menu_selectionGeneration++;
                 menu_selectionGenerationSnapshot = menu_selectionGeneration;
                 menu_beginLoadSaveCommand();
+                menu_loadSaveTraceClick(MENU_LS_CLICK_ACCEPTED);
+            } else if (commandAccepted == 0u) {
+                menu_loadSaveDropClick(MENU_LS_CLICK_REFUSED);
+                if (menu_loadSaveOkRowHoldable())
+                    menu_loadSaveOkRetry = MENU_LS_OK_ATTEMPTS;
             }
+        } else {
+            menu_loadSaveTraceClick(MENU_LS_CLICK_EDIT);
         }
     }
 
@@ -17098,6 +17526,12 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
          */
         if (!allow_load_number_scroll && !allow_type_step &&
             !allow_browse_nav) {
+            /* An OK press is held and replayed when storage is idle
+             * (S097 P3 §11); a turn drops a held one. */
+            if (button && button != lastEncoderButton)
+                menu_loadSaveHoldOk();
+            else if (inc != 0)
+                menu_loadSaveOkRetry = 0u;
             lastEncoderButton = button;
             return;
         }
@@ -18373,6 +18807,9 @@ void menu_pollPresetStatus(void)
      * snapshot cannot spin. Morph mode is included through that function's
      * Morph branch. See S054_INST_RESTORE_FIX.md.
      */
+    /* Replay a held Load/Save OK press once storage is idle (S097 P3 §11). */
+    menu_loadSaveRetryOk();
+
     if (menu_instrumentKitRestorePending &&
         menu_instrumentLoadActive &&
         !menu_instrumentSaveMode &&
@@ -18616,6 +19053,8 @@ void menu_pollPresetStatus(void)
             preset_getKitRequestSceneMask());
         if (selection_stale || !menu_isLoadSaveSelectionCurrent())
             memset(preset_currentName, ' ', 8u);
+        /* S097 P3: apply only what the Kit Load replaced. */
+        menu_soundApplyLoadMask = preset_getKitRequestSceneMask();
         menu_startSoundApply(1u, 0u, 1u, 0u, 0u, 0u, 1u, 0u,
                              FS_STALE_WARNING_NONE);
         break;
@@ -18697,6 +19136,8 @@ void menu_pollPresetStatus(void)
             uint8_t reset_save =
                 (uint8_t)(menu_activePage == LOAD_PAGE ||
                           menu_activePage == SAVE_PAGE);
+            /* S097 P3: apply only what the Scene Load replaced. */
+            menu_soundApplyLoadMask = preset_getKitRequestSceneMask();
             menu_startSoundApply(1u, reset_save, 1u, 0u, 1u, 0u, 1u, 0u,
                                  FS_STALE_WARNING_NONE);
         }
@@ -19895,34 +20336,11 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
         midiIn_setGlobalChannel(value);
         break;
 
-    case PAR_POS_X:
-        /*
-         * SOM parameters now call the SOM generator directly. These are
-         * generator controls under Core/Bank/Scene/Pattern, not sequencer transport
-         * messages. Inputs are menu-scaled 0..127 values.
-         */
-        som_setX(value);
-        break;
-
-    case PAR_POS_Y:
-        som_setY(value);
-        break;
-
-    case PAR_FLUX:
-        /*
-         * Flux is stored by SOM as 0.0..1.0, while the menu exposes 0..127.
-         * Menu performs that UI-scale conversion at the direct call site.
-         */
-        som_setFlux((float)value / 127.0f);
-        break;
-
-    case PAR_SOM_FREQ:
-        /*
-         * SOM frequency is per active voice/track, so Menu supplies the active
-         * voice and SOM owns the generator state mutation.
-         */
-        som_setFreq(value, menu_getActiveVoice());
-        break;
+    /*
+     * PAR_POS_X, PAR_POS_Y, PAR_FLUX and PAR_SOM_FREQ have no action: the SOM
+     * generator they drove is archived (S097, archive/som/). The ids stay so
+     * every later PAR_* id keeps its value.
+     */
 
     case PAR_TRACK_LENGTH:
         /*
@@ -20455,6 +20873,25 @@ void menu_setActiveVoice(uint8_t v)
 }
 uint8_t menu_areMuteLedsShown(void){ return menu_muteModeActive; }
 uint8_t menu_getSubPage(void)      { return (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT); }
+/*
+ * Read / restore the exact menu cursor (S099 P3).
+ *
+ * What: menu_getMenuIndex() returns the subpage/column cursor; menu_restoreMenuIndex()
+ * puts a saved one back (no screen cycling, unlike menu_switchSubPage()) and
+ * repaints. Why: the VOICE step edit borrows SEQ_PAGE subpage 1; closing it
+ * must return to the subpage the user was on, not leave menuIndex at subpage 1
+ * (the voice AEG page). Caller: buttonHandler_voiceStepEditRelease().
+ */
+uint8_t menu_getMenuIndex(void)    { return menuIndex; }
+void menu_restoreMenuIndex(uint8_t index)
+{
+    lockPotentiometerFetch();
+    editModeActive = 0;
+    menuIndex = index;
+    menu_endlessPotMappingChanged();
+    va_refreshAutomationLeds();
+    menu_repaintAll();
+}
 void menu_setVoiceModeShowMorph(uint8_t onOff)
 {
     /*
@@ -20809,7 +21246,7 @@ uint8_t menu_getViewedPattern(void) { return menu_shownPattern; }
 static void menu_devCheckGlobalSceneSubPage(void)
 {
     const Page *scene_page =
-        &menuPages[MENU_MIDI_PAGE][MENU_GLOBAL_SCENE_SUBPAGE];
+        menu_pageRow(MENU_MIDI_PAGE, MENU_GLOBAL_SCENE_SUBPAGE);
     uint8_t bad = (uint8_t)(scene_page->top1 != TEXT_BUS_COMP_MODE ||
                             scene_page->top4 != TEXT_BUS_COMP_SIDECHAIN ||
                             scene_page->top5 != TEXT_BUS_COMP_GR ||
@@ -20819,7 +21256,7 @@ static void menu_devCheckGlobalSceneSubPage(void)
 
     for (sub_page = (uint8_t)(MENU_GLOBAL_SCENE_SUBPAGE + 1u);
          sub_page < NUM_SUB_PAGES; sub_page++) {
-        if (menuPages[MENU_MIDI_PAGE][sub_page].top1 != TEXT_EMPTY)
+        if (menu_pageRow(MENU_MIDI_PAGE, sub_page)->top1 != TEXT_EMPTY)
             bad = 1u;
     }
     if (!bad)

@@ -1,7 +1,7 @@
 /*
  * menuPages.h — LXR-02 menu page table.
  * Ported from original LXR AVR menuPages.h by Julian Schmidt.
- * PROGMEM removed. Unused pages padded with {0} initializers.
+ * PROGMEM removed. Since S097 P1 only the static pages have rows.
  */
 
 /*
@@ -20,14 +20,32 @@
 #define MENUPAGES_H_
 #include "menu.h"
 
-const Page menuPages[NUM_PAGES][NUM_SUB_PAGES] = {
-/* VOICE1 */ { {0} },
-/* VOICE2 */ { {0} },
-/* VOICE3 */ { {0} },
-/* VOICE4 (snare) */ { {0} },
-/* VOICE5 (cymbal) */ { {0} },
-/* VOICE6 (HH closed) */ { {0} },
-/* VOICE7 (HH open) */ { {0} },
+/*
+ * Static menu pages (S097 P1 item 1).
+ *
+ * What: only the six pages whose cells come from this table have rows here,
+ * each with all NUM_SUB_PAGES sub-pages; menuStaticPageSlot[] maps a page id
+ * to its block (1-based, 0 = not a table page). Every other page (VOICE1-7,
+ * LOAD, SAVE, SOM, EFFECT) resolves its cells elsewhere and reads the shared
+ * all-zero row in menu_pageRow() (menu.c), exactly as it read its zero rows
+ * of the former menuPages[NUM_PAGES][NUM_SUB_PAGES].
+ * Why: 88 of the 136 rows of the former table could never hold a cell
+ * (-2,112 B). The six table pages keep all eight sub-pages as room to grow;
+ * a new static page needs a block here and a slot entry.
+ * Accessors: menu_pageRow() only.
+ */
+#define MENU_STATIC_PAGE_COUNT 6u
+
+static const uint8_t menuStaticPageSlot[NUM_PAGES] = {
+    [MENU_MIDI_PAGE]        = 1u,
+    [PERFORMANCE_PAGE]      = 2u,
+    [SEQ_PAGE]              = 3u,
+    [EUKLID_PAGE]           = 4u,
+    [PATTERN_SETTINGS_PAGE] = 5u,
+    [RECORDING_PAGE]        = 6u,
+};
+
+static const Page menuStaticPages[MENU_STATIC_PAGE_COUNT][NUM_SUB_PAGES] = {
 /* MENU_MIDI_PAGE (globals)
 ** Session 025 warning: this table's empty cells are not harmless decoration.
 ** The menu traversal treats TEXT_EMPTY/PAR_NONE as page terminators in some
@@ -82,8 +100,6 @@ const Page menuPages[NUM_PAGES][NUM_SUB_PAGES] = {
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
 },
-/* LOAD_PAGE — special case, entries unused */ { {0} },
-/* SAVE_PAGE — special case, entries unused */ { {0} },
 /* PERFORMANCE_PAGE
  * Per-track shuffle moved to the STEP track-settings front page below.
  *
@@ -147,13 +163,16 @@ const Page menuPages[NUM_PAGES][NUM_SUB_PAGES] = {
    * S083 follow-up: cell 5 (`nte`) uses TEXT_TRACK_NOTE (category Track). */
   {TEXT_PAT_LENGTH,TEXT_TRACK_SCALE,TEXT_SHUFFLE,TEXT_TRACK_PLAY_MODE,TEXT_MIDI_CHANNEL,TEXT_TRACK_NOTE,TEXT_TRACK_LOOPABLE,TEXT_TRACK_AUTO_SMOOTH, PAR_TRACK_LENGTH,PAR_TRACK_SCALE,PAR_SHUFFLE,PAR_TRACK_PLAY_MODE,PAR_TRACK_MIDI_CHAN,PAR_TRACK_MIDI_NOTE,PAR_TRACK_LOOPABLE,PAR_TRACK_AUTO_SMOOTH},
   /*
-   * Step specials subpage 1 (S079): vel, note, condition, micro-timing. The
-   * four fixed cells end at micro-timing; scrolling past it enters the
+   * Step specials subpage 1 (S079; S099 P3, user 2026-11-19): vel, note,
+   * micro-timing, fill (`fil`, "Step Fill", was the roll page's `rfl`: the
+   * same value, which truncates a roll and, on some instruments, shortens the
+   * step). The four fixed cells end at fil; scrolling past it enters the
    * variable automation list rendered by menu.c from PatternData's block list.
    */
-  {TEXT_STEP_VELOCITY,TEXT_NOTE,TEXT_CONDITION,TEXT_MICROTIMING,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_STEP_VOLUME,PAR_STEP_NOTE,PAR_STEP_CONDITION,PAR_STEP_TIMING,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-  /* Step specials subpage 2 (S079): roll rate, roll rhythm, roll fill. */
-  {TEXT_ROLL_RATE,TEXT_ROLL_RHYTHM,TEXT_ROLL_FILL,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_STEP_ROLL,PAR_STEP_RHYTHM,PAR_STEP_FILL,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
+  {TEXT_STEP_VELOCITY,TEXT_NOTE,TEXT_MICROTIMING,TEXT_ROLL_FILL,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_STEP_VOLUME,PAR_STEP_NOTE,PAR_STEP_TIMING,PAR_STEP_FILL,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
+  /* Step specials subpage 2 (S079; S099 P3): condition, roll rate, roll
+   * rhythm (fill moved to subpage 1). */
+  {TEXT_CONDITION,TEXT_ROLL_RATE,TEXT_ROLL_RHYTHM,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_STEP_CONDITION,PAR_STEP_ROLL,PAR_STEP_RHYTHM,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
@@ -220,17 +239,6 @@ const Page menuPages[NUM_PAGES][NUM_SUB_PAGES] = {
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
 },
-/* SOM_PAGE */ {
-  {TEXT_POS_X,TEXT_POS_Y,TEXT_SOM_FREQ,TEXT_FLUX,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_POS_X,PAR_POS_Y,PAR_SOM_FREQ,PAR_FLUX,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-  {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-  {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-  {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-  {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-  {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-  {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-  {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
-},
-/* EFFECT_PAGE — cells resolved by menuEffects.c (Session 072 step 7). */ { {0} },
 };
 
 #endif /* MENUPAGES_H_ */

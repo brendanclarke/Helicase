@@ -70,6 +70,10 @@
 ** State
 ** ----------------------------------------------------------------------- */
 volatile uint8_t dout_outputData[NUM_OUTS / 8];
+/* S102 P1: the owned-LED composite (contract in dout.h). */
+uint8_t dout_ownedMask[NUM_OUTS / 8];
+uint8_t dout_ownedData[NUM_OUTS / 8];
+static uint8_t dout_sw43Owned;   /* 0 free, 1 held off, 2 held on */
 
 /* -----------------------------------------------------------------------
 ** SPI byte — polled, blocking ~1μs at 13.5MHz SPI clock.
@@ -146,5 +150,14 @@ uint8_t dout_spi_xfer(uint8_t tx) { return spi_xfer(tx); }
 
 void dout_setSw43Led(uint8_t on)
 {
+    if (dout_sw43Owned != 0u)
+        return;
     if (on) PB_HI(8); else PB_LO(8);
+}
+
+void dout_setSw43Owned(uint8_t mode)
+{
+    dout_sw43Owned = mode;
+    if (mode == 1u) PB_LO(8);
+    else if (mode == 2u) PB_HI(8);
 }

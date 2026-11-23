@@ -20,6 +20,7 @@
 
 
 
+
 /*
  * Control constants (S095 P2). The "by ear" values (C-D12/C-D14/C-D15 and
  * the ranges of H.3) are first settings, set in the listening step and
@@ -156,16 +157,35 @@ _Static_assert(COL_PWM_COUNT == 6u, "COL_NORM_PWM is 1 / sqrt(6)");
 /*
  * COL_NORM_PWM_WARP for the six warp oscillators (S095 P5, user 2026-11-14).
  *
- * What:       1 / (full scale x sqrt(6)): pwm Sin and Tri render
- *             COL_PWM_WARP_COUNT (6) oscillators (ColloidVoice.h).
+ * What:       1 / (full scale x sqrt(6)): pwm Tri renders
+ *             COL_PWM_WARP_COUNT (6) oscillators (ColloidVoice.h; S099 P1
+ *             §15.10: pwm Sin, the other warp form, dropped).
  * Why:        the same power rule as COL_NORM_PWM, for the warp count, so a
- *             Sin/Tri <-> Saw/Rec change keeps the stack's level into the
+ *             Tri <-> Saw/Rec change keeps the stack's level into the
  *             drive. The value is the S095 P3 constant (six for every form).
  * Headroom:   six warp oscillators at the same sign: sqrt(6) x 0.5 = 1.22,
  *             inside the drive's +-1.5 clamp.
  */
 #define COL_NORM_PWM_WARP     (0.408248290f / 32768.0f)   /* 1 / sqrt(6) */
 _Static_assert(COL_PWM_WARP_COUNT == 6u, "COL_NORM_PWM_WARP is 1 / sqrt(6)");
+/*
+ * COL_NORM_SCAN for the wts scan (S096 P3 C2c, plan §3.5).
+ *
+ * What:       1 / (full scale x sqrt(COL_SCAN_COUNT)): 8 oscillators at
+ *             1 / sqrt(8), or 6 at 1 / sqrt(6). The assert ties it to the
+ *             count, as COL_NORM_PWM does.
+ * Why:        the power rule (C-D12): the stack's level into the drive is the
+ *             same at any count. The count is the P3c gate (8 if the pair
+ *             loop is ≤ 52 instructions and the device run fits; else 6).
+ */
+#if COL_SCAN_COUNT == 8u
+#define COL_INV_SQRT_SCAN     0.353553391f    /* 1 / sqrt(8) */
+#elif COL_SCAN_COUNT == 6u
+#define COL_INV_SQRT_SCAN     0.408248290f    /* 1 / sqrt(6) */
+#else
+#error "COL_SCAN_COUNT: add its 1 / sqrt(N) here"
+#endif
+#define COL_NORM_SCAN         (COL_INV_SQRT_SCAN / 32768.0f)
 #define COL_HEADROOM          0.5f
 #define COL_PSP_GAIN          5.0f
 #define COL_PSP_EXP           1.39308169f
@@ -173,6 +193,39 @@ _Static_assert(COL_PWM_WARP_COUNT == 6u, "COL_NORM_PWM_WARP is 1 / sqrt(6)");
 #define COL_SLEW_OCT          13.2877124f
 #define COL_POST_WET_STEPS    8u
 #define COL_P32_ZMAX          3.0f
+#define COL_SUB_BLOCK         8u          /* S096 P3: the filters' coefficient step (samples) */
+
+/*
+ * S096 P3 constants.
+ *
+ * COL_PENV_OCT        the pitch envelope's depth: pam's offset ((byte - 63)
+ *                     / 63) x level x 2 octaves (S096 P3, decided Q7: 0.38
+ *                     semitone per pam step at level 1).
+ * COL_NOISE_ST_CENTRE the noise's narrow-band centre at tone 0: half the
+ *                     cutoff law's span, 57.85 semitones above 20 Hz =
+ *                     565 Hz (S096 P3 plan §3.4).
+ * COL_NOISE_TRACK     the noise corners' note tracking at width 0: 0.85
+ *                     (user, 2026-11-17: "somewhat behind"); it falls
+ *                     linearly to 0 at width 127 (no tracking at all).
+ * COL_NOISE_TRACK_REF the tracking's reference pitch, log2(130.813 Hz) = C3,
+ *                     the init pitch (coa 48 at the default note 63): at C3
+ *                     the corners sit where tone and width put them.
+ * COL_NOISE_MAKEUP_W  the width make-up: mk = 1 + 5.07 (1 - w)^2. At tone 0
+ *                     the two one-poles at width 0 (both at 565 Hz) pass an
+ *                     equivalent noise bandwidth of 0.785 x 565 = 444 Hz
+ *                     against 16,386 Hz for the full band at width 127:
+ *                     sqrt(16,386 / 444) = 6.07, so mk(0) = 6.07 keeps the
+ *                     noise's RMS; at w 0.5 the exact ratio gives 2.2, the
+ *                     law 2.27 (user, 2026-11-17: width 0 is not "off").
+ * COL_NOISE_STACK     the RNG's int16 to +-1.
+ */
+#define COL_PENV_OCT          2.0f        /* pam at an end: +-2 octaves at level 1 */
+#define COL_NOISE_ST_CENTRE   (0.5f * COL_CUT_ST_MAX)   /* tone 0's narrow centre: ≈ 565 Hz */
+#define COL_NOISE_TRACK       0.85f       /* note tracking at width 0 (none at 127) */
+#define COL_NOISE_TRACK_REF   7.03135971f /* log2(130.813 Hz): C3, the init pitch */
+#define COL_NOISE_MAKEUP_W    5.07f       /* width make-up: 1 + 5.07 (1 - w)^2 */
+#define COL_SLEW2             0.4816f     /* 1 - (1 - COL_SLEW)^2: a corner updated every other block */
+#define COL_NOISE_STACK       (1.0f / 32768.0f)  /* one RNG value to +-1 */
 
 /* x clamped to 0..1 (descriptor floats are byte / 127, but an LFO or
  * velocity overlay may push them past either end). */
@@ -214,6 +267,31 @@ static inline uint32_t col_rngNext(uint32_t *s)
 	x ^= x << 5;
 	*s = x;
 	return x;
+}
+
+/*
+ * One hardware RNG word, inline (S096 P3 C2b; the noise).
+ *
+ * What:       the same read GetRngValue() performs (random.c: RNG_DR, no
+ *             DRDY wait, truncated to int16), as an inline register load.
+ *             The host build keeps GetRngValue() so its stub drives the laws.
+ * Why:        the read sits in the per-sample filter loop; an out-of-line
+ *             call there forces every live FP register to be spilled and
+ *             reloaded around it (measured +47 instructions per sample for
+ *             the noise instead of the plan's ~25). The character and the
+ *             per-sample rate are unchanged: the same RNG data register, one
+ *             read per sample, the full signed value (MEMORY.md DSP/RNG).
+ * Range:      the low 16 bits of RNG_DR, as GetRngValue().
+ * Accessors:  col_renderPar(), col_renderSer().
+ */
+static inline int16_t col_rngRead(void)
+{
+#if defined(__ARM_ARCH_7EM__)   /* Cortex-M7 firmware only (macOS arm64 also
+                                 * defines __ARM_ARCH) */
+	return (int16_t)(*(volatile uint32_t *)RNG_DR_ADDR);   /* random.h (F8) */
+#else
+	return GetRngValue();
+#endif
 }
 
 static inline float col_clamp01(const float x)
@@ -284,7 +362,8 @@ static __attribute__((noinline)) float col_pspK(const float psp)
  *             One VDIV per call, every sample whatever the drive (constant
  *             cost).
  * Inputs:     y (a filter output, about +-1), g, mk, wet (per block).
- * Accessors:  col_renderPar() (left and right), col_renderSer() (once).
+ * Accessors:  col_renderSer() (once). S096 P3: col_renderPar() uses
+ *             col_postPair() (one VDIV for both channels).
  */
 static inline float col_post(const float y, const float g, const float mk, const float wet)
 {
@@ -293,6 +372,47 @@ static inline float col_post(const float y, const float g, const float mk, const
 	const float sat = z * (27.0f + z2) / (27.0f + 9.0f * z2);
 
 	return y + wet * (mk * sat - y);
+}
+
+/*
+ * The post-filter overdrive for a stereo pair with one division (S096 P3).
+ *
+ * What:       col_post() for the left and right outputs together: with
+ *             dL = 27 + 9 zL^2 and dR = 27 + 9 zR^2, one VDIV q = 1 / (dL dR)
+ *             gives 1 / dL = dR q and 1 / dR = dL q, so satL = zL (27 + zL^2)
+ *             dR q and satR = zR (27 + zR^2) dL q; then y + wet (mk sat - y)
+ *             per channel, as col_post().
+ * Why:        the stereo filter loop ran two VDIVs per sample (one per
+ *             channel), about 14 cycles each and not pipelined; one VDIV and
+ *             three multiplies save about 11 cycles per sample, about 350 per
+ *             block in every stereo mode (S096 P3 CPU work, the device run on
+ *             a mixed Scene was over the Basic share). dL dR <= 108^2 =
+ *             11,664 (|z| <= 3): no range issue. The result differs from
+ *             col_post() by float rounding only (a few ulp); wet 0 still
+ *             returns y exactly (law CO-POST), and with zL = zR the two
+ *             channels are equal bit for bit (q, dL = dR: law CO-RTE).
+ * Inputs:     yl, yr (the two filter outputs), g, mk, wet (per block).
+ * Outputs:    *ol, *orr (before the amp).
+ * Accessors:  col_renderPar(). col_renderSer() keeps col_post() (one
+ *             channel, one VDIV).
+ */
+static inline __attribute__((always_inline)) void col_postPair(const float yl, const float yr,
+                                                               const float g, const float mk,
+                                                               const float wet,
+                                                               float *ol, float *orr)
+{
+	const float zl = fminf(fmaxf(yl * g, -COL_P32_ZMAX), COL_P32_ZMAX);
+	const float zr = fminf(fmaxf(yr * g, -COL_P32_ZMAX), COL_P32_ZMAX);
+	const float zl2 = zl * zl;
+	const float zr2 = zr * zr;
+	const float dl = 27.0f + 9.0f * zl2;
+	const float dr = 27.0f + 9.0f * zr2;
+	const float q = 1.0f / (dl * dr);
+	const float satL = zl * (27.0f + zl2) * (dr * q);
+	const float satR = zr * (27.0f + zr2) * (dl * q);
+
+	*ol = yl + wet * (mk * satL - yl);
+	*orr = yr + wet * (mk * satR - yr);
 }
 
 /*
@@ -316,29 +436,43 @@ static inline uint32_t col_octave(const float f)
 	return (uint32_t)((k < 0) ? 0 : ((k > 10) ? 10 : k));
 }
 
+/* S096 P3 C2b: defined beside the render loops, called from the async. */
+static __attribute__((noinline)) void col_noiseControl(ColloidVoice *voice, float dgL,
+                                                        float dgR, float base);
+
 /*
- * Step one envelope by one block (S095 P2, draft §4.1).
+ * Step one envelope by one block (S095 P2, draft §4.1; S096 P3 the gate;
+ * S099 P1 §15 the plain ADSR).
  *
- * What:       attack: level += K[a] (1.2 - level), at 1.0 -> decay;
+ * What:       gate not held -> release, from any stage but idle, attack
+ *             included, for every envelope alike;
+ *             attack: level += K[a] (1.2 - level), at 1.0 -> decay;
  *             decay: level += K[d] (s - level), within 0.01 of s -> sustain;
- *             sustain: keeps following s (K[d]); when the effective sustain
- *             switch is off -> release;
- *             release: level += K[r] (0 - level), below 1e-4 -> idle at 0.
+ *             sustain: keeps following s (K[d]);
+ *             release: level -= K[r] level, below 1e-4 -> idle at 0.
  *             K = colEgK[byte & 127].
- * Why:        a lightweight ADSR: one multiply-add per block (C-D8 the switch,
- *             C-D19 its effective value). With susOn 0 the envelope runs
- *             attack, decay, release; with susOn 1 it holds at s. Switching
- *             susOn off while held (sustain stage) starts the release on that
- *             block; a decay still under way releases once it settles.
- * Inputs:     e, the time bytes a, d, r, the level s (0..1 float), susOn.
+ * Why:        S099 P1 §15 (user, 2026-11-19): the note is as long as the step
+ *             (or the length special), as from a keyboard; the gate alone sets
+ *             it and every envelope runs a normal ADSR from it. The S096 P3
+ *             amp-attack minimum (a short step played the whole amp attack,
+ *             and the filter and pitch held with it) is removed.
+ * Inputs:     e, the time bytes a, d, r, the level s (0..1 float), held
+ *             (Colloid_calcVoiceAsync()'s gate this block).
  * Outputs:    e->level, e->stage.
- * Accessors:  Colloid_calcVoiceAsync() (both envelopes, with the same susOn).
+ * Results:    a step shorter than the attack: ATTACK ... -> RELEASE at the
+ *             gate's end, from the level reached; a held note: ATTACK ->
+ *             DECAY -> SUSTAIN until the gate closes; a retrigger (stage set
+ *             to ATTACK by the trigger) climbs from the current level.
+ * Cost:       one compare per call; three calls per block. No per-sample work.
+ * Accessors:  Colloid_calcVoiceAsync() (amp, filter, pitch).
  */
 static void col_egStep(ColEg *e, const uint8_t a, const uint8_t d, const float s,
-                       const uint8_t r, const uint8_t susOn)
+                       const uint8_t r, const uint8_t held)
 {
 	const float sl = col_clamp01(s);
 
+	if (!held && e->stage != COL_EG_IDLE)
+		e->stage = COL_EG_RELEASE;      /* gate closed: release from anywhere */
 	switch (e->stage) {
 	case COL_EG_ATTACK:
 		e->level += colEgK[a & 127u] * (COL_EG_ATTACK_AIM - e->level);
@@ -348,15 +482,10 @@ static void col_egStep(ColEg *e, const uint8_t a, const uint8_t d, const float s
 		}
 		break;
 	case COL_EG_DECAY:
-		e->level += colEgK[d & 127u] * (sl - e->level);
-		if (fabsf(e->level - sl) <= COL_EG_SETTLE)
-			e->stage = COL_EG_SUSTAIN;
-		break;
 	case COL_EG_SUSTAIN:
-		/* the level keeps following slv, so a sustain-level change is smooth */
 		e->level += colEgK[d & 127u] * (sl - e->level);
-		if (!susOn)
-			e->stage = COL_EG_RELEASE;
+		if (e->stage == COL_EG_DECAY && fabsf(e->level - sl) <= COL_EG_SETTLE)
+			e->stage = COL_EG_SUSTAIN;
 		break;
 	case COL_EG_RELEASE:
 		e->level -= colEgK[r & 127u] * e->level;
@@ -440,6 +569,62 @@ static void col_svfControl(ColSvf *f, const float cut, const float res,
 	f->da2 = (f->t2 - f->a2) * (1.0f / (float)OUTPUT_DMA_SIZE);
 	f->da3 = (f->t3 - f->a3) * (1.0f / (float)OUTPUT_DMA_SIZE);
 	col_svfMix(f, type);
+}
+
+/*
+ * One filter's coefficients for two blocks (S101 P2 CL5;
+ * S101_P2_REDUCTIONS.md §A.5 CL5; S101_P2_IMPLEMENTATION.md §4.1).
+ *
+ * What:       col_svfControl() for a ramp that spans two blocks: the same
+ *             targets, the cutoff and damping slewed by COL_SLEW2 (two blocks
+ *             of COL_SLEW: the same time constant), and da = (t - a) / 64. On
+ *             the block between, col_svfCarry() moves the start on by one
+ *             block's ramp (a += 32 da), so the render loops (which never
+ *             write the coefficients back) continue the ramp to t exactly at
+ *             the end of the second block.
+ * Why:        the two filters' controls (one alk_exp2f(), one col_tanf() and
+ *             two VDIVs each, 99 instructions a block) ran for both filters
+ *             every block. Both now run every other block (the parity the
+ *             noise corners already use, voice->nPhase), which halves the
+ *             average; the block between costs two col_svfCarry() calls. Both
+ *             filters update in the same block so that with zero offsets they
+ *             stay identical (law CO-RTE). The filter envelope and the
+ *             knobs reach a filter at most one block (0.73 ms) later; the
+ *             coefficients still ramp per sample (per sub-block in the stereo
+ *             loop), so no step is added.
+ * Inputs:     as col_svfControl(). Outputs: f's a, t, da, cutSt, k and mix.
+ * Accessors:  Colloid_calcVoiceAsync().
+ */
+static void col_svfControl2(ColSvf *f, const float cut, const float res,
+                            const uint8_t type, const float envSt)
+{
+	const float st = fminf(fmaxf(col_clamp01(cut) * COL_CUT_ST_MAX + envSt, 0.0f),
+	                       COL_CUT_ST_MAX);
+	const float kT = 2.0f - COL_K_SPAN * col_clamp01(res);
+	float g;
+
+	(void)0;
+	f->a2 = f->t2;
+	f->a3 = f->t3;
+	f->cutSt += COL_SLEW2 * (st - f->cutSt);
+	f->k += COL_SLEW2 * (kT - f->k);
+	g = col_tanf(COL_CUT_BASE_HZ * alk_exp2f(f->cutSt * (1.0f / 12.0f)) * COL_PI_OVER_FS);
+	f->t1 = 1.0f / (1.0f + g * (g + f->k));
+	f->t2 = g * f->t1;
+	f->t3 = g * f->t2;
+	f->da1 = (f->t1 - f->a1) * (1.0f / (2.0f * (float)OUTPUT_DMA_SIZE));
+	f->da2 = (f->t2 - f->a2) * (1.0f / (2.0f * (float)OUTPUT_DMA_SIZE));
+	f->da3 = (f->t3 - f->a3) * (1.0f / (2.0f * (float)OUTPUT_DMA_SIZE));
+	col_svfMix(f, type);
+}
+
+/* The block between two col_svfControl2() runs (S101 P2 CL5, see there):
+ * the ramp's start moves on by one block; da, t and the mix stay. */
+static inline void col_svfCarry(ColSvf *f)
+{
+	f->a1 += (float)OUTPUT_DMA_SIZE * f->da1;
+	f->a2 += (float)OUTPUT_DMA_SIZE * f->da2;
+	f->a3 += (float)OUTPUT_DMA_SIZE * f->da3;
 }
 
 /*
@@ -577,6 +762,153 @@ static inline float col_pwmScale(const ColloidVoice *voice)
 }
 
 /*
+ * The wavetable scan's frame positions for this block (S096 P3 C2c, plan
+ * §3.5; moved out of col_oscControl()'s loop in the S096 P3 noise update).
+ *
+ * What:       for each of the `count` oscillators, the target T = pos x
+ *             (F - 1) / 127 + r x k x F / 2 (k = col_pspK(psp)), folded into
+ *             0..F - 1, then the block's cell and glide (the comment block
+ *             inside: assessment F2): frame[i] = the cell, pwD0[i] / pwD[i]
+ *             = the start / end fraction in the cell, 0..32768.
+ *             col_oscControl() then reads frame[i] for the row as before.
+ * Why:        inside col_oscControl()'s per-oscillator loop the scan code
+ *             lengthened the loop for every mode (186 -> 244 instructions
+ *             on the longest path, and the device's block-rate cost of the
+ *             12-oscillator modes rose by about 1,900 cycles). As its own
+ *             pass, run only under wts, the wav / wtb / pwm loops are back to
+ *             their S096 P2 form. Same results, bit for bit (law CO-SCAN).
+ * Inputs:     voice (pos, psp, rnd[], frame[], pwD[], the bound table's
+ *             frame count), count (COL_SCAN_COUNT), jump (first note),
+ *             live (the oscillators the last block rendered: i >= live
+ *             rejoins and lands).
+ * Outputs:    frame[], pwD[], pwD0[] for oscillators 0..count - 1.
+ * Cost:       per block, wts only; noinline so it stays out of the async.
+ * Accessors:  Colloid_calcVoiceAsync() (typ wts, before col_oscControl()).
+ */
+static __attribute__((noinline)) void col_scanControl(ColloidVoice *voice, const uint32_t count,
+                                                       const uint8_t jump, const uint32_t live)
+{
+	const OscInfo *const osc = &voice->osc;
+	const uint32_t frames = osc->sampleCacheSize ? osc->sampleCacheSize : 1u;
+	const int32_t scanSpan = (int32_t)(frames - 1u) * 32768;
+	const int32_t scanBase = (frames > 1u)
+	    ? (((int32_t)(osc->position & 127u) * scanSpan) + 63) / 127
+	    : 0;
+	/*
+	 * The spread in frames per unit draw, k x F / 2 (S096 P3; kept in float,
+	 * user report 2026-11-17).
+	 *
+	 * What:       each oscillator's offset is r x k x F / 2 frames (r = rnd /
+	 *             32768, k = col_pspK(psp) 0..5), in Q15 frame units
+	 *             rnd x (k x F / 2).
+	 * Why:        the first form truncated k x F / 2 to a whole number before
+	 *             the multiply: with the 8..18-frame tables, psp below about
+	 *             15..20 gave no spread at all and above it the spread jumped
+	 *             in whole-frame steps (8 frames: 0, 1, 2, 4 ... as psp or an
+	 *             LFO on it moved). wtb's latch (col_wtbTrigger()) already
+	 *             kept it in float.
+	 * Range:      |rnd x offK| <= 32,768 x 5 x 255 / 2 = 20.9 M: inside int32;
+	 *             the float product's rounding is below one Q15 unit (1/32768
+	 *             of a frame) up to 16.7 M and at most 2 units above.
+	 */
+	const float scanOffK = col_pspK(voice->posSpread) * (float)frames * 0.5f;
+	uint32_t i;
+
+#pragma GCC unroll 1
+	for (i = 0u; i < count; i++) {
+		/*
+		 * wts (S096 P3, plan §3.5): the frame position follows pos and
+		 * the spread every block (not latched): target T = pos x (F - 1)
+		 * / 127 + r x k x F / 2, folded into 0..F - 1 (a triangle, so a
+		 * scan never jumps from the last frame to the first). The
+		 * position (frame[] = the cell's lower frame A, pwD[] = the Q15
+		 * fraction) moves toward T but stops at the cell's upper edge
+		 * A + 1 in this block (top speed one frame per block, 1,378
+		 * frames/s): each block blends only A and A + 1. pwD0[] keeps
+		 * the block's start fraction; the sync block turns pwD0 / pwD
+		 * into the loop's g and dg. A first note, a rejoin or a
+		 * trigger lands on T (no glide across a new note, the S095
+		 * rule).
+		 */
+		int32_t tq;
+		uint8_t endFrame;
+		uint16_t endFrac;
+		int32_t end;
+
+		if (frames <= 1u) {
+			tq = 0;
+		} else {
+			const int32_t period = scanSpan * 2;
+			int32_t t = scanBase + (int32_t)((float)voice->rnd[i] * scanOffK);
+
+			t %= period;
+			if (t < 0)
+				t += period;
+			if (t > scanSpan)
+				t = period - t;
+			tq = t;
+		}
+		/*
+		 * The block's cell (S096 P3 assessment F2).
+		 *
+		 * What:       the block blends frames cell and cell + 1 only.
+		 *             The cell is chosen from the direction of travel:
+		 *             moving up (or still), cur >> 15; moving down, the
+		 *             cell BELOW a boundary ((cur - 1) >> 15), so a
+		 *             position exactly on frame k may still descend
+		 *             into k - 1. It is clamped to 0..F - 2 (frame
+		 *             cell + 1 must exist). The block's end is the target
+		 *             clamped into [cell, cell + 1] x 32768: at most one
+		 *             frame per block, and it stops exactly on the cell's
+		 *             edge. Both the block's start (pwD0) and its end
+		 *             (pwD) are stored relative to the SAME cell, 0..32768,
+		 *             so the sync block's glide starts exactly where the
+		 *             last block ended.
+		 * Why:        the first form stored an upward end that hit the
+		 *             edge as the next frame with fraction 0, so the block
+		 *             played one frame too high with no blend (a whole-
+		 *             frame step at every crossing), and took a downward
+		 *             boundary as its own lower edge, so the scan stalled
+		 *             there (law CO-SCAN: sweep and descent).
+		 * Landing:    a first note, a rejoin or a trigger lands on the
+		 *             target: start = end, no glide.
+		 */
+		if (scanSpan == 0) {
+			endFrame = 0u;
+			endFrac = 0u;
+			voice->pwD0[i] = 0u;
+		} else {
+			const uint32_t land = (uint32_t)(jump || i >= live);
+			const int32_t topCell = (int32_t)frames - 2;
+			int32_t cur = (int32_t)voice->frame[i] * 32768 + (int32_t)voice->pwD[i];
+			int32_t cell;
+			int32_t lo;
+
+			if (cur > scanSpan)
+				cur = scanSpan;
+			if (land)
+				cur = tq;
+			cell = (tq < cur && cur > 0) ? ((cur - 1) >> 15) : (cur >> 15);
+			if (cell > topCell)
+				cell = topCell;
+			if (cell < 0)
+				cell = 0;
+			lo = cell * 32768;
+			end = tq;
+			if (end < lo)
+				end = lo;
+			if (end > lo + 32768)
+				end = lo + 32768;
+			endFrame = (uint8_t)cell;
+			endFrac = (uint16_t)(end - lo);
+			voice->pwD0[i] = (uint16_t)(cur - lo);
+		}
+		voice->frame[i] = endFrame;
+		voice->pwD[i] = endFrac;
+	}
+}
+
+/*
  * Every oscillator's pitch, increment, row, width and stereo position for
  * this block (S095 P2, draft §2.2, §2.6; S095 P3 F2-F6).
  *
@@ -591,14 +923,19 @@ static inline float col_pwmScale(const ColloidVoice *voice)
  *               first note; slw 0 lands through its huge step), or when the
  *               oscillator rejoins (S095 P5: o >= voice->oscLive, the count
  *               the last block rendered);
- *             - f = 2^pitchCur x osc.modNodeValue (the LFO / velocity pitch
- *               multiplier after the slew, Q2), clamped to 0.45 fs;
+ *             - f = 2^pitchCur x osc.modNodeValue x pitchMul (S096 P3: the
+ *               pitch envelope's 2^(offset), after the slew like the LFO /
+ *               velocity multiplier), clamped to 0.45 fs;
  *               inc = f x 2^32 / fs;
- *             - row: wtb, the latched frame of the bound table (the last
- *               frame if the table shrank); Sin, the 1,024-point sine; pwm,
- *               by form: Sin the sine, Tri the triTable octave row lifted by
- *               oscPwmTriLift[width], Saw/Rec the sawTable octave row;
- *               Saw/Rec/Tri under wav, the octave row of that table;
+	 *             - row: wtb, the latched frame of the bound table (the last
+	 *               frame if the table shrank); Sin, the 1,024-point sine; pwm,
+	 *               by form (S099 P1 §15.10: no Sin): Tri the triTable octave row lifted by
+	 *               oscPwmTriLift[width], Saw/Rec the sawTable octave row;
+	 *               Saw/Rec/Tri under wav, the octave row of that table;
+	 *               R-S (S099 P1) takes the Saw/Rec rows, Rec's widths and
+	 *               the Rec level here; col_chopBlock() lifts the rows and
+	 *               replaces the level in the sync block (S099 P2: the widths
+	 *               stay Rec's);
  *             - pwm: the width index slews toward col_pwmTarget() by at most
  *               OSC_PWM_SLEW_STEPS (2) per block, or lands on it when the
  *               oscillator rejoins (S095 P5, as the pitch); Saw/Rec take pwD =
@@ -620,7 +957,7 @@ static inline float col_pwmScale(const ColloidVoice *voice)
  *             Lower notes sit nearer the centre and move less (w, C-D14).
  * Inputs:     voice (parameters, osc, the bind, rnd, frame, pitchCur,
  *             oscLive), count (COL_OSC_COUNT, or under pwm
- *             COL_PWM_FORM_COUNT(): 6 Sin/Tri, 8 Saw/Rec), base (log2 Hz),
+ *             COL_PWM_FORM_COUNT(): 6 Tri, 6 Saw/Rec), base (log2 Hz),
  *             step (octaves per block), jump, isPwm, isWtb.
  * Outputs:    pitchCur[], inc[], row[], pwPos[], pwPos0[], pwD[], pwD0[], motPhase[],
  *             posPair[], oscLive (= count). Returns the pwm level factor:
@@ -641,7 +978,8 @@ static inline float col_pwmScale(const ColloidVoice *voice)
  */
 static __attribute__((noinline)) float col_oscControl(ColloidVoice *voice, const uint32_t count, const float base,
                             const float step, const uint8_t jump,
-                            const uint8_t isPwm, const uint8_t isWtb)
+                            const uint8_t isPwm, const uint8_t isWtb,
+                            const float pitchMul)
 {
 	const OscInfo *const osc = &voice->osc;
 	const float dtn = col_clamp01(voice->detune);
@@ -653,7 +991,9 @@ static __attribute__((noinline)) float col_oscControl(ColloidVoice *voice, const
 	const float motStep = (mot > 0.0f)
 	    ? COL_MOT_RATE_MIN_HZ * alk_exp2f(COL_MOT_RATE_OCT * mot) * COL_MOT_PHASE_PER_HZ
 	    : 0.0f;
-	const float modMul = osc->modNodeValue;
+	/* S096 P3: the pitch envelope's multiplier acts after the slew, like the
+	 * LFO / velocity multiplier (plan §3.3) */
+	const float modMul = osc->modNodeValue * pitchMul;
 	const uint8_t wave = osc->waveform;
 	/* the pwm form (the platform's order; past Rec plays Rec) */
 	const uint8_t form = (wave < COL_PWM_WAVE_COUNT) ? wave : COL_PWM_REC;
@@ -664,8 +1004,8 @@ static __attribute__((noinline)) float col_oscControl(ColloidVoice *voice, const
 	    : ((wave == COL_WAVE_REC) ? (const int16_t (*)[1024])recTable
 	    : ((wave == COL_WAVE_TRI) ? (const int16_t (*)[1024])triTable
 	                              : (const int16_t (*)[1024])sawTable));
-	const uint8_t isSin = (uint8_t)(isPwm ? (form == COL_PWM_SIN)
-	                                      : (!isWtb && wave == COL_WAVE_SIN));
+	/* S099 P1 §15.10: Sin only under wav (pwm Sin dropped) */
+	const uint8_t isSin = (uint8_t)(isPwm ? 0u : (!isWtb && wave == COL_WAVE_SIN));
 	const uint8_t isPwmD = (uint8_t)(isPwm && form >= COL_PWM_SAW);
 	const uint16_t *const dTab = (form == COL_PWM_SAW) ? oscPwmDSaw : oscPwmDRec;
 	const int16_t *const lvTab = (form == COL_PWM_SAW) ? oscPwmLevelSawQ14 : oscPwmLevelRecQ14;
@@ -673,7 +1013,9 @@ static __attribute__((noinline)) float col_oscControl(ColloidVoice *voice, const
 	const uint32_t frames = osc->sampleCacheSize ? osc->sampleCacheSize : 1u;
 	/* pwm: the centre width and the spread scale, once per block */
 	const int32_t pwPos0 = (int32_t)(osc->position & 127u);
-	const float pwScale = col_pwmScale(voice);
+	/* S096 P3 CPU work: only pwm uses the width spread; the curve's log2 /
+	 * exp2 (col_pspK()) no longer runs every block under wav, wtb and wts */
+	const float pwScale = isPwm ? col_pwmScale(voice) : 0.0f;
 	/* S095 P5: oscillators from here on rejoin this block (see Rejoin) */
 	const uint32_t live = voice->oscLive;
 	float iv[COL_GROUPS];
@@ -727,7 +1069,7 @@ static __attribute__((noinline)) float col_oscControl(ColloidVoice *voice, const
 		if (isWtb) {
 			const uint32_t fr = (voice->frame[i] < frames) ? voice->frame[i] : (frames - 1u);
 
-			voice->row[i] = wtbBase ? wtbBase + fr * WAVETABLE_ROW_POINTS : sawTable[0];
+			voice->row[i] = wtbBase ? wtbBase + fr * WAVETABLE_ROW_POINTS : sawTable[1];   /* S101: level 1 (no level 0) */
 		} else if (isSin) {
 			voice->row[i] = sine_table;
 		} else if (isPwm && form == COL_PWM_TRI) {
@@ -736,7 +1078,11 @@ static __attribute__((noinline)) float col_oscControl(ColloidVoice *voice, const
 
 			voice->row[i] = stock[(r > 10u) ? 10u : r];
 		} else {
-			voice->row[i] = stock[col_octave(f)];
+			/* S101 (wavetable.h): sawTable / recTable have no level 0, so
+			 * they read level 1 below 16.35 Hz; the triangle keeps level 0 */
+			const uint32_t o = col_octave(f);
+
+			voice->row[i] = stock[(o == 0u && stock != (const int16_t (*)[1024])triTable) ? 1u : o];
 		}
 		voice->motPhase[i] += (uint32_t)(motStep * colMotK[i]);
 		{
@@ -815,6 +1161,17 @@ void Colloid_initVoice(ColloidVoice *voice)
 	voice->route = COL_RTE_STR;
 	voice->vcaDrive = 0u;              /* no overdrive, the tone open (F10) */
 	voice->tone = 127u;
+	/* S096 P3: the pitch envelope (init.col: 0/40/0/40, pam 63 = none) and
+	 * the noise (level 0, tone 63, width 127, pan 63) */
+	voice->pAttack = 0u;
+	voice->pDecay = 40u;
+	voice->pSustain = 0.0f;
+	voice->pRelease = 40u;
+	voice->pAmount = 63.0f / 127.0f;
+	voice->nLevel = 0u;
+	voice->nTone = 63u;
+	voice->nWidth = 127u;
+	voice->nPan = 63u;
 
 	/* free-running from a random start: the stack never starts phase-aligned
 	 * (one hardware RNG read, salted with the voice's address so the six
@@ -827,7 +1184,7 @@ void Colloid_initVoice(ColloidVoice *voice)
 		voice->motPhase[i] = col_rngNext(&rng);
 		voice->pitchCur[i] = 0.0f;   /* set on the first block (pitchJump) */
 		voice->inc[i] = 0u;
-		voice->row[i] = sawTable[0];
+		voice->row[i] = sawTable[1];   /* S101: level 1 (wavetable.h: no level 0) */
 		voice->rnd[i] = 0;
 		voice->frame[i] = 0u;
 		voice->pwPos[i] = 0u;
@@ -844,6 +1201,15 @@ void Colloid_initVoice(ColloidVoice *voice)
 	voice->ampEg.stage = COL_EG_IDLE;
 	voice->fltEg.level = 0.0f;
 	voice->fltEg.stage = COL_EG_IDLE;
+	voice->pitchEg.level = 0.0f;
+	voice->pitchEg.stage = COL_EG_IDLE;
+	/* S096 P3 C1: no gate, no hold, no change pending */
+	voice->gateLeft = 0;
+	voice->susBreak = 0u;
+	voice->midiHold = 0u;
+	voice->changeArm = 0u;
+	voice->susSeen = 0u;
+	voice->scan = 0u;
 	/* both filters on the knobs (the offsets are 0) */
 	col_svfInit(&voice->svfA, voice->cut, voice->res, voice->filtType);
 	col_svfInit(&voice->svfB, voice->cut, voice->res, voice->filtType);
@@ -861,10 +1227,25 @@ void Colloid_initVoice(ColloidVoice *voice)
 	voice->toneC = 0.0f;
 	voice->toneZL = 0.0f;
 	voice->toneZR = 0.0f;
+	/* S096 P3: the noise's states and its first coefficients (the async slews
+	 * from the corners it starts on) */
+	voice->nHpZ = 0.0f;
+	voice->nLpZ = 0.0f;
+	voice->nG1 = 0.0f;
+	voice->nG2 = 0.0f;
+	voice->nGL = 0.0f;
+	voice->nGR = 0.0f;
+	voice->nHSt = 0.0f;
+	voice->nLSt = COL_CUT_ST_MAX;
+	/* drv 0 (drive gain 1), the reference pitch (no tracking offset) */
+	voice->nPhase = 0u;
+	col_noiseControl(voice, 1.0f, 1.0f, COL_NOISE_TRACK_REF);   /* the HP corner */
+	col_noiseControl(voice, 1.0f, 1.0f, COL_NOISE_TRACK_REF);   /* the LP corner */
 }
 
 void Colloid_triggerVoice(ColloidVoice *voice, const uint8_t source_slot,
-                          const uint8_t velocity, const uint8_t note)
+                          const uint8_t velocity, const uint8_t note,
+                          const uint32_t stepSamples, const uint8_t first)
 {
 	/* the velocity as the modulation system's 0..1 value (Drum: vol/127.f) */
 	const float vel = (float)velocity * (1.0f / 127.0f);
@@ -888,6 +1269,26 @@ void Colloid_triggerVoice(ColloidVoice *voice, const uint8_t source_slot,
 	/* both attacks restart from their current levels */
 	voice->ampEg.stage = COL_EG_ATTACK;
 	voice->fltEg.stage = COL_EG_ATTACK;
+	/*
+	 * S096 P3 C1: the gate.
+	 *
+	 * What:       first (the trigger's reset flag) sets gateLeft to the
+	 *             step length in samples; a roll's later hits (first 0) keep
+	 *             it, so every hit of a roll ends where its window ends (the
+	 *             window end sends a release request). Every trigger clears
+	 *             susBreak (a forced release lasts until the next note) and
+	 *             changeArm (a step that triggers after a Scene change
+	 *             continues the voice as a new note). The three envelopes
+	 *             restart their attack from their current levels (rule 5).
+	 * Inputs:     stepSamples 1..5,292,960 (seq_trackStepSamples()), first.
+	 * Accessors:  instrumentManager_triggerTrack() (the single trigger
+	 *             funnel: sequencer, MIDI, live and preview).
+	 */
+	if (first)
+		voice->gateLeft = (int32_t)((stepSamples > 0x7FFFFFFFu) ? 0x7FFFFFFFu : stepSamples);
+	voice->susBreak = 0u;
+	voice->changeArm = 0u;            /* a trigger in the new Scene continues */
+	voice->pitchEg.stage = COL_EG_ATTACK;   /* with the amp and filter (P3b) */
 	/* one hardware read per trigger, salted with a free-running phase (it
 	 * differs at every trigger), then one generator value per oscillator:
 	 * its top 16 bits are the Q15 draw (-1..+1) */
@@ -896,7 +1297,12 @@ void Colloid_triggerVoice(ColloidVoice *voice, const uint8_t source_slot,
 	for (i = 0u; i < COL_OSC_MAX; i++)
 		voice->rnd[i] = (int16_t)(col_rngNext(&rng) >> 16);
 	if (voice->osc.oscType == OSC_TYPE_WTB) {
-		col_wtbTrigger(voice);
+		/* S096 P3: wts does not latch frames; every position lands on its
+		 * target in the first block (oscLive 0, as a rejoin). */
+		if (voice->scan)
+			voice->oscLive = 0u;
+		else
+			col_wtbTrigger(voice);
 	} else if (voice->osc.oscType == OSC_TYPE_PWM) {
 		/* the widths start on their targets (no slew across a new note);
 		 * S096 P2 F5: the pulse width and both glide starts too, so the
@@ -924,34 +1330,54 @@ void Colloid_calcVoiceAsync(ColloidVoice *voice)
 	 * The block's oscillator count (S095 P5, user 2026-11-14).
 	 *
 	 * What:       COL_OSC_COUNT (12) under wav and wtb; under pwm
-	 *             COL_PWM_FORM_COUNT(): 6 for the warp forms Sin/Tri, 8 for
-	 *             the pulse forms Saw/Rec (ColloidVoice.h). isWarp also picks
+	 *             COL_PWM_FORM_COUNT(): 6 for the warp form Tri, 6 for the
+	 *             pulse and chop forms (ColloidVoice.h). isWarp also picks
 	 *             the bus normalisation below.
 	 * Why:        the sync block renders the same count from the same test
 	 *             (COL_PWM_IS_WARP()), so the control and the audio agree.
 	 */
 	const uint8_t isWarp = (uint8_t)(isPwm && COL_PWM_IS_WARP(osc->waveform));
-	const uint32_t count = isPwm ? COL_PWM_FORM_COUNT(osc->waveform) : COL_OSC_COUNT;
+	/* S096 P3: wts is OSC_TYPE_WTB with the scan flag and COL_SCAN_COUNT */
+	const uint32_t count = (isWtb && voice->scan) ? COL_SCAN_COUNT
+	                     : (isPwm ? COL_PWM_FORM_COUNT(osc->waveform) : COL_OSC_COUNT);
 	/*
-	 * The effective sustain switch (C-D8, C-D19).
+	 * The gate (S096 P3 C1; was C-D8/C-D19's effective sustain).
 	 *
-	 * What:       sus on and the transport running. Read once per block.
-	 * Why:        nothing tells an engine that a note has ended. With the
-	 *             transport stopped, a pad, a MIDI note or the preview plays
-	 *             attack, decay, release; a transport stop releases a held
-	 *             note on the next block (the sustain stage sees 0), with no
-	 *             edge flag and no ISR-to-engine call.
+	 * What:       susEff = sus on, no forced release since the last trigger
+	 *             (susBreak), and the transport running or MIDI keys held
+	 *             (midiHold). held = susEff or gate samples left.
+	 *             gateLeft then drops by one block (32 samples), floored at
+	 *             0. The amp, filter and pitch envelopes all step with held
+	 *             (S099 P1 §15: no amp-attack minimum), so the note is the
+	 *             step's gate, or the length special's, as from a keyboard.
+	 * Why:        plan §2.1. With the transport stopped and no MIDI keys held,
+	 *             sus does not hold (C-D19 kept): a pad or a preview plays one
+	 *             step's gate. The order matters: held is taken before the
+	 *             subtraction, so a gate of exactly one block holds that
+	 *             block.
+	 * Results:    a 1/16 at 120 BPM (5,514 samples) holds 173 blocks (5,536
+	 *             samples, the first block boundary at or after the step);
+	 *             fill 50 sends a release at half the step (TIM3 window).
+	 * Inputs:     voice->sustain, susBreak, midiHold, gateLeft;
+	 *             seq_isRunning() (read only).
 	 */
-	const uint8_t susOn = (uint8_t)(voice->sustain != 0u && seq_isRunning() != 0u);
-	float base, step, level, famL, famR, cutR, resR, driveR, norm;
+	const uint8_t susEff = (uint8_t)(voice->sustain != 0u && !voice->susBreak &&
+	                                 (seq_isRunning() != 0u || voice->midiHold != 0u));
+	const uint8_t held = (uint8_t)(susEff || voice->gateLeft > 0);
+	float base, step, level, famL, famR, cutR, resR, driveR, norm, pitchMul;
+	float dgL, dgR;
 	uint8_t typeB;
 
 	/* envelopes: the amp ramp starts on the previous block's end */
+	voice->gateLeft = (voice->gateLeft > (int32_t)OUTPUT_DMA_SIZE)
+	                ? voice->gateLeft - (int32_t)OUTPUT_DMA_SIZE : 0;
 	voice->ampLast = voice->ampEg.level;
 	col_egStep(&voice->ampEg, voice->attack, voice->decay, voice->sustainLevel,
-	           voice->release, susOn);
+	           voice->release, held);
 	col_egStep(&voice->fltEg, voice->fAttack, voice->fDecay, voice->fSustain,
-	           voice->fRelease, susOn);
+	           voice->fRelease, held);
+	col_egStep(&voice->pitchEg, voice->pAttack, voice->pDecay, voice->pSustain,
+	           voice->pRelease, held);
 
 	/*
 	 * Pitch (the Alkaline's formula, S093 P3): log2 of the note plus coarse
@@ -978,14 +1404,40 @@ void Colloid_calcVoiceAsync(ColloidVoice *voice)
 	step = (voice->slew == 0u) ? 1.0e9f
 	     : COL_SLEW_STEP_MAX * alk_exp2f(-COL_SLEW_OCT * (float)((voice->slew & 127u) - 1u)
 	                                     * (1.0f / 126.0f));
+	/*
+	 * The pitch envelope (S096 P3 C2a, plan §3.3).
+	 *
+	 * What:       offset in octaves = clamp((pam x 127 - 63) / 63, -1, 1) x 2 x
+	 *             pitchEg.level; pitchMul = 2^offset, one alk_exp2f() per
+	 *             block (1.0 exactly when the offset is 0, so pam 63 and an
+	 *             idle envelope leave the pitch bit-identical to S096 P2).
+	 * Why:        the brief: an ADSR pitch envelope, bipolar, 2 octaves;
+	 *             applied after the slew (not slewed) to every oscillator.
+	 * Results:    pam 126, level 1: 2^(63/63 x 2) = x4 (+24 semitones); pam 64,
+	 *             level 1: 2^(2/63) = +0.381 semitone.
+	 * Cost:       one alk_exp2f() and one col_egStep() per block (≈ +1.7
+	 *             instructions per sample, plan §3.2).
+	 */
+	{
+		const float pam = fminf(fmaxf((voice->pAmount * 127.0f - 63.0f) * (1.0f / 63.0f),
+		                              -1.0f), 1.0f);
+		const float pOct = pam * COL_PENV_OCT * voice->pitchEg.level;
+
+		pitchMul = (pOct != 0.0f) ? alk_exp2f(pOct) : 1.0f;
+	}
 
 	/* wtb: bind on a key change (an install, or a wav change by the menu,
 	 * Morph, an LFO or automation) */
 	if (isWtb && col_wtbKeyChanged(osc))
 		col_wtbBind(voice);
+	/* S096 P3: the wts frame positions, before the rows are picked */
+	if (isWtb && voice->scan)
+		col_scanControl(voice, count, (uint8_t)(voice->pitchJump == 1u ||
+		                                        voice->pitchJump == 2u),
+		                voice->oscLive);
 	level = col_oscControl(voice, count, base, step, (uint8_t)(voice->pitchJump == 1u ||
 	                                                          voice->pitchJump == 2u),
-	                       isPwm, isWtb);
+	                       isPwm, isWtb, pitchMul);
 	/* the first note's block has jumped: from here the pitch slews */
 	if (voice->pitchJump == 2u)
 		voice->pitchJump = 0u;
@@ -1018,7 +1470,7 @@ void Colloid_calcVoiceAsync(ColloidVoice *voice)
 	 * COL_HEADROOM (S095 P3: the stack's peaks stay inside the shaper at drv
 	 * 0) times the drive gain 2^(4 drv); under pwm Saw/Rec times the stack's
 	 * mean level (S095 P3 F2). S095 P5: N is the block's count, so pwm uses
-	 * COL_NORM_PWM_WARP (1 / sqrt(6)) for Sin/Tri and COL_NORM_PWM
+	 * COL_NORM_PWM_WARP (1 / sqrt(6)) for Tri and COL_NORM_PWM
 	 * (1 / sqrt(6) since S096 P2 F5) for Saw/Rec. wtb with no table installed is silenced here (the rows
 	 * point at a stock row so the loops still read valid memory). str: the
 	 * right channel's own gain from driveR. Mono: inGainR is the gain into
@@ -1027,10 +1479,21 @@ void Colloid_calcVoiceAsync(ColloidVoice *voice)
 	 * render loop.
 	 */
 	norm = COL_HEADROOM * (isPwm ? (isWarp ? COL_NORM_PWM_WARP : COL_NORM_PWM) * level
-	                    : ((isWtb && !osc->sampleCacheData) ? 0.0f : COL_NORM_WAV));
-	voice->inGain = norm * alk_exp2f(COL_DRIVE_OCT * col_clamp01(voice->drive));
-	voice->inGainR = ((voice->route == COL_RTE_STR || voice->route >= COL_RTE_COUNT) ? norm : 1.0f)
-	               * alk_exp2f(COL_DRIVE_OCT * driveR);
+	                    : ((isWtb && !osc->sampleCacheData) ? 0.0f
+	                       : ((isWtb && voice->scan) ? COL_NORM_SCAN : COL_NORM_WAV)));
+	{
+		/* S096 P3 assessment F7: the drive gains are kept apart from the
+		 * stack's normalisation, so the noise can take them alone */
+		const uint8_t isStr = (uint8_t)(voice->route == COL_RTE_STR ||
+		                                voice->route >= COL_RTE_COUNT);
+
+		dgL = alk_exp2f(COL_DRIVE_OCT * col_clamp01(voice->drive));
+		dgR = alk_exp2f(COL_DRIVE_OCT * driveR);
+		voice->inGain = norm * dgL;
+		voice->inGainR = (isStr ? norm : 1.0f) * dgR;
+		if (!isStr)
+			dgR = dgL;   /* mono: the noise enters the first stage only */
+	}
 
 	/*
 	 * Filters (draft §3, §4.2): fam (63 = none) x the filter envelope x
@@ -1050,9 +1513,24 @@ void Colloid_calcVoiceAsync(ColloidVoice *voice)
 		famR = fminf(fmaxf((famB + (voice->envOfs - 63.0f / 127.0f) * 127.0f)
 		                   * (1.0f / 63.0f), -1.0f), 1.0f);
 	}
-	col_svfControl(&voice->svfA, voice->cut, voice->res, voice->filtType,
-	               famL * COL_FENV_ST * voice->fltEg.level);
-	col_svfControl(&voice->svfB, cutR, resR, typeB, famR * COL_FENV_ST * voice->fltEg.level);
+	/*
+	 * S101 P2 CL5: both filters' controls every other block, each with a
+	 * two-block ramp (col_svfControl2()); on the block between both carry
+	 * their ramps on (col_svfCarry()). Both in the same block, so that with
+	 * zero offsets the left and right filters stay identical bit for bit
+	 * (law CO-RTE: alternating them left one a block behind the other). The
+	 * parity is the noise corners' (nPhase, toggled later in this block by
+	 * col_noiseControl()).
+	 */
+	if (voice->nPhase != 0u) {
+		col_svfControl2(&voice->svfA, voice->cut, voice->res, voice->filtType,
+		                famL * COL_FENV_ST * voice->fltEg.level);
+		col_svfControl2(&voice->svfB, cutR, resR, typeB,
+		                famR * COL_FENV_ST * voice->fltEg.level);
+	} else {
+		col_svfCarry(&voice->svfA);
+		col_svfCarry(&voice->svfB);
+	}
 
 	/*
 	 * The post-filter overdrive and tone (S095 P3 F10): the Alkaline's tables
@@ -1068,6 +1546,103 @@ void Colloid_calcVoiceAsync(ColloidVoice *voice)
 		voice->postWet = (oi >= COL_POST_WET_STEPS) ? 1.0f
 		               : (float)oi * (1.0f / (float)COL_POST_WET_STEPS);
 		voice->toneC = alkToneC[(uint32_t)voice->tone & 127u];
+	}
+	/* S096 P3 C2b: the noise's corners, damping, mix and gains this block. */
+	col_noiseControl(voice, dgL, dgR, base);
+}
+
+/*
+ * The noise's control for this block (S096 P3 C2b, plan §3.4; form B and
+ * the note tracking / width make-up, user 2026-11-17).
+ *
+ * What:       tone t = (nto - 63) / 63 in -1..+1, width w = nwd / 127.
+ *             The width-127 corners, in semitones above 20 Hz (0..115.7,
+ *             the cutoff law):
+ *               t > 0: HP h1 = t x 115.7, LP l1 = 115.7 (cuts lows);
+ *               t < 0: HP h1 = 0, LP l1 = (1 + t) x 115.7 (cuts highs);
+ *               t = 0: h1 = 0, l1 = 115.7 (the full band).
+ *             As the width falls both corners close on c = (h1 + l1) / 2:
+ *               h = c + w (h1 - c), l = c + w (l1 - c).
+ *             Note tracking: both corners move by 0.85 (1 - w) x 12 x
+ *             (base - log2 C3) semitones, clamped to 0..115.7: none at width
+ *             127, 85 % of the note at width 0 (a note an octave above C3
+ *             moves a width-0 band by 10.2 semitones).
+ *             One corner per block, alternately (S096 P3 CPU work): it slews
+ *             by COL_SLEW2 (0.4816, two blocks of ColSvf's 0.28) and its
+ *             one-pole's G = g / (1 + g), g = tan(pi f / fs) (col_tanf(), one
+ *             VDIV, plus the G division).
+ *             Gains: level = nlv / 127; pan p = clamp((npn - 63) / 63, -1,
+ *             1); the width make-up mk = 1 + 5.07 (1 - w)^2 (COL_NOISE_
+ *             MAKEUP_W: x6.07 at width 0, which keeps the noise's RMS at
+ *             tone 0); nGL = level x (1 - p) x 0.5 x dgL x mk / 32768 (the
+ *             render loops filter the raw int16 RNG value), nGR likewise
+ *             with (1 + p) and dgR (COL_HEADROOM x each channel's drive gain,
+ *             S096 P3 assessment F7: nlv 127 at width 127 and drv 0 peaks at
+ *             +-0.5 into the drive, a full stack's level).
+ * Results:    t 0, w 1: HP at 20 Hz, LP at 15,963 Hz, flat, mk 1; t 0, w 0:
+ *             both one-poles at 565 Hz (at C3), a broad peak about 6 dB down
+ *             at its centre, mk 6.07; t +1, w 1: HP at 15,963 Hz; t -1, w 1:
+ *             LP at 20 Hz. Width 0 is never "noise off": only nlv 0 closes it.
+ * Why:        the brief (level, tone, width, pan) and the user's additions
+ *             (tracking, width level); constant cost: every value runs the
+ *             same arithmetic, level 0 included.
+ * Inputs:     voice (the noise rows and states), dgL, dgR (this block's drive
+ *             gains), base (the note's pitch in log2 Hz, before the slew and
+ *             the pitch envelope).
+ * Cost:       per block: one col_tanf() (one VDIV), one G division, one
+ *             alk_exp2f() (the alternate-block trim; was two of each).
+ * Accessors:  Colloid_calcVoiceAsync(), Colloid_initVoice().
+ * Affiliates: col_renderPar(), col_renderSer() (the per-sample one-poles).
+ */
+static __attribute__((noinline)) void col_noiseControl(ColloidVoice *voice, const float dgL,
+                                                        const float dgR, const float base)
+{
+	const float t = ((float)(voice->nTone & 127u) - 63.0f) * (1.0f / 63.0f);
+	const float w = (float)(voice->nWidth & 127u) * (1.0f / 127.0f);
+	const float h1 = (t > 0.0f) ? t * COL_CUT_ST_MAX : 0.0f;
+	const float l1 = (t < 0.0f) ? (1.0f + t) * COL_CUT_ST_MAX : COL_CUT_ST_MAX;
+	const float c = 0.5f * (h1 + l1);
+	const float nw = 1.0f - w;
+	const float trk = COL_NOISE_TRACK * nw * 12.0f * (base - COL_NOISE_TRACK_REF);
+	const float hT = fminf(fmaxf(c + w * (h1 - c) + trk, 0.0f), COL_CUT_ST_MAX);
+	const float lT = fminf(fmaxf(c + w * (l1 - c) + trk, 0.0f), COL_CUT_ST_MAX);
+	const float mk = 1.0f + COL_NOISE_MAKEUP_W * nw * nw;
+
+	/*
+	 * One corner per block (S096 P3 CPU work, user 2026-11-17: the
+	 * alternate-block trim). Even blocks slew the high-pass corner and
+	 * compute G1, odd blocks the low-pass corner and G2: one alk_exp2f(),
+	 * one col_tanf() and one division per block instead of two each, the
+	 * same work every block (constant cost). Each corner slews by
+	 * COL_SLEW2 = 1 - (1 - 0.28)^2 per update, so over two blocks it moves
+	 * as far as ColSvf's 0.28 per block: the same time constant (about 3.5
+	 * blocks, 2.5 ms). A corner's coefficient is at most one block (0.73 ms)
+	 * older than the other's.
+	 */
+	if ((voice->nPhase ^= 1u) != 0u) {
+		float g;
+
+		voice->nHSt += COL_SLEW2 * (hT - voice->nHSt);
+		g = col_tanf(COL_CUT_BASE_HZ * alk_exp2f(voice->nHSt * (1.0f / 12.0f)) * COL_PI_OVER_FS);
+		voice->nG1 = g / (1.0f + g);
+	} else {
+		float g;
+
+		voice->nLSt += COL_SLEW2 * (lT - voice->nLSt);
+		g = col_tanf(COL_CUT_BASE_HZ * alk_exp2f(voice->nLSt * (1.0f / 12.0f)) * COL_PI_OVER_FS);
+		voice->nG2 = g / (1.0f + g);
+	}
+	{
+		const float level = (float)(voice->nLevel & 127u) * (1.0f / 127.0f) * mk;
+		/* the one pan rule: clamp so stored 0 / 127 are exactly full left /
+		 * right (127 - 63 / 63 is 1.016 unclamped) */
+		const float p = fminf(fmaxf(((float)(voice->nPan & 127u) - 63.0f) * (1.0f / 63.0f),
+		                            -1.0f), 1.0f);
+
+		/* COL_NOISE_STACK (1 / 32768) folded in: the render loops filter
+		 * the RNG's raw int16 value */
+		voice->nGL = level * (1.0f - p) * (COL_HEADROOM * COL_NOISE_STACK) * dgL;
+		voice->nGR = level * (1.0f + p) * (COL_HEADROOM * COL_NOISE_STACK) * dgR;
 	}
 }
 
@@ -1089,11 +1664,39 @@ void Colloid_calcVoiceAsync(ColloidVoice *voice)
  *               channel;
  *               outL[n], right[n] = SSAT16(tz) (S095 P3 F10);
  *               every coefficient += its per-sample step.
+ *               S096 P3 C2b (form B): the noise. n = RNG / 32768 -> the
+ *               one-pole HP (n - its low-pass part) -> the one-pole LP ->
+ *               added to each channel's drive input with nGL / nGR, so it
+ *               passes
+ *               the drive, both filters, the overdrive, the amp and the tone
+ *               with the oscillators. Every sample reads the RNG (no skip at
+ *               nlv 0: constant cost; nGL = nGR = 0 there, so the output is
+ *               the S096 P2 output exactly, law CO-NOISE).
  *             The integrator states are written back; the coefficients are
  *             not (the next async starts the ramp on the targets).
  * Why:        the draft's measured f5_par form (72 per sample, no VDIV),
  *             plus the post stage: two VDIVs per sample (one per channel) and
- *             the two tone states (S095 P3, measured on the device).
+ *             the two tone states (S095 P3, measured on the device); S096 P3:
+ *             one VDIV per sample for both channels (col_postPair()).
+ * S096 P3 CPU work: the filter coefficients step every COL_SUB_BLOCK (8)
+ *             samples.
+ *   What:     the loop runs four sub-blocks of 8 samples. Within a sub-block
+ *             both filters' a1..a3 are constant, set to the ramp's value at
+ *             the sub-block's centre (a + da x (8 j + 4)); after each sub-
+ *             block they step by 8 da. Before, they ramped by da every
+ *             sample. The integrator states, the amp ramp, the noise, the
+ *             drive, the overdrive and the tone are unchanged (per sample).
+ *   Why:      the six coefficients and six steps were live in registers for
+ *             the whole loop; with the noise added the loop spilled 21 values
+ *             per sample. Stepping per sub-block frees six registers and turns
+ *             six adds per sample into six per 8 samples: 135 -> 121 per
+ *             sample plus 38 per sub-block (≈ 125.8), 16 stack accesses.
+ *   Sound:    the TPT filter takes any coefficient change without a jump in
+ *             its state; a sub-block step is a quarter of the block's ramp
+ *             (the cutoff and damping are still slewed per block by 0.28), so
+ *             the steps fall at 5.5 kHz in quarters of a block's move. To be
+ *             checked by ear on fast, resonant sweeps (S096 P3 CPU work).
+ *             The mono loop (col_renderSer()) keeps the per-sample ramp.
  *             noinline: one call per block, kept out of the sync block's and
  *             the mixer's register allocation.
  * Accessors:  Colloid_calcVoiceSyncBlock() (rte str).
@@ -1115,19 +1718,45 @@ static __attribute__((noinline)) void col_renderPar(ColloidVoice *voice, int16_t
 	const float da1B = B->da1, da2B = B->da2, da3B = B->da3;
 	const float mHA = A->mH, mBA = A->mB, mLA = A->mL;
 	const float mHB = B->mH, mBB = B->mB, mLB = B->mL;
-	float a1A = A->a1, a2A = A->a2, a3A = A->a3, ic1A = A->ic1, ic2A = A->ic2;
-	float a1B = B->a1, a2B = B->a2, a3B = B->a3, ic1B = B->ic1, ic2B = B->ic2;
+	/* S096 P3 C2b: the noise's per-block constants and its states */
+	const float nG1 = voice->nG1, nG2 = voice->nG2;
+	const float nGL = voice->nGL, nGR = voice->nGR;
+	/* S096 P3 CPU work: the coefficients step once per 8 samples, at each
+	 * sub-block's centre (a + da x (8 j + 4)); see the comment block */
+	float a1A = A->a1 + 4.0f * da1A, a2A = A->a2 + 4.0f * da2A, a3A = A->a3 + 4.0f * da3A;
+	float a1B = B->a1 + 4.0f * da1B, a2B = B->a2 + 4.0f * da2B, a3B = B->a3 + 4.0f * da3B;
+	float ic1A = A->ic1, ic2A = A->ic2, ic1B = B->ic1, ic2B = B->ic2;
+	uint32_t j;
+	float nHpZ = voice->nHpZ, nLpZ = voice->nLpZ;
 	float amp = voice->ampLast * COL_OUT_SCALE;
 	float tzL = voice->toneZL, tzR = voice->toneZR;
 	uint32_t n;
 
-	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
+#pragma GCC unroll 1
+	for (j = 0u; j < OUTPUT_DMA_SIZE; j += COL_SUB_BLOCK) {
+#pragma GCC unroll 1
+	for (n = j; n < j + COL_SUB_BLOCK; n++) {
 		const int32_t m = busM[n];
 		const int32_t s2 = busS[n] * 2;
-		const float xl = col_drive((float)(m + s2) * gin);
-		const float xr = col_drive((float)(m - s2) * ginR);
+		/* S096 P3 C2b: a fresh RNG value, the one-pole HP and the SVF */
+		/* the RNG in int16 units: COL_NOISE_STACK is folded into nGL / nGR
+		 * (the one-poles are linear), one multiply less per sample */
+		const float nz = (float)col_rngRead();
+		/* form B: one-pole TPT HP, then one-pole TPT LP (v = (x - s) G;
+		 * lp = v + s; s = lp + v; hp = x - lp) */
+		const float nv = (nz - nHpZ) * nG1;
+		const float nlpo = nv + nHpZ;
+		const float nhp = nz - nlpo;
+		const float nv2 = (nhp - nLpZ) * nG2;
+		const float nOut = nv2 + nLpZ;
+		float xl, xr;
 		float ol, orr;
 		float v1, v2, v3, yl, yr;
+
+		nHpZ = nlpo + nv;
+		nLpZ = nOut + nv2;
+		xl = col_drive((float)(m + s2) * gin + nOut * nGL);
+		xr = col_drive((float)(m - s2) * ginR + nOut * nGR);
 
 		v3 = xl - ic2A;
 		v1 = a1A * ic1A + a2A * v3;
@@ -1144,18 +1773,23 @@ static __attribute__((noinline)) void col_renderPar(ColloidVoice *voice, int16_t
 		yr = mHB * xr + mBB * v1 + mLB * v2;
 
 		/* S095 P3 F10: overdrive, the amp, then the tone (exact when open) */
-		ol = col_post(yl, pg, pmk, pwet) * amp;
-		orr = col_post(yr, pg, pmk, pwet) * amp;
+		/* S096 P3: one VDIV for both channels (col_postPair()) */
+		col_postPair(yl, yr, pg, pmk, pwet, &ol, &orr);
+		ol *= amp;
+		orr *= amp;
 		tzL = ol + tc * (tzL - ol);
 		tzR = orr + tc * (tzR - orr);
 		outL[n] = (int16_t)__SSAT((int32_t)tzL, 16);
 		outR[n] = (int16_t)__SSAT((int32_t)tzR, 16);
-		a1A += da1A; a2A += da2A; a3A += da3A;
-		a1B += da1B; a2B += da2B; a3B += da3B;
 		amp += ampStep;
+	}
+	a1A += 8.0f * da1A; a2A += 8.0f * da2A; a3A += 8.0f * da3A;
+	a1B += 8.0f * da1B; a2B += 8.0f * da2B; a3B += 8.0f * da3B;
 	}
 	A->ic1 = ic1A; A->ic2 = ic2A;
 	B->ic1 = ic1B; B->ic2 = ic2B;
+	voice->nHpZ = nHpZ;
+	voice->nLpZ = nLpZ;
 	voice->toneZL = tzL;
 	voice->toneZR = tzR;
 }
@@ -1172,6 +1806,8 @@ static __attribute__((noinline)) void col_renderPar(ColloidVoice *voice, int16_t
  *             dro 0 it is 1, P2's shaper-only stage. The side bus is not
  *             read: the voice is mono and the positions have no effect (spr
  *             and mot show "---").
+ *             S096 P3 C2b: the noise, mono: one FMA into the first drive
+ *             (the pan has no effect in a mono route, as spr/mot).
  * Why:        the second shaper bounds the first filter's resonant peak into
  *             the second filter; dro sets how hard (the user's note: the
  *             second stage is the first plus offsets).
@@ -1194,16 +1830,34 @@ static __attribute__((noinline)) void col_renderSer(ColloidVoice *voice, int16_t
 	/* the inter-stage gain folded into A's mix (exact at g2 = 1) */
 	const float mHA = A->mH * g2, mBA = A->mB * g2, mLA = A->mL * g2;
 	const float mHB = B->mH, mBB = B->mB, mLB = B->mL;
+	/* S096 P3 C2b: the noise, mono (the pan has no effect in a mono route,
+	 * as spr/mot): one gain into the first drive. */
+	const float nG1 = voice->nG1, nG2 = voice->nG2;
+	const float nGM = 0.5f * (voice->nGL + voice->nGR);
 	float a1A = A->a1, a2A = A->a2, a3A = A->a3, ic1A = A->ic1, ic2A = A->ic2;
 	float a1B = B->a1, a2B = B->a2, a3B = B->a3, ic1B = B->ic1, ic2B = B->ic2;
+	float nHpZ = voice->nHpZ, nLpZ = voice->nLpZ;
 	float amp = voice->ampLast * COL_OUT_SCALE;
 	float tz = voice->toneZL;
 	uint32_t n;
 
 	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
-		const float x = col_drive((float)busM[n] * gin);
+		/* the RNG in int16 units: COL_NOISE_STACK is folded into nGL / nGR
+		 * (the one-poles are linear), one multiply less per sample */
+		const float nz = (float)col_rngRead();
+		/* form B, as col_renderPar() */
+		const float nv = (nz - nHpZ) * nG1;
+		const float nlpo = nv + nHpZ;
+		const float nhp = nz - nlpo;
+		const float nv2 = (nhp - nLpZ) * nG2;
+		const float nOut = nv2 + nLpZ;
 		float v1, v2, v3, y;
+		float x;
 		int16_t o;
+
+		nHpZ = nlpo + nv;
+		nLpZ = nOut + nv2;
+		x = col_drive((float)busM[n] * gin + nOut * nGM);
 
 		v3 = x - ic2A;
 		v1 = a1A * ic1A + a2A * v3;
@@ -1231,9 +1885,126 @@ static __attribute__((noinline)) void col_renderSer(ColloidVoice *voice, int16_t
 	}
 	A->ic1 = ic1A; A->ic2 = ic2A;
 	B->ic1 = ic1B; B->ic2 = ic2B;
+	voice->nHpZ = nHpZ;
+	voice->nLpZ = nLpZ;
 	/* both channels' tone states follow, so a change to str starts smooth */
 	voice->toneZL = tz;
 	voice->toneZR = tz;
+}
+
+/*
+ * One block of pwm R-S (S099 P1; S-R draft §6.3, §6.4; S099 P2: REx
+ * dropped, the widths Rec's).
+ *
+ * What:       for each of the COL_PWM_COUNT (6) oscillators o, with k =
+ *             pwPos[o] (the block's end width index) and k0 = pwPos0[o] (its
+ *             start):
+ *               - the gate row: the octave row col_oscControl() picked for
+ *                 the pulse forms (sawTable[octave], read back from row[o]),
+ *                 lifted by OSC_CHOP_LIFT, at most row 10;
+ *               - the widths: pwD = oscPwmDRec[k], pwD0 = oscPwmDRec[k0],
+ *                 as col_oscControl() wrote them for every pulse form
+ *                 (S099 P2, user: R-S narrows to Rec's 0.39 %; it used the
+ *                 Saw floor of 2.54 %, D-5, and rewrote both here);
+ *               - the pair's packed halves: g14 = oscChopGainQ14[row], rel =
+ *                 oscChopRelRsQ15[k], rel x position / 2;
+ *               - the stack's mean at the start and end widths, mid and side,
+ *                 in bus units (dc x rel >> 16; the side also x position);
+ *             then col_chopDcInit() starts both buses at minus that mean,
+ *             gliding from the start to the end, and col_chopPairAdd() adds
+ *             the three pairs. Finally the bus-to-drive gain: the async set
+ *             inGain with the stack's mean Rec level (col_oscControl()'s
+ *             return for a pulse form, oscPwmLevelRecQ14 / 16,384 averaged);
+ *             the chop's level is rel x OSC_CHOP_LREF_RS per oscillator, and
+ *             its bus multiplies halve the bus, so inGain (and inGainR in the
+ *             stereo route) is scaled by 2 x Lref / that mean: one VDIV per
+ *             block, chop forms only.
+ * Why:        the chop runs in the sync block, not in the async, so
+ *             col_oscControl()'s per-oscillator loop and
+ *             Colloid_calcVoiceAsync() keep their code (S096 P3 noise update:
+ *             anything added to that loop costs every mode); the values this
+ *             pass replaces (row) is rewritten by the next
+ *             block's col_oscControl() before anything else reads them.
+ *             The mean needs no state: both ends of its glide come from the
+ *             widths the voice already holds (S099 P1 deviation §0.3 item 4).
+ * Range:      per oscillator dc x rel >> 16 < 6,200; the six summed, x 32
+ *             (col_chopDcInit()'s Q5), < 1.2 M.
+ * Inputs:     voice (the async ran this block: row, pwPos, pwPos0, posPair,
+ *             phase, inc, inGain, inGainR, route, pwD, pwD0).
+ * Outputs:    busM, busS; phase[0..5]; row (this block's); inGain, inGainR.
+ * Cost:       per block: the six-oscillator loop, one VDIV, the init pass
+ *             (6 a sample) and the three pairs (≈ 54 a pair a sample).
+ * Accessors:  Colloid_calcVoiceSyncBlock() (typ pwm, wav R-S).
+ * Affiliates: col_chopDcInit(), col_chopPairAdd() (ColloidOsc.c);
+ *             oscChopTables.h; law CO-CHP.
+ */
+static __attribute__((noinline)) void col_chopBlock(ColloidVoice *voice)
+{
+	const int16_t *const curve = oscChopCurveRs;
+	const int16_t *const dcTab = oscChopDcRsQ15;
+	const int16_t *const relTab = oscChopRelRsQ15;
+	const float lref = OSC_CHOP_LREF_RS;
+	int32_t dcM0 = 0, dcM1 = 0, dcS0 = 0, dcS1 = 0;
+	int32_t recSum = 0;
+	uint32_t i;
+
+/* The mean's four sums first: col_chopDcInit() must start both buses before
+ * any pair adds, so this pass reads the widths, the level and the position
+ * only (no row or width is written here). */
+#pragma GCC unroll 1
+	for (i = 0u; i < COL_PWM_COUNT; i++) {
+		const uint32_t k = (uint32_t)(voice->pwPos[i] & 127u);
+		const uint32_t k0 = (uint32_t)(voice->pwPos0[i] & 127u);
+		const uint32_t half = (i & 1u) ? 16u : 0u;
+		/* the oscillator's Q15 stereo position (posPair: even low, odd high) */
+		const int32_t pos = (int32_t)(int16_t)(voice->posPair[i >> 1] >> half);
+		const int32_t rel = relTab[k];
+		const int32_t relPos = (rel * pos) >> 16;   /* rel x pos / 2, Q15 */
+		recSum += oscPwmLevelRecQ14[k];
+		dcM0 += ((int32_t)dcTab[k0] * rel) >> 16;
+		dcM1 += ((int32_t)dcTab[k] * rel) >> 16;
+		dcS0 += ((int32_t)dcTab[k0] * relPos) >> 16;
+		dcS1 += ((int32_t)dcTab[k] * relPos) >> 16;
+	}
+	col_chopDcInit(voice->busM, -(dcM0 * 32), dcM0 - dcM1, -(dcS0 * 32), dcS0 - dcS1);
+	/* then one pair at a time, its two halves built in registers (the arrays
+	 * the first form used spilled on every iteration: 84 per oscillator, the
+	 * pair form is about half that; C-G4) */
+#pragma GCC unroll 1
+	for (i = 0u; i < COL_PWM_COUNT / 2u; i++) {
+		uint32_t gq = 0u, lv = 0u, lp = 0u;
+		uint32_t h;
+
+#pragma GCC unroll 1
+		for (h = 0u; h < 2u; h++) {
+			const uint32_t o = 2u * i + h;
+			const uint32_t k = (uint32_t)(voice->pwPos[o] & 127u);
+			const uint32_t half = h ? 16u : 0u;
+			const int32_t pos = (int32_t)(int16_t)(voice->posPair[i] >> half);
+			const int32_t rel = relTab[k];
+			const int32_t relPos = (rel * pos) >> 16;
+			/* the octave row col_oscControl() picked (a sawTable row) */
+			uint32_t r = (uint32_t)(voice->row[o] - sawTable[0]) >> 10;
+
+			r = (r + OSC_CHOP_LIFT > 10u) ? 10u : r + OSC_CHOP_LIFT;
+			voice->row[o] = sawTable[r];
+			gq |= (uint32_t)(uint16_t)oscChopGainQ14[r] << half;
+			lv |= (uint32_t)(uint16_t)rel << half;
+			lp |= (uint32_t)(uint16_t)relPos << half;
+		}
+		col_chopPairAdd(&voice->row[2u * i], &voice->phase[2u * i], &voice->inc[2u * i],
+		                &voice->pwD[2u * i], &voice->pwD0[2u * i], gq, lv, lp,
+		                curve, voice->busM);   /* busM then busS: one 64-word bus */
+	}
+	{
+		/* the stack's level: 2 x Lref (the bus multiplies halve the bus) in
+		 * place of the mean Rec level the async put into inGain */
+		const float ratio = (2.0f * 16384.0f * (float)COL_PWM_COUNT) * lref / (float)recSum;
+
+		voice->inGain *= ratio;
+		if (voice->route == COL_RTE_STR || voice->route >= COL_RTE_COUNT)
+			voice->inGainR *= ratio;
+	}
 }
 
 /* S096 P2 F5: the warp loops take busM as one 64-word bus, mid then side */
@@ -1248,14 +2019,19 @@ void Colloid_calcVoiceSyncBlock(ColloidVoice *voice, int16_t *buf, uint8_t size)
 	 *
 	 * What:       the oscillator loops, the first storing the buses and every
 	 *             further one adding:
-	 *               typ pwm, wav Sin or Tri: col_warpStore/Add per oscillator
+	 *               typ pwm, wav Tri: col_warpStore/Add per oscillator
 	 *                 (COL_PWM_WARP_COUNT, 6 since S095 P5), W/ra/rb from
-	 *                 oscPwmSin* or oscPwmTri*, gliding from the block's start
-	 *                 width index pwPos0 to its end index pwPos (S096 P2 F5);
+	 *                 oscPwmTri* (S099 P1 §15.10: pwm Sin dropped),
+	 *                 gliding from the block's start width index pwPos0 to
+	 *                 its end index pwPos (S096 P2 F5);
 	 *               typ pwm, wav Saw or Rec: col_pwmPairStore/Add per pair
 	 *                 (COL_PWM_COUNT, 6 since S096 P2 F5), sign +1 (Saw) or -1
 	 *                 (Rec), the second read gliding from pwD0 to pwD (S096 P2
 	 *                 F5);
+	 *               typ pwm, wav R-S (S099 P1): col_chopBlock() (the
+	 *                 mean's start pass and three col_chopPairAdd() calls);
+	 *               typ wts: col_scanPairStore/Add per pair (COL_SCAN_COUNT),
+	 *                 g and dg from pwD0 / pwD (S096 P3);
 	 *               otherwise: col_oscPairStore/Add per pair (COL_OSC_COUNT);
 	 *             then the filter/output loop of the route (rte str stereo,
 	 *             any other value mono).
@@ -1272,9 +2048,9 @@ void Colloid_calcVoiceSyncBlock(ColloidVoice *voice, int16_t *buf, uint8_t size)
 
 	(void)size;   /* the voice always renders OUTPUT_DMA_SIZE */
 	if (isPwm && COL_PWM_IS_WARP(form)) {
-		const uint32_t *const tW  = (form == COL_PWM_SIN) ? oscPwmSinW  : oscPwmTriW;
-		const uint32_t *const tRa = (form == COL_PWM_SIN) ? oscPwmSinRa : oscPwmTriRa;
-		const uint32_t *const tRb = (form == COL_PWM_SIN) ? oscPwmSinRb : oscPwmTriRb;
+		const uint32_t *const tW  = oscPwmTriW;
+		const uint32_t *const tRa = oscPwmTriRa;
+		const uint32_t *const tRb = oscPwmTriRb;
 
 		for (j = 0u; j < COL_PWM_WARP_COUNT; j++) {
 			const uint32_t k = voice->pwPos[j] & 127u;
@@ -1297,6 +2073,10 @@ void Colloid_calcVoiceSyncBlock(ColloidVoice *voice, int16_t *buf, uint8_t size)
 				            tW[k0], tRa[k0], tRb[k0], dW, dRa, dRb, pq,
 				            voice->busM);
 		}
+	} else if (isPwm && COL_PWM_IS_CHOP(form)) {
+		/* S099 P1: the chopped waves (the dispatch costs pwm Saw/Rec about 2
+		 * instructions a block, ≈ +0.06 a sample; measured at gate C-G4) */
+		col_chopBlock(voice);
 	} else if (isPwm) {
 		const int32_t sign = (form == COL_PWM_SAW) ? 1 : -1;
 
@@ -1306,6 +2086,27 @@ void Colloid_calcVoiceSyncBlock(ColloidVoice *voice, int16_t *buf, uint8_t size)
 			col_pwmPairAdd(&voice->row[2u * j], &voice->phase[2u * j], &voice->inc[2u * j],
 			               &voice->pwD[2u * j], &voice->pwD0[2u * j], voice->posPair[j],
 			               voice->busM, voice->busS, sign);
+	} else if (voice->scan && voice->osc.oscType == OSC_TYPE_WTB) {
+		/* S096 P3 C2c: the wavetable scan, two adjacent frames per read,
+		 * blended by a Q31 g gliding from pwD0 to pwD (dg = (g1 - g0) / 32). */
+		for (j = 0u; j < COL_SCAN_COUNT / 2u; j++) {
+			const uint32_t o = 2u * j;
+			const uint32_t g0 = (uint32_t)voice->pwD0[o] << 16;
+			const uint32_t g1 = (uint32_t)voice->pwD0[o + 1u] << 16;
+			uint32_t g[2];
+			int32_t dg[2];
+
+			g[0] = g0;
+			g[1] = g1;
+			dg[0] = (int32_t)((((int64_t)((uint32_t)voice->pwD[o] << 16)) - (int64_t)g0) >> 5);
+			dg[1] = (int32_t)((((int64_t)((uint32_t)voice->pwD[o + 1u] << 16)) - (int64_t)g1) >> 5);
+			if (j == 0u)
+				col_scanPairStore(&voice->row[o], &voice->phase[o], &voice->inc[o],
+				                  g, dg, voice->posPair[j], voice->busM);   /* busM then busS: one 64-word bus */
+			else
+				col_scanPairAdd(&voice->row[o], &voice->phase[o], &voice->inc[o],
+				                g, dg, voice->posPair[j], voice->busM);   /* busM then busS: one 64-word bus */
+		}
 	} else {
 		col_oscPairStore(&voice->row[0], &voice->phase[0], &voice->inc[0],
 		                 voice->posPair[0], voice->busM, voice->busS);
@@ -1324,28 +2125,100 @@ uint8_t Colloid_isQuiet(const ColloidVoice *voice)
 	return (uint8_t)(voice->ampEg.stage == COL_EG_IDLE);
 }
 
+/*
+ * The gate's entry points (S096 P3 C1, plan §2.2).
+ *
+ * Colloid_gateRelease(voice, brk)
+ *   What:     closes the gate: gateLeft = 0. With an effective sustain the
+ *             note still holds (the length special never ends a sustained
+ *             note, the brief). brk 1 also sets susBreak, so the sustain no
+ *             longer holds it either: a forced release (mute, a Scene/track
+ *             change without a sus-on step).
+ *   Callers:  InstrumentManager (the slot's release request, consumed in
+ *             instrumentManager_calcSlotAsync(); instrumentManager_muteRelease()).
+ * Colloid_gateRenew(voice, stepSamples)
+ *   What:     gateLeft = stepSamples: a roll carried across a step boundary
+ *             keeps its gate for the new step (voiceControl_resetOnly() path).
+ *   Callers:  instrumentManager_renewGate().
+ * Colloid_setMidiHold(voice, on)
+ *   What:     the paraphonic hold (MidiNoteModes.c through
+ *             instrumentManager_setMidiHold()); see the state block.
+ * Colloid_changeArm(voice)
+ *   What:     the track's played Scene changed: changeArm 1, susSeen 0.
+ * Colloid_changeDecide(voice)
+ *   What:     the track's first step event in the new Scene has been drained
+ *             and fired: if no trigger cleared changeArm, no drained entry
+ *             wrote sus = on (susSeen) and no MIDI keys hold the voice, the
+ *             note is released with susBreak (plan §2.1 rule 6, decided Q4).
+ * Colloid_noteSustainWrite(voice, value)
+ *   What:     the drain wrote the sus row; value 1 sets susSeen.
+ *   Callers:  instrumentManager_automationWritten() (seq_writeInstrumentAutomation()).
+ * Context:    all foreground (main loop or render context, never TIM3); each
+ *             writes single bytes or one int32 read by the next async.
+ */
+void Colloid_gateRelease(ColloidVoice *voice, const uint8_t brk)
+{
+	voice->gateLeft = 0;
+	if (brk)
+		voice->susBreak = 1u;
+}
+
+void Colloid_gateRenew(ColloidVoice *voice, const uint32_t stepSamples)
+{
+	voice->gateLeft = (int32_t)((stepSamples > 0x7FFFFFFFu) ? 0x7FFFFFFFu : stepSamples);
+}
+
+void Colloid_setMidiHold(ColloidVoice *voice, const uint8_t on)
+{
+	voice->midiHold = (uint8_t)(on != 0u);
+}
+
+void Colloid_changeArm(ColloidVoice *voice)
+{
+	voice->changeArm = 1u;
+	voice->susSeen = 0u;
+}
+
+void Colloid_changeDecide(ColloidVoice *voice)
+{
+	if (voice->changeArm && !voice->susSeen && !voice->midiHold)
+		Colloid_gateRelease(voice, 1u);
+	voice->changeArm = 0u;
+}
+
+void Colloid_noteSustainWrite(ColloidVoice *voice, const uint8_t value)
+{
+	if (value)
+		voice->susSeen = 1u;
+}
+
 void Colloid_setOscType(ColloidVoice *voice, const uint8_t typ)
 {
 	OscInfo *const osc = &voice->osc;
-	/* the byte -> the platform type: 0 wav, 1 wtb, 2 and above pwm */
+	/* the byte -> the platform type: 0 wav, 1 wtb, 2 and above pwm; S096 P3:
+	 * 3 (wts) is OSC_TYPE_WTB plus the scan flag */
+	const uint8_t scan = (uint8_t)(typ == COL_TYP_WTS);
 	const uint8_t type = (typ == COL_TYP_WAV) ? OSC_TYPE_WAV
-	                   : ((typ == COL_TYP_WTB) ? OSC_TYPE_WTB : OSC_TYPE_PWM);
-	/* the new list's length: Saw..Sin, Sin..Rec (S095 P3 F2), or the
-	 * installed tables */
+	                   : (((typ == COL_TYP_WTB) || scan) ? OSC_TYPE_WTB : OSC_TYPE_PWM);
+	/* the new list's length: Saw..Sin, Tri..R-S (S095 P3 F2; S099 P1/P2), or
+	 * the installed tables */
 	const uint8_t count = (type == OSC_TYPE_WTB) ? sampleMemory_getNumWavetables()
 	                    : ((type == OSC_TYPE_PWM) ? (uint8_t)COL_PWM_WAVE_COUNT
 	                                              : (uint8_t)COL_WAVE_COUNT);
 	const uint8_t last = count ? (uint8_t)(count - 1u) : 0u;
 	uint32_t i;
 
-	if (type == osc->oscType)
+	if (type == osc->oscType && scan == voice->scan)
 		return;
 	osc->oscType = type;
+	voice->scan = scan;
 	/* the stored byte is used as it is, clamped to an entry that exists
 	 * (the platform's typ rule, S087 P0 r8) */
 	if (osc->waveform > last)
 		osc->waveform = last;
 	osc->sampleCacheLooped = COL_BIND_NONE;
+	if (type == OSC_TYPE_WTB && scan)
+		voice->oscLive = 0u;   /* S096 P3: the scan positions land at once */
 	if (type == OSC_TYPE_PWM) {
 		const int32_t pos = (int32_t)(osc->position & 127u);
 		const float scale = col_pwmScale(voice);

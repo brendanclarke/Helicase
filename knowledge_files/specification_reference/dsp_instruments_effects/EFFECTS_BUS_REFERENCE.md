@@ -32,8 +32,13 @@ differences from the plan.
   `EFFECTS_MODULES_DSP_REFERENCE.md` (each type's DSP, binding rules, the
   arena framework, and the rules for buffer-using types).
 - **New here?** Read §1 (concepts), §3 (one block), §4 (the type contract),
-  §8 (the page), then the tutorial (§14). The two registered types are the
-  worked examples: `flt` has no arena use and no custom UI; `cbt` uses both.
+  §8 (the page), then the tutorial (§14). The registered types are the
+  worked examples: `cbt` uses the arena and custom UI; the Space group
+  (`dly`/`rvb`/`ech`) shares one parameter table and the arena prefix
+  (see `SPACE_GROUP_EFFECTS_MODULE_REFERENCE.md`).
+- **S095 P4 changes:** StereoFilter (`flt`) removed; type IDs renumbered;
+  Space effects (Delay/Reverb/Echo) added. CrumpBit `rvb` damping updated
+  (`toneK[ton >> 1]`). See `EFFECTS_MODULES_DSP_REFERENCE.md` §5 and §7.
 
 ---
 
@@ -42,10 +47,11 @@ differences from the plan.
 - **One Effect per Scene.** Each of the 16 resident Scenes owns one
   `effect_record_t`. A Kit or Instrument load never changes it. Scene and Bank
   Load/Save carry it.
-- **Type.** The registry id is `0` = `off` (default), `1` = `flt` (stereo
-  filter) or `2` = `cbt` (CrumpBit: 8-bit bit-crush into an 8-bit tape delay,
-  Session 074). Files and AutoSave store the three-character token, never the
-  id.
+- **Type.** The registry id is `0` = `off` (default), `1` = `cbt`
+  (CrumpBit), `2` = `dly` (Delay), `3` = `rvb` (Reverb), `4` = `ech`
+  (Echo). IDs renumbered in S095 P4 (StereoFilter `flt` removed, CrumpBit
+  moved from 2 to 1, Space types added at 2–4; `EFFECT_TYPE_COUNT` = 5).
+  Files and AutoSave store the three-character token, never the id.
 - **Parameters.** Each type has up to 64 local parameters, and each has a
   normal and a Morph value:
   - `0 out` (route), `1 vol`, `2 pan` are common to every type;
@@ -66,9 +72,11 @@ differences from the plan.
   - LFO (`fx` namespace, value 8);
   - `fxm` (Scene target 404) for Effect Morph.
 - **Shared DTCM arena.** The rest of DTCM after statics is shared between the
-  Effect (bottom) and future buffer voices (top). Since S091 P2 `cbt` uses
-  the whole share up to 126,656 B for its delay loop (elastic; the Rate is
-  clamped to what the share holds); `flt` uses none.
+  Effect (bottom) and future buffer voices (top). `cbt` uses the whole share
+  up to 126,656 B for its delay loop (elastic; S091 P2). The Space types
+  (`dly`/`rvb`/`ech`) reserve a 512 B prefix (`SK_PREFIX_BYTES`: 64 B
+  control block + 448 B type state) and use the rest as ring memory
+  (`SPACE_GROUP_EFFECTS_MODULE_REFERENCE.md` §3).
 - **Not part of the Effect system:** the master bus compressor (`cmp`, S074)
   is a Scene setting that processes an output pair after the Effect return.
   It has no registry row, send or lanes (`MIXER_SYSTEM_DSP_REFERENCE.md`
@@ -83,10 +91,11 @@ differences from the plan.
 | Area | File(s) | Owns |
 |---|---|---|
 | Data contract | `Core/DSP/Effects/EffectTypes.h` | `effect_record_t` (420 B), step shape, lane/run/length constants, block-7 ID helpers |
-| Registry, runtime, resolution | `Core/DSP/Effects/EffectsManager.c/.h` | registry (`off`, `flt`, `cbt`), the runtime union, activation/type change and the handoff export (`effects_exportHandoff()`), the per-block §6 resolution, edit API + fan-out, FX-sequencer consumption, Pattern/LFO overlays, target validation; the hook and layout contract types |
+| Registry, runtime, resolution | `Core/DSP/Effects/EffectsManager.c/.h` | registry (`off`, `cbt`, `dly`, `rvb`, `ech`), the runtime union, activation/type change, drain logic (§4.2 of `SPACE_GROUP_EFFECTS_MODULE_REFERENCE.md`), slot-lock API, and the handoff export (`effects_exportHandoff()`), the per-block §6 resolution, edit API + fan-out, FX-sequencer consumption, Pattern/LFO overlays, target validation; the hook and layout contract types |
 | Row macros | `Core/DSP/Effects/EffectParamRows.h` | `EFFECT_COMMON_ROWS`, `EFFECT_ROW`, `EFFECT_ROW_MENU`, modulation-domain presets |
 | Arena | `Core/DSP/Effects/FxBuffer.c/.h`, linker `.dtcm_fxbuf` | arena bounds, voice units, Effect share, handoff record |
-| Stereo filter | `Core/DSP/Effects/StereoFilter/StereoFilterParameters.c/.h`, `StereoFilterEffect.c/.h` | descriptors/names, runtime + ops |
+| ~~Stereo filter~~ | ~~`Core/DSP/Effects/StereoFilter/`~~ | Removed in S095 P4 (4 files deleted; −3.7 KB flash) |
+| Space group (S095) | `Core/DSP/Effects/Space/SpaceKit.c/.h`, `SpaceEffect.c`, `SpaceParameters.c`, `SpaceTables.c` | Shared DSP primitives, per-type init/process, parameter descriptors, flash tables; Delay/Reverb/Echo |
 | CrumpBit (S074) | `Core/DSP/Effects/CrumpBit/CrumpBitParameters.c/.h`, `CrumpBitEffect.c/.h` | descriptors/names, layout and page hooks (bit row, SELECT/LED, value labels); runtime, ops, Rate/Sync helpers |
 | Float SVF | `Core/DSPAudio/ResonantFilter.c` `SVF_calcBlockZDFFloat()` | float-I/O ZDF block for Effects |
 | Bus | `Core/DSPAudio/mixer.c` | send taps, fader modes, bus accumulation, process call, return |
@@ -175,7 +184,7 @@ FX-send step override. The fader never changes the stored send.
 
 | Field | Meaning | Why |
 |---|---|---|
-| `base` (`ParamDescriptor`) | file key, short/long/category labels, dtype, flags MORPHABLE/MODULATABLE/AUTOMATABLE, `mod_domain` | shared with Menu, target pickers and storage, so Effect rows behave like Instrument rows |
+| `base` (`ParamDescriptor`, 20 B) | file key, `short_id`/`long_id`/`cat_id` label pool indexes (S097 P1; were pointers), dtype, flags MORPHABLE/MODULATABLE/AUTOMATABLE, `mod_domain` | shared with Menu, target pickers and storage, so Effect rows behave like Instrument rows |
 | `default_value` | the single default for both endpoints on a type change | F3: one default, no separate Morph default |
 | `max_value` | inclusive retained/runtime clamp | every writer clamps to it |
 | `effect_flags` | `EFFECT_PARAM_FLAG_WIDE8` (0..255 domain), `EFFECT_PARAM_FLAG_BUFFER_DEPENDENT` | automation expansion; runtime-only buffer clamp |
@@ -207,20 +216,29 @@ Rules:
 The registry is **append-only in token terms**: ids may be reordered in the
 future, tokens never change meaning.
 
-### 4.2a Registered types (Session 074)
+### 4.2a Registered types (Session 095 P4)
 
-| Id | Token / abbrev / full | I/O | Rows | Lanes 1..n | Layout / hooks | Runtime | Arena min = pref |
-|---:|---|---|---:|---|---|---:|---:|
-| 0 | `off` / `Off␣␣` / `Off` | none | 3 | — | default / none | 0 | 0 |
-| 1 | `flt` / `StFlt` / `StFilter` | stereo in, stereo out | 7 | freq, reso, drive, type, vol, pan | default / none | 76 B (two filter states) | 0 |
-| 2 | `cbt` / `CrmBt` / `CrumpBit` | stereo in, stereo out | 24 | per `sub` (`lane_map`): shared `mrp bof biv mix vol pan typ frq res`; pool `fbk rte spn ton` (`dly`), `fbk rte snc spn ton` (`cmb`/`rvb`), + `aux fin` (`pit`), `den rte snc spn lng aux spr` (`grn`); `bal` is lane-less | custom layout; `select`, `render_leds`, `paint_row0`, `format_value3`, `labels`, `layout`, `format_target3`, flag `OWNS_SELECT_LEDS` | 100 B | elastic: min 73,664 B (12 units), pref up to 126,656 B |
+| Id | Token / abbrev / full | I/O | Rows | Layout / hooks | Runtime | Arena |
+|---:|---|---|---:|---|---:|---:|
+| 0 | `off` / `Off␣␣` / `Off` | none | 3 | default / none | 0 | 0 |
+| 1 | `cbt` / `CrmBt` / `CrumpBit` | stereo in, stereo out | 24 | custom layout; `select`, `render_leds`, `paint_row0`, `format_value3`, `labels`, `layout`, `format_target3`, `OWNS_SELECT_LEDS` | 100 B | elastic: min 73,664 B, pref 126,656 B |
+| 2 | `dly` / `Delay` / `Delay   ` | stereo in, stereo out | 17 | default / `format_value3`, `labels` | arena prefix | uses arena prefix (512 B) + ring |
+| 3 | `rvb` / `Rverb` / `Reverb  ` | stereo in, stereo out | 17 | default / `format_value3`, `labels` | arena prefix | uses arena prefix (512 B) + ring |
+| 4 | `ech` / `Echo ` / `Echo    ` | stereo in, stereo out | 17 | default / `format_value3`, `labels` | arena prefix | uses arena prefix (512 B) + ring |
+
+StereoFilter (`flt`, id 1) was removed in S095 P4 (4 files deleted,
+−3.7 KB flash). CrumpBit moved from id 2 to id 1.
 
 `effects_runtime_t` is a union of every runtime struct and is **100 B** since
-S091 P4 (CrumpBit is the largest: 56 B shared + 44 B union; StereoFilter
-76 B). `_Static_assert`s check
-each member against the union and pin CrumpBit at 100 B: it fills the union,
-so any larger runtime grows `.dtcmz` (RAM approval). The CrumpBit
-rows, DSP and page are in §8.6 and `EFFECTS_MODULES_DSP_REFERENCE.md` §6.
+S091 P4 (CrumpBit is the largest: 56 B shared + 44 B union). The Space
+types do not use the runtime union; their state lives in the arena prefix
+(512 B: 64 B control block + 448 B type state header).
+`_Static_assert`s check each member against the union and pin CrumpBit at
+100 B: it fills the union, so any larger runtime grows `.dtcmz` (RAM
+approval). The CrumpBit rows, DSP and page are in §8.6 and
+`EFFECTS_MODULES_DSP_REFERENCE.md` §6. The Space group is in
+`SPACE_GROUP_EFFECTS_MODULE_REFERENCE.md` and
+`SPACE_GROUP_EFFECTS_MODELLING_REFERENCE.md`.
 
 ### 4.3 Operations (`effect_type_ops_t`)
 
@@ -394,9 +412,18 @@ for each descriptor i:
   margin is 3,712 B.
 - It is never zeroed or cleared by the system (A31).
 - **Voice units:** 2,208 samples × 2 B = 4,416 B (50.06 ms at 44,108 Hz);
-  12 in total, at most 2 per slot. They are allocated from the top. No
-  instrument claims them yet; the diagnostic knob
-  `DEV_FXBUF_FORCE_VOICE_UNITS` can.
+  12 in total, at most 2 per slot. They are allocated from the top.
+  **Tetrakt (S096 P1)** is the first instrument to claim voice units: one
+  unit per voice for its S1 space stage (50 ms delay line), so a six-slot
+  Tetrakt Scene claims 6 of 12 units. **Advanced Colloid `clx` and Advanced
+  Alkaline `alx` (S099)** each claim one unit per slot while `fx` ≠ off
+  (`IM_SPECIAL_FX_TYPE` fixed selector; `instrumentManager_unitsWanted()`).
+  The unit holds the BBD chorus's ring buffer. Unlike the Tetrakt, the
+  chorus claim is dynamic: the unit is acquired when `fx` is set to `chr`
+  and released when `fx` is set to `off`, changing the FxBuffer rule from
+  "claimed at type assignment, never at a row change" to include this
+  selector-driven claim. The diagnostic knob
+  `DEV_FXBUF_FORCE_VOICE_UNITS` forces claims without an instrument.
 - **The Effect share** is contiguous from the bottom: the arena minus the
   claimed units. With all twelve units claimed it is **73,600 B**. A type
   must work at that minimum.
@@ -415,7 +442,7 @@ Everything is foreground-only.
 
 ### 7.3 Handoff rule: clear unless you adopt
 
-- `fxbuf_handoff_t` (180 B) records the exited Effect's type, channels, bits,
+- `fxbuf_handoff_t` (196 B, was 180 B before S095 P1) records the exited Effect's type, channels, bits,
   `state_flags` (`FXBUF_STATE_EFFECT_WRITTEN`, `FXBUF_STATE_VOICE_WRITTEN`),
   rate, share bounds, unit owners and rates, and read/write offsets (arena
   byte offsets, not pointers).
@@ -431,11 +458,16 @@ Everything is foreground-only.
   clearing up to 126 KB in one foreground call (§8.6,
   `EFFECTS_MODULES_DSP_REFERENCE.md` §6).
 - **Per type:**
-  - `flt` uses no arena memory and ignores the handoff.
   - `cbt` never adopts (Q19). It exports 1 channel, 8 bits, 44,108 Hz, its
     write and read positions in pointer slot 12
     (`FXBUF_HANDOFF_EFFECT_POINTER_BASE`), and
     `FXBUF_STATE_EFFECT_WRITTEN` once anything was written.
+  - The Space types (`dly`/`rvb`/`ech`) use `sk_feedBegin()` to set up
+    feed-through from the old effect's ring data, and `sk_feedRead()` to
+    inject the outgoing tail into the new effect's loop. Feed-through reads
+    lock one interpolation slot (`effects_setFeedSlotLock`). On drain into
+    OFF, the outgoing effect keeps rendering with muted input until the
+    output drops below −80 dBFS or 6 s elapse.
 - **Refresh points:** the handoff is exported when a type is exited (Scene
   activation with a different type, or a `typ` change). Since S074 it is also
   refreshed without `init` on a same-type Scene switch
@@ -891,7 +923,7 @@ trigger".
 ```
 format=helicase.effect
 version=2
-type=flt
+type=cbt
 [params]      <file_key>=<0..255>          (rows of this type)
 [morph]       same keys                    (missing section → copy of [params])
 [sequence]    run_mode=fwd|rev|pip|rnd|sel
@@ -1000,6 +1032,8 @@ Scene switches, how time changes behave, and RAM (the union has 20 B spare).
 2. **Descriptors.**
    - Start with `EFFECT_COMMON_ROWS(out, vol, pan flags)`, then
      `EFFECT_ROW(...)` / `EFFECT_ROW_MENU(...)` for rows 3..
+   - `EFFECT_ROW` arguments 2–4 are `uint8_t` label pool indexes (short, long,
+     cat) into `MenuLabels.c` pools, not string pointers (S097 P1).
    - Reuse the voice keys and dtypes when the meaning matches, as `flt` does
      with `filter_freq` etc.
    - Give each row one `default_value` ≤ `max_value`.
@@ -1121,10 +1155,27 @@ all registry-driven.
    `effects_activateScene()` and the all-source LFO rebind.
 6. Optional `DEV_EFFECT_FORCE_TYPE` (diagnostic builds only).
 
-### 16.2 Scene activation (`effects_activateScene()`)
+### 16.2 Scene activation (`effects_activateScene()`) and rebind
 
 Called from `preset_sendDrumsetParameters()` (pre-audio) and
-`preset_startDrumsetApply()` (every Scene switch and Scene/Bank load apply).
+`preset_startDrumsetApply()` (pre-S098) or
+`preset_startSceneSwitchApply()` (S098 P1, every Scene switch).
+
+Since S098 P1, `preset_startSceneSwitchApply()` decides per Scene:
+- **Effect changed** (`!effect_same`): `effects_activateScene()` runs as
+  before — type switch or same-type refresh, FX clock invalidated, overlays
+  cleared, serial bumped.
+- **Effect identical** (`effect_same`): only `effects_rebindSourceScene(target)`
+  moves the Effect's cached source Scene index. The FX clock, overlays and
+  `fxm` override are **not** reset, so the FX sequence keeps its position and
+  the tails ring uninterrupted. `effects_rebindSourceScene()` refuses a type
+  mismatch; if that happens, `preset_startSceneSwitchApply()` falls back to
+  `effects_activateScene()`.
+
+Bank and other Load applies still call `effects_activateScene()` through
+`preset_startDrumsetApply()`.
+
+**`effects_activateScene()` detail:**
 
 - A different type goes through `effects_switchRuntime()`:
   1. handoff `BeginExit` → exited type and channels → `export_handoff`;

@@ -175,6 +175,36 @@ void lfo_dispatchNextValue(Lfo* lfo, uint8_t source_slot)
 										lfo->modTarget2.amount);
 }
 //-------------------------------------------------------------
+/* S101 P2 A1: contract in lfo.h. The step is lfo_calc()'s, line for line. */
+void lfo_stepBlock(Lfo *lfo)
+{
+	const uint32_t oldPhase = lfo->phase;
+	const float rateScale = lfo->sync ? 1.0f : lfo->modNodeValue;
+	float inc = lfo->phaseInc*rateScale;
+	uint32_t incInt = inc;
+
+	lfo->phase += incInt;
+	if (lfo->waveform == LFO_NOISE && oldPhase > lfo->phase)
+		lfo->rnd = (float)(GetRngValue()) / 32767.0f;
+}
+//-------------------------------------------------------------
+/* S101 P2 A1: contract in lfo.h. modTarget.lastVal is the value both nodes
+ * and both adapter pairs last received (modNode_updateValuePolarity() stores
+ * it in lastVal before any target test, so it is set even with no target). */
+void lfo_reapplyValue(Lfo *lfo, uint8_t source_slot)
+{
+	const float val = lfo->modTarget.lastVal;
+
+	modNode_updateValuePolarity(&lfo->modTarget,val,lfo->polarity);
+	modNode_updateValuePolarity(&lfo->modTarget2,val,lfo->polarity);
+	instrumentManager_updateLfoAdapters(source_slot, 0u, val,
+										lfo->polarity,
+										lfo->modTarget.amount);
+	instrumentManager_updateLfoAdapters(source_slot, 1u, val,
+										lfo->polarity,
+										lfo->modTarget2.amount);
+}
+//-------------------------------------------------------------
 uint32_t lfo_calcPhaseInc(float freq, uint8_t sync)
 {
 	if(sync==0)//no sync

@@ -56,7 +56,15 @@
  */
 #define VOICE_CHAIN_DEFAULT     0u
 #define VOICE_CHAIN_WAVEFOLDER  1u
-#define VOICE_CHAIN_COUNT       2u
+/*
+ * S101 P3: 2 Spc = the spatializer (voiceSpace.h) in place of the transient,
+ * the post-chain drive and the SRR; the transient_wave/vol/freq rows are its
+ * spread, feedback and time, instrument_decimation its tone and
+ * instrument_drive its level. The slot holds one FxBuffer voice unit while
+ * its chain is Spc (InstrumentManager.c, the voice_chain writer).
+ */
+#define VOICE_CHAIN_SPACE       2u
+#define VOICE_CHAIN_COUNT       3u
 
 /*
  * Fold types: the transient_wave byte under WFd (S089 P2 §3).

@@ -42,6 +42,15 @@
  */
 static uint8_t midiOut_trackNote[7];
 static uint8_t midiOut_trackChannel[7];
+/*
+ * S096 P3 T1 (finding D3): a wide track's sounding layer notes.
+ *
+ * What: bit k = the note (base + k) is sounding; midiOut_trackNote[] keeps
+ * the base note and midiOut_trackChannel[] the channel. Why: a Tetrakt step
+ * transmits one note per layer, and every one must be turned off. RAM: 7 B.
+ * Writers: midiOut_trackLayers(); reader: midiOut_trackNoteOffLocked().
+ */
+static uint8_t midiOut_trackLayersBits[7];
 
 static uint32_t midiOut_irqSave(void)
 {
@@ -164,16 +173,28 @@ static void midiOut_trackNoteOffLocked(uint8_t t)
 {
 	uint8_t rec = midiOut_trackNote[t];
 	uint8_t ch = midiOut_trackChannel[t];
+	uint8_t layers = midiOut_trackLayersBits[t];
 
 	midiOut_trackNote[t] = 0u;
+	midiOut_trackLayersBits[t] = 0u;
 	if ((rec & 0x80u) && ch >= 1u && ch <= 16u) {
 		MidiMsg msg = {0};
+		uint8_t k;
 
-		/* 0x80 note-off, velocity 0 (some gear ignores 0x90 v0). */
 		msg.status = (uint8_t)(NOTE_OFF | (ch - 1u));
-		msg.data1 = (uint8_t)(rec & 0x7Fu);
 		msg.bits.length = 2u;
-		midiOut_sendMsg(&msg, MIDI_PORT_BOTH);
+		if (layers == 0u) {
+			/* 0x80 note-off, velocity 0 (some gear ignores 0x90 v0). */
+			msg.data1 = (uint8_t)(rec & 0x7Fu);
+			midiOut_sendMsg(&msg, MIDI_PORT_BOTH);
+		} else {
+			for (k = 0u; k < 4u; k++) {
+				if ((layers & (uint8_t)(1u << k)) == 0u)
+					continue;
+				msg.data1 = (uint8_t)((rec & 0x7Fu) + k);
+				midiOut_sendMsg(&msg, MIDI_PORT_BOTH);
+			}
+		}
 	}
 }
 
@@ -257,11 +278,79 @@ void midiOut_trackTrigger(uint8_t track, uint8_t scene_index,
 	uint8_t note;
 
 	midiNoteMap_load(scene_index, &map);
-	if (!midiNoteMap_inverse(&map, track, internal, &channel, &note)) {
+	/* S096 P3 T1: a wide (Tetrakt) track transmits at the trigger fire, in
+	 * the foreground, with the mask that played (finding D3). */
+	if ((map.wide & (uint8_t)(1u << track)) != 0u)
+		return;
+	if (!midiNoteMap_inverse(&map, track, internal, 0u, &channel, &note)) {
 		midiOut_trackNoteOff(track);	/* Q4: no note for this pitch */
 		return;
 	}
 	midiOut_trackNoteOn(track, channel, note, velocity);
+}
+
+/*
+ * Transmit a wide track's trigger (S096 P3 T1, decided Q15; finding D3).
+ *
+ * What: ends the track's sounding notes (one or several layer notes), then
+ * sends one note-on per layer in `mask`: the note that resolves back to
+ * (track, internal, sub = layer), so a recorded MIDI part plays back the
+ * same layers. Stores the base note and mask for the note-offs.
+ * Inputs: track 0..6, scene_index (the track's played Scene), internal,
+ * vel, mask 1..15. Context: foreground (the trigger fire); PRIMASK as
+ * midiOut_trackNoteOn(). Latency: up to one render pass (2.18 ms) after
+ * TIM3's step time, for wide tracks only.
+ */
+void midiOut_trackLayers(uint8_t track, uint8_t scene_index, uint8_t internal,
+                         uint8_t velocity, uint8_t mask)
+{
+	midiNoteMap_settings_t map;
+	uint8_t channel;
+	uint8_t base;
+	uint32_t primask;
+	uint8_t k;
+
+	if (track > 6u)
+		return;
+	midiNoteMap_load(scene_index, &map);
+	if ((map.wide & (uint8_t)(1u << track)) == 0u) {
+		midiOut_trackTrigger(track, scene_index, internal, velocity);
+		return;
+	}
+	if (!midiNoteMap_inverse(&map, track, internal, 0u, &channel, &base)) {
+		midiOut_trackNoteOff(track);
+		return;
+	}
+	primask = midiOut_irqSave();
+	midiOut_trackNoteOffLocked(track);
+	if (channel >= 1u && channel <= 16u && mask != 0u &&
+	    midiIn_txAllows(MIDI_FILTER_NOTE)) {
+		uint8_t sent = 0u;
+
+		for (k = 0u; k < 4u; k++) {
+			uint8_t chk;
+			uint8_t note;
+			MidiMsg msg = {0};
+
+			if ((mask & (uint8_t)(1u << k)) == 0u)
+				continue;
+			if (!midiNoteMap_inverse(&map, track, internal, k, &chk, &note) ||
+			    chk != channel)
+				continue;
+			msg.status = (uint8_t)(NOTE_ON | (channel - 1u));
+			msg.data1 = note;
+			msg.data2 = (uint8_t)(velocity & 0x7Fu);
+			msg.bits.length = 2u;
+			midiOut_sendMsg(&msg, MIDI_PORT_BOTH);
+			sent |= (uint8_t)(1u << k);
+		}
+		if (sent != 0u) {
+			midiOut_trackNote[track] = (uint8_t)(0x80u | base);
+			midiOut_trackChannel[track] = channel;
+			midiOut_trackLayersBits[track] = sent;
+		}
+	}
+	midiOut_irqRestore(primask);
 }
 
 /*

@@ -1,0 +1,34 @@
+# S096 P3 device cycle probe (SD_CARD_COL, 2026-11-17)
+#
+# Source:   SD_CARD_COL/asavetrc.bin, 'p' records after the last boot
+#           (record 1,027,862, BOOT_SETTLE start), decoded with
+#           tools/diagnostic_tools/decode_devlogs.py. 264 windows.
+#           Image: SD_CARD_COL/LXRV2_lxr02.img = the S096 P3 implementation
+#           build BEFORE the assessment fixes and the noise form B (the first
+#           noise form: one-pole HP + SVF; its gain then near -96 dBFS, but
+#           its CPU cost is the same at any gain).
+# Scene:    slots tkt drm alk alk col hat. The Colloid (slot 4) final state
+#           (.hcprms1 generation 0x0a1d, Scene 0 instrument 4): typ 3 (wts),
+#           rte str (stereo), LFO 1 at 127 on osc1_position (scanning), slw 78,
+#           drv 127, noise level 15 width 127, pam 64. Edits during the run
+#           (AutoSave dirty records): filter type/cutoff/res, osc1_wave,
+#           pam, fin, psp, drv, ton, vol, osc1_type (windows 102-105, 117,
+#           152-154), the noise rows.
+# Budget:   Basic share 19,620 cycles per block (S094 P2 §21).
+#
+# Colloid slot 4, by segment (block-rate + render = total, average):
+#   windows   0-12   4,337 + 16,032 = 20,369  (before the transport ran)
+#   windows  14-41   4,652 + 17,104 = 21,756  (6-oscillator mode, wts by
+#   windows  42-101  4,654 + 17,058 = 21,713   its block-rate; edits)
+#   windows 107-116  5,388 + 17,989 = 23,377  (a 12-oscillator mode by its
+#   windows 118-151  5,291 + 17,443 = 22,734   block-rate: wav or wtb)
+#   windows 155-263  4,624 + 16,579 = 21,202  (wts, the final state)
+#   max window 23,609. Every Colloid segment is over the share.
+# The other slots (median): tkt 18,011 (max 20,056, first windows only),
+#   drm 13,747, alk 15,960 / 15,658, hat 15,285.
+# Whole mixer: average 129,896..143,039 cycles, maximum 162,939 of 156,705
+#   (the 2.18 ms budget; the queue absorbed it).
+#
+# Cycles per instruction in this mixed Scene (render / host loop count x 32):
+#   wts 16,579 / (344 x 32) = 1.51. Higher than the S095 P5 six-Colloid
+#   Scene (1.37..1.42): six different engines share the 16 KB I-cache.

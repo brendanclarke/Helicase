@@ -114,6 +114,11 @@ enum ParamEnums
 	PAR_PATTERN_NEXT,
 	PAR_TRACK_LENGTH,
 
+	/*
+	 * Former SOM generator controls, unused since S097 (archive/som/). The
+	 * ids stay so every later PAR_* id, and the globals block, keep their
+	 * values.
+	 */
 	PAR_POS_X,
 	PAR_POS_Y,
 	PAR_FLUX,

@@ -1,4 +1,9 @@
-# LXR-02 firmware — Python requirements
+# LXR-02 Helicase firmware build requirements
+# This document outlines the toolchain necessary to build the firmware and
+# run the test and conversion utilities in /tools/.
+# It is not necessary to use the firmware on an LXR02. To use the firmware,
+# copy /build/LXRV2_lxr02.img as the only *.img on your SD card and power on
+# while pressing the encoder button down. 
 #
 # Python is only used for the .img packaging tool (tools/build_lxrv2_img.py).
 # No third-party packages are required — only Python 3.6+ standard library.

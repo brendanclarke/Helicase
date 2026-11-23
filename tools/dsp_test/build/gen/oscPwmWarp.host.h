@@ -11,15 +11,14 @@
  *             plays over [0, W) and the second over [W, 2^32), each to
  *             within 64 phase units (gen_pwm_tables.py T5). At W = 2^31 psi
  *             is ph to within 64 units.
- * Why:        the warp forms (WT: the triangle row; WS: the sine) of the
- *             drum-instrument pwm loops (Oscillator.c) and the Alkaline's
+ * Why:        the warp form (WT: the triangle row; S099 P1 §15.10 dropped
+ *             WS, the sine) of the drum-instrument pwm loops (Oscillator.c) and the Alkaline's
  *             fused ladder mode 4 (WT, DiodeLadder.c) must be the same law.
  *             Both halves are computed and one selected, so every width runs
  *             the same instructions (constant cost); the << 6 is exact for
- *             every reader (WT reads psi >> 7 and above, WS psi >> 5 and
- *             above).
+ *             every reader (WT reads psi >> 7 and above).
  * Inputs:     ph, W (wPh), ra, rb.  Outputs: psi.
- * Accessors:  Oscillator.c (the WT and WS loops); DiodeLadder.c
+ * Accessors:  Oscillator.c (the WT loops); DiodeLadder.c
  *             dl_renderB2Body() mode 4.
  * Affiliates: oscPwmTables.h (W, ra, rb per pos).
  */

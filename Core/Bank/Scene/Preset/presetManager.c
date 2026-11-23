@@ -107,8 +107,28 @@ static uint16_t                  pm_bank_load_failed_scene_mask = 0u;
  * Affiliates: ccSvc_dropQueued(), filesystem_setAutosaveYield(),
  * preset_buildBackgroundScene(), seq_switchToBackgroundScene(),
  * seq_moveTracksToBackgroundScene().
+ * S098 P2: the same phases also run Scene and Pattern Loads (pm_bg_kind).
  */
 static uint8_t                   pm_bg_phase = 0u;
+/*
+ * Kind of the background load (S098 P2).
+ *
+ * What: PRESET_BG_KIND_BANK, PRESET_BG_KIND_SCENE or PRESET_BG_KIND_PATTERN
+ * for the load the phases are running. Phases 1-3 and 5 are the same for
+ * every kind. Phase 4 posts the kind's request. Only a Bank load drops
+ * queued copy/clear jobs, can discard the dirty mask, unlocks the panel and
+ * writes the MIDI CC0 result.
+ * Why: target T2. A Scene or Pattern Load that replaces a played Scene must
+ * first move playback onto Scene 17, exactly as a Bank Load does.
+ * pm_request_type cannot carry the kind: preset_loadName() rewrites it while
+ * the user browses, and the flag byte pm_bg_phase is full.
+ * Inputs: preset_requestBackgroundBankLoad() (and phase 0 for MIDI),
+ * preset_requestBackgroundSceneLoad().
+ * Outputs: phases 1, 2 and 4, preset_bgEnd(),
+ * preset_backgroundBankLoadRunning().
+ * RAM: +1 B SRAM1 (approved 2026-11-18). Owner: Preset.
+ */
+static uint8_t                   pm_bg_kind = PRESET_BG_KIND_BANK;
 #define PM_BG_PHASE_MASK      0x07u
 /*
  * The load is unlocked for the panel (S082 P3 W3, W4, D40).
@@ -248,6 +268,26 @@ static uint8_t drumset_apply_voice = 0;
 static uint8_t drumset_apply_scene = 0u;
 static uint16_t drumset_apply_pending_mask = 0u;
 /*
+ * All six instrument slots as a mask (S098 P1).
+ */
+#define PM_ALL_SLOTS ((uint8_t)((1u << INSTRUMENT_SLOT_COUNT) - 1u))
+/*
+ * Sources the Scene worker rebinds when it finishes (S098 P1).
+ *
+ * What: bit s set = source slot s is revisited by the rebind cursor once
+ * every pending slot of this worker has committed.
+ * Why: a switch that keeps some slots must not reinstall their untouched
+ * bindings. A reinstall restores the target to its base for a block and
+ * clears the source's Morph and Effect LFO contributions.
+ * preset_startDrumsetApply() (Load, boot, copy/clear) sets all six, as
+ * before; preset_startSceneSwitchApply() sets only what
+ * instrumentManager_prepareModulationForSlotChange() reported.
+ * RAM: +1 B SRAM1 (approved 2026-11-18). Owner: Preset.
+ * Accessors: preset_startDrumsetApply(), preset_startSceneSwitchApply(),
+ * preset_tickDrumsetApply(), preset_applyDeferredSceneSlotForTrigger().
+ */
+static uint8_t drumset_apply_rebind_mask = 0u;
+/*
  * Per-track single-voice apply worker (S077 P2 §3.4).
  *
  * What: one bit per instrument slot awaiting a deferred per-track instrument
@@ -267,6 +307,16 @@ static uint8_t instrument_apply_scene = 0u;
 static uint8_t instrument_apply_phase = 0u;
 static uint8_t instrument_apply_rebind_source = 0u;
 static uint8_t instrument_apply_morph_only = 0u;
+/*
+ * Rebind cursor source mask (S098 P1).
+ *
+ * What: the rebind phase visits only the source slots set here. Every
+ * Instrument apply that reaches the rebind through the Morph phase sets all
+ * six; a Scene-worker rebind sets drumset_apply_rebind_mask.
+ * RAM: +1 B SRAM1 (approved 2026-11-18). Owner: Preset.
+ * Accessors: preset_startSceneModulationRebind(), preset_tickInstrumentApply().
+ */
+static uint8_t instrument_apply_rebind_mask = PM_ALL_SLOTS;
 enum {
     INSTRUMENT_APPLY_PHASE_MORPH_REBUILD = 0u,
     INSTRUMENT_APPLY_PHASE_TARGET_REBIND
@@ -494,6 +544,19 @@ static void on_globals_load_complete(void)
 static void on_pattern_load_complete(void)
 {
     preset_markRequestedScenesPresentOnSuccessfulLoad();
+    /*
+     * End the load-availability session (S098 P2).
+     *
+     * What: the destinations become selectable again as soon as the Load
+     * has committed (or failed). Why: a running Scene/Pattern Load marks its
+     * destinations unavailable when it is posted (preset_tickBackgroundBankLoad()
+     * phase 4); the Menu completion that follows may repaint the PERF row
+     * and accept a Scene change at once. Idempotent: a Load posted without a
+     * session (stopped, the copy/clear reload job, the boot fallback) ends
+     * nothing. preset_bgEnd() ends it again on every exit.
+     * Affiliates: bank_beginLoadAvailability(), bank_endLoadAvailability().
+     */
+    bank_endLoadAvailability();
     preset_completeFilesystemOp(PRESET_OP_PATTERN_LOAD);
 }
 
@@ -604,6 +667,19 @@ static void on_scene_load_complete(void)
      * preset_completeFilesystemOp().
      */
     preset_markRequestedScenesPresentOnSuccessfulLoad();
+    /*
+     * End the load-availability session (S098 P2).
+     *
+     * What: the destinations become selectable again as soon as the Load
+     * has committed (or failed). Why: a running Scene/Pattern Load marks its
+     * destinations unavailable when it is posted (preset_tickBackgroundBankLoad()
+     * phase 4); the Menu completion that follows may repaint the PERF row
+     * and accept a Scene change at once. Idempotent: a Load posted without a
+     * session (stopped, the copy/clear reload job, the boot fallback) ends
+     * nothing. preset_bgEnd() ends it again on every exit.
+     * Affiliates: bank_beginLoadAvailability(), bank_endLoadAvailability().
+     */
+    bank_endLoadAvailability();
     if (filesystem_status() == FS_STATUS_DONE) {
         for (scene_index = 0u;
              scene_index < SCENE_COUNT && scene_index < 16u;
@@ -1347,6 +1423,38 @@ void preset_clearFxSendStepOverride(uint8_t slot)
     fx_send_step_override[slot].amount = 0u;
 }
 
+/*
+ * Clear one slot's step-automation overlays for a Scene switch (S098 P1).
+ *
+ * What: deactivates the slot's audio-out, FX-send and Morph step overrides
+ * and, for slot 6, the generated track-7 decay override. Nothing is
+ * re-applied here: the Scene worker commits the slot's routing and image
+ * from the new Scene at its quiet point or trigger, and the mixer ramps the
+ * send to the retained value.
+ * Why: a switch replaces only the changed slots. Their overlays describe
+ * the outgoing Scene's automation; a kept slot's overlays belong to
+ * automation that keeps playing. The former whole-Scene clear in
+ * preset_applySceneSettings() cleared them for all six slots.
+ * Inputs: slot 0..5. Outputs: the four overlay records of that slot.
+ * Accessors: preset_startSceneSwitchApply().
+ * Affiliates: preset_clearAllAudioOutStepOverrides(),
+ * preset_clearAllFxSendStepOverrides(),
+ * presetMorph_clearStepAutomationOverride(),
+ * instrumentManager_clearSlot6Track7StepDecayOverride().
+ */
+static void preset_clearSlotStepOverrides(uint8_t slot)
+{
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    audio_out_step_override[slot].active = 0u;
+    audio_out_step_override[slot].route = 0u;
+    fx_send_step_override[slot].active = 0u;
+    fx_send_step_override[slot].amount = 0u;
+    presetMorph_clearStepAutomationOverride(slot);
+    if (slot == INSTRUMENT_SLOT_COUNT - 1u)
+        instrumentManager_clearSlot6Track7StepDecayOverride();
+}
+
 uint8_t preset_getFxSendDisplayAmount(uint8_t scene_index, uint8_t slot)
 {
     /*
@@ -1919,13 +2027,22 @@ static void preset_resetAndApplyKitVoiceImage(uint8_t scene_index,
  * gives boot, deferred Scene selection, and normal Instrument Load the same
  * target-resolution ordering. Clients must keep the Scene apply gate active
  * until the cursor drains so Menu never releases a half-rebound graph.
+ * S098 P1: source_mask limits the cursor to the sources a switch touched.
  */
-static void preset_startSceneModulationRebind(uint8_t scene_index)
+static void preset_startSceneModulationRebind(uint8_t scene_index,
+                                              uint8_t source_mask)
 {
+    /*
+     * S098 P1: only the sources in source_mask are revisited. Load, boot and
+     * copy/clear pass all six (through drumset_apply_rebind_mask), so their
+     * behaviour is unchanged; a Scene switch passes the sources whose
+     * bindings it detached or whose targets it replaced.
+     */
     instrument_apply_active = 1u;
     instrument_apply_scene = scene_index;
     instrument_apply_phase = INSTRUMENT_APPLY_PHASE_TARGET_REBIND;
     instrument_apply_rebind_source = 0u;
+    instrument_apply_rebind_mask = (uint8_t)(source_mask & PM_ALL_SLOTS);
     instrument_apply_morph_only = 0u;
 }
 
@@ -2012,6 +2129,8 @@ void preset_startDrumsetApply(void)
     drumset_apply_scene = scene_getActiveIndex();
     drumset_apply_pending_mask =
         (uint16_t)((1u << INSTRUMENT_SLOT_COUNT) - 1u);
+    /* S098 P1: a full Scene apply rebinds every source, as before. */
+    drumset_apply_rebind_mask = PM_ALL_SLOTS;
     drumset_apply_active = 1u;
     drumset_apply_voice = 0u;
     /*
@@ -2104,6 +2223,44 @@ static uint8_t preset_tickSingleVoiceApply(void)
         return 1u;
     }
     return 0u;
+}
+
+/*
+ * Apply what a finished Scene or Kit Load changed, and nothing else (S097 P3).
+ *
+ * What: when scene_mask (the Load's destination Scenes) holds the active
+ * Scene, the whole active Scene is re-applied as before
+ * (preset_startDrumsetApply()). Otherwise the playing sound did not change:
+ * no Scene settings, Effect, modulation or voice reset is done, and only a
+ * slot whose track plays one of the loaded Scenes through per-track Scene
+ * playback (S077) is re-armed from that Scene (preset_startSingleVoiceApply(),
+ * quiet-wait or trigger commit).
+ * Why: every runtime Load used to run the full active-Scene apply. A Load into
+ * other Scenes then reset the playing voices one by one
+ * (instrumentManager_resetRuntimeSlotFromScene()), cleared the step
+ * audio-out/FX-send/decay overrides (preset_applySceneSettings()),
+ * re-activated the Effect and cleared runtime modulation mid-pattern: the
+ * sequencer "stumble" heard on the device (S097 P3 log §7).
+ * Inputs: scene_mask bit n = resident Scene n. Outputs: one of the two applies
+ * above, or none. Caller: menu.c load completion (Scene Load, Kit Load).
+ * Affiliates: preset_getSlotPlayedScene(), preset_tickDrumsetApply().
+ */
+void preset_startLoadApply(uint16_t scene_mask)
+{
+    uint8_t active = scene_getActiveIndex();
+    uint8_t slot;
+
+    if (active < 16u && (scene_mask & (uint16_t)(1u << active)) != 0u) {
+        preset_startDrumsetApply();
+        return;
+    }
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        uint8_t played = preset_getSlotPlayedScene(slot);
+
+        if (played != active && played < 16u &&
+            (scene_mask & (uint16_t)(1u << played)) != 0u)
+            preset_startSingleVoiceApply(slot, played);
+    }
 }
 
 /*
@@ -2244,7 +2401,8 @@ uint8_t preset_tickDrumsetApply(void)
         drumset_apply_pending_mask =
             (uint16_t)(drumset_apply_pending_mask & ~bit);
         if (drumset_apply_pending_mask == 0u)
-            preset_startSceneModulationRebind(drumset_apply_scene);
+            preset_startSceneModulationRebind(drumset_apply_scene,
+                                              drumset_apply_rebind_mask);
         return 1u;
     }
 
@@ -2307,7 +2465,8 @@ void preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track)
     drumset_apply_pending_mask =
         (uint16_t)(drumset_apply_pending_mask & ~bit);
     if (drumset_apply_pending_mask == 0u)
-        preset_startSceneModulationRebind(drumset_apply_scene);
+        preset_startSceneModulationRebind(drumset_apply_scene,
+                                          drumset_apply_rebind_mask);
 }
 
 static uint8_t preset_copyInstrumentNormalToMorphIfSameType(
@@ -3025,8 +3184,24 @@ uint8_t preset_tickInstrumentApply(void)
         }
         instrument_apply_phase = INSTRUMENT_APPLY_PHASE_TARGET_REBIND;
         instrument_apply_rebind_source = 0u;
+        /* S098 P1: an Instrument/Kit apply rebuilds every source. */
+        instrument_apply_rebind_mask = PM_ALL_SLOTS;
         return 1u;
     }
+    /*
+     * Skip the sources this rebind does not own (S098 P1).
+     *
+     * What: advances the cursor past every source whose bit is clear in
+     * instrument_apply_rebind_mask. Why: a Scene switch rebinds only the
+     * sources whose bindings it detached or retargeted; reinstalling an
+     * untouched source would restore its target to base for a block and
+     * clear its Morph/Effect LFO contributions on a voice the switch kept.
+     * Inputs: instrument_apply_rebind_mask (all six for every other client).
+     */
+    while (instrument_apply_rebind_source < INSTRUMENT_SLOT_COUNT &&
+           (instrument_apply_rebind_mask &
+            (uint8_t)(1u << instrument_apply_rebind_source)) == 0u)
+        instrument_apply_rebind_source++;
     if (instrument_apply_rebind_source < INSTRUMENT_SLOT_COUNT) {
         /*
          * Rebuild every source rather than only the replaced destination.
@@ -3329,6 +3504,458 @@ static uint16_t preset_backgroundTrackChunks(uint8_t src_scene, uint8_t track)
     return chunks;
 }
 
+/* =======================================================================
+ * Scene switch continuity and the Scene 17 copy share one field list
+ * (S098 P1; S082 D4)
+ * ======================================================================= */
+
+/*
+ * The fields that make a track and a voice slot sound the way they do.
+ *
+ * What: X-macro lists of the per-track Pattern fields, the per-track bits,
+ * the per-track Scene settings, the per-slot Scene settings and the slot-6
+ * Kit settings. The Scene 17 build copies exactly these
+ * (preset_copyBackgroundTrack(), preset_copyBackgroundSlot()), and the
+ * Scene switch compares exactly these (preset_trackMatches(),
+ * preset_slotMatches()).
+ * Why: a switch may leave a track running only when the incoming track
+ * sounds identical. Scene 17 makes the same promise when it copies a track
+ * (D4). One list keeps the two from drifting: a field added to one is
+ * added to both. The sizeof guards below fire when one of the three
+ * structs gains a field, so the new field gets classified.
+ * Not listed, on purpose:
+ *  - chain_condition/chain_next: what plays next (Scene 17 drops them, D9b);
+ *  - morph_amount: the PERF bulk-set mirror, not used by the runtime;
+ *  - bus_comp: read live from the active Scene by BusCompressor.c;
+ *  - pattern_change_bar/pattern_next;
+ *  - morph_interpolation[]: derived, see preset_instrumentImageMatches().
+ * Affiliates: the copy and match functions below.
+ */
+#define PRESET_TRACK_REGION_FIELDS(X) \
+    X(track_length) X(track_scale) X(track_shuffle) X(track_play_mode)
+#define PRESET_TRACK_REGION_BITS(X) \
+    X(track_loop_exclude) X(track_auto_smooth)
+#define PRESET_TRACK_SETTINGS_FIELDS(X) \
+    X(midi_channel) X(midi_note) \
+    X(track_morph_length) X(track_morph_scale) X(track_morph_shuffle)
+#define PRESET_SLOT_SETTINGS_FIELDS(X) \
+    X(voice_morph_amount) X(audio_out) X(fx_send_amount) X(fx_send_morph) \
+    X(fader_setting)
+#define PRESET_SLOT6_KIT_FIELDS(X) \
+    X(slot6_track7_amp_envelope_decay) \
+    X(slot6_track7_morph_amp_envelope_decay)
+
+_Static_assert(sizeof(scene_settings_t) == 75u,
+               "scene_settings_t changed: classify the new field in the S098 "
+               "field lists (presetManager.c), then update 75");
+_Static_assert(sizeof(kit_settings_t) == 2u,
+               "kit_settings_t changed: classify the new field in the S098 "
+               "field lists (presetManager.c), then update 2");
+_Static_assert(sizeof(pat_scene_region_t) ==
+               (PAT_STEPS_PER_SCENE * 2u) + (PAT_STACK_SIZE * 32u) +
+               512u + 32u,
+               "pat_scene_region_t changed: classify the new field in the "
+               "S098 field lists (presetManager.c)");
+
+/*
+ * Compare one track's steps in two Scenes by content (S098 P1).
+ *
+ * What: for every step, the trigger bit and the block bytes read through
+ * pat_rawReadBlock() must be equal. Pool offsets and the specials bit's
+ * placement are not compared.
+ * Why: two identical Patterns can hold their blocks at different offsets
+ * (copy/clear, compaction, a Load into a fuller region), so raw address
+ * entries can differ while the music is the same. A false "different" is
+ * safe (the track then changes as it always did); a false "identical" is
+ * not, so every byte of every block is compared.
+ * Inputs: track 0..6, two Scene indices (0..16).
+ * Output: 1 when identical.
+ * Cost: at most 2 x 128 block reads of at most 136 B; empty steps copy
+ * nothing. Foreground, once per executed Scene change.
+ * Accessors: preset_trackMatches(); host test scene_identity.
+ * Affiliates: pat_rawReadBlock(), preset_copyBackgroundTrack() (the copy
+ * with the same per-step rule).
+ */
+static uint8_t preset_trackStepsMatch(uint8_t track, uint8_t scene_a,
+                                      uint8_t scene_b)
+{
+    uint8_t block_a[PAT_RAW_BLOCK_MAX];
+    uint8_t block_b[PAT_RAW_BLOCK_MAX];
+    uint16_t entry_a;
+    uint16_t entry_b;
+    uint8_t bytes_a;
+    uint8_t bytes_b;
+    uint8_t step;
+
+    for (step = 0u; step < NUM_STEPS; step++) {
+        bytes_a = pat_rawReadBlock(scene_a, track, step, block_a, &entry_a);
+        bytes_b = pat_rawReadBlock(scene_b, track, step, block_b, &entry_b);
+        if ((entry_a & PAT_ADDR_TRIGGER_BIT) != (entry_b & PAT_ADDR_TRIGGER_BIT))
+            return 0u;
+        if (bytes_a != bytes_b)
+            return 0u;
+        if (bytes_a != 0u && memcmp(block_a, block_b, bytes_a) != 0)
+            return 0u;
+    }
+    return 1u;
+}
+
+/*
+ * Compare two Kit slots' instrument images (S098 P1).
+ *
+ * What: the type and the Normal and Morph endpoint images must be equal.
+ * morph_interpolation[] is not compared.
+ * Why: morph_interpolation[] is a derived runtime image. For the playing
+ * Scene it holds the resolved amount including a step override or the LFO
+ * Morph layer (presetMorph_getResolvedVoiceAmount()), so it differs from an
+ * idle copy while the music is the same. The switch carries it over for a
+ * kept slot (preset_prepareSceneSwitch()).
+ * Inputs: two slot images. Output: 1 when identical.
+ * Accessors: preset_slotMatches(); host test scene_identity.
+ */
+static uint8_t preset_instrumentImageMatches(const kit_instrument_slot_t *a,
+                                             const kit_instrument_slot_t *b)
+{
+    return (uint8_t)(a->type == b->type &&
+        memcmp(a->parameter_images.instrument_parameters,
+               b->parameter_images.instrument_parameters,
+               sizeof(a->parameter_images.instrument_parameters)) == 0 &&
+        memcmp(a->parameter_images.morph_instrument_parameters,
+               b->parameter_images.morph_instrument_parameters,
+               sizeof(a->parameter_images.morph_instrument_parameters)) == 0);
+}
+
+/*
+ * Is a track identical in two Scenes? (S098 P1)
+ *
+ * What: the per-track Pattern fields and bits, the per-track Scene settings
+ * and every step (preset_trackStepsMatch()). A Scene compared with itself is
+ * identical.
+ * Inputs: track 0..6, two Scene indices. Output: 1 when identical.
+ * Accessors: preset_sceneSwitchKeepMask().
+ */
+static uint8_t preset_trackMatches(uint8_t track, uint8_t scene_a,
+                                   uint8_t scene_b)
+{
+    const pat_scene_region_t *ra = pat_sceneRegion(scene_a);
+    const pat_scene_region_t *rb = pat_sceneRegion(scene_b);
+    const scene_t *sa = scene_getConst(scene_a);
+    const scene_t *sb = scene_getConst(scene_b);
+    const uint8_t bit = (uint8_t)(1u << track);
+
+    if (!ra || !rb || !sa || !sb || track >= NUM_TRACKS)
+        return 0u;
+    if (scene_a == scene_b)
+        return 1u;
+#define PM_MATCH_TRACK_REGION(f) if (ra->f[track] != rb->f[track]) return 0u;
+    PRESET_TRACK_REGION_FIELDS(PM_MATCH_TRACK_REGION)
+#undef PM_MATCH_TRACK_REGION
+#define PM_MATCH_TRACK_BIT(f) if (((ra->f ^ rb->f) & bit) != 0u) return 0u;
+    PRESET_TRACK_REGION_BITS(PM_MATCH_TRACK_BIT)
+#undef PM_MATCH_TRACK_BIT
+#define PM_MATCH_TRACK_SETTING(f) \
+    if (sa->settings.f[track] != sb->settings.f[track]) return 0u;
+    PRESET_TRACK_SETTINGS_FIELDS(PM_MATCH_TRACK_SETTING)
+#undef PM_MATCH_TRACK_SETTING
+    return preset_trackStepsMatch(track, scene_a, scene_b);
+}
+
+/*
+ * Is a voice slot identical in two Scenes? (S098 P1)
+ *
+ * What: the instrument image (preset_instrumentImageMatches()), the per-slot
+ * Scene settings and, for slot 6, the generated track-7 decay endpoints.
+ * Inputs: slot 0..5, two Scene indices. Output: 1 when identical.
+ * Accessors: preset_sceneSwitchKeepMask().
+ */
+static uint8_t preset_slotMatches(uint8_t slot, uint8_t scene_a,
+                                  uint8_t scene_b)
+{
+    const scene_t *sa = scene_getConst(scene_a);
+    const scene_t *sb = scene_getConst(scene_b);
+
+    if (!sa || !sb || slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    if (scene_a == scene_b)
+        return 1u;
+    if (!preset_instrumentImageMatches(&sa->kit.instruments[slot],
+                                       &sb->kit.instruments[slot]))
+        return 0u;
+#define PM_MATCH_SLOT_SETTING(f) \
+    if (sa->settings.f[slot] != sb->settings.f[slot]) return 0u;
+    PRESET_SLOT_SETTINGS_FIELDS(PM_MATCH_SLOT_SETTING)
+#undef PM_MATCH_SLOT_SETTING
+    if (slot == INSTRUMENT_SLOT_COUNT - 1u) {
+#define PM_MATCH_SLOT6_KIT(f) \
+        if (sa->kit.settings.f != sb->kit.settings.f) return 0u;
+        PRESET_SLOT6_KIT_FIELDS(PM_MATCH_SLOT6_KIT)
+#undef PM_MATCH_SLOT6_KIT
+    }
+    return 1u;
+}
+
+/*
+ * Is the Effect identical in two Scenes? (S098 P1)
+ *
+ * What: the whole Effect record (type, sequence settings, Normal and Morph
+ * values, FX sequence steps) and the Scene's Effect Morph amount.
+ * Why: an identical Effect is rebound without a reset
+ * (effects_rebindSourceScene()), so its tails, FX clock, step and locks
+ * continue. Records are only ever copied or zero-initialised whole, so a
+ * byte compare is exact; any padding difference can only report
+ * "different", which is safe.
+ * Inputs: two Scene indices. Output: 1 when identical.
+ * Accessors: preset_sceneSwitchKeepMask().
+ */
+static uint8_t preset_effectMatches(uint8_t scene_a, uint8_t scene_b)
+{
+    const scene_t *sa = scene_getConst(scene_a);
+    const scene_t *sb = scene_getConst(scene_b);
+
+    if (!sa || !sb)
+        return 0u;
+    if (scene_a == scene_b)
+        return 1u;
+    return (uint8_t)(sa->settings.effect_morph_amount ==
+                         sb->settings.effect_morph_amount &&
+                     memcmp(&sa->effect, &sb->effect, sizeof(sa->effect)) == 0);
+}
+
+/*
+ * Slots whose tracks are all kept (S098 P1).
+ *
+ * What: slots 0..4 follow tracks 0..4; slot 5 is kept only when tracks 5 and
+ * 6 (which share it) are both kept.
+ * Inputs: track keep mask. Output: slot keep mask (6 bits).
+ */
+static uint8_t preset_keptSlotsOfTracks(uint8_t keep_tracks)
+{
+    uint8_t slots = (uint8_t)(keep_tracks & 0x1Fu);
+
+    if ((keep_tracks & 0x60u) == 0x60u)
+        slots = (uint8_t)(slots | 0x20u);
+    return slots;
+}
+
+/*
+ * Decide what a switch to `target` keeps (S098 P1; user, Q2).
+ *
+ * What: bit t of the result is set when track t, and the voice slot it
+ * plays, are identical in the Scene the track plays now
+ * (seq_getTrackPlayedScene()) and in `target`. Tracks 5 and 6 are kept only
+ * together. *effect_same reports whether the active Scene's Effect equals
+ * `target`'s. Scene 17 counts like any other played Scene.
+ * Why: target T1. The switch runs the same procedure for every track and
+ * changes only what differs: an identical Scene changes nothing audible; a
+ * Scene with one edited track changes that track.
+ * Inputs: target (0..15), the played Scenes, the active Scene.
+ * Output: keep mask (7 bits); *effect_same (may be NULL).
+ * DEV trace: one 'x' record per call with the result and the compare time.
+ * Context: foreground, before any switch state moves.
+ * Accessors: menu_perfSceneChangeExecute().
+ * Affiliates: preset_trackMatches(), preset_slotMatches(),
+ * preset_effectMatches(), seq_selectActivePattern(),
+ * preset_startSceneSwitchApply().
+ */
+uint8_t preset_sceneSwitchKeepMask(uint8_t target, uint8_t *effect_same)
+{
+    uint8_t active = scene_getActiveIndex();
+    uint8_t same;
+    uint8_t keep = 0u;
+    uint8_t track;
+#if DEV_MODE_LOGGING
+    uint32_t start_us = timebase_tim2Now();
+#endif
+
+    if (!scene_getConst(target) || !pat_patternValid(target)) {
+        if (effect_same)
+            *effect_same = 0u;
+        return 0u;
+    }
+    same = preset_effectMatches(active, target);
+    for (track = 0u; track < NUM_TRACKS; track++) {
+        uint8_t played = seq_getTrackPlayedScene(track);
+        uint8_t slot = (track >= INSTRUMENT_SLOT_COUNT)
+            ? (uint8_t)(INSTRUMENT_SLOT_COUNT - 1u) : track;
+
+        if (preset_trackMatches(track, played, target) &&
+            preset_slotMatches(slot, played, target))
+            keep = (uint8_t)(keep | (uint8_t)(1u << track));
+    }
+    if ((keep & 0x60u) != 0x60u)
+        keep = (uint8_t)(keep & (uint8_t)~0x60u);
+    if (effect_same)
+        *effect_same = same;
+#if DEV_MODE_LOGGING
+    {
+        uint32_t us = timebase_tim2Delta(timebase_tim2Now(), start_us);
+
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_SCENE_SWITCH,
+                             (uint8_t)(keep | (same ? 0x80u : 0u)),
+                             (uint32_t)target | ((uint32_t)active << 8u) |
+                             ((us > 0xFFFFu ? 0xFFFFu : us) << 16u));
+    }
+#endif
+    return keep;
+}
+
+/*
+ * Carry the derived Scene state of the kept slots into `target`
+ * (S098 P1).
+ *
+ * What: for each kept slot, copies morph_interpolation[] from the Scene its
+ * track plays into `target`, then moves the Morph worker from the active
+ * Scene to `target` (presetMorph_retargetScene()), keeping only the kept
+ * slots' work.
+ * Why: morph_interpolation[] is the only Scene-indexed state that differs
+ * between two identical Scenes (it holds the playing Scene's resolved Morph,
+ * including step overrides and the LFO Morph layer). The next resetting
+ * trigger of a kept voice restores its base from the played Scene's image
+ * (seq_restoreAutomatedParameters()). Without the carry, that restore would
+ * read `target`'s idle image and step the sound. This is the whole handoff
+ * a kept voice needs (S098_P0 §3); its runtime state is never touched.
+ * Inputs: target, keep_tracks (from preset_sceneSwitchKeepMask()).
+ * Outputs: target's morph_interpolation[] for kept slots; the Morph worker.
+ * The image is not persisted, so nothing is marked dirty.
+ * Context: foreground, immediately before scene_selectActive(target).
+ * Accessors: menu_perfSceneChangeExecute().
+ * Affiliates: presetMorph_retargetScene(), preset_keptSlotsOfTracks().
+ */
+void preset_prepareSceneSwitch(uint8_t target, uint8_t keep_tracks)
+{
+    scene_t *dst = scene_get(target);
+    uint8_t keep_slots = preset_keptSlotsOfTracks(keep_tracks);
+    uint8_t slot;
+
+    if (!dst)
+        return;
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        const scene_t *src;
+
+        if ((keep_slots & (uint8_t)(1u << slot)) == 0u)
+            continue;
+        src = scene_getConst(seq_getTrackPlayedScene(slot));
+        if (!src || src == dst)
+            continue;
+        memcpy(dst->kit.instruments[slot].parameter_images.morph_interpolation,
+               src->kit.instruments[slot].parameter_images.morph_interpolation,
+               sizeof(dst->kit.instruments[slot].parameter_images.
+                      morph_interpolation));
+    }
+    presetMorph_retargetScene(scene_getActiveIndex(), target, keep_slots);
+}
+
+/*
+ * Apply a Scene switch to the voices, slot by slot (S098 P1; user, Q2).
+ *
+ * What: the voice half of the switch, after seq_selectActivePattern().
+ *  - Changed slots (a slot whose track is not kept): the LFO phase is
+ *    captured (S076 P2), the step-automation overlays are cleared, the
+ *    Morph pass for the new Scene is requested, and the drumset worker
+ *    commits the slot from the new Scene at its quiet point, at its next
+ *    trigger, or after DRUMSET_APPLY_FORCE_TICKS. That is what every slot
+ *    got from preset_startDrumsetApply() before.
+ *  - The modulation graph: only the bindings the change makes stale are
+ *    detached (instrumentManager_prepareModulationForSlotChange()), and the
+ *    rebind at the end revisits only those sources.
+ *  - Kept slots: nothing. Their runtime image, envelopes, phases, filter
+ *    states, Colloid gate, sustain, glide and intervals, Tetrakt layers and
+ *    S1 line, LFO phase, bindings and step overlays continue.
+ *  - Effect: an identical Effect is rebound to the new Scene without a reset
+ *    (effects_rebindSourceScene(), as for the Scene 17 switch); a changed
+ *    one is activated as before (same type keeps its tails).
+ *  - The PERF mirrors (Morph, bus compressor, Effect Morph) follow the new
+ *    Scene; they only write parameter_values[].
+ *  - An unfinished earlier worker is carried, not dropped: its pending
+ *    slots and rebind sources join the new worker, which commits them from
+ *    the new Scene. A kept slot's content is identical there; a changed
+ *    one's is the new content anyway.
+ * Why: target T1. preset_startDrumsetApply() reset every slot on every
+ * Scene change (P1-P5 in S098_P0 §2.2). The rule is the same however many
+ * slots are identical.
+ * Inputs: keep_tracks, effect_same (from preset_sceneSwitchKeepMask()), the
+ * active Scene (already the new one).
+ * Outputs: drumset/instrument worker state, overlays, Effect binding,
+ * mirrors.
+ * Context: foreground. Accessors: menu_perfSceneChangeExecute().
+ * Affiliates: preset_tickDrumsetApply(),
+ * preset_applyDeferredSceneSlotForTrigger(), preset_startDrumsetApply()
+ * (the full apply still used by Loads, boot and copy/clear).
+ */
+void preset_startSceneSwitchApply(uint8_t keep_tracks, uint8_t effect_same)
+{
+    const uint8_t scene_index = scene_getActiveIndex();
+    const scene_t *scene = scene_getConst(scene_index);
+    const uint8_t changed =
+        (uint8_t)(~preset_keptSlotsOfTracks(keep_tracks) & PM_ALL_SLOTS);
+    uint8_t carry_pending = 0u;
+    uint8_t carry_rebind = 0u;
+    uint8_t rebind;
+    uint8_t slot;
+
+    preset_ensureMorphInitialized();
+    if (drumset_apply_active) {
+        carry_pending = (uint8_t)(drumset_apply_pending_mask & PM_ALL_SLOTS);
+        carry_rebind = drumset_apply_rebind_mask;
+        if (instrument_apply_active &&
+            instrument_apply_phase == INSTRUMENT_APPLY_PHASE_TARGET_REBIND)
+            carry_rebind = (uint8_t)(carry_rebind |
+                                     instrument_apply_rebind_mask);
+    }
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        if ((changed & (uint8_t)(1u << slot)) == 0u)
+            continue;
+        instrumentManager_captureLfoPhaseForSlot(slot);
+        preset_clearSlotStepOverrides(slot);
+    }
+    rebind = instrumentManager_prepareModulationForSlotChange(
+        changed, (uint8_t)(effect_same == 0u));
+    /*
+     * An Instrument or Kit apply in flight (S098 assessment F1).
+     *
+     * What: when this switch will start the shared rebind cursor (a slot
+     * changed, or a binding must be revisited), every source is rebound.
+     * Why: the cursor is shared, so starting it here ends the running
+     * apply's own all-source rebind. Before S098 the Scene worker always
+     * rebound all six and covered it; a partial mask would leave the loaded
+     * Instrument's other bindings uninstalled. A switch that changes nothing
+     * starts no rebind and leaves the apply running.
+     * Affiliates: preset_startSceneModulationRebind(),
+     * preset_tickInstrumentApply().
+     */
+    if (instrument_apply_active && rebind != 0u)
+        carry_rebind = PM_ALL_SLOTS;
+    if (scene)
+        preset_syncSceneMorphMirrors(scene);
+    preset_syncBusCompMirrors();
+    preset_syncEffectMorphMirror();
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++)
+        if ((changed & (uint8_t)(1u << slot)) != 0u)
+            presetMorph_requestVoice(scene_index, slot);
+    if (!effect_same || !effects_rebindSourceScene(scene_index))
+        effects_activateScene(scene_index);
+    /* Changed slots are owned by the Scene worker from here; a per-track
+     * single-voice commit for a kept slot stays pending (it now reads the
+     * same content from the new Scene). */
+    single_voice_pending_mask =
+        (uint8_t)(single_voice_pending_mask & (uint8_t)~changed);
+    drumset_apply_scene = scene_index;
+    drumset_apply_pending_mask = (uint16_t)(carry_pending | changed);
+    drumset_apply_rebind_mask = (uint8_t)(carry_rebind | rebind);
+    drumset_apply_stall_ticks = 0u;
+    if (drumset_apply_pending_mask != 0u) {
+        drumset_apply_active = 1u;
+        drumset_apply_voice = 0u;
+    } else if (drumset_apply_rebind_mask != 0u) {
+        /* Only bindings changed (a changed Effect): rebind now. */
+        drumset_apply_active = 1u;
+        preset_startSceneModulationRebind(scene_index,
+                                          drumset_apply_rebind_mask);
+    } else {
+        drumset_apply_active = 0u;
+    }
+}
+
 /*
  * Empty one Scene 17 track before a rebuild copies into it (S082 P1 D30).
  *
@@ -3406,24 +4033,21 @@ static uint8_t preset_copyBackgroundTrack(uint8_t track, uint8_t src_scene)
                                 PAT_RAW_TRIGGER_ON);
         }
     }
-    dst->track_length[track] = src->track_length[track];
-    dst->track_scale[track] = src->track_scale[track];
-    dst->track_shuffle[track] = src->track_shuffle[track];
-    dst->track_play_mode[track] = src->track_play_mode[track];
-    dst->track_loop_exclude = (uint8_t)((dst->track_loop_exclude & ~bit) |
-                                        (src->track_loop_exclude & bit));
-    dst->track_auto_smooth = (uint8_t)((dst->track_auto_smooth & ~bit) |
-                                       (src->track_auto_smooth & bit));
-    dst_scene->settings.midi_channel[track] =
-        src_scene_data->settings.midi_channel[track];
-    dst_scene->settings.midi_note[track] =
-        src_scene_data->settings.midi_note[track];
-    dst_scene->settings.track_morph_length[track] =
-        src_scene_data->settings.track_morph_length[track];
-    dst_scene->settings.track_morph_scale[track] =
-        src_scene_data->settings.track_morph_scale[track];
-    dst_scene->settings.track_morph_shuffle[track] =
-        src_scene_data->settings.track_morph_shuffle[track];
+    /*
+     * The per-track fields Scene 17 copies are the fields a Scene switch
+     * compares (S098 P1): one list, PRESET_TRACK_* above.
+     */
+#define PM_COPY_TRACK_REGION(f) dst->f[track] = src->f[track];
+    PRESET_TRACK_REGION_FIELDS(PM_COPY_TRACK_REGION)
+#undef PM_COPY_TRACK_REGION
+#define PM_COPY_TRACK_BIT(f) \
+    dst->f = (uint8_t)((dst->f & ~bit) | (src->f & bit));
+    PRESET_TRACK_REGION_BITS(PM_COPY_TRACK_BIT)
+#undef PM_COPY_TRACK_BIT
+#define PM_COPY_TRACK_SETTING(f) \
+    dst_scene->settings.f[track] = src_scene_data->settings.f[track];
+    PRESET_TRACK_SETTINGS_FIELDS(PM_COPY_TRACK_SETTING)
+#undef PM_COPY_TRACK_SETTING
     return 1u;
 }
 
@@ -3451,20 +4075,18 @@ static void preset_copyBackgroundSlot(uint8_t dst_slot, uint8_t src_scene,
         src_slot >= INSTRUMENT_SLOT_COUNT)
         return;
     dst->kit.instruments[dst_slot] = src->kit.instruments[src_slot];
-    dst->settings.voice_morph_amount[dst_slot] =
-        src->settings.voice_morph_amount[src_slot];
-    dst->settings.audio_out[dst_slot] = src->settings.audio_out[src_slot];
-    dst->settings.fx_send_amount[dst_slot] =
-        src->settings.fx_send_amount[src_slot];
-    dst->settings.fx_send_morph[dst_slot] =
-        src->settings.fx_send_morph[src_slot];
-    dst->settings.fader_setting[dst_slot] =
-        src->settings.fader_setting[src_slot];
+    /*
+     * The per-slot fields Scene 17 copies are the fields a Scene switch
+     * compares (S098 P1): one list, PRESET_SLOT_* above.
+     */
+#define PM_COPY_SLOT_SETTING(f) \
+    dst->settings.f[dst_slot] = src->settings.f[src_slot];
+    PRESET_SLOT_SETTINGS_FIELDS(PM_COPY_SLOT_SETTING)
+#undef PM_COPY_SLOT_SETTING
     if (dst_slot == INSTRUMENT_SLOT_COUNT - 1u) {
-        dst->kit.settings.slot6_track7_amp_envelope_decay =
-            src->kit.settings.slot6_track7_amp_envelope_decay;
-        dst->kit.settings.slot6_track7_morph_amp_envelope_decay =
-            src->kit.settings.slot6_track7_morph_amp_envelope_decay;
+#define PM_COPY_SLOT6_KIT(f) dst->kit.settings.f = src->kit.settings.f;
+        PRESET_SLOT6_KIT_FIELDS(PM_COPY_SLOT6_KIT)
+#undef PM_COPY_SLOT6_KIT
     }
     /*
      * The slot's name follows its data (S082 P1 D29).
@@ -3688,6 +4310,7 @@ uint8_t preset_requestBackgroundBankLoad(uint16_t slot, uint16_t act_mask,
         return 0u;                  /* §4.1: never build Scene 17 for nothing */
     pm_bg_pending_slot = PM_BG_PENDING_NONE;     /* R5 */
     pm_request_slot = slot;
+    pm_bg_kind = PRESET_BG_KIND_BANK;     /* S098 P2 */
     pm_kit_request_scene_mask = act_mask;
     (void)empty_mask;
     pm_bg_result = PRESET_BG_RESULT_NONE;
@@ -3697,7 +4320,68 @@ uint8_t preset_requestBackgroundBankLoad(uint16_t slot, uint16_t act_mask,
 
 uint8_t preset_backgroundBankLoadRunning(void)
 {
-    return (uint8_t)((pm_bg_phase & PM_BG_PHASE_MASK) != 0u);
+    /*
+     * Bank loads only (S098 P2).
+     *
+     * What: a background Bank load is in flight. A Scene or Pattern Load on
+     * the same phases is not one.
+     * Why: MIDI input filtering (midiIn_dispatch()), the chain gate
+     * (sequencer.c), the panel lock (preset_backgroundBankLoadLocked()) and
+     * the Menu VOICE gate are Bank rules (S082 R7, D13). A Scene/Pattern
+     * Load keeps today's Load-page hold (decision Q6).
+     */
+    return (uint8_t)((pm_bg_phase & PM_BG_PHASE_MASK) != 0u &&
+                     pm_bg_kind == PRESET_BG_KIND_BANK);
+}
+
+/*
+ * Request a Scene or Pattern Load that keeps playing (S098 P2).
+ *
+ * What: accepted at once and advanced by preset_tickBackgroundBankLoad().
+ * Phase 1 decides whether Scene 17 is needed: the transport runs and a
+ * destination is the active Scene or a Scene a track plays. If it is, phases
+ * 2-3 quiesce, build Scene 17 from what is playing and move playback there,
+ * then phase 4 posts the Load. If not, phase 4 posts it at once, exactly as
+ * the Menu did before. Refused while any background load runs, while Preset
+ * is busy, for an empty mask, and for a slot that does not exist (so Scene 17
+ * is never built for nothing, as for a Bank, §4.1). A pending MIDI Bank
+ * request is discarded, as a Menu Bank OK discards it (R5).
+ * Why: target T2. A Load writes its destinations in place
+ * (pat_initScene(), then the read). A played Scene then plays defaults and
+ * partial content during the read and drifts (S097 P3 §9.2). On Scene 17,
+ * playback never reads a region being rewritten. The user switches back
+ * manually afterwards; with S098 P1 that switch changes only what the Load
+ * changed.
+ * Inputs: slot (zero-based library slot), scene_mask (destinations), kind
+ * (PRESET_BG_KIND_SCENE or PRESET_BG_KIND_PATTERN).
+ * Outputs: accepted (1) / refused (0); pm_bg_* state; completion through
+ * PRESET_OP_SCENE_LOAD / PRESET_OP_PATTERN_LOAD as before.
+ * Accessors: Menu Scene and Pattern Load OK.
+ * Affiliates: preset_tickBackgroundBankLoad(), filesystem_sceneSlotExists(),
+ * filesystem_patternSlotExists(), preset_loadSceneForScenes(),
+ * preset_loadPatternForScenes().
+ */
+uint8_t preset_requestBackgroundSceneLoad(uint16_t slot, uint16_t scene_mask,
+                                          uint8_t kind)
+{
+    if ((pm_bg_phase & PM_BG_PHASE_MASK) != 0u || pm_status != PRESET_IDLE ||
+        scene_mask == 0u)
+        return 0u;
+    if (kind == PRESET_BG_KIND_SCENE) {
+        if (!filesystem_sceneSlotExists(slot))
+            return 0u;
+    } else if (kind == PRESET_BG_KIND_PATTERN) {
+        if (!filesystem_patternSlotExists(slot))
+            return 0u;
+    } else {
+        return 0u;
+    }
+    pm_bg_pending_slot = PM_BG_PENDING_NONE;      /* R5 */
+    pm_bg_kind = kind;
+    pm_request_slot = slot;
+    pm_kit_request_scene_mask = scene_mask;
+    pm_bg_phase = 1u;                             /* never PM_BG_REPLACE */
+    return 1u;
 }
 
 /*
@@ -3806,10 +4490,18 @@ static void preset_bgEnd(uint8_t failed)
     pm_bg_phase = 0u;
     pm_bg_pending_slot = PM_BG_PENDING_NONE;
     if (failed) {
-        pm_bg_result = (uint8_t)(PRESET_BG_RESULT_FAILED |
-                                 (midi ? PRESET_BG_RESULT_MIDI : 0u));
+        /*
+         * S098 P2: only a Bank load reports through the MIDI CC0 result.
+         * A failed Scene/Pattern Load ends the accepted Load/Save command
+         * the same way (menu_backgroundBankLoadAbort() finishes any
+         * command; its Bank preview re-request is Bank-type only).
+         */
+        if (pm_bg_kind == PRESET_BG_KIND_BANK)
+            pm_bg_result = (uint8_t)(PRESET_BG_RESULT_FAILED |
+                                     (midi ? PRESET_BG_RESULT_MIDI : 0u));
         menu_backgroundBankLoadAbort();
     }
+    pm_bg_kind = PRESET_BG_KIND_BANK;
 }
 
 /*
@@ -3859,6 +4551,7 @@ void preset_tickBackgroundBankLoad(void)
         pm_bg_pending_slot = PM_BG_PENDING_NONE;
         pm_bg_result = PRESET_BG_RESULT_NONE;
         menu_backgroundBankLoadUiBegin(pm_request_slot);
+        pm_bg_kind = PRESET_BG_KIND_BANK;     /* S098 P2 */
         pm_bg_phase = (uint8_t)(PM_BG_ORIGIN_MIDI | PM_BG_REPLACE);
         preset_bgSetPhase(PM_BG_PHASE_MIDI_UI);
         return;
@@ -3875,11 +4568,24 @@ void preset_tickBackgroundBankLoad(void)
          */
         if (preset_backgroundScene17Needed(replaced))
             pm_bg_phase |= PM_BG_NEEDED;
-        preset_bgSetPhase(2u);
+        /*
+         * S098 P2: a Bank request always quiesces (D12, D1/R6). A Scene or
+         * Pattern Load quiesces only when it builds Scene 17; otherwise it
+         * is posted at once, exactly as the Menu posted it before.
+         */
+        preset_bgSetPhase((pm_bg_kind == PRESET_BG_KIND_BANK ||
+                           (pm_bg_phase & PM_BG_NEEDED) != 0u) ? 2u : 4u);
         return; }
     case 2u:
         if ((pm_bg_phase & PM_BG_DISCARDED) == 0u) {
-            ccSvc_dropQueued();
+            /*
+             * S098 P2 (Q4): only a Bank load drops queued copy/clear jobs
+             * (D12: a Bank replaces every Scene they name). A Scene/Pattern
+             * Load leaves them queued; the ccSvc_busy() wait below lets
+             * them finish first, bounded by PM_BG_WAIT_LIMIT_MS.
+             */
+            if (pm_bg_kind == PRESET_BG_KIND_BANK)
+                ccSvc_dropQueued();
             filesystem_setAutosaveYield(1u);
         }
         if (ccSvc_busy() || filesystem_status() == FS_STATUS_BUSY ||
@@ -3955,6 +4661,41 @@ void preset_tickBackgroundBankLoad(void)
         preset_bgSetPhase(4u);
         return; }
     case 4u: {
+        /*
+         * Post a Scene or Pattern Load (S098 P2).
+         *
+         * What: the kind's ordinary request with the destination mask. When
+         * it is accepted while the transport runs, the destinations are
+         * marked unavailable until the Load ends (bank_beginLoadAvailability();
+         * ended by the completion callback and by preset_bgEnd()). A refusal
+         * while the card is busy is retried next pass, for at most
+         * PM_BG_WAIT_LIMIT_MS; a refusal on an idle card fails the request.
+         * The panel is never unlocked for these kinds (Q6).
+         * Why: target T2 and decision Q5. A PERF press, MIDI PC, queued or
+         * chain change must not select a Scene that is half written. While
+         * Scene 17 plays, the chain is off anyway (17 has no chain), but a
+         * direct running Load into an unplayed Scene had no protection.
+         * Inputs: pm_bg_kind, pm_request_slot, act (= the destination mask).
+         * Outputs: phase 5, or failure.
+         * Affiliates: preset_loadSceneForScenes(), preset_loadPatternForScenes(),
+         * bank_beginLoadAvailability(), menu_perfSceneChangeExecute() (refuses
+         * an unavailable Scene).
+         */
+        if (pm_bg_kind != PRESET_BG_KIND_BANK) {
+            uint8_t posted = (pm_bg_kind == PRESET_BG_KIND_SCENE)
+                ? preset_loadSceneForScenes(pm_request_slot, act)
+                : preset_loadPatternForScenes(pm_request_slot, act);
+
+            if (posted) {
+                if (seq_isRunning())
+                    bank_beginLoadAvailability(act);
+                preset_bgSetPhase(5u);
+            } else if (filesystem_status() != FS_STATUS_BUSY ||
+                       preset_bgWaitExpired()) {
+                preset_bgEnd(1u);
+            }
+            return;
+        }
         /*
          * Post the ordinary two-mask Bank Load; wait while the card is busy
          * (P1-5). Decide the unlock (S082 P3 D40).

@@ -39,6 +39,7 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/DSP/Instruments/Alkaline \
           -ICore/DSP/Instruments/Colloid \
           -ICore/DSP/Instruments/Tetrakt \
+          -ICore/DSP/Instruments/Chorus \
           -ICore/DSP/Effects \
           -ICore/DSP/Effects/CrumpBit \
           -ICore/DSP/Effects/Space \
@@ -94,6 +95,7 @@ SRCS = \
   Core/Hardware/USB/App/usbd_usr.c \
   Core/Menu/menu.c \
   Core/Menu/menuEffects.c \
+  Core/Menu/MenuLabels.c \
   Core/Sequencer/StepScale.c \
   Core/Menu/Cc2Text.c \
   Core/Menu/CopyClear/copyClearSession.c \
@@ -132,6 +134,7 @@ SRCS = \
   Core/MIDI/MidiOut.c \
   Core/MIDI/MidiNoteMap.c \
   Core/MIDI/MidiNotes.c \
+  Core/MIDI/MidiNoteModes.c \
   Core/MIDI/MidiProgram.c \
   Core/MIDI/MidiControl.c \
   Core/MIDI/MidiLearn.c \
@@ -139,8 +142,6 @@ SRCS = \
   Core/Bank/Scene/Pattern/PatternData.c \
   Core/Bank/Scene/Pattern/PatternStackService.c \
   Core/Bank/Scene/Pattern/EuklidGenerator.c \
-  Core/Bank/Scene/Pattern/SomGenerator.c \
-  Core/Bank/Scene/Pattern/SomData.c \
 	  Core/Sequencer/sequencer.c \
 	  Core/Sequencer/sequencerTimer.c \
 	  Core/Sequencer/clockSync.c \
@@ -161,6 +162,7 @@ DSP_SRCS = \
   Core/DSP/Instruments/Alkaline/AlkalineTables.c \
   Core/DSP/Instruments/Alkaline/AlkalinePostTables.c \
   Core/DSP/Instruments/Alkaline/AlkalineVoice.c \
+  Core/DSP/Instruments/Alkaline/AlkalineChop.c \
   Core/DSP/Instruments/Colloid/ColloidOsc.c \
   Core/DSP/Instruments/Colloid/ColloidTables.c \
   Core/DSP/Instruments/Colloid/ColloidVoice.c \
@@ -190,16 +192,75 @@ DSP_SRCS = \
   Core/DSP/Instruments/Snare/Snare.c \
   Core/DSPAudio/squareRootLut.c \
   Core/DSPAudio/transientGenerator.c \
-  Core/DSPAudio/transientTables.c \
   Core/DSPAudio/voiceFold.c \
   Core/DSPAudio/voiceFoldTables.c \
-  Core/DSPAudio/wavetable.c
+  Core/DSPAudio/voiceSpace.c \
+  Core/DSPAudio/wavetable.c \
+  Core/DSPAudio/oscChopTables.c \
+  Core/DSP/Instruments/Chorus/BbdChorus.c \
+  Core/DSP/Instruments/Chorus/BbdChorusTables.c
 
 # -Ofast for DSP: enables -ffast-math (float reordering, NaN/Inf assumptions)
 CFLAGS_DSP = $(subst -O2,-Ofast,$(CFLAGS))
 
-OBJS = $(patsubst %.c,$(BUILD)/%.o,$(patsubst %.s,$(BUILD)/%.o,$(SRCS))) \
-       $(patsubst %.c,$(BUILD)/%.o,$(DSP_SRCS))
+# S097 P2 step 1: cold sources compiled for size (-Os). Only sources that never
+# run in an ISR, on the render path (audio_check_and_render(), the mixer,
+# voiceControl_processPending(), TIM3) or per MIDI message, checked by call
+# graph: the FAT engine (main loop, inside filesystem operations), sample
+# install (Load:[Samples], audio suspended) and boot-only code. Compile-time
+# -Os is kept per function through LTO. Gate (S097_P2_UI_STORAGE_IMPLEMENTATION.md):
+# every per-sample loop exact, hot call sets and ISR bodies unchanged. Do not
+# add a file here without that gate: a larger shrink moves the LTO partition
+# cuts and with them the DSP loops (S097 P0 §3).
+OS_SRCS = \
+  Core/Hardware/SD/asyncfatfs/asyncfatfs.c \
+  Core/SampleRom/SampleInstall.c \
+  Core/SampleRom/sampleFlash.c \
+  Core/Hardware/flashImage.c \
+  Core/Menu/SplashAnimation.c
+
+# S097 P2 step 3: filesystem.c with -Os as well (-36 KB, every per-sample loop
+# exact with COLD_LAST below). The Scene Load stumble first seen on the
+# FS_OS=1 image was a baseline defect, fixed in S097 P3 §8-§9
+# (S097_P3_FS_OPTIMIZE_INVESTIGATION.md §10); the §11 image ran clean on the
+# device (§12). S101 (user, 2026-11-21: "FS_OS=1 is fine, put that in"): on
+# by default, -36,896 B on the S101 logging build, every per-sample loop
+# exact (S101_P2_REDUCTIONS.md §B.3). `make all FS_OS=0` builds the -O2
+# filesystem. FS_OS_BUILD keeps the helpers reachable from TIM3/MIDI at -O2
+# (FS_HOT_O2 in filesystem.c). Changing FS_OS needs `make clean` (compiler
+# flags are not object prerequisites).
+FS_OS ?= 1
+ifeq ($(FS_OS),1)
+OS_SRCS += Core/Hardware/SD/filesystem.c
+$(BUILD)/Core/Hardware/SD/filesystem.o: CFLAGS += -DFS_OS_BUILD
+endif
+
+# S097 P2: cold UI/storage objects are linked after the DSP objects.
+#
+# What: COLD_LAST sources move from their SRCS position to the end of the link.
+# Why: LTO's balanced partitioner fills partitions in object order. With these
+# sources before the DSP objects, any change in their size moved the partition
+# cuts through the voice renders and the mixer, and so changed per-sample loops
+# (S097 P0 §3: ±1 instruction "jitter"). Linked last, they share partitions
+# only with each other. Measured on the S097 P1 image: every oscillator and
+# mixer loop exact, hot call sets and ISR bodies unchanged, -1,096 B; and
+# filesystem.c at -Os then leaves every loop exact (S097_P2_UI_STORAGE_
+# IMPLEMENTATION.md). Keep new cold UI/storage sources in this list.
+COLD_LAST = \
+  Core/Hardware/SD/filesystem.c \
+  Core/Hardware/SD/storageTypes.c \
+  Core/Hardware/SD/asyncfatfs/asyncfatfs.c \
+  Core/Hardware/SD/asyncfatfs/fat_standard.c \
+  Core/Menu/menu.c \
+  Core/Menu/menuEffects.c \
+  Core/Menu/CopyClear/copyClearSession.c \
+  Core/Menu/CopyClear/copyOps.c \
+  Core/Menu/CopyClear/clearOps.c \
+  Core/Menu/CopyClear/copyClearService.c
+
+OBJS = $(patsubst %.c,$(BUILD)/%.o,$(patsubst %.s,$(BUILD)/%.o,$(filter-out $(COLD_LAST),$(SRCS)))) \
+       $(patsubst %.c,$(BUILD)/%.o,$(DSP_SRCS)) \
+       $(patsubst %.c,$(BUILD)/%.o,$(COLD_LAST))
 
 -include $(OBJS:.o=.d)
 
@@ -247,6 +308,24 @@ $(BUILD)/Core/DSP/Instruments/HiHat/HiHat.o: Core/DSP/Instruments/HiHat/HiHat.c 
 $(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineVoice.o: Core/DSP/Instruments/Alkaline/AlkalineVoice.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
+# S099 P1: the chopped waves' render (Alkaline_renderChop()) is its own object,
+# -fno-lto for the S095 P2 reason (the Makefile comment above the Colloid
+# rules): in the LTO unit it re-partitioned the unit and ten Drum-family loops
+# changed, two of them +1. Outside it no loop grows (the ten that differ are
+# shorter or an equal-length twin; baselines/s099p1/p4_lengths_b.txt). The
+# render is a noinline call from alk_renderPwm(), so it loses nothing from LTO.
+$(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineChop.o: Core/DSP/Instruments/Alkaline/AlkalineChop.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+# S099 P1: the ladder (mode 5's body copy) is -fno-lto as well. With only
+# AlkalineChop.c outside the unit, the new copy of dl_renderB2Body() still
+# re-partitioned it (fourteen Drum loops changed, two of them +1). Outside, no
+# loop grows and the four existing B2R wrappers are
+# instruction-identical to the Phase 0 snapshot (elf_s099_check); the ladder
+# loses nothing from LTO (its wrappers are noinline).
+$(BUILD)/Core/DSPAudio/DiodeLadder.o: Core/DSPAudio/DiodeLadder.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 $(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineControl.o: Core/DSP/Instruments/Alkaline/AlkalineControl.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
@@ -284,6 +363,34 @@ $(BUILD)/Core/DSP/Instruments/Colloid/ColloidTables.o: Core/DSP/Instruments/Coll
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 
+# S099 P1: the chopped pwm waves' tables (generated, data only). -fno-lto for
+# the S095 P2 reason: outside the LTO unit a new object cannot shift LTO's
+# partitioning of the other engines' loops (gate: elf_p4_check). The
+# Alkaline (in the LTO unit) and the Colloid (-fno-lto) both read them as
+# ordinary externals.
+$(BUILD)/Core/DSPAudio/oscChopTables.o: Core/DSPAudio/oscChopTables.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+
+# S099 P1: the BBD chorus (the Advanced types' insert) and its tables are DSP:
+# -Ofast, and -fno-lto for the S095 P2 reason (a new object outside the LTO
+# unit cannot shift the other engines' loops; its entry points are noinline
+# calls from InstrumentManager).
+$(BUILD)/Core/DSP/Instruments/Chorus/BbdChorus.o: Core/DSP/Instruments/Chorus/BbdChorus.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+$(BUILD)/Core/DSP/Instruments/Chorus/BbdChorusTables.o: Core/DSP/Instruments/Chorus/BbdChorusTables.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+
+# S101 P3: the Spc chain's spatializer and the Cymbal/HiHat low-pass
+# (voiceSpace.c) are DSP: -Ofast, and -fno-lto for the S095 P2 / S099 P1
+# reason (a new object inside the LTO unit can re-partition it and move other
+# engines' loops). Every entry point is noinline, so the engines' calls into
+# it lose nothing from LTO.
+$(BUILD)/Core/DSPAudio/voiceSpace.o: Core/DSPAudio/voiceSpace.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 # S096 P1: the Tetrakt engine and its tables are DSP: -Ofast like the
 # Colloid. -fno-lto for the S095 P2 reason (Makefile comment above): outside
 # the LTO unit the Tetrakt cannot shift LTO's partitioning of the other
@@ -307,8 +414,9 @@ $(BUILD)/Core/DSP/Effects/CrumpBit/CrumpBitEffect.o: Core/DSP/Effects/CrumpBit/C
 # S095 P1: the Space kit's per-frame half (the feed read, the drain envelope)
 # runs with the fast-math policy like CrumpBit. Its init-time half
 # (SpaceKit.c) is an ordinary -O2 source in SRCS: a per-file -Os was tried
-# and has no effect under -flto (the link step re-optimizes at -O2; the image
-# was byte-identical).
+# on it and left the image byte-identical. That does not hold in general:
+# compile-time -Os is kept per function through LTO (S097 P0 §4 A measured
+# -135 KB with -Os on every SRCS file).
 $(BUILD)/Core/DSP/Effects/Space/SpaceKitDsp.o: Core/DSP/Effects/Space/SpaceKitDsp.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
@@ -318,6 +426,8 @@ $(BUILD)/Core/DSP/Effects/Space/SpaceKitDsp.o: Core/DSP/Effects/Space/SpaceKitDs
 $(BUILD)/Core/DSP/Effects/Space/SpaceEffect.o: Core/DSP/Effects/Space/SpaceEffect.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
+
+$(patsubst %.c,$(BUILD)/%.o,$(OS_SRCS)): CFLAGS += -Os
 
 $(BUILD)/%.o: %.c | $(BUILD)
 	@mkdir -p $(dir $@)

@@ -1318,7 +1318,7 @@ static void run_fmramp(void)
 /* ================================================================ pwm --
  * S094 P1 S3 laws for typ pwm, re-based on the S094 P4 law (pos 0 = the
  * unmodified wave, pos 127 = the narrowest; oscPwmTables.h).
- *   PW1  pos 0: WS equals calcSineBlock() and WT equals the stock table read
+ *   PW1  pos 0: WT equals the stock table read
  *        (calcWavetableOscBlock()) within 2 LSB (integer against float
  *        interpolation) at gain 1;
  *   PW2  D, both signs, pos in {0, 1, 16, 63, 64, 100, 127}, three phases
@@ -1332,13 +1332,15 @@ static void run_fmramp(void)
  *   PW5  the width slew (unchanged);
  *   PW6  depth 0 identities (unchanged);
  *   PW7  routing and the itp old carrier (unchanged);
- *   PW8  type and bind (unchanged);
+ *   PW8  type and bind (S099 P1 §15.10: the pwm list is Tri, Saw, Rec,
+ *        the byte its own index; a wav byte past it clamps to Rec, 2);
  *   PW9  S094 P4: the tables at pos 0 are the S094 P1 width-1/2 constants
  *        (d 512, levels 16384, W 2^31, ra = rb = 0xFFFFFFFF / 64, lift 0);
+ *        the pwm Sin tables went with the form (S099 P1 §15.10);
  *   PW10 S094 P4: the law is monotonic and not mirrored: on the shape
  *        tables, the Rec high fraction falls strictly over pos {0, 32, 64,
- *        96, 127} from 1/2 to 4/1,024 (within one point), and the Sin peak
- *        moves strictly earlier;
+ *        96, 127} from 1/2 to 4/1,024 (within one point), and the Tri peak
+ *        moves strictly earlier (the Sin peak until S099 P1 §15.10);
  * Break builds: break_pwm1 (forward second read), break_pwm2 (unlimited
  * slew), break_pwm3 (S094 P4: Rec planned on the Saw width table; fails
  * PW2 and PW10).
@@ -1388,7 +1390,7 @@ static void pwm_d_exact(void)
      for (unsigned w = 0u; w < sizeof widths; ++w)
       for (unsigned p = 0u; p < 3u; ++p)
        for (unsigned k = 0u; k < 3u; ++k) {
-        OscInfo o = pwm_osc(s ? REC : SAW, widths[w], phases[p], incs[k]);
+        OscInfo o = pwm_osc(s ? OSC_PWM_REC : OSC_PWM_SAW, widths[w], phases[p], incs[k]);
         const int g = (s ? oscPwmLevelRecQ14 : oscPwmLevelSawQ14)[widths[w]];
         int16_t out[N];
         uint32_t ph = phases[p];
@@ -1404,14 +1406,14 @@ static void pwm_d_exact(void)
 
 static void pwm_identities(void)
 {
-    static const uint8_t waves[] = { SINE, TRI, SAW, REC };
+    static const uint8_t waves[] = { OSC_PWM_TRI, OSC_PWM_SAW, OSC_PWM_REC };
     int16_t mod[N], plain[N], out[N];
     uint32_t over[N];
     uint32_t s = 0x94u;
 
     random_mod(mod, &s);
     for (unsigned i = 0u; i < N; ++i) over[i] = OSC_SYNC_NONE;
-    for (unsigned w = 0u; w < 4u; ++w) {
+    for (unsigned w = 0u; w < 3u; ++w) {
         OscInfo a = pwm_osc(waves[w], 37u, 0x12340000u, 0x02345678u), b;
 
         b = a; osc_pwmRenderPlain(&b, plain, N, 1.0f);
@@ -1471,7 +1473,7 @@ static void pwm_identities(void)
 
 static void pwm_slew_and_type(void)
 {
-    OscInfo o = pwm_osc(SAW, 10u, 0u, 0x01000000u);
+    OscInfo o = pwm_osc(OSC_PWM_SAW, 10u, 0u, 0x01000000u);
     const uint32_t inc = o.phaseInc;
 
     o.position = 100u;
@@ -1497,11 +1499,11 @@ static void pwm_slew_and_type(void)
         t.freq = 220.0f; t.pitchMod = 1.0f; t.modNodeValue = 1.0f;
         t.waveform = 4u;
         osc_setType(&t, OSC_TYPE_PWM);
-        if (t.waveform != 3u) fail("PW8 wav clamps to Rec", t.waveform, 3u, 0u);
+        if (t.waveform != OSC_PWM_REC) fail("PW8 wav clamps to Rec", t.waveform, OSC_PWM_REC, 0u);
         if (!osc_isTyped(&t)) fail("PW8 pwm is typed", 0u, 0u, 0u);
         t.oscType = OSC_TYPE_MODLIST;
         if (osc_isTyped(&t)) fail("PW8 MODLIST is not typed", 0u, 0u, 0u);
-        if (osc_userCount(OSC_TYPE_PWM) != 4u) fail("PW8 count", osc_userCount(OSC_TYPE_PWM), 4u, 0u);
+        if (osc_userCount(OSC_TYPE_PWM) != 3u) fail("PW8 count", osc_userCount(OSC_TYPE_PWM), 3u, 0u);
         t.oscType = OSC_TYPE_PWM;
         osc_userBind(&t);
         if (t.sampleCacheLooped != OSC_BIND_PWM || t.phaseInc != freq2PhaseIncr1024(220.0f) ||
@@ -1514,16 +1516,10 @@ static void pwm_shapes(void)
 {
     /* PW1: pos 0 against the stock reads (shape tables) */
     {
-        OscInfo a = pwm_osc(SINE, 0u, 0x01000000u, 0x00654321u), b;
+        OscInfo a = pwm_osc(OSC_PWM_TRI, 0u, 0x01000000u, 0x00654321u), b;
         int16_t x[N], y[N];
 
-        b = a; b.oscType = OSC_TYPE_WAV;
-        osc_pwmRenderPlain(&a, x, N, 1.0f);
-        calcSineBlock(&b, y, N, 1.0f);
-        for (unsigned i = 0u; i < N; ++i)
-            if (abs(x[i] - y[i]) > 2) { fail("PW1 sine at 0", i, x[i], y[i]); break; }
-        a = pwm_osc(TRI, 0u, 0x01000000u, 0x00654321u);
-        b = a; b.oscType = OSC_TYPE_WAV;
+        b = a; b.oscType = OSC_TYPE_WAV; b.waveform = TRI;
         osc_pwmRenderPlain(&a, x, N, 1.0f);
         calcWavetableOscBlock(&b, (const int16_t (*)[1024])triTable, y, N, 1.0f);
         for (unsigned i = 0u; i < N; ++i)
@@ -1536,7 +1532,7 @@ static void pwm_shapes(void)
         static const uint8_t widths[] = { 0u, 64u, 120u };
 
         for (unsigned w = 0u; w < 3u; ++w) {
-            OscInfo o = pwm_osc(REC, widths[w], 0u, 0x00800000u);   /* 1/512 cycle */
+            OscInfo o = pwm_osc(OSC_PWM_REC, widths[w], 0u, 0x00800000u);   /* 1/512 cycle */
             int16_t out[N];
             unsigned hiBad = 0u, loBad = 0u;
 
@@ -1565,7 +1561,7 @@ static void pwm_shapes(void)
 
         for (unsigned sign = 0u; sign < 2u; ++sign)
          for (unsigned w = 0u; w < 3u; ++w) {
-            OscInfo o = pwm_osc(sign ? REC : SAW, widths[w], 0u,
+            OscInfo o = pwm_osc(sign ? OSC_PWM_REC : OSC_PWM_SAW, widths[w], 0u,
                                 0x00400000u); /* 1,024 samples per cycle */
             int16_t out[N];
             int peak = 0;
@@ -1589,7 +1585,7 @@ static void pwm_shapes(void)
         static const uint8_t widths[] = { 0u, 32u, 64u, 96u, 127u };
 
         for (unsigned w = 0u; w < 5u; ++w) {
-            OscInfo o = pwm_osc(TRI, widths[w], 0u, 0x00400000u);   /* 1/1024 */
+            OscInfo o = pwm_osc(OSC_PWM_TRI, widths[w], 0u, 0x00400000u);   /* 1/1024 */
             int16_t out[N];
             int best = -40000;
             uint32_t bestPh = 0u;
@@ -1615,8 +1611,9 @@ static void pwm_shapes(void)
  *             width 1/2. PW10 renders Rec at 1,024 samples per cycle on the
  *             ideal saw and measures the fraction of the cycle above zero at
  *             pos 0, 32, 64, 96, 127: it must fall strictly, from 512 to 4
- *             points (within one point each); Sin's peak phase must move
- *             strictly earlier over the same pos values.
+ *             points (within one point each); Tri's peak phase must move
+ *             strictly earlier over the same pos values (Sin's until S099
+ *             P1 §15.10 dropped pwm Sin).
  * Why:        the user's complaint (P4 investigation §0): the S094 P1 law
  *             folded at 64. A mirror (p against 128 - p) fails PW10.
  * Inputs:     the shape tables (fill_shape_tables()).
@@ -1630,18 +1627,16 @@ static void pwm_law(void)
     /* PW9: pos 0 is the S094 P1 p = 64 constant set */
     if (oscPwmDRec[0] != 512u || oscPwmDSaw[0] != 512u ||
         oscPwmLevelRecQ14[0] != 16384 || oscPwmLevelSawQ14[0] != 16384 ||
-        oscPwmTriW[0] != 0x80000000u || oscPwmSinW[0] != 0x80000000u ||
+        oscPwmTriW[0] != 0x80000000u ||
         oscPwmTriRa[0] != (0xFFFFFFFFu / 64u) ||
-        oscPwmTriRb[0] != (0xFFFFFFFFu / 64u) ||
-        oscPwmSinRa[0] != (0xFFFFFFFFu / 64u) ||
-        oscPwmSinRb[0] != (0xFFFFFFFFu / 64u) || oscPwmTriLift[0] != 0u)
+        oscPwmTriRb[0] != (0xFFFFFFFFu / 64u) || oscPwmTriLift[0] != 0u)
         fail("PW9 pos 0 is the width-1/2 set", 0, 0, 0);
 
     /* PW10: Rec's high fraction over one 1,024-sample cycle, 512 -> 4 */
     for (unsigned i = 0u; i < 1024u; ++i)
         sawTable[3][i] = (int16_t)lrint(32767.0 * (1.0 - 2.0 * (double)i / 1024.0));
     for (unsigned w = 0u; w < 5u; ++w) {
-        OscInfo o = pwm_osc(REC, widths[w], 0u, 0x00400000u);
+        OscInfo o = pwm_osc(OSC_PWM_REC, widths[w], 0u, 0x00400000u);
         int16_t out[N];
         int high = 0;
         const int expect = (int)oscPwmDRec[widths[w]];
@@ -1659,9 +1654,9 @@ static void pwm_law(void)
     }
     if (abs(prevHigh - 4) > 1) fail("PW10 Rec ends at 4 points", 0, prevHigh, 4);
 
-    /* PW10: Sin's peak moves strictly earlier as pos rises */
+    /* PW10: Tri's peak moves strictly earlier as pos rises */
     for (unsigned w = 0u; w < 5u; ++w) {
-        OscInfo o = pwm_osc(SINE, widths[w], 0u, 0x00400000u);
+        OscInfo o = pwm_osc(OSC_PWM_TRI, widths[w], 0u, 0x00400000u);
         int16_t out[N];
         int peak = -40000, at = -1;
 
@@ -1671,7 +1666,7 @@ static void pwm_law(void)
                 if (out[i] > peak) { peak = out[i]; at = (int)(b * N + i); }
         }
         if (at >= prevPeak)
-            fail("PW10 Sin peak moves earlier", widths[w], at, prevPeak);
+            fail("PW10 Tri peak moves earlier", widths[w], at, prevPeak);
         prevPeak = at;
     }
 }

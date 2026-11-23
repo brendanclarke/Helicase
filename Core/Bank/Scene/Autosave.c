@@ -2647,6 +2647,13 @@ uint8_t autosave_maskBitTake(uint16_t payload_offset)
     return was_set;
 }
 
+uint8_t autosave_maskByteClean(uint16_t payload_offset)
+{
+    if (payload_offset >= AUTOSAVE_PAYLOAD_BYTES)
+        return 1u;
+    return (uint8_t)(autosave_dirty_mask[payload_offset >> 3u] == 0u);
+}
+
 void autosave_maskRestoreCaptured(const uint16_t *payload_offsets,
                                   uint16_t patch_count)
 {

@@ -93,6 +93,23 @@
 #include <string.h>
 #include <stdint.h>
 
+/*
+ * FS_HOT_O2 (S097 P2 step 3).
+ *
+ * What: in the opt-in size build (make FS_OS=1, -DFS_OS_BUILD) this file is
+ * compiled with -Os; FS_HOT_O2 keeps at -O2 the few functions reachable from
+ * TIM3 (the Follow Scene-change repaint) or per MIDI message: the slot-name
+ * helpers, their callee filesystem_cachedLibraryName() and
+ * filesystem_setAutosaveEnabled(). In the default build it is
+ * empty. Why: those paths are the worst-case CPU users (S097_P2_UI_STORAGE_
+ * IMPLEMENTATION.md). Affiliates: Makefile FS_OS / OS_SRCS.
+ */
+#if defined(FS_OS_BUILD)
+#define FS_HOT_O2 __attribute__((optimize("O2")))
+#else
+#define FS_HOT_O2
+#endif
+
 #define FS_SECTOR_SIZE_BYTES 512u
 #define FS_NUM_FATS_EXPECTED 2u
 /*
@@ -1638,6 +1655,7 @@ static void filesystem_copyLongComponent(char *dst, uint16_t cap,
                                          const char *src);
 static uint8_t filesystem_patternServiceReady(uint16_t scene_mask);
 static void filesystem_patternServiceFinish(uint16_t scene_mask);
+static void filesystem_patternRealignPlayingTracks(uint16_t scene_mask);
 static void filesystem_patternDisplayFromFilename(
     char dst[STORAGE_KIT_DISPLAY_NAME_LEN + 1u], const char *filename);
 static uint16_t filesystem_interpolateMorphEndpoint(uint16_t normal,
@@ -1708,6 +1726,9 @@ static void filesystem_autosaveTraceFlushCompleted(void);
 static void filesystem_autosaveTraceCaptured(uint8_t budget_exhausted);
 static void filesystem_patternTraceFlush_tick(void);
 static void filesystem_patternTraceFlushSchedule_tick(void);
+#if DEV_MODE_LOGGING
+static uint8_t filesystem_coreSavePending(void);
+#endif
 #if DEV_MODE_LOGGING
 static void filesystem_patternTraceFlushCompleted(void);
 #endif
@@ -2108,7 +2129,7 @@ static void filesystem_prepareLibraryNameCache(fs_name_cache_kind_t kind)
  * from accidentally using stale rows after a menu transition. The returned
  * pointer remains valid until the next cache disposal or replacement.
  */
-static const char *filesystem_cachedLibraryName(fs_name_cache_kind_t kind,
+static FS_HOT_O2 const char *filesystem_cachedLibraryName(fs_name_cache_kind_t kind,
                                                 uint16_t slot)
 {
     if (fs_list_cache_kind != kind || slot >= fs_list_cache_count)
@@ -6248,6 +6269,9 @@ static void filesystem_patternTraceFlushSchedule_tick(void)
 
     if (menu_isLoadSaveCommandActive() || patternTrace_pendingCount() == 0u)
         return;
+    /* S099 P3 §10 / §0: no diagnostic flush while a save is pending. */
+    if (filesystem_coreSavePending())
+        return;
     now = time_sysTick;
     if (fs_pattern_trace_next_due_tick == 0u)
         fs_pattern_trace_next_due_tick = now;
@@ -9592,6 +9616,18 @@ static void filesystem_autosaveParameterDrain_tick(void)
                 op_phase = 10u;
                 return;
             }
+            /*
+             * S099 P3 §10: skip a clean mask byte in one step. The bitwise
+             * walk over 30,848 offsets took 557 ms of the save on device.
+             */
+            if ((payload_offset & 7u) == 0u &&
+                payload_offset + 8u <= AUTOSAVE_PAYLOAD_BYTES &&
+                autosave_maskByteClean(payload_offset)) {
+                op_autosave_writer.payload_scan_offset =
+                    (uint16_t)(payload_offset + 8u);
+                examined = (uint16_t)(examined + 8u);
+                continue;
+            }
             op_autosave_writer.payload_scan_offset++;
             examined++;
             if (!autosave_maskBitTake(payload_offset)) {
@@ -11662,7 +11698,7 @@ static instrument_type_t filesystem_instrumentTypeFromFilename(
     return INSTRUMENT_TYPE_UNKNOWN;
 }
 
-static void filesystem_copyInstrumentStemDisplay(char dst[9],
+static FS_HOT_O2 void filesystem_copyInstrumentStemDisplay(char dst[9],
                                                  const char *filename)
 {
     char stem[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
@@ -13294,6 +13330,46 @@ static void filesystem_patternServiceFinish(uint16_t scene_mask)
     }
 }
 
+/*
+ * Realign the tracks that play a replaced Pattern (S097 P3 §9; backstop
+ * since S098 P2).
+ *
+ * What: while the sequencer runs, refreshes the effective track-timing cache
+ * from the new regions, then puts every track whose played Scene is in
+ * scene_mask back on the master clock, as the PERF double-click does.
+ * Why: a load writes the played region in place. pat_initScene() leaves the
+ * Normal defaults (length 16, default scale) until the header is read, and
+ * presetMorph_tick() feeds them to the DDA within a pass; the new Pattern can
+ * also carry a different length, scale or play mode. Either way the track's
+ * cursor and accumulator keep the old phase and stay off the grid. Tracks
+ * playing other Scenes are not touched.
+ * Since S098 P2 a running Menu Scene, Pattern or Bank Load that replaces a
+ * played Scene moves those tracks onto Scene 17 first, so this finds no
+ * track to realign. It stays (decision Q3) for the two cases that still
+ * write a played region in place: a Load posted while stopped and then
+ * started before the Pattern was read, and the copy/clear "reload Scene" job
+ * (ccClear_runReloadScene()).
+ * Inputs: the replaced-Scene mask. Outputs: seq_realignTrackToMasterClock()
+ * for each matching track. Callers: the explicit Pattern replacement ends
+ * (Scene Load phase 52, Pattern Load phase 14, Bank empty Scenes); never
+ * filesystem_finish(), whose op_scene_load_scene_mask may be stale.
+ */
+static void filesystem_patternRealignPlayingTracks(uint16_t scene_mask)
+{
+    uint8_t track;
+
+    if (scene_mask == 0u || !seq_isRunning())
+        return;
+    seq_refreshTrackEffectiveParams();
+    for (track = 0u; track < NUM_TRACKS; track++) {
+        uint8_t scene_index = seq_getTrackPlayedScene(track);
+
+        if (scene_index < 16u &&
+            (scene_mask & (uint16_t)(1u << scene_index)) != 0u)
+            seq_realignTrackToMasterClock(track);
+    }
+}
+
 static void filesystem_loadSceneDirectory_tick(void)
 {
     uint8_t line_ready;
@@ -14389,6 +14465,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         /* Pattern bytes are no longer being written; release the service gate
          * before effect cleanup or the terminal Scene publication continues. */
         filesystem_patternServiceFinish(op_scene_load_scene_mask);
+        filesystem_patternRealignPlayingTracks(op_scene_load_scene_mask);
         if (filesystem_bankPayloadDetailActive())
             filesystem_bootLoggingSetBankSceneDetail('P');
         op_close_done = false;
@@ -15597,6 +15674,7 @@ static void filesystem_loadBankDirectory_tick(void)
             return;
         filesystem_bankEmptyScenes(op_bank_scene_empty_mask);
         filesystem_patternServiceFinish(op_bank_scene_empty_mask);
+        filesystem_patternRealignPlayingTracks(op_bank_scene_empty_mask);
         if (op_bank_scene_load_mask == 0u) {
             /* No children to load — enter the empty-Bank branch. */
             uint16_t old_bank_source =
@@ -16540,6 +16618,7 @@ static void filesystem_loadPattern_tick(void)
         if (op_close_status != FS_STATUS_DONE) {
             pat_initScene(op_pattern_scene);
             filesystem_patternServiceFinish(op_scene_load_scene_mask);
+            filesystem_patternRealignPlayingTracks(op_scene_load_scene_mask);
             bank_invalidateSdCleanScene(op_pattern_scene);
             filesystem_finish(FS_STATUS_ERROR);
             return;
@@ -16568,6 +16647,7 @@ static void filesystem_loadPattern_tick(void)
             }
         }
         filesystem_patternServiceFinish(op_scene_load_scene_mask);
+        filesystem_patternRealignPlayingTracks(op_scene_load_scene_mask);
         filesystem_startPatternHcnamesUpdate();
         return;
     default:
@@ -21115,6 +21195,12 @@ static void filesystem_saveBankDirectory_tick(void)
         }
         if (op_bank_scene_empty_mask &
             (uint16_t)(1u << op_bank_child_cursor)) {
+            /* The delete scanner works in the current directory and never
+             * changes it: the CWD is still the Bank directory, so phase 12
+             * may go straight to phase 20. Without this, a removed child
+             * visited before any written one sent phase 12 to the root-based
+             * reopen (phase 13) from inside the Bank directory (S097 P3 §13). */
+            op_bank_cwd_at_parent = 1u;
             op_phase = 12u;
             return;
         }
@@ -22644,14 +22730,47 @@ static uint8_t op_settings_stall_last_phase = 0u;
 static uint32_t op_settings_stall_ticks = 0u;
 #endif
 
-static void filesystem_saveGlobals_tick(void)
+/*
+ * One safe text write: settings.cfg or midilrn.cfg (S097 P1 item 5, K).
+ *
+ * What: the safe-write phases shared by filesystem_saveGlobals_tick() and
+ * filesystem_saveMidiLearn_tick(), which were the same state machine with
+ * five different values: temp_name/final_name (the tmp and live file names),
+ * next_line (the line generator), stall_tag (the stall code, `StWr` or
+ * `MlWr`) and settings_revision (1: snapshot the settings dirty revision and
+ * mark the settings write active at phase 0; settings only).
+ * Why: one copy of the code. Phase numbers, the stall site and codes, and
+ * every afatfs call stay as they were. noinline/noclone keep LTO from
+ * specialising it back into two copies. Affiliates: the two wrappers below.
+ */
+typedef struct {
+    const char *temp_name;
+    const char *final_name;
+    uint8_t (*next_line)(char *, uint16_t, void *);
+    const char *stall_tag;
+    uint8_t settings_revision;
+} fs_safe_text_write_t;
+
+static const fs_safe_text_write_t fs_settings_safe_write = {
+    STORAGE_SETTINGS_TEMP_FILENAME, STORAGE_SETTINGS_FILENAME,
+    filesystem_nextSettingsLine, "StWr", 1u
+};
+
+static const fs_safe_text_write_t fs_midilearn_safe_write = {
+    STORAGE_MIDILEARN_TEMP_FILENAME, STORAGE_MIDILEARN_FILENAME,
+    filesystem_nextMidiLearnLine, "MlWr", 0u
+};
+
+static void __attribute__((noinline, noclone))
+filesystem_safeTextWrite_tick(const fs_safe_text_write_t *w)
 {
 #if DEV_STALL_DETECTION
     /*
-     * Detect and abort a Settings write phase stall.
+     * Detect and abort a Settings (or MIDI Learn) write phase stall.
      *
      * What: fires once after op_phase stays unchanged for 30,000 consecutive
-     * polls, writes a named error code `StWr NN` encoding the stalled phase,
+     * polls, writes a named error code `StWr NN` (`MlWr NN` for MIDI Learn,
+     * w->stall_tag) encoding the stalled phase,
      * records one PHASE_STALL trace entry, and calls filesystem_finish(ERROR)
      * to release the facade. Why: the settings writer is autonomous and its
      * errors are not displayed on screen, but a stall here keeps
@@ -22675,7 +22794,7 @@ static void filesystem_saveGlobals_tick(void)
         autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
                              AUTOSAVE_TRACE_PHASE_STALL_SITE_SETTINGS,
                              value);
-        filesystem_makeNamedErrorCode("StWr", op_phase);
+        filesystem_makeNamedErrorCode(w->stall_tag, op_phase);
         filesystem_finish(FS_STATUS_ERROR);
         return;
     }
@@ -22690,8 +22809,10 @@ static void filesystem_saveGlobals_tick(void)
          * line serialization is not an atomic SRAM snapshot. Affiliates:
          * filesystem_complete() and the background settings scheduler.
          */
-        op_settings_change_revision = fs_settings_change_revision;
-        op_settings_write_active = 1u;
+        if (w->settings_revision) {
+            op_settings_change_revision = fs_settings_change_revision;
+            op_settings_write_active = 1u;
+        }
         op_file_ready = false;
         op_file = NULL;
         /*
@@ -22700,7 +22821,7 @@ static void filesystem_saveGlobals_tick(void)
          * preserving temp-file content. This is the key difference from the
          * former in-place truncate of the live settings.cfg. See §4.
          */
-        if (!afatfs_fopen(STORAGE_SETTINGS_TEMP_FILENAME, "w", on_file_opened))
+        if (!afatfs_fopen(w->temp_name, "w", on_file_opened))
             return;
         op_phase = 1;
         return;
@@ -22718,7 +22839,7 @@ static void filesystem_saveGlobals_tick(void)
         return;
 
     case 2: /* WRITE LINES (including terminator) */
-        if (filesystem_writeTextLine(filesystem_nextSettingsLine, NULL))
+        if (filesystem_writeTextLine(w->next_line, NULL))
             return;
         op_phase = 3;
         return;
@@ -22759,7 +22880,7 @@ static void filesystem_saveGlobals_tick(void)
          */
         op_remove_done = 0u;
         op_remove_result = AFATFS_RESULT_OK;
-        if (!afatfs_removeObjects_lfn(STORAGE_SETTINGS_FILENAME,
+        if (!afatfs_removeObjects_lfn(w->final_name,
                                       AFATFS_MATCH_CASE_INSENSITIVE,
                                       AFATFS_REMOVE_FILES_ONLY,
                                       on_remove_complete))
@@ -22794,8 +22915,8 @@ static void filesystem_saveGlobals_tick(void)
         op_rename_result = AFATFS_RESULT_OK;
         memset(op_repair_rename_open_name, 0,
                sizeof(op_repair_rename_open_name));
-        if (!afatfs_renameObject_lfn(STORAGE_SETTINGS_TEMP_FILENAME,
-                                     STORAGE_SETTINGS_FILENAME,
+        if (!afatfs_renameObject_lfn(w->temp_name,
+                                     w->final_name,
                                      AFATFS_MATCH_CASE_INSENSITIVE,
                                      op_repair_rename_open_name,
                                      on_rename_complete))
@@ -22832,6 +22953,11 @@ static void filesystem_saveGlobals_tick(void)
         filesystem_finish(FS_STATUS_ERROR);
         return;
     }
+}
+
+static void filesystem_saveGlobals_tick(void)
+{
+    filesystem_safeTextWrite_tick(&fs_settings_safe_write);
 }
 
 /* -----------------------------------------------------------------------
@@ -23108,116 +23234,7 @@ static void filesystem_loadMidiLearn_tick(void)
 ** ----------------------------------------------------------------------- */
 static void filesystem_saveMidiLearn_tick(void)
 {
-#if DEV_STALL_DETECTION
-    if (filesystem_pollPhaseStall(op_phase,
-                                  &op_settings_stall_last_phase,
-                                  &op_settings_stall_ticks,
-                                  30000u)) {
-        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
-                             AUTOSAVE_TRACE_PHASE_STALL_SITE_SETTINGS,
-                             (uint32_t)op_phase <<
-                             AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT);
-        filesystem_makeNamedErrorCode("MlWr", op_phase);
-        filesystem_finish(FS_STATUS_ERROR);
-        return;
-    }
-#endif
-
-    switch (op_phase) {
-    case 0: /* OPEN midilrn.tmp (truncate) */
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen(STORAGE_MIDILEARN_TEMP_FILENAME, "w", on_file_opened))
-            return;
-        op_phase = 1;
-        return;
-
-    case 1: /* WAIT_OPEN */
-        if (!op_file_ready) return;
-        if (op_file == NULL) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_write_line_index = 0u;
-        op_write_line_len = 0u;
-        op_write_line_offset = 0u;
-        op_phase = 2;
-        return;
-
-    case 2: /* WRITE LINES (header, rows, terminator) */
-        if (filesystem_writeTextLine(filesystem_nextMidiLearnLine, NULL))
-            return;
-        op_phase = 3;
-        return;
-
-    case 3: /* CLOSE */
-        op_close_done = false;
-        if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 4;
-        return;
-
-    case 4: /* WAIT_CLOSE */
-        if (!op_close_done) return;
-        op_phase = 5;
-        return;
-
-    case 5: /* SYNC — the tmp is durable before the old file is touched */
-        if (!afatfs_sync())
-            return;
-        op_phase = 6;
-        return;
-
-    case 6: /* REMOVE old midilrn.cfg (not-found is OK: first Learn) */
-        op_remove_done = 0u;
-        op_remove_result = AFATFS_RESULT_OK;
-        if (!afatfs_removeObjects_lfn(STORAGE_MIDILEARN_FILENAME,
-                                      AFATFS_MATCH_CASE_INSENSITIVE,
-                                      AFATFS_REMOVE_FILES_ONLY,
-                                      on_remove_complete))
-            return;
-        op_phase = 7;
-        return;
-
-    case 7: /* WAIT_REMOVE — on error the durable tmp waits for boot */
-        if (!op_remove_done) return;
-        if (op_remove_result != AFATFS_RESULT_OK) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_phase = 8;
-        return;
-
-    case 8: /* RENAME midilrn.tmp -> midilrn.cfg */
-        op_rename_done = 0u;
-        op_rename_result = AFATFS_RESULT_OK;
-        memset(op_repair_rename_open_name, 0,
-               sizeof(op_repair_rename_open_name));
-        if (!afatfs_renameObject_lfn(STORAGE_MIDILEARN_TEMP_FILENAME,
-                                     STORAGE_MIDILEARN_FILENAME,
-                                     AFATFS_MATCH_CASE_INSENSITIVE,
-                                     op_repair_rename_open_name,
-                                     on_rename_complete))
-            return;
-        op_phase = 9;
-        return;
-
-    case 9: /* WAIT_RENAME — on error boot recovery promotes the tmp */
-        if (!op_rename_done) return;
-        if (op_rename_result != AFATFS_RESULT_OK) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_phase = 10;
-        return;
-
-    case 10: /* FINISH — shared flush makes the rename durable */
-        filesystem_finish(FS_STATUS_DONE);
-        return;
-
-    default:
-        filesystem_finish(FS_STATUS_ERROR);
-        return;
-    }
+    filesystem_safeTextWrite_tick(&fs_midilearn_safe_write);
 }
 
 /* -----------------------------------------------------------------------
@@ -24048,12 +24065,44 @@ static void filesystem_blockPoll(void)
     afatfs_poll();
 }
 
-static afatfsFilePtr_t filesystem_blockOpen(const char *filename)
+/*
+ * Blocking open of a file (8.3 or long name) or a directory (S097 P1, K).
+ *
+ * What: the three blocking open helpers were one loop with a different
+ * afatfs open call; mode picks the call: FS_BLOCK_OPEN_8_3 afatfs_fopen(),
+ * FS_BLOCK_OPEN_LFN afatfs_fopen_lfn(), FS_BLOCK_OPEN_DIR_LFN
+ * afatfs_opendir_lfn() (both case-insensitive). The open is retried and the
+ * callback waited for exactly as before. noinline/noclone keep LTO from
+ * specialising it back into three copies. Callers keep the three names.
+ */
+#define FS_BLOCK_OPEN_8_3     0u
+#define FS_BLOCK_OPEN_LFN     1u
+#define FS_BLOCK_OPEN_DIR_LFN 2u
+
+static afatfsFilePtr_t __attribute__((noinline, noclone))
+filesystem_blockOpenMode(const char *filename, uint8_t mode)
 {
     block_file_ready = 0;
     block_file = NULL;
 
-    while (!afatfs_fopen(filename, "r", filesystem_blockOpenCb)) {
+    for (;;) {
+        bool started;
+
+        if (mode == FS_BLOCK_OPEN_8_3)
+            started = afatfs_fopen(filename, "r", filesystem_blockOpenCb);
+        else if (mode == FS_BLOCK_OPEN_LFN)
+            started = afatfs_fopen_lfn(filename,
+                                       "r",
+                                       AFATFS_MATCH_CASE_INSENSITIVE,
+                                       NULL,
+                                       filesystem_blockOpenCb);
+        else
+            started = afatfs_opendir_lfn(filename,
+                                         AFATFS_MATCH_CASE_INSENSITIVE,
+                                         NULL,
+                                         filesystem_blockOpenCb);
+        if (started)
+            break;
         filesystem_blockPoll();
         if (!filesystem_blockFsOk())
             return NULL;
@@ -24068,51 +24117,19 @@ static afatfsFilePtr_t filesystem_blockOpen(const char *filename)
     return block_file;
 }
 
-static afatfsFilePtr_t filesystem_blockOpenLfn(const char *filename)
+static inline afatfsFilePtr_t filesystem_blockOpen(const char *filename)
 {
-    block_file_ready = 0;
-    block_file = NULL;
-
-    while (!afatfs_fopen_lfn(filename,
-                             "r",
-                             AFATFS_MATCH_CASE_INSENSITIVE,
-                             NULL,
-                             filesystem_blockOpenCb)) {
-        filesystem_blockPoll();
-        if (!filesystem_blockFsOk())
-            return NULL;
-    }
-
-    while (!block_file_ready) {
-        filesystem_blockPoll();
-        if (!filesystem_blockFsOk())
-            return NULL;
-    }
-
-    return block_file;
+    return filesystem_blockOpenMode(filename, FS_BLOCK_OPEN_8_3);
 }
 
-static afatfsFilePtr_t filesystem_blockOpenDirLfn(const char *filename)
+static inline afatfsFilePtr_t filesystem_blockOpenLfn(const char *filename)
 {
-    block_file_ready = 0;
-    block_file = NULL;
+    return filesystem_blockOpenMode(filename, FS_BLOCK_OPEN_LFN);
+}
 
-    while (!afatfs_opendir_lfn(filename,
-                               AFATFS_MATCH_CASE_INSENSITIVE,
-                               NULL,
-                               filesystem_blockOpenCb)) {
-        filesystem_blockPoll();
-        if (!filesystem_blockFsOk())
-            return NULL;
-    }
-
-    while (!block_file_ready) {
-        filesystem_blockPoll();
-        if (!filesystem_blockFsOk())
-            return NULL;
-    }
-
-    return block_file;
+static inline afatfsFilePtr_t filesystem_blockOpenDirLfn(const char *filename)
+{
+    return filesystem_blockOpenMode(filename, FS_BLOCK_OPEN_DIR_LFN);
 }
 
 static uint8_t filesystem_blockClose(afatfsFilePtr_t file)
@@ -26973,7 +26990,7 @@ void filesystem_patternAutosaveOnLoad(uint8_t scene_index)
         bank_invalidateSdCleanScene(scene_index);
 }
 
-void filesystem_setAutosaveEnabled(uint8_t enabled)
+FS_HOT_O2 void filesystem_setAutosaveEnabled(uint8_t enabled)
 {
     enabled = enabled ? 1u : 0u;
 
@@ -27484,10 +27501,44 @@ static void filesystem_autosaveWriterCompleted(void)
             fs_autosave_writer_armed = 1u;
         } else {
             /*
-             * A clean terminal drain has no continuation consumer. Clear the
-             * cache so a later unrelated mutation cannot reuse an old target.
+             * A clean terminal drain (S099 P3: the cache is now kept).
+             *
+             * What: the next drain may skip the dual-record validation, as a
+             * continuation does. If this drain published (its copy reached
+             * the end of the record: stream_offset is zeroed at phase 0 and
+             * advances only in the copy, phases 12-13; the shared final sync
+             * made the target durable, or the status would be ERROR; a
+             * capture with no live patch still publishes), the cached
+             * winner is that new target (winner ^ 1, generation + 1, probe
+             * + 1). If it published nothing (an empty capture, e.g. the boot
+             * settle), the cached winner is the record this drain just
+             * validated in full (unchanged on the card).
+             * Why: clearing the cache here meant the first save after every
+             * pause re-read and CRC-checked both 34,768-byte records (about
+             * 3.7 s at the old CRC chunk), so an edit followed by a power-off
+             * a few seconds later was lost (the user's device test). Only
+             * this writer writes the records; card removal while powered is
+             * outside the product contract (the continuation path's rule).
+             * Every lifecycle invalidation path (AutoSave OFF, Bank loss or
+             * change, error, setup) still clears the cache.
              */
-            fs_autosave_winner_cached = 0u;
+            if (op_autosave_writer.have_winner) {
+                const uint8_t published = (uint8_t)(op_autosave_writer.stream_offset >=
+                                                    AUTOSAVE_RECORD_BYTES);
+
+                fs_autosave_cached_winner_index = published
+                    ? (uint8_t)(op_autosave_writer.winner_index ^ 1u)
+                    : op_autosave_writer.winner_index;
+                fs_autosave_cached_winner_generation = published
+                    ? op_autosave_writer.winner_generation + 1u
+                    : op_autosave_writer.winner_generation;
+                fs_autosave_cached_winner_probe = published
+                    ? (uint8_t)(op_autosave_writer.winner_probe + 1u)
+                    : op_autosave_writer.winner_probe;
+                fs_autosave_winner_cached = 1u;
+            } else {
+                fs_autosave_winner_cached = 0u;
+            }
             fs_autosave_writer_armed = 0u;
         }
     } else {
@@ -28125,6 +28176,28 @@ static void filesystem_autosaveTraceFlushCompleted(void)
  * is initialized from the current tick before unsigned deadline comparison so
  * a first edit long after boot cannot wait for the 16-bit clock to wrap.
  */
+#if DEV_MODE_LOGGING
+/*
+ * Report whether any core persistence work is waiting for the facade.
+ *
+ * What: nonzero while scalar AutoSave bits are dirty, the writer is armed or
+ * recovering, a Pattern AutoSave mask is dirty, settings.cfg is dirty, or the
+ * resident name cache awaits its deferred write. Why (S099 P3 §10, §0): the
+ * diagnostic trace flushes must not take the facade while a save waits.
+ * Inputs: the owners' dirty state. Output: predicate only; no state changes.
+ */
+static uint8_t filesystem_coreSavePending(void)
+{
+    return (uint8_t)(autosave_maskHasDirty() ||
+                     fs_autosave_writer_armed ||
+                     fs_autosave_recovery_pending ||
+                     autosave_patternDirtyMask() != 0u ||
+                     autosave_nonSemanticPatternDirtyMask() != 0u ||
+                     fs_settings_dirty ||
+                     menu_hasResidentNameDirtyMask());
+}
+#endif
+
 static void filesystem_autosaveTraceFlushSchedule_tick(void)
 {
 #if DEV_MODE_LOGGING
@@ -28166,6 +28239,15 @@ static void filesystem_autosaveTraceFlushSchedule_tick(void)
     }
 
     if (autosaveTrace_pendingCount() == 0u)
+        return;
+    /*
+     * S099 P3 §10 / §0: no diagnostic flush while any save is pending. Each
+     * flush seeks a multi-megabyte asavetrc.bin and held the one facade for
+     * most of every 500 ms interval, so the AutoSave writer armed 1.3 s late
+     * and started 3.2 s late (device trace SD_CARD_ATS_4). Trace records may
+     * be lost; saves may not.
+     */
+    if (filesystem_coreSavePending())
         return;
     now = time_sysTick;
     if (fs_autosave_trace_next_due_tick == 0u)
@@ -28858,7 +28940,195 @@ static void filesystem_batchScanTick(void (*tick)(void))
     }
 }
 
+/*
+ * Which facade owners get the AUTOSAVE_DRAIN_POLL_BUDGET_US burst (S101).
+ *
+ * What: the scalar and Pattern AutoSave drains and Flush Finish always; the
+ * two diagnostic trace flushes (logging builds) only while core work waits
+ * for the facade, so they free it sooner: filesystem_coreSavePending()
+ * (a save) or menu_loadSaveStorageWaiting() (a Load/Save page open or a
+ * command active; a trace flush already in flight when the page opens would
+ * otherwise hold its first request back at one poll per pass).
+ * Why (S101_P1_CPU_INVESTIGATION.md §3.3, rule §0): otherwise each trace flush,
+ * twice a second, took 1 ms of foreground per main-loop pass, about 20 ms of
+ * pass at this Scene's 93 % render load.
+ * Inputs: current_op, the two predicates. Output: predicate only.
+ * Accessors: filesystem_tick().
+ */
+static uint8_t filesystem_drainPollEligible(void)
+{
+    switch (current_op) {
+    case FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN:
+    case FS_INTERNAL_OP_AUTOSAVE_PATTERN_DRAIN:
+    case FS_INTERNAL_OP_FLUSH_FINISH:
+        return 1u;
+#if DEV_MODE_LOGGING
+    case FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH:
+    case FS_INTERNAL_OP_PATTERN_TRACE_FLUSH:
+        return (uint8_t)(filesystem_coreSavePending() ||
+                         menu_loadSaveStorageWaiting());
+#endif
+    default:
+        return 0u;
+    }
+}
+
+#if DEV_MODE_LOGGING
+/*
+ * Filesystem pass probe (S097 P3, DEV only).
+ *
+ * What: filesystem_tick() is filesystem_tickBody() timed with the TIM2
+ * microsecond counter. While audio runs, filesystem_passProbe() records
+ * (stage 'f', AutosaveTrace.h):
+ *  - every call that took >= FS_PASS_PROBE_SLOW_US, with the operation and
+ *    phase the call entered with;
+ *  - when the operation changes, the previous operation's longest call and
+ *    its phase;
+ *  - every rise of audioCodec_underrunCount, with the operation and phase;
+ *  - once per second, the longest gap between two filesystem_tick() calls
+ *    (one whole main-loop pass, render included), with the operation and
+ *    phase at the call that closed it.
+ * Why: the FS_OS=1 build (filesystem.c at -Os) stumbled during a Scene Load
+ * into non-playing slots (S097 P2 log §10-§11). One fixed-work phase is
+ * suspected to run long enough to delay the render and the trigger drain; the
+ * trace had no measure of it. This finds the phase.
+ * Rules: nothing is recorded for the trace-flush or boot-log operations (a
+ * record must never start the next trace flush, S090 P5), and nothing before
+ * audio starts (boot work is blocking by design). Cost: two timer reads per
+ * call; 20 B of RAM in DEV builds only (user sign-off, S097 P3).
+ * Inputs: current_op, op_phase, audioCodec_underrunCount.
+ * Affiliates: AUTOSAVE_TRACE_STAGE_FS_PASS, S097_P3_FS_OPTIMIZE_INVESTIGATION.md.
+ */
+#define FS_PASS_PROBE_SLOW_US      1000u
+#define FS_PASS_PROBE_FLAG_SLOW    0u
+#define FS_PASS_PROBE_FLAG_OP_MAX  1u
+#define FS_PASS_PROBE_FLAG_UNDERRUN 2u
+#define FS_PASS_PROBE_FLAG_LOOP_GAP 3u
+#define FS_PASS_PROBE_GAP_WINDOW_US 1000000u
+
+static uint8_t  fs_probe_op = 0u;           /* operation whose maximum is held */
+static uint8_t  fs_probe_max_phase = 0u;
+static uint16_t fs_probe_max_us = 0u;
+static uint32_t fs_probe_underruns = 0u;    /* last count seen */
+static uint32_t filesystem_passProbeValue(uint32_t low, uint8_t op,
+                                          uint8_t phase);
+static uint32_t fs_probe_last_entry_us = 0u;   /* previous call's start */
+static uint32_t fs_probe_gap_window_us = 0u;   /* gap window start */
+static uint16_t fs_probe_gap_max_us = 0u;
+static uint8_t  fs_probe_gap_op = 0u;
+static uint8_t  fs_probe_gap_phase = 0u;
+
+/*
+ * Main-loop gap (flags 3): the time from the previous filesystem_tick() start
+ * to this one is one main-loop pass, render included. The longest gap of each
+ * one-second window is recorded once, so the cost is one record per second.
+ */
+static void filesystem_passProbeGap(uint32_t start_us, uint8_t op,
+                                    uint8_t phase)
+{
+    uint32_t gap = timebase_tim2Delta(start_us, fs_probe_last_entry_us);
+
+    fs_probe_last_entry_us = start_us;
+    if (!audioCodec_isInitialized()) {
+        fs_probe_gap_window_us = start_us;
+        fs_probe_gap_max_us = 0u;
+        return;
+    }
+    if (gap > fs_probe_gap_max_us) {
+        fs_probe_gap_max_us = (uint16_t)(gap > 0xFFFFu ? 0xFFFFu : gap);
+        fs_probe_gap_op = op;
+        fs_probe_gap_phase = phase;
+    }
+    if (timebase_tim2Delta(start_us, fs_probe_gap_window_us) <
+        FS_PASS_PROBE_GAP_WINDOW_US)
+        return;
+    /* Never record from a trace flush or the boot log (S090 P5); the window
+     * stays open and is recorded at the next other call. */
+    if (op == (uint8_t)FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH ||
+        op == (uint8_t)FS_INTERNAL_OP_PATTERN_TRACE_FLUSH ||
+        op == (uint8_t)FS_INTERNAL_OP_WRITE_BOOT_LOG)
+        return;
+    autosaveTrace_record(AUTOSAVE_TRACE_STAGE_FS_PASS,
+                         FS_PASS_PROBE_FLAG_LOOP_GAP,
+                         filesystem_passProbeValue(fs_probe_gap_max_us,
+                                                   fs_probe_gap_op,
+                                                   fs_probe_gap_phase));
+    fs_probe_gap_window_us = start_us;
+    fs_probe_gap_max_us = 0u;
+}
+
+static uint32_t filesystem_passProbeValue(uint32_t low, uint8_t op,
+                                          uint8_t phase)
+{
+    if (low > 0xFFFFu)
+        low = 0xFFFFu;
+    return low | ((uint32_t)op << 16) | ((uint32_t)phase << 24);
+}
+
+static void filesystem_passProbe(uint32_t start_us, uint8_t op, uint8_t phase)
+{
+    uint32_t elapsed = timebase_tim2Delta(timebase_tim2Now(), start_us);
+    uint32_t underruns = audioCodec_underrunCount;
+
+    if (!audioCodec_isInitialized()) {
+        fs_probe_underruns = underruns;
+        fs_probe_op = (uint8_t)FS_INTERNAL_OP_NONE;
+        fs_probe_max_us = 0u;
+        return;
+    }
+    if (underruns != fs_probe_underruns) {
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_FS_PASS,
+                             FS_PASS_PROBE_FLAG_UNDERRUN,
+                             filesystem_passProbeValue(
+                                 underruns - fs_probe_underruns, op, phase));
+        fs_probe_underruns = underruns;
+    }
+    if (op == (uint8_t)FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH ||
+        op == (uint8_t)FS_INTERNAL_OP_PATTERN_TRACE_FLUSH ||
+        op == (uint8_t)FS_INTERNAL_OP_WRITE_BOOT_LOG)
+        return;
+    if (op != fs_probe_op) {
+        /* Flush Finish closes every trace flush twice a second: its
+         * maximum is not recorded (a slow one still is, as flags 0). */
+        if (fs_probe_op != (uint8_t)FS_INTERNAL_OP_NONE &&
+            fs_probe_op != (uint8_t)FS_INTERNAL_OP_FLUSH_FINISH &&
+            fs_probe_max_us != 0u)
+            autosaveTrace_record(AUTOSAVE_TRACE_STAGE_FS_PASS,
+                                 FS_PASS_PROBE_FLAG_OP_MAX,
+                                 filesystem_passProbeValue(fs_probe_max_us,
+                                                           fs_probe_op,
+                                                           fs_probe_max_phase));
+        fs_probe_op = op;
+        fs_probe_max_us = 0u;
+        fs_probe_max_phase = 0u;
+    }
+    if (op != (uint8_t)FS_INTERNAL_OP_NONE && elapsed > fs_probe_max_us) {
+        fs_probe_max_us = (uint16_t)(elapsed > 0xFFFFu ? 0xFFFFu : elapsed);
+        fs_probe_max_phase = phase;
+    }
+    if (elapsed >= FS_PASS_PROBE_SLOW_US)
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_FS_PASS,
+                             FS_PASS_PROBE_FLAG_SLOW,
+                             filesystem_passProbeValue(elapsed, op, phase));
+}
+
+static void filesystem_tickBody(void);
+
 void filesystem_tick(void)
+{
+    const uint32_t start_us = timebase_tim2Now();
+    const uint8_t op = (uint8_t)current_op;
+    const uint8_t phase = op_phase;
+
+    filesystem_passProbeGap(start_us, op, phase);
+    filesystem_tickBody();
+    filesystem_passProbe(start_us, op, phase);
+}
+
+static void filesystem_tickBody(void)
+#else
+void filesystem_tick(void)
+#endif
 {
 #if DEV_MODE_LOGGING && DEV_LOGGING_IWDG
     filesystem_devIwdgFeed();
@@ -28895,6 +29165,39 @@ void filesystem_tick(void)
 
         for (pass = 0u; pass < passes; pass++)
             afatfs_poll();
+        /*
+         * S099 P3 §10: core AutoSave storage polls for up to
+         * AUTOSAVE_DRAIN_POLL_BUDGET_US per pass. One poll per pass moved
+         * 16 bytes, so the parameter copy took seconds and edits were lost
+         * at power-off.
+         *
+         * S101 (S101_P1_CPU_INVESTIGATION.md §3.3): the burst is foreground time
+         * the render does not get back. At a 93 % render load 1 ms of it
+         * stretches one main-loop pass to about 20 ms, and the front panel
+         * was sampled once per pass. Two corrections, neither slowing a save:
+         * - a trace flush (diagnostic) gets the burst only while core work
+         *   waits for the facade (a pending save, which is what this comment
+         *   always said, or Load/Save); the condition had no such test, so
+         *   every flush, twice a second, spun 1 ms on each of its passes
+         *   (rule §0: diagnostics never take core time);
+         * - Flush Finish ends its burst once AsyncFATFS has nothing left to
+         *   write (afatfs_isFlushed()). A trace flush syncs before it
+         *   finishes, so the Flush Finish closing it had nothing to do and
+         *   still spun the whole 1 ms.
+         * The drains themselves keep the full burst: their speed is bounded
+         * by the foreground share, not by this loop.
+         */
+        if (status == FS_STATUS_BUSY && filesystem_drainPollEligible()) {
+            const uint32_t poll_start_us = timebase_tim2Now();
+
+            while (timebase_tim2Delta(timebase_tim2Now(), poll_start_us) <
+                   AUTOSAVE_DRAIN_POLL_BUDGET_US) {
+                if (current_op == FS_INTERNAL_OP_FLUSH_FINISH &&
+                    afatfs_isFlushed())
+                    break;
+                afatfs_poll();
+            }
+        }
     } else {
         uint16_t now = time_sysTick;
         if ((uint16_t)(now - fs_last_idle_poll_tick) >= FS_IDLE_POLL_MS) {
@@ -28953,28 +29256,6 @@ void filesystem_tick(void)
     if (status == FS_STATUS_IDLE && !cc_suspended)
         filesystem_settingsWriterSchedule_tick();
     /*
-     * Persist a pending diagnostic batch before an eligible AutoSave drain
-     * claims the one facade after leaving Load/Save.
-     *
-     * Inputs: an idle facade outside Load/Save and any RAM lifecycle records
-     * produced while the foreground Instrument operation owned the card.
-     * Output: at most one existing bounded append starts before the overdue
-     * first full-bank drain; the normal writer starts on the next idle poll.
-     * Why: the former writer-before-trace order let an exit immediately start
-     * a long initial drain, so a power-off during that drain left only an older
-     * S record and concealed the J/I evidence needed to distinguish a missed
-     * publication from an unfinished persistence attempt. This changes only
-     * logging-build diagnostic arbitration: tracing still never starts on a
-     * Load/Save page and neither mask ownership nor writer bytes change.
-     * Affiliates: filesystem_autosaveTraceFlushSchedule_tick(),
-     * filesystem_autosaveWriterSchedule_tick(), and AutosaveTrace.c.
-     */
-    if (status == FS_STATUS_IDLE && !cc_suspended)
-        filesystem_autosaveTraceFlushSchedule_tick();
-    /* PatternTrace is diagnostic-only and runs behind the existing trace gate. */
-    if (status == FS_STATUS_IDLE && !cc_suspended)
-        filesystem_patternTraceFlushSchedule_tick();
-    /*
      * Give deferred Kit/Instrument HCNAMES persistence priority over AutoSave.
      *
      * What: once Menu has left Load/Save, its retained dirty Scene mask is
@@ -29001,14 +29282,21 @@ void filesystem_tick(void)
      */
     filesystem_backgroundBudgetRefill();
     /*
-     * Start the durable AutoSave writer only after settings and, when pending,
-     * its pre-drain diagnostic witness declined the idle facade.
+     * Start the durable AutoSave writer after settings and HCNAMES, and
+     * before every diagnostic trace flush (S099 P3, the user's device report:
+     * nothing autosaved).
      *
      * Inputs: the unchanged writer gate/deadline and an idle facade. Output:
-     * the original parameter-drain state machine owns the card exactly as
-     * before, except that a pending logging-build trace has one append first.
-     * Why: the trace's J/I batch must become durable before a long first drain
-     * can be interrupted by power removal. Affiliate: the scheduler above.
+     * the parameter-drain state machine owns the card exactly as before.
+     * Why: the trace flush used to come first (so a J/I witness batch landed
+     * before a long first drain), but a logging build always has pending
+     * trace records (the cycle probe alone writes 16 every 1.5 s), so the
+     * trace won every idle pass: the writer was armed late or never, and a
+     * due drain waited for tens of seconds or for ever (SD_CARD_ADV_2: no
+     * scalar AutoSave after the first Instrument page visit of a boot; the
+     * previous card already showed 5 to 53 s waits). User data first: the
+     * trace now flushes only in a pass no AutoSave claimant took. Affiliate:
+     * the trace schedulers after the Pattern drains below.
      */
     /*
      * S082 C9/D11: Scene 17 owns the background Pattern region and the
@@ -29029,6 +29317,17 @@ void filesystem_tick(void)
     if (status == FS_STATUS_IDLE && !cc_suspended &&
         !scene_backgroundExists())
         filesystem_autosaveNonSemanticPatternDrainSchedule_tick();
+    /*
+     * The diagnostic trace flushes are the last claimants (S099 P3): a
+     * logging build's AutoSave Trace and PatternTrace append only in a pass
+     * that no settings, HCNAMES or AutoSave work took. Their own gates are
+     * unchanged (never on a Load/Save page or during a command); the ring
+     * keeps accumulating meanwhile and counts what it drops (stage G).
+     */
+    if (status == FS_STATUS_IDLE && !cc_suspended)
+        filesystem_autosaveTraceFlushSchedule_tick();
+    if (status == FS_STATUS_IDLE && !cc_suspended)
+        filesystem_patternTraceFlushSchedule_tick();
 #if DEV_MODE_LOGGING
     filesystem_traceOwnerTransition();   /* S090 P5 F5 */
 #endif
@@ -34173,9 +34472,6 @@ bool filesystem_requestSaveBank(uint16_t slot,
                    (bank_hasResidentBank()
                         ? bank_scenePresentMask() : 0u));
     full_save_mask = bank_scene_save_mask;
-    op_bank_save_written_mask = full_save_mask;
-    op_bank_scene_empty_mask = (uint16_t)(empty_mask &
-                                          (uint16_t)~full_save_mask & 0xffffu);
     /*
      * Option 2: compute which children may skip their on-card rewrite.
      *
@@ -34232,6 +34528,16 @@ bool filesystem_requestSaveBank(uint16_t slot,
 
     op_kit_save_source_scene = source_scene;
     op_kit_save_mode = STORAGE_INSTRUMENT_SAVE_NORMAL;
+    /*
+     * The written and removed masks are set after filesystem_start(), which
+     * clears every op_bank_* mask (S097 P3 §13). Set before it, as until S097,
+     * both were always zero: a replace Save never removed the slot's other
+     * children (it acted as a Merge) and every child counted as untouched in
+     * the manifest staging below and in phases 6/61-64.
+     */
+    op_bank_save_written_mask = full_save_mask;
+    op_bank_scene_empty_mask = (uint16_t)(empty_mask &
+                                          (uint16_t)~full_save_mask & 0xffffu);
     op_bank_scene_save_mask = (uint16_t)(full_save_mask & ~skip_mask);
     op_bank_sd_clean_candidate_mask = op_bank_scene_save_mask;
     op_bank_sd_clean_candidate_slot = slot;
@@ -35532,7 +35838,7 @@ uint8_t filesystem_sceneSlotExists(uint16_t zero_based_slot)
                                         zero_based_slot);
 }
 
-const char *filesystem_sceneSlotName(uint16_t zero_based_slot)
+FS_HOT_O2 const char *filesystem_sceneSlotName(uint16_t zero_based_slot)
 {
     const char *name;
 
@@ -35574,7 +35880,7 @@ uint8_t filesystem_bankSlotExists(uint16_t zero_based_slot)
                                         zero_based_slot);
 }
 
-const char *filesystem_bankSlotName(uint16_t zero_based_slot)
+FS_HOT_O2 const char *filesystem_bankSlotName(uint16_t zero_based_slot)
 {
     /*
      * Return an eight-character root Bank display name.
@@ -35610,7 +35916,7 @@ uint8_t filesystem_patternSlotExists(uint16_t zero_based_slot)
                                         zero_based_slot);
 }
 
-const char *filesystem_patternSlotName(uint16_t zero_based_slot)
+FS_HOT_O2 const char *filesystem_patternSlotName(uint16_t zero_based_slot)
 {
     /* Blank means the Pattern cache domain has not resolved this coordinate;
      * Empty means a valid Pattern index has no file at this slot. */

@@ -58,6 +58,12 @@ void presetMorph_prioritizeVoice(uint8_t scene_index, uint8_t slot);
 uint8_t presetMorph_tick(void);
 void presetMorph_rebuildScene(uint8_t scene_index);
 /*
+ * Retarget the Morph worker across a Scene switch (S098 P1): a worker busy
+ * for `from` continues for `to` with only the kept slots' work. Client:
+ * preset_prepareSceneSwitch().
+ */
+void presetMorph_retargetScene(uint8_t from, uint8_t to, uint8_t keep_slots);
+/*
  * Synchronously rebuild one voice's Morph interpolation.
  *
  * Inputs: resident Scene index and zero-based slot. Output: the slot's

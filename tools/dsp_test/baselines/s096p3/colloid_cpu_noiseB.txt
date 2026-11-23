@@ -1,0 +1,20 @@
+# S096 P3 host CPU record after the noise form B, the note tracking / width
+# make-up, the folded RNG scale and the scan pre-pass (2026-11-17).
+#
+# Command: python3 tools/dsp_test/colloid_cpu.py --elf build/lxr02.elf --count 12
+# (colloid_cpu.py now charges col_scanControl() to the scan rows).
+# Base S096 P2 (fd3d58be, fresh): plain12-par 390.6, pwm6-par 376.5,
+# pwmw6-par 379.6. Before this update (colloid_cpu_p3c.txt, the tool's upper
+# bound with the scan branch in the control loop): 463.1 / 438.1 / 441.2 /
+# scan 438.3.
+#
+# col_renderPar 106 (S096 P2) -> 145 (first noise form) -> 130 now;
+# col_renderSer 80 -> 116 -> 99; col_oscControl loop 186 -> 244 -> 186.
+plain12-par: loops 307 + per block 3703/32 = 422.7
+plain12-ser: loops 276 + per block 3705/32 = 391.8
+pwm6-par: loops 328 + per block 2578/32 = 408.6
+pwm6-ser: loops 297 + per block 2580/32 = 377.6
+pwmw6-par: loops 331 + per block 2582/32 = 411.7
+pwmw6-ser: loops 300 + per block 2584/32 = 380.8
+scan6-par: loops 329 + per block 2902/32 = 419.7
+scan6-ser: loops 298 + per block 2904/32 = 388.8

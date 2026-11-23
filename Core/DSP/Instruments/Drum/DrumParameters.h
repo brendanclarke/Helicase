@@ -21,5 +21,9 @@ extern const instrument_menu_page_t drum_menu_pages[];
 extern const uint8_t drum_menu_page_count;
 extern const char drum_instrument_display_label[];
 extern const uint8_t drum_instrument_type_flags;
+/* S101 P3: the voice_chain row's descriptor index, for the Spc chain's unit
+ * claim at a slot reset (instrumentManager_unitsWanted()); asserted against
+ * DRUM_PARAM_VOICE_CHAIN in DrumParameters.c. */
+#define DRUM_IDX_VOICE_CHAIN 42u
 
 #endif

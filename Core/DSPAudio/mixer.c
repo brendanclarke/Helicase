@@ -1008,22 +1008,25 @@ static __attribute__((noinline)) void mixer_addVoiceStereoToOutputAndFx(uint8_t 
 }
 
 /*
- * Convert one normalized Effect return sample to the mixer's signed-24
- * representation.
+ * Convert one normalized Effect return sample, already multiplied by the
+ * return scale, to the mixer's signed-24 representation (S101 P2 E1: was
+ * mixer_floatToMx(value), which multiplied by 8,388,352 itself).
  *
- * Inputs: normalized float where 1.0 is int16 full scale. Output: saturated
- * sample_mx_t with the same 8-bit fractional shift as sampleMix_fromInt16().
- * The explicit ±255 guard contains Effect overshoot before the float-to-int
- * conversion and leaves the final output accumulation to satAdd32().
+ * Inputs: value = normalized float x 8,388,352 (1.0 normalized is int16 full
+ * scale; mixer_addFxReturnToOutput() folds the scale into its ramps).
+ * Output: saturated sample_mx_t with the same 8-bit fractional shift as
+ * sampleMix_fromInt16(). The +-255 guard (normalized; +-2,139,029,760 here,
+ * inside int32) contains Effect overshoot before the float-to-int conversion
+ * and leaves the final output accumulation to satAdd32().
  * Affiliate: mixer_addFxReturnToOutput().
  */
-static sample_mx_t mixer_floatToMx(float value)
+static inline sample_mx_t mixer_floatToMxScaled(float value)
 {
-	if (value > 255.0f)
-		value = 255.0f;
-	else if (value < -255.0f)
-		value = -255.0f;
-	return (sample_mx_t)(value * 8388352.0f);
+	if (value > 255.0f * 8388352.0f)
+		value = 255.0f * 8388352.0f;
+	else if (value < -255.0f * 8388352.0f)
+		value = -255.0f * 8388352.0f;
+	return (sample_mx_t)value;
 }
 
 /*
@@ -1052,8 +1055,22 @@ static void mixer_addFxReturnToOutput(uint8_t dest,
 	uint8_t stereo_route = 0u;
 	uint8_t i;
 	const float inv_size = 1.f / (OUTPUT_DMA_SIZE - 1.f);
-	const float deltaL = gainL - mixer_fx_return_last_gain[0];
-	const float deltaR = gainR - mixer_fx_return_last_gain[1];
+	/*
+	 * S101 P2 E1 (S101_P2_REDUCTIONS.md §A.6b E1; S101_P2_IMPLEMENTATION.md
+	 * §2.5): the return ramps' constants per block.
+	 * What: both ramps carry the 8,388,352 scale of mixer_floatToMx()
+	 * (lastK, dK), the sample index is a float count fi (exactly (float)i),
+	 * and mixer_floatToMxScaled() clamps in the scaled domain (+-255 x
+	 * 8,388,352). Why: the linked loop converted i to float and multiplied
+	 * by 8,388,352 per channel per sample. 8,388,352 is not a power of two,
+	 * so x (g x K) can differ from (x g) x K by one float rounding, at most
+	 * one int16 LSB of the return (S1).
+	 */
+	const float lastKL = mixer_fx_return_last_gain[0] * 8388352.0f;
+	const float lastKR = mixer_fx_return_last_gain[1] * 8388352.0f;
+	const float deltaKL = (gainL - mixer_fx_return_last_gain[0]) * 8388352.0f;
+	const float deltaKR = (gainR - mixer_fx_return_last_gain[1]) * 8388352.0f;
+	float fi;
 
 	switch (dest) {
 	case MIXER_ROUTING_DAC1_STEREO:
@@ -1082,24 +1099,22 @@ static void mixer_addFxReturnToOutput(uint8_t dest,
 		return;
 	}
 
-	for (i = 0u; i < OUTPUT_DMA_SIZE; i++) {
-		const float currentL = mixer_fx_return_last_gain[0]
-				+ ((float)i * inv_size * deltaL);
-		const float currentR = mixer_fx_return_last_gain[1]
-				+ ((float)i * inv_size * deltaR);
+	for (i = 0u, fi = 0.0f; i < OUTPUT_DMA_SIZE; i++, fi += 1.0f) {
+		const float currentL = lastKL + fi * inv_size * deltaKL;
+		const float currentR = lastKR + fi * inv_size * deltaKR;
 		if (stereo_route) {
 			*stereoL = bufferTool_satAdd32(*stereoL,
-					mixer_floatToMx(l[i] * currentL));
+					mixer_floatToMxScaled(l[i] * currentL));
 			stereoL += 2;
 			*stereoR = bufferTool_satAdd32(*stereoR,
-					mixer_floatToMx((r ? r[i] : l[i]) * currentR));
+					mixer_floatToMxScaled((r ? r[i] : l[i]) * currentR));
 			stereoR += 2;
 		} else {
 			const float monoSample = r
 					? (0.5f * (l[i] * currentL
 							+ r[i] * currentR))
 					: (l[i] * currentL);
-			*mono = bufferTool_satAdd32(*mono, mixer_floatToMx(monoSample));
+			*mono = bufferTool_satAdd32(*mono, mixer_floatToMxScaled(monoSample));
 			mono += 2;
 		}
 	}
@@ -1174,6 +1189,22 @@ void mixer_calcNextSampleBlockTest(sample_mx_t *output, sample_mx_t *output2)
  *             (which SRAM cache configuration ran). The whole block less
  *             the slots and
  *             sections is the probe's own overhead.
+ *             S101 (S1, RAM approved by the user 2026-11-21: 84 B, logging
+ *             builds only) adds per-block maxima and the span outside the
+ *             mixer, fifteen more records per window:
+ *               flags 6 | (9 + slot) << 3: that slot's largest block-rate
+ *                 << 16 | largest render (each the largest single block's
+ *                 sum, saturated to 16 bits);
+ *               flags 6 | (16 + section) << 3: that section's largest block;
+ *               flags 6 | 24 << 3 / 6 | 25 << 3: the average / largest block
+ *                 of voiceControl_processPending() + seq_rampService()
+ *                 (mixer_probeOutside(), measured in main.c).
+ *             Each max word holds (this block's running sum << 16) | the
+ *             window's maximum: the adds of a block (the slot's filter and
+ *             async; six set-up, SRR and send-add spans) sum in the high
+ *             half, and mixer_probeEnd() folds it into the low half at every
+ *             block end. No call site in mixer_calcNextSampleBlock() changed:
+ *             only the out-of-line bodies (S101: the mixer's loops stay).
  * Why:        the instruction-count model (S093) does not see flash wait
  *             states, cache misses or VDIV stalls; S094 P2 needs measured
  *             cycles per slot, and run 1 left a fifth of the block
@@ -1181,8 +1212,15 @@ void mixer_calcNextSampleBlockTest(sample_mx_t *output, sample_mx_t *output2)
  * Inputs:     DWT_CYCCNT (enabled by audioCodec_initCycleCounter()).
  * Outputs:    AutosaveTrace records only; nothing on screen, no product
  *             state depends on them.
- * Cost:       94 B RAM; ~30 out-of-line calls per block (noinline so LTO
- *             keeps them out of the inlined render loops).
+ * Cost:       94 B RAM, + 84 B since S101; ~30 out-of-line calls per block
+ *             (noinline so LTO keeps them out of the inlined render loops),
+ *             each now also a range test and a saturating add, and a 19-word
+ *             fold per block in mixer_probeEnd() (after the block's own
+ *             measurement).
+ *             S101 P2 (Q-C9): the maxima (76 B, the range tests, the fold
+ *             and records 6 | (9..22) << 3) compile only with
+ *             MIXER_PROBE_MAX, off by default; they measured about 1.5k
+ *             cycles a block inside the render.
  * Affiliates: AUTOSAVE_TRACE_STAGE_CPU_PROBE, decode_devlogs.py ('p').
  */
 #define MIXER_PROBE_CYCCNT  (*(volatile uint32_t *)0xE0001004u)
@@ -1203,6 +1241,21 @@ static uint32_t mixer_probe_max;
 static uint32_t mixer_probe_start;
 static uint32_t mixer_probe_last;
 static uint16_t mixer_probe_blocks;
+/* S101 (S1): the max words, (block sum << 16) | window max (48 + 28 B), and
+ * the outside-mixer span's window sum and maximum (8 B).
+ *
+ * S101 P2 (Q-C9): the max words, their lookup, their fold and their records
+ * compile only with MIXER_PROBE_MAX (config.h, off by default): they cost
+ * about 1.5k cycles a block inside the render (S101_P2_REDUCTIONS.md §A.1b
+ * item 7). The outside-mixer span stays with DEV_MODE_LOGGING: it is two
+ * DWT reads per block, outside the mixer. */
+#if MIXER_PROBE_MAX
+static uint32_t mixer_probe_async_max[6];
+static uint32_t mixer_probe_sync_max[6];
+static uint32_t mixer_probe_sec_max[MIXER_PROBE_SEC_COUNT];
+#endif
+static uint32_t mixer_probe_outside_sum;
+static uint32_t mixer_probe_outside_max;
 
 static __attribute__((noinline)) void mixer_probeBegin(void)
 {
@@ -1210,11 +1263,70 @@ static __attribute__((noinline)) void mixer_probeBegin(void)
 	mixer_probe_last = mixer_probe_start;
 }
 
+#if MIXER_PROBE_MAX
+/* S101: the max word that shadows one accumulator (by address: the call
+ * sites pass only the accumulator), or NULL. */
+static uint32_t *mixer_probeMaxWord(const uint32_t *acc)
+{
+	const uintptr_t a = (uintptr_t)acc;
+
+	if (a - (uintptr_t)mixer_probe_async < sizeof(mixer_probe_async))
+		return &mixer_probe_async_max[(a - (uintptr_t)mixer_probe_async) / 4u];
+	if (a - (uintptr_t)mixer_probe_sync < sizeof(mixer_probe_sync))
+		return &mixer_probe_sync_max[(a - (uintptr_t)mixer_probe_sync) / 4u];
+	if (a - (uintptr_t)mixer_probe_sec < sizeof(mixer_probe_sec))
+		return &mixer_probe_sec_max[(a - (uintptr_t)mixer_probe_sec) / 4u];
+	return 0;
+}
+#endif
+
 static __attribute__((noinline)) void mixer_probeAdd(uint32_t *acc)
 {
 	const uint32_t now = MIXER_PROBE_CYCCNT;
-	*acc += now - mixer_probe_last;
+	const uint32_t d = now - mixer_probe_last;
+
+	*acc += d;
 	mixer_probe_last = now;
+#if MIXER_PROBE_MAX
+	/* S101: this block's running sum in the high half, saturated */
+	{
+		uint32_t *const mw = mixer_probeMaxWord(acc);
+
+		if (mw) {
+			uint32_t s = (*mw >> 16) + d;
+
+			s = (s > 0xFFFFu) ? 0xFFFFu : s;
+			*mw = (s << 16) | (*mw & 0xFFFFu);
+		}
+	}
+#endif
+}
+
+#if MIXER_PROBE_MAX
+/* S101: fold each word's block sum into its window maximum, clear the sum. */
+static void mixer_probeFold(uint32_t *mw, const uint32_t n)
+{
+	for (uint32_t i = 0u; i < n; i++) {
+		const uint32_t s = mw[i] >> 16;
+		const uint32_t m = mw[i] & 0xFFFFu;
+
+		mw[i] = (s > m) ? s : m;
+	}
+}
+#endif
+
+uint32_t mixer_probeNow(void)
+{
+	return MIXER_PROBE_CYCCNT;
+}
+
+void mixer_probeOutside(const uint32_t start)
+{
+	const uint32_t d = MIXER_PROBE_CYCCNT - start;
+
+	mixer_probe_outside_sum += d;
+	if (d > mixer_probe_outside_max)
+		mixer_probe_outside_max = d;
 }
 
 static uint16_t mixer_probeAvg16(uint32_t sum)
@@ -1230,6 +1342,11 @@ static __attribute__((noinline)) void mixer_probeEnd(void)
 	mixer_probe_total += block;
 	if (block > mixer_probe_max)
 		mixer_probe_max = block;
+#if MIXER_PROBE_MAX
+	mixer_probeFold(mixer_probe_async_max, 6u);
+	mixer_probeFold(mixer_probe_sync_max, 6u);
+	mixer_probeFold(mixer_probe_sec_max, MIXER_PROBE_SEC_COUNT);
+#endif
 	if (++mixer_probe_blocks < MIXER_PROBE_WINDOW)
 		return;
 	for (uint8_t slot = 0u; slot < 6u; slot++) {
@@ -1254,6 +1371,28 @@ static __attribute__((noinline)) void mixer_probeEnd(void)
 	*(volatile uint32_t *)0xE000ED98u = 0u;                 /* MPU_RNR */
 	autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE, (uint8_t)(6u | (8u << 3)),
 			*(volatile uint32_t *)0xE000EDA0u);                 /* MPU_RASR */
+	/* S101 (S1): the maxima (MIXER_PROBE_MAX only, S101 P2) and the
+	 * outside-mixer span, then restart them */
+#if MIXER_PROBE_MAX
+	for (uint8_t slot = 0u; slot < 6u; slot++) {
+		autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE,
+				(uint8_t)(6u | ((9u + slot) << 3)),
+				(mixer_probe_async_max[slot] << 16) | mixer_probe_sync_max[slot]);
+		mixer_probe_async_max[slot] = 0u;
+		mixer_probe_sync_max[slot] = 0u;
+	}
+	for (uint8_t sec = 0u; sec < MIXER_PROBE_SEC_COUNT; sec++) {
+		autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE,
+				(uint8_t)(6u | ((16u + sec) << 3)), mixer_probe_sec_max[sec]);
+		mixer_probe_sec_max[sec] = 0u;
+	}
+#endif
+	autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE, (uint8_t)(6u | (24u << 3)),
+			mixer_probe_outside_sum / MIXER_PROBE_WINDOW);
+	autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE, (uint8_t)(6u | (25u << 3)),
+			mixer_probe_outside_max);
+	mixer_probe_outside_sum = 0u;
+	mixer_probe_outside_max = 0u;
 	mixer_probe_total = 0u;
 	mixer_probe_max = 0u;
 	mixer_probe_blocks = 0u;
@@ -1290,19 +1429,24 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	 *             OSC_WAVE_INTERP_MAX_ACTIVE.
 	 */
 	modNode_setItpReserved(instrumentManager_activeItpFadeCount());
-	modNode_resetTargets();
-	//re assign velocity modulation
-	modNode_reassignVeloMod();
-
 	/*
-	 * Dispatch slot-owned DSP runtime work through InstrumentManager.
+	 * The slot control: target restores, velocity re-apply, LFO dispatch
+	 * (S101 P2 A1: staggered).
 	 *
-	 * Inputs: active Scene instrument assignments for slots 1..6. Output:
-	 * LFOs, filters, and async voice state update on whichever engine instance
-	 * is currently loaded into each slot. Mixer keeps output routing and gain;
-	 * InstrumentManager owns the dynamic instrument-to-runtime selection.
+	 * What:       modNode_controlBlock() replaces modNode_resetTargets() +
+	 *             modNode_reassignVeloMod() + instrumentManager_
+	 *             dispatchRuntimeLfos(): the interpolation-slot accounting
+	 *             every block; the restores, the velocity re-apply and the LFO
+	 *             dispatch (with the blocks they owe) every other block, all
+	 *             six slots together; in between only the modulators whose
+	 *             target an ordinary write refreshed.
+	 * Why:        S101_P2_REDUCTIONS.md §A.3 A1: the control measured 7.0k
+	 *             cycles a block; its per-slot part now runs once per 1.45 ms.
+	 *             The LFOs, filters and async voice state still update on
+	 *             whichever engine instance is loaded into each slot
+	 *             (InstrumentManager owns the instrument-to-runtime selection).
 	 */
-	instrumentManager_dispatchRuntimeLfos();
+	modNode_controlBlock();
 	MIXER_PROBE(MIXER_PROBE_SEC(CTL));
 	for(uint8_t slot=0u; slot<6u; slot++)
 	{

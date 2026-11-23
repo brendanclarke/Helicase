@@ -23,5 +23,9 @@ extern const instrument_menu_page_t cymbal_menu_pages[];
 extern const uint8_t cymbal_menu_page_count;
 extern const char cymbal_instrument_display_label[];
 extern const uint8_t cymbal_instrument_type_flags;
+/* S101 P3: the voice_chain row's descriptor index, for the Spc chain's unit
+ * claim at a slot reset (instrumentManager_unitsWanted()); asserted against
+ * CYMBAL_PARAM_VOICE_CHAIN in CymbalParameters.c. */
+#define CYMBAL_IDX_VOICE_CHAIN 42u
 
 #endif

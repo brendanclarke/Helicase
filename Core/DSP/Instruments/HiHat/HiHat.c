@@ -154,6 +154,8 @@ void HiHat_initVoice(HiHatVoice *voice)
 	voice->lastAmpGain = 0.0f;
 	voice->snapshot.active = 0u;
 	voice->snapshot.counter = 0u;
+	/* S101 P3: no unit until the voice_chain writer binds one (Spc). */
+	voiceSpace_init(&voice->space);
 }
 //---------------------------------------------------
 /*
@@ -372,7 +374,9 @@ void HiHat_calcAsyncVoice(HiHatVoice *voice)
 	 *             variant of that latent issue is recorded, not changed (§16).
 	 * Affiliates: HiHat_initVoice() (pitchMod = 1); voiceFold_process().
 	 */
-	if (voice->chainType == VOICE_CHAIN_WAVEFOLDER)
+	/* S101 P3: Snp is T+D's only; under Spc the transient_wave byte is the
+	 * spread (0 is a valid spread), so every chain but T+D holds pitchMod 1. */
+	if (voice->chainType != VOICE_CHAIN_DEFAULT)
 		voice->osc.pitchMod = 1.0f;
 	else if(voice->transGen.waveform == 0)
 	{
@@ -480,11 +484,29 @@ void HiHat_calcSyncBlockVoice(HiHatVoice *voice, int16_t* buf,
 	if (voice->chainType == VOICE_CHAIN_WAVEFOLDER)
 		voiceFold_process(&voice->transGen, &voice->snapEg, buf, size,
 		                  2.0f, 0.5f);
-	SVF_calcBlockZDF(&voice->filter,voice->filterType,buf,size);
+	/*
+	 * The filter (S101 P3 §6.2: the cheaper LP, decided).
+	 *
+	 * What:       the LP type plays voiceSpace_lp1() (a TPT low-pass on the
+	 *             ZDF's own g, resonance and drive, no division) in every
+	 *             chain; every other type plays SVF_calcBlockZDF() as before.
+	 *             The type list still reads LP, in the same place as on Drum
+	 *             and Snare.
+	 * Why:        the ZDF LP (101 instructions, 3 VDIV a sample, measured)
+	 *             was this engine's dearest type; with it gone the dearest is
+	 *             Peak (92, 2 VDIV), so the engine's worst case falls in every
+	 *             chain. One per-block branch.
+	 * Affiliates: the IM_SPECIAL_FILTER_TYPE writer (clears the state when
+	 *             the type changes to or from LP); voiceSpace_lp1().
+	 */
+	if (voice->filterType == FILTER_LP)
+		voiceSpace_lp1(&voice->filter, buf);
+	else
+		SVF_calcBlockZDF(&voice->filter,voice->filterType,buf,size);
 
 	/* Transient (T+D only, S089 P2). Under WFd mod1 still holds the modulator
 	 * sum, so the post loop below must not add it. */
-	if (voice->chainType != VOICE_CHAIN_WAVEFOLDER)
+	if (voice->chainType == VOICE_CHAIN_DEFAULT)   /* S101 P3: was "not WFd" */
 		transient_calcBlock(&voice->transGen,mod1,size);
 
 	/*
@@ -516,7 +538,14 @@ void HiHat_calcSyncBlockVoice(HiHatVoice *voice, int16_t* buf,
 		 *      transient, and must not reach the output (plan §1 hazard).
 		 * Affiliates: voicePost_gainDist() (voicePostChain.h).
 		 */
-		if (voice->chainType == VOICE_CHAIN_WAVEFOLDER)
+		/* S101 P3: Spc, the spatializer in place of the post-chain (the amp
+		 * ramp fused, no drive, no SRR in the mixer); spread and feedback are
+		 * the transient_wave and transient_vol rows. */
+		if (voice->chainType == VOICE_CHAIN_SPACE)
+			voiceSpace_process(&voice->space, buf, lastAmpGain, ampGain,
+			                   voice->transGen.waveform,
+			                   voice->transGen.volume);
+		else if (voice->chainType == VOICE_CHAIN_WAVEFOLDER)
 			voicePost_gainDist(buf, ampGain, lastAmpGain,
 			                   &voice->distortion, size);
 		else

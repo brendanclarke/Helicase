@@ -115,6 +115,14 @@ typedef struct {
 	uint8_t  pendSample;
 	uint8_t  pendVel;
 	float    env, envLast, velo;
+	/*
+	 * S101 P2 A2q (S101_P2_REDUCTIONS.md §A.3 A2q; S101_P2_IMPLEMENTATION.md
+	 * §5.1): the decay's per-block factor (1 - k, or 0 after a FADE) that
+	 * tkt_layerCarry() applies on the three blocks between this layer's
+	 * controls, so the envelope stays the exact per-block exponential.
+	 * RAM: none (inside the 1,264 B slot reserve: the voice was 1,064 B).
+	 */
+	float    envMul;
 	float    ic1, ic2;
 	float    a1, a2, a3, da1, da2, da3;
 	float    mX, mB, mL, dmX, dmB, dmL;
@@ -153,6 +161,10 @@ typedef struct TetraktVoiceStruct
 	uint8_t  layerOn, veloVol, pan;
 	uint8_t  spaceTime, spaceFeedback, spaceDetune, spaceTone, spaceLevel, width;
 	uint8_t  slot, note, veloKind;
+	/* S101 P2 A2q: the layer-control schedule, 0..TKT_CTL_BLOCKS - 1 (layer i
+	 * runs its control when (ctlPhase + i) % 4 is 0; RAM: none, inside the
+	 * slot reserve) */
+	uint8_t  ctlPhase;
 } TetraktVoice;
 
 /*
@@ -162,8 +174,9 @@ typedef struct TetraktVoiceStruct
  *                            (or NULL) from InstrumentManager; clears the
  *                            unit (main loop or boot).
  * Tetrakt_triggerVoice()     LFO retrigger, the platform velocity node;
- *                            arms the layers set in layerOn (main loop,
- *                            sequencer).
+ *                            arms the layers set in layerOn, or in `layers`
+ *                            when it is nonzero for this trigger only
+ *                            (S096 P3) (main loop, sequencer).
  * Tetrakt_calcVoiceAsync()   the block's control work (render context).
  * Tetrakt_calcVoiceSyncBlock() the block's audio: left into buf, right into
  *                            voice->right (render context).
@@ -175,7 +188,7 @@ typedef struct TetraktVoiceStruct
 void Tetrakt_initVoice(TetraktVoice *voice, uint8_t slot, int16_t *line)
 	__attribute__((noinline, noclone));
 void Tetrakt_triggerVoice(TetraktVoice *voice, uint8_t source_slot,
-                          uint8_t velocity, uint8_t note);
+                          uint8_t velocity, uint8_t note, uint8_t layers);
 void Tetrakt_calcVoiceAsync(TetraktVoice *voice) __attribute__((noinline));
 void Tetrakt_calcVoiceSyncBlock(TetraktVoice *voice, int16_t *buf, uint8_t size)
 	__attribute__((noinline));

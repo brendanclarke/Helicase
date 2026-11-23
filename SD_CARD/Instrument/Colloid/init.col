@@ -53,6 +53,15 @@ lfo_target_voice=self
 lfo_target_param=255
 lfo_target_voice_2=self
 lfo_target_param_2=255
+col_penv_attack=0
+col_penv_decay=40
+col_penv_sustain_level=0
+col_penv_release=40
+col_penv_amount=63
+col_noise_level=0
+col_noise_tone=63
+col_noise_width=127
+col_noise_pan=63
 
 [morph]
 osc1_pitch_coarse=48
@@ -96,4 +105,13 @@ lfo_polarity=0
 lfo_sync=0
 lfo_offset=0
 velo_mod_amount=0
+col_penv_attack=0
+col_penv_decay=40
+col_penv_sustain_level=0
+col_penv_release=40
+col_penv_amount=63
+col_noise_level=0
+col_noise_tone=63
+col_noise_width=127
+col_noise_pan=63
 

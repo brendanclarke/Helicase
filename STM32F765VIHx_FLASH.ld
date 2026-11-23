@@ -177,6 +177,13 @@ SECTIONS {
          *             S095 P3: .itcm.s095p3 (the Colloid's two pwm warp loops,
          *             ColloidOsc.c; ITCM signed off, Q12) is named after
          *             .itcm.s095p2 for the same reason.
+         *             S096 P3: .itcm.s096p3 (the Colloid's two wavetable scan
+         *             loops, ColloidOsc.c; ITCM signed off 2026-11-17) is
+         *             named after .itcm.s095p3 for the same reason.
+         *             S099 P1: .itcm.s099p1 (the Colloid's chop pair loop,
+         *             ColloidOsc.c col_chopPairAdd(); ITCM approved
+         *             2026-11-19, plan Q-3) is named after .itcm.s096p3 for
+         *             the same reason.
          * Check:      with no other change the image must be byte-identical
          *             to the previous build (S089 P2 schedule step 1; S089
          *             P3 schedule step 1). The linker's ITCM -> flash veneer
@@ -186,7 +193,7 @@ SECTIONS {
          *             Oscillator.c OSC_S089P3_SECTION; voiceFold.c
          *             VOICE_FOLD_SECTION; the ASSERT below.
          */
-        *(.itcm) *(.itcm.s085) *(.itcm.s087 .itcm.s087.*) *(.itcm.s089) *(.itcm.s089p3) *(.itcm.s094p1) *(.itcm.s095p2) *(.itcm.s095p3) *(.itcm.*)
+        *(.itcm) *(.itcm.s085) *(.itcm.s087 .itcm.s087.*) *(.itcm.s089) *(.itcm.s089p3) *(.itcm.s094p1) *(.itcm.s095p2) *(.itcm.s095p3) *(.itcm.s096p3) *(.itcm.s099p1) *(.itcm.*)
         . = ALIGN(4); _eitcm = .;
     } >ITCM AT> FLASH
     ASSERT(_eitcm <= ORIGIN(ITCM) + LENGTH(ITCM),

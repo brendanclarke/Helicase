@@ -142,6 +142,27 @@ uint8_t midiControl_writeTarget(uint16_t id, uint8_t value7)
 }
 
 /*
+ * Received channel pressure (S096 P3 C4, plan §5.2).
+ *
+ * What: a waiting Learn takes it first (a pressure row, mode +); otherwise
+ * every matching pressure row is applied (absolute: a menu edit as a CC;
+ * delta: the non-destructive overlay). Returns 1 when consumed (a capture or
+ * any row applied), else 0 (forwarded per MRT).
+ * Inputs: msg (status 0xDn, data1 the pressure 0..127).
+ * Accessors: midiIn_dispatch(). Affiliates: midiLearn_capturePressure(),
+ * midiLearn_applySource().
+ */
+uint8_t midiControl_handlePressure(const MidiMsg *msg)
+{
+	const uint8_t channel = (uint8_t)((msg->status & 0x0Fu) + 1u);
+
+	if (midiLearn_capturePressure(channel))
+		return 1u;
+	return midiLearn_applySource(channel, MIDI_LEARN_SRC_PRESSURE, 0u,
+	                             msg->data1);
+}
+
+/*
  * Effective channel of a target's voice in the active Scene (S083 Q8).
  * What: voice IDs and the per-voice Scene targets -> the effective channel
  * of the voice's track (slot 5 -> track 6 (T6)); track timing targets ->

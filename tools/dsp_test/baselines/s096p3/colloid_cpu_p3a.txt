@@ -1,0 +1,18 @@
+# S096 P3a host CPU record (Colloid gate, C1).
+#
+# Command: python3 tools/dsp_test/colloid_cpu.py --elf build/lxr02.elf --count 12
+# Base: fd3d58be, freshly built (a pristine archive build), which measures
+# plain12-par 390.6, pwm6-par 376.5, pwmw6-par 379.6 -- the plan's §1 table.
+# The committed baselines/s096p2/colloid_cpu.txt is stale for the warp modes
+# (it lists pwm8 and pwmw 326.6, recorded before S096 P2 F5's warp glide);
+# it is left untouched as a historical record.
+#
+# P3a delta against the fresh base: +2.2 instructions per sample in every
+# mode (the gate's async work and col_egStep's two extra outcomes); the
+# per-sample loop counts are unchanged (283 / 304 / 307).
+plain12-par: loops 283 + per block 3516/32 = 392.9
+plain12-ser: loops 257 + per block 3513/32 = 366.8
+pwm6-par: loops 304 + per block 2391/32 = 378.7
+pwm6-ser: loops 278 + per block 2388/32 = 352.6
+pwmw6-par: loops 307 + per block 2395/32 = 381.8
+pwmw6-ser: loops 281 + per block 2392/32 = 355.8

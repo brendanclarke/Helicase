@@ -168,6 +168,22 @@ void lfo_init(Lfo *lfo);
  */
 void lfo_dispatchNextValue(Lfo* lfo, uint8_t source_slot);
 /*
+ * S101 P2 A1 (the staggered slot control, S101_P2_IMPLEMENTATION.md §2.1).
+ *
+ * lfo_stepBlock(): advance the phase by one block without dispatching, by
+ * lfo_calc()'s own step law (the rate-scale select and the 32-bit step); a
+ * noise LFO whose phase wraps in that step draws its next random value, as
+ * lfo_calc() does on a wrap. The control runs every other block and calls
+ * this before lfo_dispatchNextValue(), so the LFO's rate is exact.
+ * lfo_reapplyValue(): re-apply the LFO's last dispatched value (both nodes
+ * and both adapter pairs) with no phase step, for a target whose base an
+ * ordinary write refreshed in the block between two control runs.
+ * Accessors: instrumentManager_dispatchRuntimeLfos(),
+ * instrumentManager_reapplyDirtyLfos(). Affiliates: host law A1-LFO.
+ */
+void lfo_stepBlock(Lfo *lfo);
+void lfo_reapplyValue(Lfo *lfo, uint8_t source_slot);
+/*
  * Phase step per block for a rate or a sync division.
  *
  * Inputs:     freq (Hz, used when sync is 0), sync 0..11.

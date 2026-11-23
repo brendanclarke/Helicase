@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""Generate the BBD chorus tables (S099 P1; DRAFT_ADVANCED_BBD_CHORUS.md).
+
+What:       writes Core/DSP/Instruments/Chorus/BbdChorusTables.h/.c, every
+            table indexed by a descriptor byte (0..127) or by delay / 8:
+              bbdRateHz[128]   float 0.1 x 100^(i/127) Hz: the crt law for
+                               the var and dbl modes (D-6, Q-10: log 0.1..10)
+              bbdKcTone[128]   int16 round(65536 e^(-2 pi fc / fs)), fc =
+                               5 kHz x 2.8^(i/127) (5 .. 14 kHz): the
+                               complement coefficient 1 - k of the pre and
+                               post poles (cbw; the Colloid's fixed
+                               BBD_COL_TONE)
+              bbdKcTrack[128]  int16 the same for the post pole's tracking
+                               cutoff at the delay d = 8 j + 4 samples:
+                               0.33 x the MN3009 clock 256 / (2 d / fs),
+                               clamped to 5 .. 20 kHz
+              bbdMixGain[128]  uint32 the packed dry / wet gains of cmx: low
+                               half gn = round(32768 cos(pi m / 2)) - 32768
+                               (the dry gain less 1, <= 0), high half gw =
+                               round(32767 sin(pi m / 2)), m = i / 127;
+                               entry 0 is exactly (0, 0): the input alone
+              bbdDrvQ13[128]   int16 round(8192 x 2^(2 i / 127)), capped at
+                               32,767: the Alkaline's BBD input gain x1 .. x4
+              bbdDrvInvQ15[128] int16 round(32767 x 8192 / bbdDrvQ13[i]): the
+                               wet gain's compensation (the wet level holds
+                               until the clip)
+Why:        per-block lookups for the chorus control (bbdChorus_control()):
+            no exp, no VDIV per block.
+Checks:     K1 every coefficient in 0..32,767 (SMLAWB / SMLAWT read the
+            halfword signed); K2 bbdKcTone strictly decreasing (the cutoff
+            rises), bbdKcTrack non-decreasing in j (longer delay, lower
+            cutoff); K3 bbdMixGain[0] == 0, the dry gain non-increasing and
+            the wet gain non-decreasing in i, bbdMixGain[127]'s dry gain
+            within 1 LSB of 0; K4 bbdDrvQ13[0] == 8192 and bbdDrvInvQ15[0] ==
+            32767; K5 bbdRateHz increasing, [0] = 0.1, [127] = 10.0; K6
+            --check compares both files byte for byte. Exit 1 on a failure.
+Inputs:     --check.
+Outputs:    the two files, or a pass/fail line.
+Accessors:  make -C tools/dsp_test chorus_tables.
+Affiliates: BbdChorus.c (the consumer); tools/dsp_test modules/chorus.c.
+"""
+import math
+import sys
+
+FS = 44108.0
+N = 128
+H_PATH = "Core/DSP/Instruments/Chorus/BbdChorusTables.h"
+C_PATH = "Core/DSP/Instruments/Chorus/BbdChorusTables.c"
+RATE_LO, RATE_HI = 0.1, 10.0
+TONE_LO, TONE_HI = 5000.0, 14000.0     # the complement form's floor is 4.87 kHz
+TRACK_K, TRACK_HI = 0.33, 20000.0
+D_MIN = 65
+DRV_OCT = 2.0
+
+
+def kc(fc):
+    return int(round(65536.0 * math.exp(-2.0 * math.pi * fc / FS)))
+
+
+def tables():
+    rate = [RATE_LO * (RATE_HI / RATE_LO) ** (i / 127.0) for i in range(N)]
+    tone = [kc(TONE_LO * (TONE_HI / TONE_LO) ** (i / 127.0)) for i in range(N)]
+    track = []
+    for j in range(N):
+        d = max(8 * j + 4, D_MIN)
+        clock = 256.0 / (2.0 * d / FS)
+        track.append(kc(min(TRACK_HI, max(TONE_LO, TRACK_K * clock))))
+    mix = []
+    for i in range(N):
+        m = i / 127.0
+        gn = int(round(32768.0 * math.cos(math.pi * m / 2.0))) - 32768
+        gw = int(round(32767.0 * math.sin(math.pi * m / 2.0)))
+        if i == 0:
+            gn, gw = 0, 0
+        mix.append(((gw & 0xFFFF) << 16) | (gn & 0xFFFF))
+    drv = [min(32767, int(round(8192.0 * 2.0 ** (DRV_OCT * i / 127.0)))) for i in range(N)]
+    inv = [int(round(32767.0 * 8192.0 / g)) for g in drv]
+    return rate, tone, track, mix, drv, inv
+
+
+def checks(rate, tone, track, mix, drv, inv):
+    ok = all(0 <= x <= 32767 for x in tone + track)                       # K1
+    ok = ok and all(b < a for a, b in zip(tone, tone[1:]))                 # K2
+    ok = ok and all(b >= a for a, b in zip(track, track[1:]))
+    gn = [((m & 0xFFFF) ^ 0x8000) - 0x8000 for m in mix]
+    gw = [m >> 16 for m in mix]
+    ok = ok and mix[0] == 0                                                # K3
+    ok = ok and all(b <= a for a, b in zip(gn, gn[1:]))
+    ok = ok and all(b >= a for a, b in zip(gw, gw[1:]))
+    ok = ok and abs(gn[127] + 32768) <= 1
+    ok = ok and drv[0] == 8192 and inv[0] == 32767                         # K4
+    ok = ok and all(b > a for a, b in zip(rate, rate[1:]))                 # K5
+    ok = ok and abs(rate[0] - 0.1) < 1e-9 and abs(rate[127] - 10.0) < 1e-9
+    return ok
+
+
+def rows(vals, fmt, per):
+    return ["    " + ", ".join(fmt % v for v in vals[i:i + per]) + ","
+            for i in range(0, len(vals), per)]
+
+
+def render_h():
+    return "\n".join([
+        "/* Generated by tools/chorus/gen_chorus_tables.py (S099 P1). Do not edit. */",
+        "#ifndef BBD_CHORUS_TABLES_H_",
+        "#define BBD_CHORUS_TABLES_H_",
+        "",
+        "#include <stdint.h>",
+        "",
+        "/*",
+        " * BBD chorus control tables (S099 P1), flash; see the generator's",
+        " * docstring for each law. Indexed by a descriptor byte 0..127, or",
+        " * (bbdKcTrack) by the delay in samples / 8.",
+        " * Accessors: BbdChorus.c bbdChorus_control(), bbd_sidePlan().",
+        " */",
+        "#define BBD_TABLE_N 128u",
+        "extern const float    bbdRateHz[BBD_TABLE_N];",
+        "extern const int16_t  bbdKcTone[BBD_TABLE_N];",
+        "extern const int16_t  bbdKcTrack[BBD_TABLE_N];",
+        "extern const uint32_t bbdMixGain[BBD_TABLE_N];",
+        "extern const int16_t  bbdDrvQ13[BBD_TABLE_N];",
+        "extern const int16_t  bbdDrvInvQ15[BBD_TABLE_N];",
+        "",
+        "#endif /* BBD_CHORUS_TABLES_H_ */",
+        "",
+    ])
+
+
+def render_c(rate, tone, track, mix, drv, inv):
+    p = ["/* Generated by tools/chorus/gen_chorus_tables.py (S099 P1). Do not edit. */",
+         '#include "BbdChorusTables.h"', ""]
+    p += ["const float bbdRateHz[BBD_TABLE_N] = {"] + rows(rate, "%.9ef", 4) + ["};", ""]
+    p += ["const int16_t bbdKcTone[BBD_TABLE_N] = {"] + rows(tone, "%6d", 8) + ["};", ""]
+    p += ["const int16_t bbdKcTrack[BBD_TABLE_N] = {"] + rows(track, "%6d", 8) + ["};", ""]
+    p += ["const uint32_t bbdMixGain[BBD_TABLE_N] = {"] + rows(mix, "0x%08Xu", 4) + ["};", ""]
+    p += ["const int16_t bbdDrvQ13[BBD_TABLE_N] = {"] + rows(drv, "%6d", 8) + ["};", ""]
+    p += ["const int16_t bbdDrvInvQ15[BBD_TABLE_N] = {"] + rows(inv, "%6d", 8) + ["};", ""]
+    return "\n".join(p)
+
+
+def main():
+    t = tables()
+    ok = checks(*t)
+    h, c = render_h(), render_c(*t)
+    if "--check" in sys.argv:
+        ok = ok and open(H_PATH).read() == h and open(C_PATH).read() == c
+        print("chorus tables", "OK" if ok else "FAILED")
+        return 0 if ok else 1
+    if not ok:
+        print("chorus tables: K1-K5 failed")
+        return 1
+    open(H_PATH, "w").write(h)
+    open(C_PATH, "w").write(c)
+    print("wrote", H_PATH, C_PATH)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

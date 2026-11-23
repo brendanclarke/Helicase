@@ -1,0 +1,8 @@
+plain10-par: loops 272.2 + per block 3340/32 = 376.6
+plain10-ser: loops 246.0 + per block 3322/32 = 349.8
+pwm6-par: loops 323.2 + per block 2607/32 = 404.7
+pwm6-ser: loops 297.0 + per block 2589/32 = 377.9
+pwmw6-par: loops 326.2 + per block 2611/32 = 407.8
+pwmw6-ser: loops 300.0 + per block 2593/32 = 381.0
+scan6-par: loops 316.2 + per block 2944/32 = 408.2
+scan6-ser: loops 290.0 + per block 2926/32 = 381.4

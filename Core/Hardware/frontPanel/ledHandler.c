@@ -578,6 +578,40 @@ void led_clearAll(void)
     dout_setSw43Led(0);
 }
 
+/* Contract in ledHandler.h (S102 P1). */
+void led_ownedShow(uint16_t seqBits, uint8_t bar1, uint8_t bar2)
+{
+    uint8_t mask[NUM_OUTS / 8];
+    uint8_t data[NUM_OUTS / 8];
+    uint8_t i;
+
+    memset(mask, 0, sizeof(mask));
+    memset(data, 0, sizeof(data));
+    /* SEQ1..16, then BAR2 (a chain LED); BAR1 is the SW43 GPIO LED. */
+    for (i = 0u; i < 17u; i++) {
+        uint8_t ledNr = (i < 16u) ? (uint8_t)(LED_STEP1 + i) : (uint8_t)LED_BAR2;
+        uint8_t on = (i < 16u) ? (uint8_t)((seqBits >> i) & 1u) : bar2;
+        uint8_t physLed = led_toPhysicalNumber(ledNr);
+        uint8_t ap = led_arrayPos(physLed), bp = led_bitPos(physLed);
+
+        mask[ap] |= (uint8_t)(1u << bp);
+        if (on)
+            data[ap] |= (uint8_t)(1u << bp);
+    }
+    memcpy(dout_ownedData, data, sizeof(data));
+    memcpy(dout_ownedMask, mask, sizeof(mask));
+    dout_setSw43Owned(bar1 ? 2u : 1u);
+}
+
+/* Contract in ledHandler.h (S102 P1). */
+void led_ownedRelease(void)
+{
+    memset(dout_ownedMask, 0, sizeof(dout_ownedMask));
+    memset(dout_ownedData, 0, sizeof(dout_ownedData));
+    dout_setSw43Owned(0u);
+    dout_setSw43Led(led_sw43State);     /* BAR1 as this file now shows it */
+}
+
 /*
  * Start a one-shot temporary LED inversion.
  *

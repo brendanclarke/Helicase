@@ -118,7 +118,7 @@ void copyClear_init(void);
  * Inputs: shift_held = SHIFT state at the press. Output: nonzero when an
  * operation was armed (copy) or a clear operation began; zero when refused
  * silently (recording/erasing, Load/Save or Instrument Load busy, LOAD/SAVE,
- * MENU or SOM mode, or pastes/clears of the previous operation still queued:
+ * MENU mode, or pastes/clears of the previous operation still queued:
  * they read that operation's source). LEDs: copy -> copy/clear LED steady
  * until its menu opens, then blinking; clear -> SHIFT and copy/clear blink,
  * latched until release (F1-B). Refusals are silent and traced in DEV builds.

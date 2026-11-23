@@ -48,6 +48,19 @@
 
 #include <stdint.h>
 
+/*
+ * S096 P3 C4: the source of a learned row (plan §5.2). The row's `space`
+ * bits 3..4 hold it; bits 5..6 hold the mode (0 default, 1 absolute,
+ * 2 + delta, 3 - delta). A CC's default is absolute; pressure's is +delta
+ * (the brief); note and velocity default absolute.
+ */
+enum {
+    MIDI_LEARN_SRC_CC = 0,
+    MIDI_LEARN_SRC_PRESSURE,
+    MIDI_LEARN_SRC_NOTE,
+    MIDI_LEARN_SRC_VELOCITY
+};
+
 /* Empty the table (start of the boot midilrn.cfg load). */
 void     midiLearn_clearAll(void);
 uint8_t  midiLearn_count(void);
@@ -73,6 +86,17 @@ void     midiLearn_service(void);	/* FUL timeout (foreground) */
  */
 uint8_t  midiLearn_captureCc(uint8_t channel, uint8_t cc);
 uint8_t  midiLearn_applyCc(uint8_t channel, uint8_t cc, uint8_t value7);
+/*
+ * S096 P3: pressure capture (the first pressure message after a target) and
+ * the generic source apply. applySource() matches src (and, for a CC row,
+ * `cc`), then writes absolute values as a menu edit or applies a ±delta
+ * overlay (with the Q11 recording rule). applyNote() feeds note-number and
+ * velocity rows for every note-on; it is not consumed.
+ */
+uint8_t  midiLearn_capturePressure(uint8_t channel);
+uint8_t  midiLearn_applySource(uint8_t channel, uint8_t src, uint8_t cc,
+                               uint8_t value7);
+void     midiLearn_applyNote(uint8_t channel, uint8_t note, uint8_t vel);
 
 /* Transmit: the first row for `id` matching the active type. Output: 1
 ** with *cc and *voiceKind (1 = send on the voice's channel). */
@@ -82,8 +106,8 @@ uint8_t  midiLearn_ccForTarget(uint16_t id, uint8_t *cc,
 /*
  * midilrn.cfg (F34, S083 §16).
  * formatFileLine(): line `index` of the table as
- * "learn=CCC,<g|v>,<v1..v6|fx|scn>,<type>,<key>\n" (Scene rows have no
- * type field). A row whose names cannot be resolved writes a "#" comment
+ * "learn=<CCC|prs±=|nte±=|vel±=>,<g|v>,<v1..v6|fx|scn>,<type>,<key>\n"
+ * (Scene rows have no type field). A row whose names cannot be resolved writes a "#" comment
  * line so the line count stays exact. Returns the line length in bytes
  * (the filesystem_writeTextLine() contract); 0 when `index` is past the
  * table or cap < 32. Caller: filesystem_nextMidiLearnLine().

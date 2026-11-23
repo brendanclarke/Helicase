@@ -15,9 +15,9 @@
  *                 points of 1,024 (Rec 512 .. 4, Saw 512 .. 26);
  *               oscPwmLevelRecQ14 / oscPwmLevelSawQ14: 16384 x 512 /
  *                 (1024 - d), the D level that keeps the table's peak;
- *               oscPwmTriW / oscPwmSinW: the warp's split point W (Tri down
- *                 to 2.54 %, Sin down to 6.25 % of the cycle);
- *               oscPwmTriRa/Rb, oscPwmSinRa/Rb: floor((2^32 - 1) 2^25 / W)
+ *               oscPwmTriW: the warp's split point W (down to 2.54 % of
+ *                 the cycle);
+ *               oscPwmTriRa/Rb: floor((2^32 - 1) 2^25 / W)
  *                 and the same for 2^32 - W (osc_pwmWarp()'s half-cycle
  *                 scales);
  *               oscPwmTriLift: octave rows the warped triangle moves up.
@@ -37,9 +37,6 @@ extern const uint32_t oscPwmTriW[OSC_PWM_POS_COUNT];
 extern const uint32_t oscPwmTriRa[OSC_PWM_POS_COUNT];
 extern const uint32_t oscPwmTriRb[OSC_PWM_POS_COUNT];
 extern const uint8_t  oscPwmTriLift[OSC_PWM_POS_COUNT];
-extern const uint32_t oscPwmSinW[OSC_PWM_POS_COUNT];
-extern const uint32_t oscPwmSinRa[OSC_PWM_POS_COUNT];
-extern const uint32_t oscPwmSinRb[OSC_PWM_POS_COUNT];
 
 #endif /* OSC_PWM_TABLES_H_ */
 

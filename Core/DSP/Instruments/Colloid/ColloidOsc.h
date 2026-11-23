@@ -22,9 +22,9 @@
  *                 so a moving width never steps (it was a whole-point
  *                 offset sharing the first read's fraction, held per block);
  *               col_warpStore / col_warpAdd  one oscillator per pass: a
- *                 1,024-point row (sine_table or a triTable octave row) read
- *                 at the warped phase osc_pwmWarp(ph, W, ra, rb) (the shipped
- *                 WS / WT forms; S095 P3 F2), its position in pq's low half.
+ *                 1,024-point row (a triTable octave row) read at the
+ *                 warped phase osc_pwmWarp(ph, W, ra, rb) (the shipped WT
+ *                 form; S095 P3 F2; S099 P1 §15.10: pwm Sin dropped), its position in pq's low half.
  *                 S096 P2 F5: W, ra and rb glide by dW, dRa, dRb per sample
  *                 from the block's start values toward its end values.
  * Why:        S095 P2 draft §2.1/§2.4: a pair per pass is the cheapest form
@@ -38,7 +38,14 @@
  *             -1 Rec, +1 Saw), posPair, busM[32], busS[32]; the warp loops:
  *             one row, phase, inc, W, ra, rb (the block's start), dW, dRa,
  *             dRb (their steps per sample), pq and bus[64]: the mid bus then
- *             the side bus in one array (S096 P2 F5).
+ *             the side bus in one array (S096 P2 F5); the scan loops:
+ *             row[0..1] (frame A of each), g[0..1] (the Q31 blend at the
+ *             block's start), dg[0..1] (its step) and the same buses
+ *             (S096 P3).
+ *             S099 P1: the chop loops add col_chopDcInit() (the buses start
+ *             at minus the stack's mean, flash) and col_chopPairAdd() (three
+ *             pairs, each oscillator at its own level, every point
+ *             truncated; ITCM .itcm.s099p1).
  * Outputs:    busM, busS; phase[0..1] advanced by 32 x inc.
  * Accessors:  Colloid_calcVoiceSyncBlock() (ColloidVoice.c), once per pair
  *             per block.
@@ -73,5 +80,33 @@ void col_warpAdd(const int16_t *row, uint32_t *phase, uint32_t inc,
                  uint32_t wPh, uint32_t ra, uint32_t rb,
                  int32_t dW, int32_t dRa, int32_t dRb, uint32_t pq,
                  int32_t *bus);
+void col_scanPairStore(const int16_t *const *row, uint32_t *phase,
+                       const uint32_t *inc, const uint32_t *g,
+                       const int32_t *dg, uint32_t posPair,
+                       int32_t *bus);
+void col_scanPairAdd(const int16_t *const *row, uint32_t *phase,
+                     const uint32_t *inc, const uint32_t *g,
+                     const int32_t *dg, uint32_t posPair,
+                     int32_t *bus);
+/*
+ * S099 P1: the Colloid's chopped pwm wave R-S (S099 P2: REx dropped).
+ *
+ * What:       col_chopDcInit() writes both buses (mid then side, one 64-word
+ *             array) with minus the stack's mean, gliding from the block's
+ *             start widths to its end; col_chopPairAdd() adds one pair of
+ *             (the 2x gate x the curve at the 1x ramp wrapped at 7/8), each
+ *             oscillator at its own level and position. Form T: every point
+ *             truncated. Contracts in ColloidOsc.c.
+ * Why:        the chop runs COL_PWM_COUNT (6) oscillators per block, in ITCM
+ *             (.itcm.s099p1); the mean's start pass stays in flash.
+ * Accessors:  col_chopBlock() (ColloidVoice.c), three pairs and one init a
+ *             block.
+ * Affiliates: oscChopTables.h; tools/dsp_test modules/colloid.c law CO-CHP.
+ */
+void col_chopDcInit(int32_t *bus, int32_t aM, int32_t dM, int32_t aS, int32_t dS);
+void col_chopPairAdd(const int16_t *const *row, uint32_t *phase,
+                     const uint32_t *inc, const uint16_t *width,
+                     const uint16_t *width0, uint32_t gq, uint32_t lv,
+                     uint32_t lp, const int16_t *curve, int32_t *bus);
 
 #endif /* COLLOIDOSC_H_ */

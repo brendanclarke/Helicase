@@ -29,6 +29,16 @@ equals `Tri → Saw` on the same data, in all four Drum modes).
 Session 093 P8 note: the slot budget was measured. See "Slot budget
 (Session 093 P8)" at the end of this file.
 
+Session 095 P2 note: the global sine table was reduced from 4,096 to 1,024
+points (readers >> 22, fraction mask 0x3fffff; −6,144 B flash). All
+existing readers (wavetable, LFO, oscillator) updated. The Colloid
+instrument (S095 P2/P3) adds 12 free-running oscillators with integer
+pair-loop table reads in ITCM (`.itcm.s095p2`). Its 4 PWM warp loops are
+in `.itcm.s095p3` (+352 B). The Space effects (S095 P1) lock one
+interpolation slot during feed-through (`effects_setFeedSlotLock`), charged
+to the Advanced budget; the slot is released when the feed ends.
+`OSC_WAVE_INTERP_MAX_ACTIVE` remains 2.
+
 ## Goal
 Add simple/fast/dirty oscillator waveform interpolation for modulation-driven waveform automation, with a global ON/OFF setting that persists in global save/load.
 
@@ -63,8 +73,9 @@ This requirement is satisfied.
 Why:
 1. `PAR_OSC_WAVE_INTERP` is in the global parameter domain.
 2. The strict keyed settings.cfg schema writes and reads the allowlisted key
-   `osc_wave_interp` in filesystem_saveGlobals_tick() and
-   filesystem_loadGlobals_tick().
+   `osc_wave_interp` in `filesystem_safeTextWrite_tick()` (formerly
+   `filesystem_saveGlobals_tick()`, merged S097 P1) and
+   `filesystem_loadGlobals_tick()`.
 3. On apply, menu global application calls menu_parseGlobalParam() for the
    loaded value, which re-applies the modulation runtime toggle.
 

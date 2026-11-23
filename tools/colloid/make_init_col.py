@@ -22,6 +22,8 @@ What:       reads the descriptor rows of Core/DSP/Instruments/Colloid/
             overdrive 0; LFO and velocity off: the LFO voices `self` (the
             writer's own-slot token), the target selectors 255
             (INSTRUMENT_TARGET_TOKEN_OFF). S095 P3: the rows in page order.
+            S096 P3: pitch envelope 0/40/0/40 with pam 63 (none); noise 0,
+            tone 63, width 127, pan 63.
 Why:        Instrument Load only lists files, and a slot's type only changes
             by loading one (S093 P4 F1), so the card image carries a first
             Colloid. Every key is written: a missing key loads 0
@@ -46,6 +48,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 TABLE = os.path.join(ROOT, "Core", "DSP", "Instruments", "Colloid", "ColloidParameters.c")
 OUT = os.path.join(ROOT, "SD_CARD", "Instrument", "Colloid", "init.col")
+OUT_ADV = os.path.join(ROOT, "SD_CARD", "Instrument", "ColAdv", "init.clx")
 # one descriptor row: macro name, then the quoted file key
 ROW = re.compile(r'^\s*(ROW[A-Z_]*)\("([^"]+)"')
 # rows whose macro sets INSTRUMENT_PARAM_FLAG_MORPHABLE (FLAGS_IMAGE)
@@ -70,20 +73,45 @@ INIT = {
     "velo_mod_amount": "0", "velo_mod_dest": "255",
     "lfo_target_voice": "self", "lfo_target_param": "255",
     "lfo_target_voice_2": "self", "lfo_target_param_2": "255",
+    # S096 P3: the pitch envelope, its amount, the noise
+    "col_penv_attack": "0", "col_penv_decay": "40",
+    "col_penv_sustain_level": "0", "col_penv_release": "40",
+    "col_penv_amount": "63",
+    "col_noise_level": "0", "col_noise_tone": "63",
+    "col_noise_width": "127", "col_noise_pan": "63",
 }
 
+# S099 P1: the clx type's rows (after the @advanced-rows marker); S099 P2:
+# the effect's rows: fx chr, dpt 0 (I, the Juno-60's mode I, the S099 P1
+# init's sound), rte 40 (for dpt 3..127), mix 64 (dry and wet at -3 dB each);
+# no csr (S099 P2: the source follows the route); by ear in the D-G6 listening
+INIT_ADV = {
+    "fx_type": "1", "fx_rate": "40", "fx_depth": "0",
+    "fx_mix": "64",
+}
+MARKER = "@advanced-rows"
+
 def rows():
-    """(macro, key) for every descriptor row, in table order."""
+    """((macro, key) of the Basic rows, (macro, key) of the clx rows) in
+    table order; the clx rows follow the @advanced-rows marker (S099 P1)."""
+    basic, adv, seen = [], [], False
     with open(TABLE) as fh:
-        return [(m.group(1), m.group(2)) for m in map(ROW.match, fh) if m]
+        for line in fh:
+            if MARKER in line:
+                seen = True
+                continue
+            m = ROW.match(line)
+            if m:
+                (adv if seen else basic).append((m.group(1), m.group(2)))
+    return basic, adv
 
 
-def text(r):
+def text(r, typ, init):
     """The file text, line for line as the firmware writer emits it."""
-    lines = ["format=helicase.instrument", "version=1", "type=col", "", "[params]"]
-    lines += [f"{k}={INIT[k]}" for _, k in r]
+    lines = ["format=helicase.instrument", "version=1", f"type={typ}", "", "[params]"]
+    lines += [f"{k}={init[k]}" for _, k in r]
     lines += ["", "[morph]"]
-    lines += [f"{k}={INIT[k]}" for m, k in r if m in MORPHABLE]
+    lines += [f"{k}={init[k]}" for m, k in r if m in MORPHABLE]
     lines += [""]
     return "\n".join(lines) + "\n"
 
@@ -92,24 +120,26 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true")
     a = ap.parse_args()
-    r = rows()
-    keys = [k for _, k in r]
-    missing = [k for k in keys if k not in INIT]
-    extra = [k for k in INIT if k not in keys]
-    if missing or extra:
-        sys.exit(f"make_init_col: {len(r)} rows; no INIT value for {missing}; "
-                 f"INIT keys not in the table {extra}")
-    want = text(r)
-    if a.check:
-        have = open(OUT, newline="").read() if os.path.exists(OUT) else None
-        if have != want:
-            sys.exit(f"make_init_col: {OUT} differs from the table (rerun without --check)")
-        print(f"make_init_col: init.col matches the table ({len(r)} rows)")
-        return
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    with open(OUT, "w", newline="\n") as fh:
-        fh.write(want)
-    print("wrote", OUT)
+    basic, adv = rows()
+    jobs = [(OUT, "col", basic, INIT), (OUT_ADV, "clx", basic + adv, {**INIT, **INIT_ADV})]
+    for path, typ, r, init in jobs:
+        keys = [k for _, k in r]
+        missing = [k for k in keys if k not in init]
+        extra = [k for k in init if k not in keys]
+        if missing or extra:
+            sys.exit(f"make_init_col: {len(r)} {typ} rows; no INIT value for {missing}; "
+                     f"INIT keys not in the table {extra}")
+        want = text(r, typ, init)
+        if a.check:
+            have = open(path, newline="").read() if os.path.exists(path) else None
+            if have != want:
+                sys.exit(f"make_init_col: {path} differs from the table (rerun without --check)")
+            print(f"make_init_col: {os.path.basename(path)} matches the table ({len(r)} rows)")
+            continue
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", newline="\n") as fh:
+            fh.write(want)
+        print("wrote", path)
 
 
 if __name__ == "__main__":

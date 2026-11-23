@@ -35,22 +35,35 @@
  * row below moved down one index: stored Pattern automation, LFO targets
  * and AutoSave bytes on Space rows play one row off (no migration); `.fx`
  * and MIDI Learn store keys and are unaffected.
+ *
+ * S100 P2 (S100_P2_DELAY_FIXES.md revision 3; the page order after the
+ * user heard the first build, 2026-11-21): the Delay is tim fbk ton wid /
+ * xfb spr str wow / deg dck hld rev; the Echo tim fbk ton wid / spr str
+ * wow deg / dck e>r bln dcy / lsh hsh rtg. The rows the two tape types
+ * share at the same index (3 `tim`, 4 `fbk`, 5 `ton`, 6 `wid`) are
+ * asserted in SpaceEffect.c, whose laws read them by the Delay's names;
+ * `spr`, `str`, `deg` sit at different indices and are read by type. `hed` is gone; `str` (the stereo field) takes its
+ * place in the page order. New rows: `wid` (both), `str` (both), the
+ * Echo's `spr`. Stored row bytes keyed by index (AutoSave, LFO targets,
+ * Pattern automation) play from other rows; `.fx` and MIDI Learn store
+ * keys (no migration, no backward compatibility: standing rule).
  */
 typedef enum {
     SPACE_DLY_TIME = EFFECT_COMMON_PARAM_COUNT,  /* 3  CrumpBit's `dly` curve, share-truncated (D3) */
-    SPACE_DLY_SPREAD,     /* 4  R/L time ratio 2^((spr-63)/63); the longer is `tim` */
-    SPACE_DLY_FEEDBACK,   /* 5  0..1.20, unity at 100 (S095 P4) */
-    SPACE_DLY_XFEED,      /* 6  L/R feedback cross-feed, continuous (D23) */
-    SPACE_DLY_TONE,       /* 7  loop tone: LP < 63 = flat < HP */
-    SPACE_DLY_DEGRADE,    /* 8  drive, head bandwidth, hiss (D5) */
-    SPACE_DLY_WOW,        /* 9  wow + flutter + drift depth */
-    SPACE_DLY_HOLD,       /* 10 on: input 0, loop gain 1 (D10) */
-    SPACE_DLY_REVERSE,    /* 11 reverse playback head (O4) */
-    SPACE_DLY_HEADS,      /* 12 seven head sets, stepped 0..6 (O6, S095 P4) */
-    SPACE_DLY_DUCK,       /* 13 wet ducked by the input (O1) */
+    SPACE_DLY_FEEDBACK,   /* 4  0..1.20, unity at 100 (S095 P4) */
+    SPACE_DLY_TONE,       /* 5  loop band-pass position, bipolar: 0 full band, + cuts lows, - highs (S100 P2) */
+    SPACE_DLY_WIDTH,      /* 6  loop band-pass width: 0 resonant .. 127 full band */
+    SPACE_DLY_XFEED,      /* 7  side allpass: 0 stereo .. 127 ping-pong, mid kept (S100 P2) */
+    SPACE_DLY_SPREAD,     /* 8  R/L time ratio 2^((spr-63)/63); the longer is `tim` */
+    SPACE_DLY_STEREO,     /* 9  `str`, bipolar: -63 mono, 0 one head a side, +64 + taps (S100 P2) */
+    SPACE_DLY_WOW,        /* 10 wow + flutter + drift depth (pitch) */
+    SPACE_DLY_DEGRADE,    /* 11 drive, head bandwidth, bit reduction (D5, S100 P2) */
+    SPACE_DLY_DUCK,       /* 12 wet ducked by the input (O1) */
+    SPACE_DLY_HOLD,       /* 13 on: input 0, the held loop's gain from `fbk` (D10, S100 P2) */
+    SPACE_DLY_REVERSE,    /* 14 reverse playback head (O4) */
     SPACE_DELAY_PARAM_ENUM_COUNT
 } space_delay_param_t;
-#define SPACE_DELAY_PARAM_COUNT   14u
+#define SPACE_DELAY_PARAM_COUNT   15u
 
 typedef enum {
     SPACE_RVB_PREDELAY = EFFECT_COMMON_PARAM_COUNT,  /* 3  0..1.4 s, share-truncated */
@@ -77,25 +90,27 @@ typedef enum {
 typedef enum {
     SPACE_ECH_TIME = EFFECT_COMMON_PARAM_COUNT,  /* 3  the Delay's law, mono tape */
     SPACE_ECH_FEEDBACK,   /* 4  as the Delay's */
-    SPACE_ECH_TONE,       /* 5 */
-    SPACE_ECH_DEGRADE,    /* 6 */
-    SPACE_ECH_WOW,        /* 7 */
-    SPACE_ECH_TO_REVERB,  /* 8  `e>r`: the amount between tape and plate */
-    SPACE_ECH_BLEND,      /* 9  `bln`: echo .. plate in the wet */
-    SPACE_ECH_DECAY,      /* 10 plate RT60 */
-    SPACE_ECH_LOW_SHELF,  /* 11 */
-    SPACE_ECH_HIGH_SHELF, /* 12 */
-    SPACE_ECH_HEADS,      /* 13 (O15), stepped 0..6 */
-    SPACE_ECH_DUCK,       /* 14 (O14) */
-    SPACE_ECH_ROUTING,    /* 15 e>r / r>e / plate in the loop, stepped 0..2 (O16) */
+    SPACE_ECH_TONE,       /* 5  as the Delay's (S100 P2) */
+    SPACE_ECH_WIDTH,      /* 6  as the Delay's (S100 P2) */
+    SPACE_ECH_SPREAD,     /* 7  the R head's time, as the Delay's `spr` (S100 P2) */
+    SPACE_ECH_STEREO,     /* 8  `str`, as the Delay's (above 0 wider, no taps; S100 P2) */
+    SPACE_ECH_WOW,        /* 9 */
+    SPACE_ECH_DEGRADE,    /* 10 */
+    SPACE_ECH_DUCK,       /* 11 (O14) */
+    SPACE_ECH_TO_REVERB,  /* 12 `e>r`: the amount between tape and plate */
+    SPACE_ECH_BLEND,      /* 13 `bln`: echo .. plate in the wet */
+    SPACE_ECH_DECAY,      /* 14 plate RT60 */
+    SPACE_ECH_LOW_SHELF,  /* 15 */
+    SPACE_ECH_HIGH_SHELF, /* 16 */
+    SPACE_ECH_ROUTING,    /* 17 e>r / r>e / plate in the loop, stepped 0..2 (O16) */
     SPACE_ECHO_PARAM_ENUM_COUNT
 } space_echo_param_t;
-#define SPACE_ECHO_PARAM_COUNT    16u
+#define SPACE_ECHO_PARAM_COUNT    18u
 
 /*
  * Stepped rows' values (the DSP and the labels read the same codes).
  *
- * S095 P4 (T2): `hed`, `frz` and `rtg` store the stop itself (0..6, 0..2),
+ * S095 P4 (T2): `frz` and `rtg` (and `hed` until S100 P2) store the stop itself (0..6, 0..2),
  * one stop per knob detent, as CrumpBit's `sub` and `typ` do. S095 P1 §S18
  * had stored them 0..127 in equal zones (about 18 detents per stop); the
  * label then had no relation to the knob position. A value above the last
@@ -107,8 +122,6 @@ typedef enum {
 #define SPACE_FREEZE_ON           1u
 #define SPACE_FREEZE_SHIMMER      2u   /* O12 */
 #define SPACE_FREEZE_STOPS        3u
-#define SPACE_HEADS_STOPS         7u   /* hed: A B C AB AC BC ABC */
-#define SPACE_HEADS_DEFAULT       2u   /* "  C", D only */
 #define SPACE_ROUTING_E2R         0u   /* echo into plate (§4.3) */
 #define SPACE_ROUTING_R2E         1u   /* plate into echo */
 #define SPACE_ROUTING_LOOP        2u   /* plate inside the echo loop */

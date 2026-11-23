@@ -1,6 +1,7 @@
 /*
  * AlkalineVoice.c - the Alkaline (TB-303) voice engine (S093 P0, P3, P8;
- * S094 P1/P4: pwm and the Tri wave).
+ * S094 P1/P4: pwm and the Tri wave; S099 P1: the chopped wave R-S (REx until S099 P2)
+ * (mode 5)).
  * See AlkalineVoice.h. Behaviour: S092_P6_DSP_EQUATIONS.md §4.6 and the
  * validated pattern driver tools/alkaline/validate.py dsp_pattern().
  */
@@ -590,11 +591,19 @@ static __attribute__((noinline)) void alk_renderWav(AlkalineVoice *voice, int16_
 	/* S093 P3: the oscillator's table read fused into the B2R loop (-9 per
 	 * sample, bit-identical: bench law AL-X). This wrapper is only the [11][1024]
 	 * Saw/Sqr/Tri path; typ wtb uses alk_renderWtb(). */
-	DiodeLadder_renderB2Osc(&voice->ladder, buf, table[voice->osc.tableOffset],
+	/* S101 (wavetable.h): sawTable has no level 0 (sub-16.35 Hz only), so
+	 * Saw reads level 1 there; the square and the triangle keep level 0. */
+	DiodeLadder_renderB2Osc(&voice->ladder, buf,
+	                        table[(voice->osc.tableOffset == 0u &&
+	                               wave != ALK_WAVE_SQUARE && wave != ALK_WAVE_TRI)
+	                              ? 1u : voice->osc.tableOffset],
 	                        &voice->osc.phase, voice->osc.phaseInc,
 	                        scale * voice->driveGain,
 	                        voice->iLadEnd, voice->iAbcEnd * voice->makeup);
 #else
+	/* S101: the generic reader takes osc.tableOffset itself; lift Saw's 0 */
+	if (voice->osc.tableOffset == 0u && wave != ALK_WAVE_SQUARE && wave != ALK_WAVE_TRI)
+		voice->osc.tableOffset = 1u;
 	calcWavetableOscBlock(&voice->osc, table, buf, OUTPUT_DMA_SIZE, 1.0f);
 	DiodeLadder_renderB2(&voice->ladder, buf, scale * voice->driveGain,
 	                     voice->iLadEnd, voice->iAbcEnd * voice->makeup);
@@ -706,6 +715,9 @@ static __attribute__((noinline)) void alk_renderWtb(AlkalineVoice *voice, int16_
  *               Tri -> mode 4 (DiodeLadder_renderB2OscPwmWt()) on
  *                      triTable[min(tableOffset + oscPwmTriLift[k], 10)],
  *                      W / ra / rb = oscPwmTri*[k], at ALK_TRI_SCALE_V;
+ *               R-S (a stored 4, REx until S099 P2, too) ->
+ *                      Alkaline_renderChop() (mode 5, S099 P1;
+ *                      AlkalineChop.c);
  *             each times the drive.
  * Why:        S094 P4 (user): the same law as the drum instruments (pos 0 =
  *             50 %, no wrap; Sqr to 0.39 %, Saw and Tri to 2.54 %) and the
@@ -729,6 +741,19 @@ static __attribute__((noinline)) void alk_renderPwm(AlkalineVoice *voice, int16_
 	const uint32_t k = (uint32_t)(osc->positionApplied & 127u);
 	const float iAbc = voice->iAbcEnd * voice->makeup;
 
+	/*
+	 * S099 P1: R-S has its own render (fused mode 5,
+	 * AlkalineChop.c, -fno-lto).
+	 *
+	 * What:       one compare per block before the Tri / Saw / Sqr forms.
+	 * Cost:       about 2 instructions per block on those forms (≈ +0.06 per
+	 *             sample); none of them is the Alkaline's dearest setting
+	 *             (wtb with a slot, 276.7).
+	 */
+	if (osc->waveform >= ALK_WAVE_RS) {
+		Alkaline_renderChop(voice, buf);
+		return;
+	}
 	if (osc->waveform == ALK_WAVE_TRI) {
 		uint32_t r = (uint32_t)osc->tableOffset + oscPwmTriLift[k];
 
@@ -746,7 +771,9 @@ static __attribute__((noinline)) void alk_renderPwm(AlkalineVoice *voice, int16_
 		const float level = (float)(square ? oscPwmLevelRecQ14[k]
 		                                   : oscPwmLevelSawQ14[k]) * (1.0f / 16384.0f);
 
-		DiodeLadder_renderB2OscPwm(&voice->ladder, buf, sawTable[osc->tableOffset],
+		/* S101: sawTable has no level 0 (wavetable.h) */
+		DiodeLadder_renderB2OscPwm(&voice->ladder, buf,
+		                           sawTable[osc->tableOffset ? osc->tableOffset : 1u],
 		                           &osc->phase, osc->phaseInc,
 		                           square ? oscPwmDRec[k] : oscPwmDSaw[k],
 		                           square ? -1.0f : 1.0f,
@@ -793,11 +820,13 @@ void Alkaline_setOscType(AlkalineVoice *voice, const uint8_t typ)
 	/* the byte -> the platform type: 0 wav, 1 wtb, 2 and above pwm */
 	const uint8_t type = (typ == ALK_TYP_WAV) ? OSC_TYPE_WAV
 	                   : ((typ == ALK_TYP_WTB) ? OSC_TYPE_WTB : OSC_TYPE_PWM);
-	/* the number of entries of the new type's wav list (S094 P4): Saw Sqr
-	 * Tri under wav and pwm, the installed tables under wtb; a stored byte
-	 * past the list clamps to its last entry */
+	/* the number of entries of the new type's wav list (S094 P4; S099 P1):
+	 * Saw Sqr Tri under wav, Saw Sqr Tri R-S under pwm (S099 P2: REx
+	 * dropped), the installed tables under wtb; a stored byte past the list
+	 * clamps to its last entry (a pwm R-S switched to wav plays Tri) */
 	const uint8_t count = (type == OSC_TYPE_WTB) ? sampleMemory_getNumWavetables()
-	                    : (uint8_t)ALK_WAVE_COUNT;
+	                    : ((type == OSC_TYPE_PWM) ? (uint8_t)ALK_PWM_WAVE_COUNT
+	                                              : (uint8_t)ALK_WAVE_COUNT);
 	const uint8_t last = count ? (uint8_t)(count - 1u) : 0u;
 
 	if (type == osc->oscType)

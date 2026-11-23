@@ -136,6 +136,10 @@ STAGE_ENUM = {
     "d": "AUTOSAVE_TRACE_STAGE_DIR_TRIM",
     # w: S090 P5 F5 filesystem facade owner transitions (Load/Save timing).
     "w": "AUTOSAVE_TRACE_STAGE_FS_OWNER",
+    "f": "AUTOSAVE_TRACE_STAGE_FS_PASS",
+    "k": "AUTOSAVE_TRACE_STAGE_LOADSAVE_CLICK",
+    # x: S098 P1 Scene switch decision (keep mask, Effect, compare time).
+    "x": "AUTOSAVE_TRACE_STAGE_SCENE_SWITCH",
     # p: S094 P2 per-slot render cycle probe (DWT, DEV only).
     "p": "AUTOSAVE_TRACE_STAGE_CPU_PROBE",
 }
@@ -182,6 +186,9 @@ STAGE_PRODUCER = {
     "s": "filesystem_settleAutosaveBlocking() (S090 P2)",
     "d": "filesystem_trimDirectoryTailsBlocking() (S090 P3)",
     "w": "filesystem_traceOwnerTransition() (S090 P5)",
+    "f": "filesystem_passProbe() (S097 P3)",
+    "k": "menu_loadSaveTraceClick() (S097 P3)",
+    "x": "preset_sceneSwitchKeepMask() (S098 P1)",
     "p": "mixer_probeEnd() (S094 P2)",
 }
 
@@ -1113,8 +1120,10 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
         budget = 216e6 / (44108.07291666667 / 32.0)
         if (flags & 7) < 6:
             # S096 P1: the Colloid (5) and the Tetrakt (6) are named too
-            # (the probe's type field is InstrumentManager.h's enum).
-            types = {0: "drm", 1: "snr", 2: "cym", 3: "hat", 4: "alk", 5: "col", 6: "tkt"}
+            # (the probe's type field is InstrumentManager.h's enum);
+            # S099 P1: the Advanced Colloid (7) and Advanced Alkaline (8)
+            types = {0: "drm", 1: "snr", 2: "cym", 3: "hat", 4: "alk", 5: "col", 6: "tkt",
+                     7: "clx", 8: "alx"}
             typ = flags >> 3
             blk = (value >> 16) & 0xFFFF
             ren = value & 0xFFFF
@@ -1135,11 +1144,31 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
                         4: "SRR decimators", 5: "output/FX-send adds",
                         6: "Effect (bus, process, return)",
                         7: "bus compressor"}
-            if flags >> 3 == 8:
+            n = flags >> 3
+            if n == 8:
                 cached = ("NOT D-cached (S=1)" if value & (1 << 18)
                           else "D-cached (S=0)")
                 detail = (f"{enum_name} via {producer}: MPU region 0 RASR "
                           f"0x{value:08x}: SRAM {cached}")
+            elif 9 <= n <= 14:
+                # S101 (S1): one slot's largest single block in the window
+                blk = (value >> 16) & 0xFFFF
+                ren = value & 0xFFFF
+                detail = (f"{enum_name} via {producer}: slot{n - 9} MAX "
+                          f"block-rate {blk} / render {ren} cycles "
+                          f"(largest single blocks; sum {blk + ren}, "
+                          f"{100.0 * (blk + ren) / budget:.1f}% CPU)")
+            elif 16 <= n <= 22:
+                name = sections.get(n - 15, f"section {n - 15}")
+                detail = (f"{enum_name} via {producer}: mixer {name} MAX "
+                          f"block {value} cycles ({100.0 * value / budget:.1f}% "
+                          f"CPU)")
+            elif n in (24, 25):
+                what = "average" if n == 24 else "maximum"
+                detail = (f"{enum_name} via {producer}: outside the mixer "
+                          f"(voiceControl_processPending + seq_rampService) "
+                          f"{what} {value} cycles/block "
+                          f"({100.0 * value / budget:.1f}% CPU)")
             else:
                 name = sections.get(flags >> 3, f"section {flags >> 3}")
                 detail = (f"{enum_name} via {producer}: mixer {name} average "
@@ -1159,6 +1188,60 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
                   f"{statuses.get((value >> 8) & 0xFF, (value >> 8) & 0xFF)}; "
                   f"previous owner held the facade {since} "
                   f"(time since the previous 'w' record)")
+    elif ch == "f":
+        # S097 P3 filesystem pass probe; layout in AutosaveTrace.h ('f').
+        low = value & 0xFFFF
+        op = (value >> 16) & 0xFF
+        phase = (value >> 24) & 0xFF
+        op_name = _nth(FS_INTERNAL_OPS, op) if op else "idle"
+        sat = "+" if low == 0xFFFF else ""
+        if flags == 0:
+            detail = (f"{enum_name} via {producer}: SLOW filesystem_tick() "
+                      f"{low}{sat} us in {op_name} phase {phase}")
+        elif flags == 1:
+            detail = (f"{enum_name} via {producer}: {op_name} ended; longest "
+                      f"filesystem_tick() {low}{sat} us in phase {phase}")
+        elif flags == 2:
+            detail = (f"{enum_name} via {producer}: UNDERRUN +{low}{sat} "
+                      f"(audioCodec_underrunCount) seen in {op_name} phase "
+                      f"{phase}")
+        elif flags == 3:
+            detail = (f"{enum_name} via {producer}: longest main-loop pass "
+                      f"this second {low}{sat} us (gap between filesystem_tick() "
+                      f"calls), at {op_name} phase {phase}")
+        else:
+            detail = f"{enum_name} via {producer}: flags {flags} value 0x{value:08x}"
+    elif ch == "k":
+        # S097 P3 Load/Save OK click outcome; layout in AutosaveTrace.h ('k').
+        outcomes = {0: "ACCEPTED (command started)",
+                    1: "DROPPED: a command was still running",
+                    2: "DROPPED: Load name still blank",
+                    3: "DROPPED: Bank copy held",
+                    4: "REFUSED: Preset/filesystem request returned 0",
+                    5: "edit-mode toggle (type/number row)",
+                    6: "HELD: storage busy, OK held for replay",
+                    7: "RETRY: held OK replayed (outcome follows)"}
+        statuses = {0: "IDLE", 1: "BUSY", 2: "DONE", 3: "ERROR"}
+        page = value & 0xFF
+        what = (value >> 8) & 0xFF
+        state = (value >> 16) & 0xFF
+        fs = (value >> 24) & 0xFF
+        detail = (f"{enum_name} via {producer}: "
+                  f"{outcomes.get(flags, f'outcome {flags}')}; page={page} "
+                  f"what={what} state={state} filesystem="
+                  f"{statuses.get(fs, fs)}")
+    elif ch == "x":
+        # S098 P1 Scene switch decision; layout in AutosaveTrace.h ('x').
+        keep = flags & 0x7F
+        target = value & 0xFF
+        prev = (value >> 8) & 0xFF
+        us = (value >> 16) & 0xFFFF
+        kept = ",".join(str(t + 1) for t in range(7) if keep & (1 << t))
+        prev_name = "17" if prev == 16 else str(prev + 1)
+        detail = (f"{enum_name} via {producer}: Scene {prev_name} -> "
+                  f"{target + 1}; tracks kept: {kept or 'none'}; Effect "
+                  f"{'kept' if flags & 0x80 else 'changed'}; compare "
+                  f"{us}{'+' if us == 0xFFFF else ''} us")
     elif ch == "d":
         # S090 P3 boot directory tail trim; layout in AutosaveTrace.h ('d').
         dirs = {0: "SD root", 1: "/Scene", 2: "/Kit", 3: "/Bank",

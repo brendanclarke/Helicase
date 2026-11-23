@@ -4,7 +4,8 @@
  * What:       renders the real typ-pwm plain render (osc_pwmRenderPlain(),
  *             the firmware's Oscillator.c through the host build) on the real
  *             stock tables (extracted from Core/DSPAudio/wavetable.c), for
- *             Sin/Tri/Saw/Rec at every pos value 0..127, plus the stock rows
+ *             Tri/Saw/Rec at every pos value 0..127 (S099 P1 §15.10: pwm Sin
+ *             dropped; the byte is the pwm list's own index), plus the stock rows
  *             (typ wav) and the Alkaline 303 square row (alkSqrTable). One
  *             cycle is exactly 512 samples (phaseInc 2^23, about 86 Hz at
  *             REAL_FS), on octave row 2 (the row osc_setTableFreq() picks at
@@ -44,8 +45,8 @@ uint8_t modNode_interpClaim(void* osc) { (void)osc; return 0u; }
 #define PD_INC     (1u << 23)    /* 2^32 / 512 */
 #define PD_CYCLES  2u
 
-static const char *const pd_names[4] = { "Sin", "Tri", "Saw", "Rec" };
-static const uint8_t pd_waves[4] = { SINE, TRI, SAW, REC };
+static const char *const pd_names[OSC_PWM_WAVE_COUNT] = { "Tri", "Saw", "Rec" };
+static const uint8_t pd_waves[OSC_PWM_WAVE_COUNT] = { OSC_PWM_TRI, OSC_PWM_SAW, OSC_PWM_REC };
 
 static void pd_row(const char *kind, const char *name, const int16_t *row)
 {
@@ -60,7 +61,7 @@ int main(void)
     int16_t buf[OUTPUT_DMA_SIZE];
 
     printf("kind,wave,pos,i,value\n");
-    for (unsigned w = 0u; w < 4u; ++w)
+    for (unsigned w = 0u; w < OSC_PWM_WAVE_COUNT; ++w)
         for (unsigned k = 0u; k < 128u; ++k) {   /* every pos value */
             OscInfo o;
             unsigned n = 0u;

@@ -14,6 +14,20 @@
  *               6. (S088 P0 §3 3b) slots reserved for ongoing itp crossfades
  *                  are not granted to wavetable blending; two fades leave
  *                  none.
+ *               A1-CTL (S101 P2 A1, the staggered slot control,
+ *               modNode_controlBlock()):
+ *                 1. from a forced start the full control runs on every
+ *                    other block, and the LFO phase steps it passes add up
+ *                    to the blocks elapsed (the rate is exact);
+ *                 2. a velocity node whose base was refreshed in the gap is
+ *                    re-applied in the very next block, and only that node;
+ *                 3. a foreground restore (modNode_resetTargets()) makes the
+ *                    next block run the full control with the steps it owes;
+ *                 4. the dirty LFO sources are re-applied on every block in
+ *                    between (instrumentManager_reapplyDirtyLfos()).
+ *               Break (Makefile): the gap block ignoring the velocity dirty
+ *               bits must fail A1-CTL 2; full runs always stepping 1 must
+ *               fail A1-CTL 1.
  * Why:        S087 P0 A7/A8: a wavetable blend must not flip between blending
  *             and stepping at the block rate.
  * Inputs:     build/gen/modulation_interp.c, osc_host.h.
@@ -34,7 +48,30 @@ static uint8_t modNode_waveInterpActiveCount = 0u;
 static uint8_t modNode_interpReserved = 0u;
 static uint8_t modNode_itpReserved = 0u;
 static uint8_t modNode_interpLastStamp = 0u;
-static int velocityModulators[6];
+
+/* S101 P2 A1: the staggered control's stand-ins (counters per call). */
+typedef struct { float lastVal; } ModulationNode;
+static ModulationNode velocityModulators[6];
+#include "modulation_ctl_macros.inc"
+static uint8_t modNode_ctlState = MODNODE_CTL_FORCE;
+static int ctl_full_runs, ctl_steps, ctl_reapply_lfos;
+static int ctl_velo_updates[6], ctl_velo_restores[6];
+static void modNode_updateValue(ModulationNode *vm, float v)
+{
+    (void)v;
+    ctl_velo_updates[vm - velocityModulators]++;
+}
+static void modNode_reassignVeloMod(void)
+{
+    for (int i = 0; i < 6; i++)
+        modNode_updateValue(&velocityModulators[i], velocityModulators[i].lastVal);
+}
+static void instrumentManager_dispatchRuntimeLfos(uint8_t steps)
+{
+    ctl_full_runs++;
+    ctl_steps += steps;
+}
+static void instrumentManager_reapplyDirtyLfos(void) { ctl_reapply_lfos++; }
 
 typedef void (*instrument_runtime_lfo_node_visitor_t)(void*, void*, void*);
 void instrumentManager_visitRuntimeLfoNodes(
@@ -42,7 +79,10 @@ void instrumentManager_visitRuntimeLfoNodes(
 {
     (void)cb; (void)ctx;
 }
-static void modNode_restoreTarget(void* t) { (void)t; }
+static void modNode_restoreTarget(ModulationNode* t)
+{
+    ctl_velo_restores[t - velocityModulators]++;
+}
 static void modNode_restoreLfoPair(void* a, void* b, void* c)
 {
     (void)a; (void)b; (void)c;
@@ -176,6 +216,54 @@ int main(void)
         expect((uint8_t)(modNode_interpClaim(&a) + modNode_interpClaim(&b)) == 1u,
                "L7: locked block keeps one of two holders");
         mod_feed_lock = 0u;
+    }
+
+    /* A1-CTL (S101 P2 A1): the staggered slot control. */
+    {
+        int b, ok_alt = 1;
+
+        modNode_ctlState = MODNODE_CTL_FORCE;    /* the boot state */
+        ctl_full_runs = ctl_steps = ctl_reapply_lfos = 0;
+        for (b = 0; b < 40; b++) {
+            const int before = ctl_full_runs;
+
+            modNode_controlBlock();
+            /* block 0 forced, then 2, 4, ...: a run on even blocks only */
+            if ((ctl_full_runs != before) != ((b & 1) == 0))
+                ok_alt = 0;
+        }
+        expect(ok_alt, "A1-CTL 1: the full control runs on every other block");
+        /* 40 blocks: the forced first run steps 1, then 19 runs of 2; one
+         * block is owed after the last run */
+        expect(ctl_steps + 1 == 40, "A1-CTL 1: the LFO steps add up to the blocks");
+        expect(ctl_reapply_lfos == 20, "A1-CTL 4: dirty LFOs re-applied on every gap block");
+
+        /* A1-CTL 2: velocity node 3 refreshed in the gap */
+        memset(ctl_velo_updates, 0, sizeof(ctl_velo_updates));
+        memset(ctl_velo_restores, 0, sizeof(ctl_velo_restores));
+        modNode_ctlState = 0u;                    /* just after a full run */
+        modNode_ctlState |= (uint8_t)(1u << 3);   /* a base write on node 3 */
+        modNode_controlBlock();                   /* the gap block */
+        {
+            int only3 = (ctl_velo_updates[3] == 1 && ctl_velo_restores[3] == 1);
+
+            for (int i = 0; i < 6; i++)
+                if (i != 3 && (ctl_velo_updates[i] || ctl_velo_restores[i]))
+                    only3 = 0;
+            expect(only3, "A1-CTL 2: the refreshed velocity node, and only it, re-applies next block");
+        }
+
+        /* A1-CTL 3: a foreground restore forces the next block */
+        modNode_ctlState = 0u;
+        ctl_full_runs = ctl_steps = 0;
+        modNode_resetTargets();                   /* e.g. modNode_setDestination() */
+        modNode_controlBlock();
+        expect(ctl_full_runs == 1 && ctl_steps == 1,
+               "A1-CTL 3: a foreground restore runs the full control next block (1 step owed)");
+        modNode_controlBlock();                   /* gap */
+        modNode_controlBlock();                   /* owed run: 2 steps */
+        expect(ctl_full_runs == 2 && ctl_steps == 3,
+               "A1-CTL 3: then the alternation resumes with the owed steps");
     }
 
     printf("modulation failures: %d\n", failures);

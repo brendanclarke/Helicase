@@ -18,23 +18,33 @@ Just a quick summary for now:
 #### **VOICE**
 Edit parameters, set steps. Mostly superficially the same as before, with some additions:
 - if you hold the 'Voice' button, you can link 'Scenes' - more on this below. What this means is that every voice parameter edit to the scene you're on also applies to every linked scene. So if you load the same kit to multiple scenes and link them, they work like the same kit but with different patterns. Link is one directional, it doesn't automatically back-link, but you can copy the Scene or Scene Settings from the PERF mode and apply the link that way, too. Probably the easiest way is once you've done a pattern and kit you like, link to a second scene slot, then copy the scene there too, and then clear the pattern. 
-- if you press and hold any number of steps and then adjust a parameter, that parameter is automated with that value on all steps pressed. The first character of the parameter's name gets an underline if it's automated on the current scene/pattern, and if you re-hold an automated step, it will show the automated value with a little underline too. I've also stuck the voice's morph on the second 'mix' subpage so you can use that to automate it on steps. Automations apply even if the step isn't a trigger, and they are active until the voice retriggers for voice parameters, or until the scene changes for scene parameters (morph is a scene parameter, so if you want it to change on a step and then change back, automate it twice). 
+- if you press and hold any number of steps and then adjust a parameter, that parameter is automated with that value on all steps held. The first character of the parameter's name gets an underline if it's automated on the current scene/pattern, and if you re-hold an automated step, it will show the automated value with a little underline too. I've also stuck the voice's morph on the second 'mix' subpage so you can use that to automate it on steps. Automations apply even if the step isn't a trigger, and they are active until the voice retriggers for voice parameters, or until the scene changes for scene parameters (morph is a scene parameter, so if you want it to change on a step and then change back, automate it twice). 
+- If you hold 'shift', the morph parameters are shown and can be edited. You can also 'reset' a morph to the voice's natural parameters by 'clearing' it: press shift+clear+T1-7, then scroll to 'clear morph', then T1-T7 again. 
+- Shift + one or more steps opens the step edit menu while those steps are held. Settings like note, velocity, and timing may be edited. 
 - there are up to 8 bars on a track. you can adjust the bar with the < BAR > buttons, the SELECT led will blink briefly to let you know what bar you selected. 
 - the LFOs have three polarity options, and there are two LFO destinations per voice. 
+- a page that shows '+' in the upper right corner shows 'Scene' parameters. Most of these can also be automated, but are saved as scene settings rather than with an instrument or pattern. For example, the second 'mix' page shows the instrument's FX send level and fader mode. 
 #### **PERF**
-Change scene with the SEQ STEP buttons. There are 16 scenes, each scene has its own kit, pattern, and effect. The scene's LED is lit if it has a kit and at least one active step. You can only switch to a scene if it has a valid kit loaded - you can always do so in the load menu, where the SEQ buttons represent scenes also, and you can select and load to multiple scenes with the buttons. There's no option to chain scenes yet, but I'll add that later. You can mute the voices here as before, and the global morph, individual voice morph, and the effects morph amounts are on the knobs. The looper will eventually go on the SELECT buttons. I'm not sure what to do with the < BAR > buttons here yet :)
+- Change scene with the SEQ STEP buttons. There are 16 scenes, each scene has its own kit, pattern, and effect. The scene's LED is lit if it has a kit and at least one active step. You can only switch to a scene if it has a valid kit loaded - you can always do so in the load menu, where the SEQ buttons represent scenes also, and you can select and load to multiple scenes with the buttons. 
+- Chain scenes: In PERF mode, press shift+play+ a SEQ button. The chain settings *from* the selected scene to another scene are shown. Up to two destination scenes or scene ranges with various conditions may be chosen. 
+- Trigger overlay: In PERF mode, press a BAR <> button. This toggles the track buttons into a trigger mode. One for each BAR button is possible. What the mode does is selected in the shift+rec menu (single trigger, rolls, etc). 
+- Looper: In PERF mode, press the SELECT buttons 1-8. Once a loop is started, the BAR <> buttons modify the loop time to triplet or dot (+50%) intervals. The track buttons may be used to loop individual tracks. A track may be set to never participate in a loop in the STEP MODE track settings, and individual steps may conditionally be set to never or only play when a loop is engaged. 
 #### **STEP** (The button that says 'Load' on the LXR02)
-Edit tracks and steps. You can change track settings like length. The track settings menu comes up on entry or when pressing a track button. If you press a step you can edit the note, velocity, etc. and view/edit/add/delete individual automation on the step. The SELECT buttons let you jump to any bar on the track, and the led shows what bar you're on in the mode. 
+Edit tracks and steps. The track settings menu comes up on entry or when pressing a track button. You can change track settings like length, step scale, and shuffle. Some settings can be automated or morphed. If you press a step you can edit the note, velocity, etc. and view/edit/add/delete individual automation on the step. The SELECT buttons let you jump to any bar on the track, and the led shows what bar you're on in the mode. You can also copy and paste bars in this mode. 
 #### **LOAD/SAVE**
-Load: Load Kit, Kit Morph, Effect, Scene, Bank, Samples. Change type with the encoder. If the name comes up blank, give it a sec, it loads the entries (up to 1000) dynamically. There's also a temporary debug trace around some of the ops here so its a little slower for the moment than needs be. These are sourced from the 'Library' directories on the SD card: Kit, Scene, Bank, Effect. Kits also store their morph natively. Load morph replaces the morph of a kit with the normal endpoint parameters of the selected kit. 
-Press a track button: Load an instrument from the 'Instrument' library. Load an instrument morph. **Load a different instrument**: that's right. Any voice can load any instrument. You get up to 2 of cymbal and/or hi-hat, these take more CPU. If you put something other than a hi-hat in the voice 6 slot it automagically gets a second decay parameter.
+Load: Load Kit, Kit Morph, Effect, Scene, Bank, Samples. Change type with the encoder. If the name comes up blank, give it a sec, it loads the entries (up to 1000) dynamically. These are sourced from the 'Library' directories on the SD card: Kit, Scene, Bank, Effect. Kits also store their morph natively. Load morph replaces the morph of a kit with the normal endpoint parameters of the selected kit. 
+
+Press a track button: Load an instrument from the 'Instrument' library. Load an instrument morph. **Load a different instrument**: Any of the 6 voice slots can load any instrument. An instrument in the 6th slot gets a second decay parameter under T7 regardless of whether or not it is a 'Hi-Hat' (this is stored as a 'Scene' parameter). 
+
+There are 'Advanced' type instruments for the two new synth engines, Alkaline and Colloid, that add an insert FX slot in the 'click' sub-page. There can be at most two of these 'Advanced' instruments. 
+
 Press the load/save button again: Save mode. Pretty much the same stuff. Select 'ok' to save, the text changes to 'OW' to let you know if you're replacing something. Press the track buttons to save an instrument to the library. The 'Name' field gets auto-filled from the last thing it was. If you want to get OCD about naming things, I recommend doing it in your mac/windows/linux. All the stuff is pretty human readable in directories. Names can be up to 8 characters not including their number slot or extension. The only dangerous thing is **if you rename an instrument in a kit, you must also rename it in the kitset.kcg file**. Kits have to track what instruments go in what slot, that's where they do it. 
   
 ### Shift + modes
 #### **SHIFT + VOICE**: Edit morph 
 Pretty self-explanatory, locks the interface to just show the morph values. Change the voice morph in the PERF mode first if you want to hear the results. 
 #### **SHIFT + PERF**: Effects editor. 
-The first parameter is effect type and you have to click it with the encoder to change it in 1-parameter view because each effect type can mutate the entire menu overlay in this mode and changing type resets all the effect parameters to default. The effect has its own morph (hold shift while in the mode), and it's own 16-step sequencer (hold a step, adjust a parameter). You can always scroll horizontally through all the effect parameters with the encoder. The send amount to the effect for each voice is set on the voice's second 'mix' page in VOICE mode - it's a bus, you set send amount, and you can set the fader pre- (fader attenuates send) or post- (send is always the same) FX send per voice (there are also other fader modes if you want to experiment :) ). There are only two effects so far - a simple stereo multimode filter same as what's on the voices and something I'm calling 'CrumpBit' (say it fast) that converts the input to 8-bit and lets you zero/invert per-bit on the SELECT buttons and has a tape-style delay. 
+The first parameter is effect type and you have to click it with the encoder to change it in 1-parameter view because each effect type can mutate the entire menu overlay in this mode and changing type resets all the effect parameters to default. The effect has its own morph (hold shift while in the mode), and it's own 16-step sequencer (hold a step, adjust a parameter). You can always scroll horizontally through all the effect parameters with the encoder. The send amount to the effect for each voice is set on the voice's second 'mix' page in VOICE mode - it's a bus, you set send amount, and you can set the fader pre- (fader attenuates send) or post- (send is always the same) FX send per voice (there are also other fader modes if you want to experiment :) ). More on what the effects are below. 
 #### **SHIFT + STEP**: Nothing here yet. 
 Well, this is probably still the SOM pattern generator but I have no idea how well this works. I'm going to combine Euklid, SOM, rotate/mutate, and probably an arpeggiator into something called 'Generators' here but I haven't started to work on it yet. 
 #### **SHIFT + LOAD/SAVE**: Settings. 
@@ -51,6 +61,32 @@ For clear, it's pretty much the same, except the clear operation won't actually 
 Memory mapping is updated - the program uses ~500kB now so there is a slight reduction in sample storage, about 1.4MB available for sample storage in flash, or about 14 seconds.
 #### Compressor
 There is a master compressor which is sorta supposed to be a pseudo-optical-RMS character kind of thing - ie, more like a full mix bus compressor than a drums submix destructo-compressor. The compressor works directly on the output stream of one of the stereo pairs. There is a sidechain, which works by *trigger* on the selected track: ie not a literal audio threshold, to keep it light on CPU and simple. It uses the *velocity* of the trigger to set the depth in combination with the compressor amount. Other than the channel and sidechain there are only two parameters to keep it simple: *amount*, which is a fudge of threshold, ratio, and makeup gain so that it's roughly equal-volume, with a teensy bit of post-compressor saturation at the very end; and *rate*, which is a fudge of attack time and release time, increasing both across its range but increasing the release much more. Let me know what you think - I'd like to keep it somewhere in the range of transparent-to-chunky and maybe add something in the effects types that includes more aggressive compressor destruction later on. 
+
+### New sound options
+#### General options
+- PWM Oscillators: triangle morph, pulse, saw morph, and 'R-S' which is a 'chopped' saw ... :)
+- The hardcoded 'transient' sounds (and the crash cymbal oscillator) are removed and placed as samples in 'SD_CARD/samples/LXR*.wav'. The 'click' transient can now use *any* sample, so if you want those available, just include them in your 'samples' directory.
+- the mod modes 'mix' and 'fm' are supplemented with ring mod and hard sync.
+- LFO: second destination, polarity, rate increase further into audio rate and semitone-tuned (up to about 360Hz)
+- The click/transient generator, post-filter distortion, and sample rate reduction may be toggled for different FX types. There are two currently: a selection of wavefolders inserted before the filter (that keeps the post-distortion and SRR also), and a 'spatializer' that uses a short detuned buffer to increase stereo spread or create comb-filter type effects (that does not keep the distortion+SRR). 
+- Wavetables: one folder per wavetable in the 'wavetable' folder, loaded alongside samples. This is its own oscillator type now. They are loaded natively as 16-bit, 1024 points, so if the samples are shorter than that, be advised, they may take a little more space in flash than you expect. 
+- Oscillator run modes: The 4 LXR types can be set to have the main oscillator reset on retrigger (the original behavior), free-run maintaining its phase between retriggers, or 'interpolate' which resets the oscillator but fades out the old state quickly over the top. Free run and interpolate will prevent the voice from 'clicking' if retriggered while still in its decay phase. Be advised that the AEG envelope is also *very* fast - if you still find an undesirable click, set the attack to '1'. 
+#### Alkaline
+- This is a modeled transistor-ladder filter bassline voice with pre and post-filter drive, slide, accent, and integrated filter envelope. It can use all the waveforms, including a special square waveform, and also the PWM and wavetable oscillators. The filter has an extended resonance range and can self-oscillate. 
+#### Colloid
+- This is a stereo detuned-stack voice. The two filters can be used in stereo with offsets or in mono serial/parallel with two different types. The oscillator types are the standard waves (12 oscillators), fixed wavetable (12 oscillators), PWM (6 oscillators), and scanning wavetable (6 oscillators). Scanning wavetable always interpolates, without using an interpolation slot. There is also a noise oscillator with a variable width bandpass and pan. There are 3 ADSR envelopes for Amp, Filter, and Pitch and an automatable 'sustain' parameter. There is pre- and post-filter drive and a final 'tone' control to cut some of the highs out of the final drive if you like. 
+#### Advanced
+- Colloid and Alkaline in their 'Advanced' modes get an FX slot under 'click'. The only option so far is a chorus with a few different modes: fixed-rate 'I', 'II', and 'I+II' under the 'depth' parameter and then increasing depth with variable rate above that. 
+#### Tetrakt
+- This is a 4-sample player with slots labeled A-D. You automate which sample 'fires' per-step and each sample plays though its length and decay envelope regardless of what other steps might fire later. Each of the 4 sample slots gets individual pitch, decay envelope, bipolar tone filter, drive, SRR, pan, and a bipolar HP/LP 'tone' filter. There are also individual sends to an internal bus with the 'spatializer' effect for stereo widening. 
+
+
+#### Effects
+- CrumpBit: The stereo input is reduced to 8-bit, and each individual bit can be toggled 'off' (0) or inverted (!) with the SELECT buttons 1-8. There is an internal bus with sub-options: tape delay, pitch-shift, reverb, and a resampling grain engine with post delay. 
+- Delay:
+- Reverb:
+- Echo: 
+
 
 Enjoy! If you have an idea or make some cool music, feel free to join the Discord server: https://discord.gg/sWjGWuavUX
 
@@ -106,6 +142,8 @@ make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build
 │   ├── link_budget.py              ← flash/ITCM/DTCM/arena report after every build
 │   ├── decode_devlogs.py           ← decodes /bootlog.bin and /asavetrc.bin (V/X layouts updated S074)
 │   └── dsp_test/                   ← host DSP test bench (DSP_TEST.md, S073)
+├── archive/
+│   └── som/                        ← SOM generator, not compiled (reference only, S097)
 ├── build/                          ← generated, not in VCS
 ├── knowledge_files/
 │   ├── SESSION_HANDOFF_TEMPLATE.md ← template for writing new session handoff logs
@@ -162,8 +200,9 @@ make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build
     │       └── App/                 ← usb_manager, usb_midi_core, etc.
     ├── Menu/
     │   ├── menu.c/h                 ← full port, all pages, load/save UI
-    │   ├── menuPages.h              ← 16-page × 8-subpage table
-    │   ├── MenuText.h               ← all label strings
+    │   ├── menuPages.h              ← static-page table (6 pages × 8 sub-pages, S097)
+    │   ├── MenuText.h               ← value-name tables, label pool accessors
+    │   ├── MenuLabels.c             ← short/category/long label pools (S097)
     │   ├── Cc2Text.c                ← modTargets[] 205 entries
     │   ├── CcNr2Text.h
     │   ├── copyClearTools.c/h       ← copy/clear UI; pattern mutation through PatternData
@@ -186,9 +225,7 @@ make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build
     ├── Scene/
     │   ├── Pattern/
     │   │   ├── PatternData.c/h      ← pattern/track/step storage and edit API
-    │   │   ├── EuklidGenerator.c/h  ← pattern generator
-    │   │   ├── SomData.c/h          ← SOM data tables
-    │   │   └── SomGenerator.c/h     ← SOM pattern/performance generator
+    │   │   └── EuklidGenerator.c/h  ← pattern generator
     │   └── Preset/
     │       ├── ParameterArray.h/c   ← supersedes Parameters.h; NUM_PARAMS=275
     │       └── presetManager.c/h    ← typed load/save for kit, morph, pattern, performance, all, globals

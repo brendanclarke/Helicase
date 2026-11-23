@@ -24,5 +24,9 @@ extern const instrument_menu_page_t hihat_menu_pages[];
 extern const uint8_t hihat_menu_page_count;
 extern const char hihat_instrument_display_label[];
 extern const uint8_t hihat_instrument_type_flags;
+/* S101 P3: the voice_chain row's descriptor index, for the Spc chain's unit
+ * claim at a slot reset (instrumentManager_unitsWanted()); asserted against
+ * HIHAT_PARAM_VOICE_CHAIN in HiHatParameters.c. */
+#define HIHAT_IDX_VOICE_CHAIN 42u
 
 #endif

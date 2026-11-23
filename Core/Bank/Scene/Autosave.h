@@ -558,6 +558,16 @@ void autosave_maskMergeChunk(uint16_t mask_byte_offset,
 uint8_t autosave_maskHasDirty(void);
 uint8_t autosave_maskBitTake(uint16_t payload_offset);
 /*
+ * Report whether the whole mask byte holding payload_offset is clean.
+ *
+ * Input: payload offset. Output: nonzero when none of its eight bits is set
+ * (out-of-range reads as clean). Lock-free single-byte read: a bit set just
+ * after the read stays dirty for the continuation, exactly as a bit set after
+ * phase 56 has passed it. Why (S099 P3 §10): phase 56 skips clean bytes eight
+ * offsets at a time instead of taking 30,848 bits one by one.
+ */
+uint8_t autosave_maskByteClean(uint16_t payload_offset);
+/*
  * Report whether one HCNAMES object's current autosave payload scope is clean.
  *
  * Input: HCNAMES row 0..144. Output: nonzero only when no canonical dirty bit

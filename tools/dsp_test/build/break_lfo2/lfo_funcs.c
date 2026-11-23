@@ -173,3 +173,15 @@ void lfo_setSync(Lfo* lfo, uint8_t sync)
 	lfo->sync = sync;
 	lfo->phaseInc = lfo_calcPhaseInc(lfo->freq,lfo->sync);
 }
+
+void lfo_stepBlock(Lfo *lfo)
+{
+	const uint32_t oldPhase = lfo->phase;
+	const float rateScale = lfo->modNodeValue;
+	float inc = lfo->phaseInc*rateScale;
+	uint32_t incInt = inc;
+
+	lfo->phase += incInt;
+	if (lfo->waveform == LFO_NOISE && oldPhase > lfo->phase)
+		lfo->rnd = (float)(GetRngValue()) / 32767.0f;
+}

@@ -1,5 +1,6 @@
 #include "AlkalineParameters.h"
 #include "AlkalineVoice.h"
+#include "BbdChorus.h"     /* S099 P1: the chorus */
 #include "menu.h"
 #include "MenuText.h"
 #include <stddef.h>
@@ -34,6 +35,7 @@
  * cells; the Morph row shows "AlkalMrp" (§4.7). */
 const char alkaline_instrument_display_label[] = "Alkaline";
 const uint8_t alkaline_instrument_type_flags = ALKALINE_INSTRUMENT_TYPE_FLAGS;
+const char alkaline_adv_instrument_display_label[] = "AlkAdv";
 
 /* A normal sound cell: in both images, Morph-interpolated, a modulation
  * destination and step-automatable; written under [params] and [morph]. */
@@ -82,6 +84,21 @@ const uint8_t alkaline_instrument_type_flags = ALKALINE_INSTRUMENT_TYPE_FLAGS;
 #define ROW_SELECT_ONOFF_SPECIAL(key_, cat_, long_, short_, tag_, member_, type_, special_) \
     { key_, short_, long_, cat_, (uint8_t)(DTYPE_ON_OFF | ((tag_) << 4)), \
       (INSTRUMENT_PARAM_FLAG_AUTOMATABLE | INSTRUMENT_PARAM_FLAG_SELECTOR), \
+      MOD_NONE, BIND_SPECIAL(member_, type_, special_) }
+/*
+ * A fixed selector with a special writer (S099 P1: chorus_type).
+ *
+ * What:       DTYPE_ON_OFF | (tag << 4) with INSTRUMENT_PARAM_FLAG_SELECTOR
+ *             only: not automatable, not morphed, not an LFO / velocity
+ *             target; the special writer stores it.
+ * Why:        the chorus type claims or releases a voice unit, which only the
+ *             foreground may do (FxBuffer.h); with no AUTOMATABLE flag no step
+ *             lock or drain write can reach it, and a Scene apply writes it
+ *             through preset_applyKitVoiceSelectors(), foreground.
+ */
+#define ROW_SELECT_FIXED_SPECIAL(key_, cat_, long_, short_, tag_, member_, type_, special_) \
+    { key_, short_, long_, cat_, (uint8_t)(DTYPE_ON_OFF | ((tag_) << 4)), \
+      INSTRUMENT_PARAM_FLAG_SELECTOR, \
       MOD_NONE, BIND_SPECIAL(member_, type_, special_) }
 /* Cells with no AlkalineVoice member (target selectors), flags 0: [params]
  * only. */
@@ -141,13 +158,25 @@ typedef enum {
      */
     ALK_PARAM_VCA_DRIVE,         /* 29: instrument_drive, the VCA overdrive */
     ALK_PARAM_TONE,              /* 30: alk_tone, the post-filter tone */
-    ALK_PARAM_COUNT
+    ALK_PARAM_COUNT,
+    /* S099 P1 (P-E, append-only, alx only): the chorus rows */
+    ALK_PARAM_FX_TYPE = ALK_PARAM_COUNT,   /* 31 */
+    ALK_PARAM_FX_RATE,
+    ALK_PARAM_FX_DEPTH,
+    ALK_PARAM_FX_MIX,
+    ALK_PARAM_ADV_COUNT          /* 35 (S099 P2: cbw cdv cwd removed) */
 } alkaline_param_index_t;
 
 _Static_assert(ALKALINE_PARAM_DESCRIPTOR_COUNT == ALK_PARAM_COUNT,
                "ALKALINE_PARAM_DESCRIPTOR_COUNT must match alkaline_param_index_t");
 _Static_assert(ALK_PARAM_COUNT <= INSTRUMENT_PARAM_COUNT,
                "Alkaline rows must fit the 64-cell Kit image");
+_Static_assert(ALKALINE_ADV_PARAM_DESCRIPTOR_COUNT == ALK_PARAM_ADV_COUNT,
+               "ALKALINE_ADV_PARAM_DESCRIPTOR_COUNT must match alkaline_param_index_t");
+_Static_assert(ALK_PARAM_ADV_COUNT <= INSTRUMENT_PARAM_COUNT,
+               "the alx rows must fit the 64-cell Kit image");
+_Static_assert(ALK_PARAM_FX_TYPE == ALK_IDX_FX_TYPE,
+               "ALK_IDX_FX_TYPE must name fx_type");
 
 /*
  * Alkaline parameter descriptors.
@@ -175,55 +204,55 @@ const ParamDescriptor alkaline_param_descriptors[] = {
      *             table); the menu wave helpers.
      * Affiliates: ALK_WAVE_SAW / ALK_WAVE_SQUARE; alkWaveNames.
      */
-    ROW_MENU("osc1_wave", "Oscilltr", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, osc.waveform, TYPE_UINT8),
+    ROW_MENU("osc1_wave", CAT_OSC, LONG_WAVE, SHORT_WAVE, MENU_WAVEFORM, MOD_WAVE, osc.waveform, TYPE_UINT8),
     /* coa: the existing coarse writer (midiFreq high byte, osc_recalcFreq(),
      * which only sets osc.freq; the Alkaline async recomputes the pitch from
      * midiFreq and the note every block); its LFO/velocity target is
      * osc.modNodeValue, which osc_setTableFreq() multiplies in (T1-7);
      * 36 = C2 at the default note 63 ([SN] p7) */
-    ROW_SPECIAL("osc1_pitch_coarse", "Oscilltr", "Coarse", "coa", DTYPE_0B127, MOD_0_127, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC1),
+    ROW_SPECIAL("osc1_pitch_coarse", CAT_OSC, LONG_COARSE, SHORT_COARSE, DTYPE_0B127, MOD_0_127, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC1),
     /* tun: +-700 cents ([SN] p1, D6) by (tuning x 127 - 63) / 63 x 7/12 octave
      * at control rate; 63 = centre */
-    ROW("alk_tuning", "Oscilltr", "Tuning", "tun", DTYPE_PM63, MOD_PM63, tuning, TYPE_FLT),
+    ROW("alk_tuning", CAT_OSC, LONG_TUNING, SHORT_TUN, DTYPE_PM63, MOD_PM63, tuning, TYPE_FLT),
     /* sld: latched at each trigger, decides the next note (A10); an image
      * ON/OFF cell like Drum's velo_vol_on_off */
-    ROW("alk_slide", "Oscilltr", "Slide", "sld", DTYPE_ON_OFF, MOD_NONE, slide, TYPE_UINT8),
+    ROW("alk_slide", CAT_OSC, LONG_SLIDE, SHORT_SLD, DTYPE_ON_OFF, MOD_NONE, slide, TYPE_UINT8),
     /* the five 303 knobs: VR3 cutoff, VR4 resonance (both gangs), VR5 env
      * mod, VR6 decay, VR7 accent, as tapers in AlkalineControl.c */
-    ROW("alk_cutoff", "Filter", "Cutoff", "cut", DTYPE_0B127, MOD_0_127, cutoff, TYPE_FLT),
-    ROW("alk_reso", "Filter", "Resnance", "res", DTYPE_0B127, MOD_0_127, reso, TYPE_FLT),
-    ROW("alk_envmod", "Filter", "Env Mod", "env", DTYPE_0B127, MOD_0_127, envMod, TYPE_FLT),
-    ROW("alk_decay", "Filter", "Decay", "dec", DTYPE_0B127, MOD_0_127, decay, TYPE_FLT),
-    ROW("alk_accent", "Voice", "Accent", "acc", DTYPE_0B127, MOD_0_127, accent, TYPE_FLT),
+    ROW("alk_cutoff", CAT_FILTER, LONG_CUTOFF, SHORT_CUT, DTYPE_0B127, MOD_0_127, cutoff, TYPE_FLT),
+    ROW("alk_reso", CAT_FILTER, LONG_RESONANCE, SHORT_FIL_RESO, DTYPE_0B127, MOD_0_127, reso, TYPE_FLT),
+    ROW("alk_envmod", CAT_FILTER, LONG_ENV_MOD, SHORT_ENV, DTYPE_0B127, MOD_0_127, envMod, TYPE_FLT),
+    ROW("alk_decay", CAT_FILTER, LONG_DECAY, SHORT_DECAY, DTYPE_0B127, MOD_0_127, decay, TYPE_FLT),
+    ROW("alk_accent", CAT_VOICE, LONG_ACCENT, SHORT_ACC, DTYPE_0B127, MOD_0_127, accent, TYPE_FLT),
     /* drv: the ladder input x 8^(v/127) (D16) with the output make-up
      * 2^(ALK_MAKEUP_OCT (1 - v/127)) (B-2); 0 = the 303's own drive */
-    ROW("alk_drive", "Filter", "Overdriv", "drv", DTYPE_0B127, MOD_0_127, drive, TYPE_FLT),
+    ROW("alk_drive", CAT_FILTER, LONG_DRIVE, SHORT_DRIVE, DTYPE_0B127, MOD_0_127, drive, TYPE_FLT),
     /* platform rows (DrumParameters.c l. 257-258): the mixer reads them
      * through instrumentManager_runtimeVolume()/_runtimePan() */
-    ROW("instrument_vol", "Voice", "Volume", "vol", DTYPE_0B127, MOD_0_127, vol, TYPE_FLT),
-    ROW("instrument_pan", "Voice", "Panning", "pan", DTYPE_PM63, MOD_PM63, pan, TYPE_UINT8),
+    ROW("instrument_vol", CAT_VOICE, LONG_VOL, SHORT_VOL, DTYPE_0B127, MOD_0_127, vol, TYPE_FLT),
+    ROW("instrument_pan", CAT_VOICE, LONG_PAN, SHORT_PAN, DTYPE_PM63, MOD_PM63, pan, TYPE_UINT8),
     /* the LFO pair: one oscillator, two destinations (DrumParameters.c
      * l. 270-281) */
-    ROW_SPECIAL("lfo_rate", "LFO", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, lfo.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_LFO_RATE),
-    ROW("lfo_amount", "LFO", "Amount", "am1", DTYPE_0B127, MOD_0_127, lfo.modTarget.amount, TYPE_FLT),
-    ROW("lfo_amount_2", "LFO", "Amount 2", "am2", DTYPE_0B127, MOD_0_127, lfo.modTarget2.amount, TYPE_FLT),
-    ROW_MENU("lfo_wave", "LFO", "Waveform", "wav", MENU_LFO_WAVES, MOD_NONE, lfo.waveform, TYPE_UINT8),
-    ROW_MENU("lfo_retrigger_voice", "LFO", "Retriggr", "rtg", MENU_RETRIGGER, MOD_NONE, lfo.retrigger, TYPE_UINT8),
-    ROW("lfo_polarity", "LFO", "Polarity", "pol", DTYPE_LFO_POLARITY, MOD_NONE, lfo.polarity, TYPE_UINT8),
+    ROW_SPECIAL("lfo_rate", CAT_LFO, LONG_FREQ, SHORT_FREQ, DTYPE_0B127, MOD_0_127, lfo.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_LFO_RATE),
+    ROW("lfo_amount", CAT_LFO, LONG_AMOUNT, SHORT_AM1, DTYPE_0B127, MOD_0_127, lfo.modTarget.amount, TYPE_FLT),
+    ROW("lfo_amount_2", CAT_LFO, LONG_AMOUNT_2, SHORT_AM2, DTYPE_0B127, MOD_0_127, lfo.modTarget2.amount, TYPE_FLT),
+    ROW_MENU("lfo_wave", CAT_LFO, LONG_WAVE, SHORT_WAVE, MENU_LFO_WAVES, MOD_NONE, lfo.waveform, TYPE_UINT8),
+    ROW_MENU("lfo_retrigger_voice", CAT_LFO, LONG_RETRIGGER, SHORT_RETRIGGER, MENU_RETRIGGER, MOD_NONE, lfo.retrigger, TYPE_UINT8),
+    ROW("lfo_polarity", CAT_LFO, LONG_POLARITY, SHORT_POL, DTYPE_LFO_POLARITY, MOD_NONE, lfo.polarity, TYPE_UINT8),
     /* lfo_sync (S094 P1 S1): the special writer recomputes the LFO's phase
      * step with the mode (IM_SPECIAL_LFO_SYNC -> lfo_setSync()); a plain
      * byte store left the rate at the previous mode's until frq or the tempo
      * moved */
-    ROW_MENU_SPECIAL("lfo_sync", "LFO", "ClockSnc", "snc", MENU_SYNC_RATES, MOD_NONE, lfo.sync, TYPE_UINT8, IM_SPECIAL_LFO_SYNC),
-    ROW_SPECIAL("lfo_offset", "LFO", "Offset", "ofs", DTYPE_0B127, MOD_NONE, lfo.phaseOffset, TYPE_UINT32, IM_SPECIAL_LFO_OFFSET),
+    ROW_MENU_SPECIAL("lfo_sync", CAT_LFO, LONG_CLOCKSYNC, SHORT_SYNC, MENU_SYNC_RATES, MOD_NONE, lfo.sync, TYPE_UINT8, IM_SPECIAL_LFO_SYNC),
+    ROW_SPECIAL("lfo_offset", CAT_LFO, LONG_OFFSET, SHORT_OFFSET, DTYPE_0B127, MOD_NONE, lfo.phaseOffset, TYPE_UINT32, IM_SPECIAL_LFO_OFFSET),
     /* velocity (DrumParameters.c l. 283-284) */
-    ROW_NOBIND_IMAGE("velo_mod_amount", "Velocity", "Amount", "amt", DTYPE_0B127, MOD_NONE, INSTRUMENT_BIND_VELOCITY_AMOUNT),
-    ROW_NOBIND("velo_mod_dest", "Velocity", "DstParam", "dst", DTYPE_TARGET_SELECTION_VELO, INSTRUMENT_BIND_VELOCITY_TARGET),
+    ROW_NOBIND_IMAGE("velo_mod_amount", CAT_VELOCITY, LONG_AMOUNT, SHORT_FM_AMNT, DTYPE_0B127, MOD_NONE, INSTRUMENT_BIND_VELOCITY_AMOUNT),
+    ROW_NOBIND("velo_mod_dest", CAT_VELOCITY, LONG_DEST_PARAM, SHORT_DEST, DTYPE_TARGET_SELECTION_VELO, INSTRUMENT_BIND_VELOCITY_TARGET),
     /* the LFO destinations (DrumParameters.c l. 285-288) */
-    ROW_NOBIND("lfo_target_voice", "LFO", "DstVoice", "vo1", DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE),
-    ROW_NOBIND("lfo_target_param", "LFO", "DstParam", "ds1", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM),
-    ROW_NOBIND("lfo_target_voice_2", "LFO", "DstVoice2", "vo2", DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE_2),
-    ROW_NOBIND("lfo_target_param_2", "LFO", "DstParam2", "ds2", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM_2),
+    ROW_NOBIND("lfo_target_voice", CAT_LFO, LONG_DEST_VOICE, SHORT_VO1, DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE),
+    ROW_NOBIND("lfo_target_param", CAT_LFO, LONG_DEST_PARAM, SHORT_DS1, DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM),
+    ROW_NOBIND("lfo_target_voice_2", CAT_LFO, LONG_DSTVOICE2, SHORT_VO2, DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE_2),
+    ROW_NOBIND("lfo_target_param_2", CAT_LFO, LONG_DSTPARAM2, SHORT_DS2, DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM_2),
     /*
      * S093 P6: atk, the VEG attack as the 303's CPU trigger-pulse width.
      * Byte 0 = a 0.70 ms trigger, today's attack bit for bit; 127 = 0.55 ms
@@ -232,14 +261,14 @@ const ParamDescriptor alkaline_param_descriptors[] = {
      * alkVegAttack[] (generated). Heard after rests and long notes; on running
      * 16ths C42 has not recharged (the circuit's behaviour).
      */
-    ROW("alk_attack", "Veloc EG", "Attack", "atk", DTYPE_0B127, MOD_0_127, attack, TYPE_FLT),
+    ROW("alk_attack", CAT_VELO_EG, LONG_ATTACK, SHORT_ATTACK, DTYPE_0B127, MOD_0_127, attack, TYPE_FLT),
     /*
      * S093 P6: pos on Saw/Sqr, the Drum row shape (DrumParameters.c l. 314)
      * bound to the oscillator's position byte. 0 = free-running (the 303's
      * VCO, today's sound); 1..127 = every non-legato note starts at pos/128
      * of a cycle; while it moves, the per-block bend (AlkalineVoice.c).
      */
-    ROW("osc1_position", "Oscilltr", "Position", "pos", DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
+    ROW("osc1_position", CAT_OSC, LONG_POSITION, SHORT_POS, DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
     /*
      * S093 P8: typ, the oscillator type.
      *
@@ -253,7 +282,7 @@ const ParamDescriptor alkaline_param_descriptors[] = {
      * Accessors:  Alkaline_triggerVoice(), Alkaline_calcVoiceAsync(),
      *             Alkaline_calcVoiceSyncBlock() (osc.oscType).
      */
-    ROW_SELECT_ONOFF_SPECIAL("osc1_type", "Oscilltr", "Type", "typ", ONOFF_TAG_ALK_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
+    ROW_SELECT_ONOFF_SPECIAL("osc1_type", CAT_OSC, LONG_TYPE, SHORT_FIL_TYPE, ONOFF_TAG_ALK_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
     /*
      * S094 P1 S4: the VCA overdrive (K1, user P9-D9).
      *
@@ -269,7 +298,7 @@ const ParamDescriptor alkaline_param_descriptors[] = {
      *             types; the filter page's alk_drive keeps its labels (user:
      *             category "Filter" makes it clear).
      */
-    ROW_SPECIAL("instrument_drive", "Voice", "Overdriv", "drv", DTYPE_0B127, MOD_0_127, vcaDrive, TYPE_UINT8, IM_SPECIAL_INSTRUMENT_DRIVE),
+    ROW_SPECIAL("instrument_drive", CAT_VOICE, LONG_DRIVE, SHORT_DRIVE, DTYPE_0B127, MOD_0_127, vcaDrive, TYPE_UINT8, IM_SPECIAL_INSTRUMENT_DRIVE),
     /*
      * S094 P1 S4: the tone (post-FX draft §3.4.1).
      *
@@ -279,7 +308,22 @@ const ParamDescriptor alkaline_param_descriptors[] = {
      *             c from alkToneC[]: 127 = open (exact), lower values roll off
      *             toward about 800 Hz. Default 127.
      */
-    ROW("alk_tone", "Voice", "Tone", "ton", DTYPE_0B127, MOD_0_127, tone, TYPE_UINT8),
+    ROW("alk_tone", CAT_VOICE, LONG_TONE, SHORT_TON, DTYPE_0B127, MOD_0_127, tone, TYPE_UINT8),
+    /*
+     * @advanced-rows: the rows below are the alx type's only (S099 P1 P-E;
+     * chorus draft §5.2, §7.2, Q-12). tools/alkaline/make_init_alk.py writes
+     * init.alk up to this marker and init.alx with every row.
+     * fx dpt rte mix (S099 P2: the effect's rows, keys fx_*; were cho cdp
+     *   crt cmx): as the Colloid's (the Alkaline is mono, the mid form
+     *   always). S099 P2 (user, 2026-11-19): the cbw, cdv and cwd rows are
+     *   gone: the wet's cutoff is fixed (BBD_ALK_TONE, 9 kHz), the BBD
+     *   input drive follows the post-filter drive (instrument_drive,
+     *   vcaDrive) and the width follows dpt (BBD_ALK_WIDTH(), BbdChorus.h).
+     */
+    ROW_SELECT_FIXED_SPECIAL("fx_type", CAT_EFFECT, LONG_TYPE, SHORT_FX, ONOFF_TAG_FX_TYPE, fxType, TYPE_UINT8, IM_SPECIAL_FX_TYPE),
+    ROW("fx_rate", CAT_EFFECT, LONG_RATE, SHORT_FXR, DTYPE_0B127, MOD_0_127, fxRate, TYPE_UINT8),
+    ROW("fx_depth", CAT_EFFECT, LONG_DEPTH, SHORT_FXD, DTYPE_0B127_FX_DEPTH, MOD_0_127, fxDepth, TYPE_UINT8),
+    ROW("fx_mix", CAT_EFFECT, LONG_MIX, SHORT_FXM, DTYPE_0B127, MOD_0_127, fxMix, TYPE_UINT8),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -287,8 +331,8 @@ const uint8_t alkaline_param_descriptor_count =
     (uint8_t)(sizeof(alkaline_param_descriptors) / sizeof(alkaline_param_descriptors[0]));
 
 _Static_assert(sizeof(alkaline_param_descriptors) / sizeof(alkaline_param_descriptors[0]) ==
-                   ALK_PARAM_COUNT,
-               "alkaline_param_descriptors must have one row per index");
+                   ALK_PARAM_ADV_COUNT,
+               "alkaline_param_descriptors must have one row per index (31 alk + 7 alx)");
 
 /* An empty 16-cell page (page 3 only after S093 P6: FM; Snare ships an
  * all-empty page 3 the same way). */
@@ -309,23 +353,52 @@ _Static_assert(sizeof(alkaline_param_descriptors) / sizeof(alkaline_param_descri
  *             decay and keeps its label: it moves so FILTER is one screen,
  *             cut res env drv); acc on click; pos with the oscillator.
  */
-const instrument_menu_page_t alkaline_menu_pages[] = {
-    /* 0 OSC: coa tun wav pos | typ (S093 P8: Drum's second screen) */
-    {{ ALK_PARAM_OSC1_PITCH_COARSE, ALK_PARAM_TUNING, ALK_PARAM_WAVE, ALK_PARAM_OSC1_POSITION, ALK_PARAM_OSC1_TYPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
-    /* 1 AEG: atk dec */
-    {{ ALK_PARAM_ATTACK, ALK_PARAM_DECAY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
-    /* 2 mod: dst amt sld */
-    {{ ALK_PARAM_VELO_MOD_DEST, ALK_PARAM_VELO_MOD_AMOUNT, ALK_PARAM_SLIDE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
-    /* 3 FM: none */
+/* S099 P1: pages 0..6, shared by the alk and alx layouts (one source) */
+#define ALK_PAGES_0_3 \
+    /* 0 OSC: coa tun wav pos | typ (S093 P8: Drum's second screen) */ \
+    {{ ALK_PARAM_OSC1_PITCH_COARSE, ALK_PARAM_TUNING, ALK_PARAM_WAVE, ALK_PARAM_OSC1_POSITION, ALK_PARAM_OSC1_TYPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }}, \
+    /* 1 AEG: atk dec */ \
+    {{ ALK_PARAM_ATTACK, ALK_PARAM_DECAY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }}, \
+    /* 2 mod: dst amt sld */ \
+    {{ ALK_PARAM_VELO_MOD_DEST, ALK_PARAM_VELO_MOD_AMOUNT, ALK_PARAM_SLIDE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }}, \
+    /* 3 FM: none */ \
     ALK_PAGE_EMPTY,
-    /* 4 click: acc */
+
+/* 4 click: acc */
+#define ALK_PAGE_4 \
     {{ ALK_PARAM_ACCENT, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
-    /* 5 FILTER: cut res env drv (one screen) */
-    {{ ALK_PARAM_CUTOFF, ALK_PARAM_RESO, ALK_PARAM_ENVMOD, ALK_PARAM_DRIVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
-    /* 6 LFO: the Drum layout (DrumParameters.c l. 411) */
-    {{ ALK_PARAM_LFO_RATE, ALK_PARAM_LFO_SYNC, ALK_PARAM_LFO_WAVE, ALK_PARAM_LFO_OFFSET, ALK_PARAM_LFO_RETRIGGER_VOICE, ALK_PARAM_LFO_POLARITY, ALK_PARAM_LFO_AMOUNT, ALK_PARAM_LFO_AMOUNT_2, ALK_PARAM_LFO_TARGET_VOICE, ALK_PARAM_LFO_TARGET_PARAM, ALK_PARAM_LFO_TARGET_VOICE_2, ALK_PARAM_LFO_TARGET_PARAM_2, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+
+#define ALK_PAGES_5_6 \
+    /* 5 FILTER: cut res env drv (one screen) */ \
+    {{ ALK_PARAM_CUTOFF, ALK_PARAM_RESO, ALK_PARAM_ENVMOD, ALK_PARAM_DRIVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }}, \
+    /* 6 LFO: the Drum layout (DrumParameters.c l. 411) */ \
+    {{ ALK_PARAM_LFO_RATE, ALK_PARAM_LFO_SYNC, ALK_PARAM_LFO_WAVE, ALK_PARAM_LFO_OFFSET, ALK_PARAM_LFO_RETRIGGER_VOICE, ALK_PARAM_LFO_POLARITY, ALK_PARAM_LFO_AMOUNT, ALK_PARAM_LFO_AMOUNT_2, ALK_PARAM_LFO_TARGET_VOICE, ALK_PARAM_LFO_TARGET_PARAM, ALK_PARAM_LFO_TARGET_VOICE_2, ALK_PARAM_LFO_TARGET_PARAM_2, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }}, \
+
+#define ALK_PAGES_0_6 ALK_PAGES_0_3 ALK_PAGE_4 ALK_PAGES_5_6
+
+const instrument_menu_page_t alkaline_menu_pages[] = {
+    ALK_PAGES_0_6
     /* 7 MIX: vol pan ton drv (S094 P1 S4: the cells line up with the other
      * four types' vol pan srt drv; ton takes the srt cell) */
+    {{ ALK_PARAM_INSTRUMENT_VOL, ALK_PARAM_INSTRUMENT_PAN, ALK_PARAM_TONE, ALK_PARAM_VCA_DRIVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+};
+
+/*
+ * The Advanced Alkaline's layout (S099 P1 P-E; chorus draft §7.2; S099 P2).
+ *
+ * What:       the alk pages, with the effect's four cells fx dpt rte mix as
+ *             the last screen of page 4 (the 5th SELECT button, "click": acc
+ *             | fx dpt rte mix), and MIX as the Basic Alkaline's (S099 P2,
+ *             user 2026-11-19; it sat on MIX with cbw cdv cwd, now removed).
+ *             No screen before it is empty (see colloid_adv_menu_pages).
+ * Why:        one fixed place for the effect on every Advanced type.
+ */
+const instrument_menu_page_t alkaline_adv_menu_pages[] = {
+    ALK_PAGES_0_3
+    /* 4 click + the effect */
+    {{ ALK_PARAM_ACCENT, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, ALK_PARAM_FX_TYPE, ALK_PARAM_FX_DEPTH, ALK_PARAM_FX_RATE, ALK_PARAM_FX_MIX, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    ALK_PAGES_5_6
+    /* 7 MIX: as the Basic Alkaline's */
     {{ ALK_PARAM_INSTRUMENT_VOL, ALK_PARAM_INSTRUMENT_PAN, ALK_PARAM_TONE, ALK_PARAM_VCA_DRIVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
 };
 
@@ -336,6 +409,24 @@ _Static_assert(ALKALINE_MENU_PAGE_COUNT ==
                    (sizeof(alkaline_menu_pages) / sizeof(alkaline_menu_pages[0])),
                "ALKALINE_MENU_PAGE_COUNT must match alkaline_menu_pages");
 
+uint8_t alkalineParameters_cellInactive(const struct AlkalineVoiceStruct *voice,
+                                        const ParamDescriptor *descriptor)
+{
+	const ParamDescriptor *const base = alkaline_param_descriptors;
+
+	if (!voice || !descriptor || descriptor < base + ALK_PARAM_FX_TYPE ||
+	    descriptor >= base + ALK_PARAM_ADV_COUNT)
+		return 0u;
+	/* S099 P2: every effect and chorus row but fx is blank with fx off;
+	 * rte stays live under the Juno modes, which ignore it (user) */
+	switch ((alkaline_param_index_t)(descriptor - base)) {
+	case ALK_PARAM_FX_TYPE:
+		return 0u;
+	default:
+		return (uint8_t)(voice->fxType == ADV_FX_OFF);
+	}
+}
+
 #undef FLAGS_IMAGE
 #undef BIND_SPECIAL
 #undef BIND
@@ -344,8 +435,10 @@ _Static_assert(ALKALINE_MENU_PAGE_COUNT ==
 #undef ROW_MENU
 #undef ROW_MENU_SPECIAL
 #undef ROW_SELECT_ONOFF_SPECIAL
+#undef ROW_SELECT_FIXED_SPECIAL
 #undef ROW_NOBIND
 #undef ROW_NOBIND_IMAGE
+#undef ALK_PAGES_0_6
 #undef ALK_PAGE_EMPTY
 #undef MOD_WAVE
 #undef MOD_PM63

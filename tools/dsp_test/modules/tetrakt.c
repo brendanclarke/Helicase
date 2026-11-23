@@ -23,7 +23,9 @@
  *                        (+-1);
  *               TK-TONE  tnA 63, teA 63: y == x exactly; a coefficient jump
  *                        across u = 0 under the ramp has no step larger than
- *                        the input's own plus 0.02; tnA 0 and 126 reach the
+ *                        the input's own plus 0.04 (S101 P2: the four-block
+ *                        ramp in sub-block steps; was 0.02 for the one-block
+ *                        per-sample ramp); tnA 0 and 126 reach the
  *                        LP / HP ends (|H| = 1 / 1.2 at 120 Hz and 3 kHz
  *                        within 2 %, |H| = 1 / sqrt(2) at 1.148 x those
  *                        within 3 %: the -3 dB point of a damping-0.6 SVF);
@@ -112,10 +114,10 @@ uint8_t modNode_interpClaim(void *osc) { (void)osc; return g_claim; }
 #include "TetraktVoice.host.c"
 
 #define BLK OUTPUT_DMA_SIZE
-enum { G_TRIG, G_DEC, G_TUNE, G_SRR, G_TONE, G_DRV, G_W2, G_S1, G_VEL, G_RING, G_READ, G_N };
+enum { G_TRIG, G_DEC, G_TUNE, G_SRR, G_TONE, G_DRV, G_W2, G_S1, G_VEL, G_RING, G_READ, G_A2Q, G_N };
 static const char *g_name[G_N] = { "TK-TRIG", "TK-DEC", "TK-TUNE", "TK-SRR", "TK-TONE",
                                    "TK-DRV", "TK-W2", "TK-S1", "TK-VEL", "TK-RING",
-                                   "TK-READ" };
+                                   "TK-READ", "TK-A2Q" };
 static unsigned g_fail[G_N];
 static void fail(int g, const char *what, double a, double b)
 {
@@ -248,7 +250,7 @@ static void test_trig(void)
 	/* A fresh voice (lon A) restarts layer A only. */
 	voice_init();
 	V.layerOn = 1u;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
 	expect(G_TRIG, V.layer[0].stage == TKT_STAGE_START, "fresh A starts", 0, 0);
 	for (i = 1u; i < TKT_LAYERS; i++)
 		expect(G_TRIG, V.layer[i].stage == TKT_STAGE_IDLE, "fresh B..D idle", i, 0);
@@ -262,7 +264,7 @@ static void test_trig(void)
 	for (mask = 0u; mask < 16u; mask++) {
 		voice_init();
 		V.layerOn = 0x0Fu;
-		Tetrakt_triggerVoice(&V, 0u, 127u, 63u);
+		Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
 		block();
 		block();
 
@@ -270,7 +272,7 @@ static void test_trig(void)
 		REF = V;
 		REF.line = lineRef;
 		(void)lineRef;
-		Tetrakt_triggerVoice(&V, 0u, 100u, 63u);
+		Tetrakt_triggerVoice(&V, 0u, 100u, 63u, 0u);
 		block();
 
 		for (i = 0u; i < TKT_LAYERS; i++) {
@@ -310,22 +312,22 @@ static void test_trig(void)
 	/* A quiet layer starts at once: lon A then AC, C was idle. */
 	voice_init();
 	V.layerOn = 1u;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
 	block();
 	V.layerOn = 0x05u;
-	Tetrakt_triggerVoice(&V, 0u, 90u, 63u);
+	Tetrakt_triggerVoice(&V, 0u, 90u, 63u, 0u);
 	expect(G_TRIG, V.layer[2].stage == TKT_STAGE_START, "C starts at once", 0, 0);
 	expect(G_TRIG, V.layer[0].stage == TKT_STAGE_FADE, "A fades", 0, 0);
 
 	/* lon 0 restarts nothing. */
 	voice_init();
 	V.layerOn = 0x0Fu;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
 	block();
 	V.layerOn = 0u;
 	REF = V;
 	REF.line = lineRef;
-	Tetrakt_triggerVoice(&V, 0u, 1u, 63u);
+	Tetrakt_triggerVoice(&V, 0u, 1u, 63u, 0u);
 	for (i = 0u; i < TKT_LAYERS; i++)
 		expect(G_TRIG, V.layer[i].stage == TKT_STAGE_PLAY, "lon 0 leaves play", i, 0);
 	block();
@@ -345,7 +347,7 @@ static void test_dec(void)
 	voice_init();
 	V.layerOn = 1u;
 	V.layer[0].decay = 0u;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
 	block();
 	prev = V.layer[0].env;
 	expect(G_DEC, prev > 0.0f && prev < 1.0f, "starts below 1", prev, 1);
@@ -362,13 +364,89 @@ static void test_dec(void)
 	expect(G_DEC, V.layer[0].env == 0.0f, "idle env is 0", V.layer[0].env, 0);
 }
 
+/* ----------------------------------------------------------- TK-A2Q -- */
+/*
+ * TK-A2Q (S101 P2 A2q): the layer control every fourth block.
+ * What:  (1) after a hit, every layer's decay follows the exact per-block
+ *        exponential, env_n+1 = env_n (1 - k), within 2 ulp a block, on
+ *        control and carried blocks alike, to idle; (2) a row change (level)
+ *        reaches layer i's gains in the first block where
+ *        (ctlPhase + i) % 4 is 0, and not before; each of the four layers
+ *        on a different block; (3) the tone ramp is continuous: each block
+ *        starts where the last ended (a + 32 da).
+ * Break (Makefile): a carry that holds the envelope must fail TK-A2Q.
+ */
+static void test_a2q(void)
+{
+	uint32_t i, b;
+
+	voice_init();
+	V.layerOn = 15u;
+	for (i = 0u; i < TKT_LAYERS; i++)
+		V.layer[i].decay = (uint8_t)(5u + 12u * i);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 15u);
+	block();
+	for (b = 0u; b < 3000u; b++) {
+		float prev[TKT_LAYERS], a1e[TKT_LAYERS];
+		for (i = 0u; i < TKT_LAYERS; i++) {
+			prev[i] = V.layer[i].env;
+			a1e[i] = V.layer[i].a1 + (float)BLK * V.layer[i].da1;
+		}
+		block();
+		for (i = 0u; i < TKT_LAYERS; i++) {
+			const TktLayer *L = &V.layer[i];
+			const float k = colEgK[L->decay & 127u];
+			const float want = prev[i] - k * prev[i];
+
+			if (L->stage == TKT_STAGE_PLAY &&
+			    fabsf(L->env - want) > 2.0f * 1.2e-7f * (prev[i] + 1e-30f))
+				fail(G_A2Q, "decay off the per-block exponential", i, L->env - want);
+			if (L->a1 != a1e[i] && fabsf(L->a1 - a1e[i]) > 1e-6f)
+				fail(G_A2Q, "tone ramp not continuous", i, L->a1 - a1e[i]);
+		}
+	}
+	for (i = 0u; i < TKT_LAYERS; i++)
+		expect(G_A2Q, V.layer[i].stage == TKT_STAGE_IDLE && V.layer[i].env == 0.0f,
+		       "every layer decays to idle", i, V.layer[i].env);
+
+	/* (2) a level change reaches each layer on its own scheduled block */
+	voice_init();
+	V.layerOn = 15u;
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 15u);
+	block();
+	block();
+	{
+		uint32_t seen[TKT_LAYERS], blocks;
+		float g0[TKT_LAYERS];
+		const uint8_t phase0 = V.ctlPhase;
+
+		for (i = 0u; i < TKT_LAYERS; i++) {
+			g0[i] = V.layer[i].gL;
+			V.layer[i].level = 30u;
+			seen[i] = 99u;
+		}
+		for (blocks = 0u; blocks < 4u; blocks++) {
+			block();
+			for (i = 0u; i < TKT_LAYERS; i++)
+				if (seen[i] == 99u && V.layer[i].gL != g0[i])
+					seen[i] = blocks;
+		}
+		for (i = 0u; i < TKT_LAYERS; i++) {
+			const uint32_t want = (4u - ((phase0 + i) & 3u)) & 3u;
+			expect(G_A2Q, seen[i] == want, "row change on the layer's own block", i, seen[i]);
+			for (b = i + 1u; b < TKT_LAYERS; b++)
+				expect(G_A2Q, seen[i] != seen[b], "layers on different blocks", i, b);
+		}
+	}
+}
+
 /* ---------------------------------------------------------- TK-TUNE -- */
 static void tune_inc(uint8_t tune, uint32_t note, uint32_t *out)
 {
 	voice_init();
 	V.layerOn = 1u;
 	V.layer[0].tune = tune;
-	Tetrakt_triggerVoice(&V, 0u, 127u, (uint8_t)note);
+	Tetrakt_triggerVoice(&V, 0u, 127u, (uint8_t)note, 0u);
 	Tetrakt_calcVoiceAsync(&V);
 	*out = V.layer[0].osc.phaseInc;
 }
@@ -412,7 +490,7 @@ static void test_srr(void)
 	voice_init();
 	V.layerOn = 1u;
 	V.layer[0].srr = 127u;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
 	Tetrakt_calcVoiceAsync(&V);
 	expect(G_SRR, V.layer[0].srrRate == 1.0f, "127 is exactly 1.0",
 	       V.layer[0].srrRate, 1);
@@ -538,17 +616,43 @@ static void test_tone(void)
 	L.a1 = a1; L.a2 = a2; L.a3 = a3; L.mX = mX; L.mB = mB; L.mL = mL;
 	post_block(&L, in);
 	tone_law(126.0f, &a1, &a2, &a3, &mX, &mB, &mL);
-	L.da1 = (a1 - L.a1) / 32.0f; L.da2 = (a2 - L.a2) / 32.0f; L.da3 = (a3 - L.a3) / 32.0f;
-	L.dmX = (mX - L.mX) / 32.0f; L.dmB = (mB - L.mB) / 32.0f; L.dmL = (mL - L.mL) / 32.0f;
-	post_block(&L, in);
-	for (n = 1u; n < BLK; n++) {
-		const float d = fabsf(tkt_work.busL[n] - tkt_work.busL[n - 1u]) *
-		                32768.0f / (1.0f / 1.0f);
+	/*
+	 * S101 P2 A2q + B1 (sub-block form): the firmware ramps a coefficient
+	 * change over TKT_CTL_BLOCKS blocks (tkt_ramp()), stepping it every
+	 * TKT_SUB_BLOCK samples, with the start carried between blocks
+	 * (tkt_layerCarry()). The law runs that ramp: four blocks, the same
+	 * output-step bound. (Before S101 P2 it ran a one-block per-sample ramp,
+	 * which the firmware no longer has.)
+	 */
+	{
+		const float span = (float)TKT_CTL_BLOCKS * 32.0f;
+		uint32_t b;
+		float last = tkt_work.busL[BLK - 1u];
 
-		if (d > maxOut)
-			maxOut = d;
+		L.da1 = (a1 - L.a1) / span; L.da2 = (a2 - L.a2) / span; L.da3 = (a3 - L.a3) / span;
+		/* the weights stay (the law's form since S096 P1: the post loop
+		 * does not ramp them; dmX..dmL are unused) */
+		for (b = 0u; b < TKT_CTL_BLOCKS; b++) {
+			post_block(&L, in);
+			for (n = 0u; n < BLK; n++) {
+				const float d = fabsf(tkt_work.busL[n] - (n ? tkt_work.busL[n - 1u] : last)) *
+				                32768.0f;
+
+				if (n && d > maxOut)
+					maxOut = d;
+			}
+			last = tkt_work.busL[BLK - 1u];
+			L.a1 += 32.0f * L.da1; L.a2 += 32.0f * L.da2; L.a3 += 32.0f * L.da3;
+		}
 	}
-	expect(G_TONE, maxOut <= maxIn + 0.02f * 32768.0f, "sweep is ramped", maxOut, maxIn);
+	/*
+	 * S101 P2 B1 (sub-block form): the coefficients step by 1/16 of the
+	 * ramp at once every 8 samples (the full LP -> HP range over four
+	 * blocks), so the bound is the input's step + 0.04 of full scale
+	 * (measured +0.029 on this extreme sweep; the per-sample ramp's bound was
+	 * + 0.02). A sub-block step four times too large breaks it (Makefile).
+	 */
+	expect(G_TONE, maxOut <= maxIn + 0.04f * 32768.0f, "sweep is ramped", maxOut, maxIn);
 
 	/* The ends reach their cutoffs (damping 0.6: |H| = 1/1.2 at the corner). */
 	expect(G_TONE, fabsf(tone_gain(0.0f, 120.0) - (1.0f / 1.2f)) < 0.02f,
@@ -577,7 +681,7 @@ static void test_drv(void)
 	V.layer[0].tone = 63u;
 	V.layer[0].toneEnv = 63u;
 	V.layer[0].srr = 127u;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
 	Tetrakt_calcVoiceAsync(&V);
 	expect(G_DRV, fabsf(V.layer[0].dGain - 1.0f) < 1.0e-6f &&
 	       V.layer[0].dBias == 0.0f &&
@@ -609,7 +713,7 @@ static void test_drv(void)
 	V.layer[0].toneEnv = 63u;
 	V.layer[0].srr = 127u;
 	V.layer[0].decay = 127u;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
 	for (b = 0u; b < 1378u; b++) {
 		block();
 		for (n = 0u; n < BLK; n++)
@@ -641,7 +745,7 @@ static void test_w2(void)
 	V.layerOn = 0x0Fu;
 	for (n = 0u; n < TKT_LAYERS; n++)
 		V.layer[n].level = 100u;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
 	Tetrakt_calcVoiceAsync(&V);
 	expect(G_W2, V.busWMix < 0.001f, "wid at env 1 is panned", V.busWMix, 0);
 	V.layer[0].env = 0.0f;
@@ -754,7 +858,7 @@ static void test_vel(void)
 	V.layerOn = 0x05u;            /* A and C */
 	V.veloKind = TKT_KIND_TONE;
 	velocityModulators[0].amount = 1.0f;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
 	Tetrakt_calcVoiceAsync(&V);
 	expect(G_VEL, V.layer[0].velo == 1.0f && V.layer[2].velo == 1.0f,
 	       "hard hit latches 1", V.layer[0].velo, V.layer[2].velo);
@@ -763,7 +867,7 @@ static void test_vel(void)
 
 	/* A soft hit restarts A only: its tone falls to 0, C keeps its own. */
 	V.layerOn = 0x01u;
-	Tetrakt_triggerVoice(&V, 0u, 0u, 63u);
+	Tetrakt_triggerVoice(&V, 0u, 0u, 63u, 0u);
 	Tetrakt_calcVoiceAsync(&V);
 	Tetrakt_calcVoiceAsync(&V);   /* the fade block, then the START latch */
 	expect(G_VEL, V.layer[0].velo == 0.0f, "soft hit latches 0", V.layer[0].velo, 0);
@@ -951,8 +1055,34 @@ static void test_ring(void)
 	       V.tapL, TKT_RING);
 }
 
+/* S096 P3 T1: a trigger's layer mask overrides lon for that trigger only. */
+static void test_layers_override(void)
+{
+	uint32_t i;
+
+	voice_init();
+	V.layerOn = 0x05u;                 /* A and C in the patch */
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0x02u);   /* the note's layer B */
+	for (i = 0u; i < TKT_LAYERS; i++)
+		expect(G_TRIG, V.layer[i].stage == (i == 1u ? TKT_STAGE_START : TKT_STAGE_IDLE),
+		       "mask override layer state", i, V.layer[i].stage);
+	expect(G_TRIG, V.layerOn == 0x05u, "layerOn is not written", V.layerOn, 0x05u);
+
+	/* mask 0 falls back to lon */
+	voice_init();
+	V.layerOn = 0x05u;
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
+	for (i = 0u; i < TKT_LAYERS; i++) {
+		const int on = (i == 0u || i == 2u);
+
+		expect(G_TRIG, V.layer[i].stage == (on ? TKT_STAGE_START : TKT_STAGE_IDLE),
+		       "lon fallback layer state", i, V.layer[i].stage);
+	}
+}
+
 int main(void)
 {
+	test_a2q();
 	uint32_t i;
 	int rc = 0;
 
@@ -967,6 +1097,7 @@ int main(void)
 	}
 
 	test_trig();
+	test_layers_override();
 	test_dec();
 	test_tune();
 	test_srr();

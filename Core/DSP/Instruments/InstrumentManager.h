@@ -110,6 +110,35 @@ typedef enum {
      *             a leading part of the new list and is accepted.
      */
     INSTRUMENT_TYPE_TKT,
+    /*
+     * S099 P1: the Advanced Colloid (token "clx"), before UNKNOWN.
+     *
+     * What:       value 7; UNKNOWN moves from 7 to 8. The type runs the
+     *             Colloid engine (ColloidVoice, the same union member) and the
+     *             BBD chorus (BbdChorus.h) in one FxBuffer voice unit while
+     *             its cho row is not off; its registry row points at the
+     *             Colloid's descriptor table with 64 rows (the Colloid's 59,
+     *             then the five chorus rows).
+     * Why:        appended (the standing rule): no stored value changes
+     *             meaning; menu_instrumentLoadIndex[] (menu.c: +2 B .bss) and
+     *             every `type >= UNKNOWN` guard follow; a .hcnames header
+     *             written before the addition is a leading part of the new
+     *             list and is accepted. Engine-level code tests the engine
+     *             (instrumentManager_typeEngine(): clx -> col), not the type.
+     */
+    INSTRUMENT_TYPE_CLX,
+    /*
+     * S099 P1 (P-E): the Advanced Alkaline (token "alx"), before UNKNOWN.
+     *
+     * What:       value 8; UNKNOWN moves from 8 to 9. The type runs the
+     *             Alkaline engine (AlkalineVoice) and the BBD chorus in its
+     *             mono-in form (the Alpha Juno's own topology) with a 12 dB
+     *             wet, a BBD drive into a hard clip, a tone and a width; while
+     *             the chorus runs the slot is stereo (instrumentManager_
+     *             slotRight() returns the voice's right block).
+     * Why:        appended, as clx; menu_instrumentLoadIndex[] +2 B .bss.
+     */
+    INSTRUMENT_TYPE_ALX,
     INSTRUMENT_TYPE_UNKNOWN
 } instrument_type_t;
 
@@ -256,8 +285,52 @@ typedef enum {
      *             classifier.
      */
     IM_SPECIAL_LFO_SYNC,
+    /*
+     * S099 P1: the Advanced types' effect-type writer (S099 P2: the fx row,
+     *             Effect Type, was the chorus's cho row).
+     *
+     * What:       IM_SPECIAL_FX_TYPE = 24 (next after IM_SPECIAL_LFO_SYNC,
+     *             23); IM_SPECIAL_WRITER_COUNT becomes 25 (<= 32, the 5-bit
+     *             writer field, asserted below). The writer clamps the byte to
+     *             ADV_FX_COUNT - 1, stores it in the voice, makes the slot
+     *             own one FxBuffer voice unit while it is not off (none while
+     *             off), binds and clears the unit on a first bind, and
+     *             refreshes the slot's right-block pointer.
+     * Why:        the brief: the effect's 50 ms unit is held only while its
+     *             type is selected. The row is a selector that is neither
+     *             automatable, morphable nor a modulation target, so every
+     *             write comes from the foreground (FxBuffer's share callback
+     *             is foreground-only).
+     * Inputs:     slot, byte value (ADV_FX_*; larger values become the last).
+     * Outputs:    the voice's fxType and choUnit; the slot's units.
+     * Accessors:  instrumentManager_writeSpecialRuntime() switch.
+     * Affiliates: ADV_FX_* (below); the fx_type rows;
+     *             tools/dsp_test/check_special_tags.py; the diagnostic
+     *             classifier.
+     */
+    IM_SPECIAL_FX_TYPE,
     IM_SPECIAL_WRITER_COUNT
 } instrument_special_writer_t;
+
+/*
+ * The Advanced types' effect (S099 P2, user 2026-11-19).
+ *
+ * What:       the fx row (Effect Type, the first cell of the Advanced MIX
+ *             page's last screen: fx dpt rte mix): ADV_FX_OFF 0 (no unit, no
+ *             effect work), ADV_FX_CHORUS 1 (chr, the BBD chorus,
+ *             BbdChorus.h). dpt (Effect Depth), rte (Effect Rate) and mix
+ *             (Effect Mix) are the effect's three common rows; the chorus
+ *             reads dpt as its mode and depth (BBD_DPT_*).
+ * Why:        more effects may follow: each takes the next value and gives
+ *             the three rows its own meaning, and the screen stays the same
+ *             four cells on every Advanced type.
+ * Accessors:  instrumentManager_writeFxType(), instrumentManager_unitsWanted(),
+ *             the clx / alx async and sync cases; Colloid/AlkalineParameters.c
+ *             (the rows, the inactive cells); MenuText.h fxTypeNames.
+ */
+#define ADV_FX_OFF        0u
+#define ADV_FX_CHORUS     1u
+#define ADV_FX_COUNT      2u
 
 #define IM_SPECIAL_WRITER_MASK  0x1Fu
 #define IM_SPECIAL_OSC_MASK     0x60u
@@ -327,9 +400,15 @@ typedef struct {
 
 typedef struct {
     const char *file_key;
-    const char *short_name;
-    const char *long_name;
-    const char *category;
+    /*
+     * Display labels as indexes into the MenuText.h pools (S097 P1 item 2):
+     * menuLabel_short(short_id), menuLabel_long(long_id),
+     * menuLabel_cat(cat_id); ids are enum shortNamesEnum / longNamesEnum /
+     * catNamesEnum (menu.h). file_key stays the storage key.
+     */
+    uint8_t short_id;
+    uint8_t long_id;
+    uint8_t cat_id;
     uint8_t dtype;
     uint8_t flags;
     /*
@@ -362,8 +441,8 @@ typedef struct {
  */
 _Static_assert(sizeof(instrument_runtime_binding_t) == 6u,
                "instrument_runtime_binding_t must stay 6 bytes");
-_Static_assert(sizeof(ParamDescriptor) == 28u,
-               "ParamDescriptor must stay 28 bytes");
+_Static_assert(sizeof(ParamDescriptor) == 20u,
+               "ParamDescriptor must stay 20 bytes (S097 P1 item 2: 28 -> 20)");
 
 #define INSTRUMENT_MENU_EMPTY 0xffu
 #define INSTRUMENT_MENU_SKIP  0xfeu
@@ -747,6 +826,19 @@ void instrumentManager_clearAllRuntimeModulationTargets(void);
  */
 void instrumentManager_clearRuntimeModulationTargetsForSlot(uint8_t slot);
 /*
+ * Prepare the modulation graph for a Scene switch that changes some slots
+ * (S098 P1).
+ *
+ * Inputs: changed_slots (bit s = slot s is replaced), effect_changed.
+ * Output: the bindings the change makes stale are detached; returns the
+ * source mask the Scene worker's rebind must revisit (the changed slots plus
+ * every kept source whose binding points into one of them, or into the
+ * changed Effect). Kept sources with bindings inside kept slots are left
+ * running. Client: preset_startSceneSwitchApply().
+ */
+uint8_t instrumentManager_prepareModulationForSlotChange(uint8_t changed_slots,
+                                                         uint8_t effect_changed);
+/*
  * Quiet test for deferred Scene-slot replacement.
  *
  * Inputs: zero-based instrument slot. Output: nonzero when the slot has no
@@ -785,7 +877,17 @@ void instrumentManager_resetRuntimeSlot(uint8_t slot);
  */
 void instrumentManager_resetRuntimeSlotFromScene(uint8_t slot,
                                                  uint8_t scene_index);
-void instrumentManager_dispatchRuntimeLfos(void);
+/*
+ * S101 P2 A1: dispatch every slot LFO, stepping its phase by `steps` blocks
+ * (1 or 2: the staggered control runs every other block, so each run steps
+ * the blocks it owes and the rate stays exact); clears the dirty sources.
+ * instrumentManager_reapplyDirtyLfos(): on the block between, re-apply at
+ * its last value (no phase step) each source LFO whose descriptor target an
+ * ordinary write refreshed since its last dispatch, in slot order.
+ * Accessors: modNode_controlBlock().
+ */
+void instrumentManager_dispatchRuntimeLfos(uint8_t steps);
+void instrumentManager_reapplyDirtyLfos(void);
 void instrumentManager_recalcRuntimeLfoSync(void);
 void instrumentManager_retriggerRuntimeLfos(uint8_t trigger_track);
 void instrumentManager_recalcSlotFilter(uint8_t slot);
@@ -899,14 +1001,20 @@ void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
 /*
  * The slot's right output block, for a stereo engine (S095 P2, draft §5).
  *
- * What:       the Colloid's or the Tetrakt's (S096 P1) voice->right (32
- *             int16, written by its sync
- *             block in the same call that fills the mixer's left buffer), or
- *             NULL for every other type and for an empty slot.
+ * What:       the stereo voice's right block (32 int16, written by its
+ *             sync block in the same call that fills the mixer's left
+ *             buffer): the Colloid's and Advanced Colloid's voice->right, the
+ *             Tetrakt's (S096 P1), and (S099 P1, P-E) the Advanced
+ *             Alkaline's while its chorus runs; NULL for every other type, an
+ *             Advanced Alkaline with the chorus off, and an empty slot.
+ *             S099 P1: read from a per-slot pointer table set where the
+ *             runtime type or the chorus's unit changes
+ *             (instrumentManager_slotRightUpdate()).
  * Why:        the mixer renders one mono stack block per slot (sampleData);
  *             the right block lives inside the voice (the slot reserve), so a
  *             stereo voice costs no new RAM. noinline keeps the call out of
- *             mixer_calcNextSampleBlock()'s register allocation.
+ *             mixer_calcNextSampleBlock()'s register allocation; the table
+ *             read is shorter than the type tests it replaces.
  * Inputs:     slot 0..5. Outputs: a borrowed pointer valid until the next
  *             render of the slot, or NULL.
  * Accessors:  mixer_calcNextSampleBlock() (once per slot per block, after
@@ -977,8 +1085,16 @@ float instrumentManager_runtimeVolume(uint8_t slot);
  * every type, so the srt value is kept across chain changes).
  */
 uint8_t instrumentManager_slotUsesSrr(uint8_t slot);
+/*
+ * Trigger the instrument assigned to a visible track.
+ * Inputs: trigger_track 0..6, note (internal), velocity, reset (the
+ *   trigger's reset flag: 1 for a first hit, 0 for a roll retrigger) and
+ *   layers (a Tetrakt layer mask; 0 = the `lon` row, S096 P3). Output: one
+ *   engine trigger; a Colloid gets the track's step length and the gate.
+ */
 void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
-                                    uint8_t velocity);
+                                    uint8_t velocity, uint8_t reset,
+                                    uint8_t layers);
 
 /*
  * Arm a fast gain fade-out on a track's voice (S079 P2 fix 4).
@@ -1003,6 +1119,42 @@ void instrumentManager_requestGateDuck(uint8_t trigger_track);
  * 0.0..1.0. Affiliates: mixer_faderGains().
  */
 float instrumentManager_gateGain(uint8_t slot);
+
+/*
+ * Gate requests and hooks for engines with a note gate (S096 P3 C1).
+ *
+ * instrumentManager_requestGateRelease(track, brk): close the track's slot
+ *   gate at its next async; brk 1 also breaks the effective sustain (a
+ *   forced release). Context: TIM3 or foreground.
+ * instrumentManager_renewGate(track): a roll carried into a new step renews
+ *   a Colloid's gate by one step of the track. Foreground.
+ * instrumentManager_changeArm(track) / changeDecide(track): the Scene/track
+ *   change rule (plan §2.1 rule 6). Foreground, from
+ *   voiceControl_processPending() with seq_takeChangeMasks().
+ * instrumentManager_automationWritten(slot, descriptor, value): told of every
+ *   value the automation drain or a ramp writes; a Colloid's sus row with
+ *   value 1 marks the change decision's susSeen. Foreground.
+ * Only INSTRUMENT_TYPE_COL acts; every other slot type ignores the calls.
+ * The full description is the comment block in InstrumentManager.c.
+ */
+void instrumentManager_requestGateRelease(uint8_t trigger_track, uint8_t brk);
+void instrumentManager_renewGate(uint8_t trigger_track);
+void instrumentManager_changeArm(uint8_t trigger_track);
+void instrumentManager_changeDecide(uint8_t trigger_track);
+void instrumentManager_automationWritten(uint8_t slot,
+                                         const ParamDescriptor *descriptor,
+                                         instrument_param_value_t value);
+/*
+ * Set or clear one slot's MIDI Learn delta overlay (S096 P3 C4): a voice
+ * row's non-destructive pressure/note/velocity delta on top of its base.
+ * delta 0 frees it and restores the base. Returns the effective value.
+ * Full contract in InstrumentManager.c.
+ */
+uint8_t instrumentManager_deltaOverlaySet(uint8_t slot, uint8_t local,
+                                          int8_t delta);
+/* The paraphonic hold (S096 P3 C3): on a Colloid slot, sus holds with the
+** transport stopped while MIDI keys are down. Other types ignore it. */
+void instrumentManager_setMidiHold(uint8_t slot, uint8_t on);
 /*
  * Return the type that currently owns a slot's live tagged runtime member.
  *
@@ -1011,6 +1163,24 @@ float instrumentManager_gateGain(uint8_t slot);
  * field write while a deferred Scene replacement is still pending.
  */
 instrument_type_t instrumentManager_runtimeType(uint8_t slot);
+/*
+ * The engine behind a type (S099 P1).
+ *
+ * What:       the type whose engine (union member, entry points, engine
+ *             rules) a registry type runs: INSTRUMENT_TYPE_CLX -> COL (P-E:
+ *             ALX -> ALK); every other type is its own engine; UNKNOWN and
+ *             out-of-range values give UNKNOWN.
+ *             instrumentManager_runtimeEngine(slot) is the same for the slot's
+ *             live runtime type.
+ * Why:        the Advanced types run the Basic engines unchanged; code that
+ *             asks "is this a Colloid voice" (menu wave names, the MIDI
+ *             note modes, the engine branches in InstrumentManager.c) tests
+ *             the engine, and registry lookups keep the type.
+ * Accessors:  InstrumentManager.c; menu.c menu_formatWaveCell();
+ *             MidiNoteModes.c.
+ */
+instrument_type_t instrumentManager_typeEngine(instrument_type_t type);
+instrument_type_t instrumentManager_runtimeEngine(uint8_t slot);
 /*
  * Visit the two modulation destinations owned by every live runtime LFO.
  *

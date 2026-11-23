@@ -48,6 +48,7 @@
 #include "lfo.h"
 #include "distortion.h"
 #include "snapEg.h"
+#include "voiceSpace.h"   /* S101 P3: VoiceSpace (the Spc chain) */
 
 typedef struct CymbalStruct
 {
@@ -161,6 +162,24 @@ typedef struct CymbalStruct
 
 	SnapEg 		snapEg;
 
+
+	/*
+	 * The Spc chain's spatializer state (S101 P3).
+	 *
+	 * What:       the voice unit pointer, write position, tone pole state,
+	 *             the time/tone/level row bytes and the right output block
+	 *             (voiceSpace.h, 80 B).
+	 * Why:        the Spc chain (VOICE_CHAIN_SPACE) runs voiceSpace_process*()
+	 *             in place of the transient, the post-chain drive and the SRR;
+	 *             its unit is bound by the voice_chain writer
+	 *             (InstrumentManager.c) and its right block is the slot's
+	 *             right block while the unit is held.
+	 * Layout:     the last member, so every descriptor offset is unchanged;
+	 *             inside the slot reserve pinned at 1,264 B (S101 P3 §6.8).
+	 * Accessors:  the engine's init and sync render; InstrumentManager.c
+	 *             (instrumentManager_space()).
+	 */
+	VoiceSpace space;
 } CymbalVoice;
 
 /*

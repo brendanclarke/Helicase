@@ -19,6 +19,8 @@
 #ifndef MENUTEXT_H_
 #define MENUTEXT_H_
 
+#include <stdint.h>
+
 /* DTYPE_MENU stores its menu table id in the high nibble of one byte. Id 0 is
 ** valid and is reserved here for track scale so the new 21-entry scale menu can
 ** use the normal menu dtype path without widening the packed dtype table. */
@@ -67,10 +69,17 @@ static const char midiModes[][4] = {
 static const char quantisationNames[][4] = {
     {6}, {"off"}, {"8"}, {"16"}, {"32"}, {"64"}, {"trk"},
 };
+/*
+ * Transient list names (S087 P3; S101).
+ *
+ * S101: only the two generator modes are named here. The twelve built-in
+ * clicks (Clk Ck2 Tik Kik Rim Drp Hat Clp Kk2 Snr Tom Sp2) left the firmware
+ * and are card samples (samples/LXRClk.wav .. LXRSp2.wav), listed with the
+ * other installed one-shots as sNN from value 2 (TRANSIENT_USER_FIRST).
+ */
 static const char transientNames[][4] = {
-    {14},
-    {"Snp"},{"Ofs"},{"Clk"},{"Ck2"},{"Tik"},{"Kik"},{"Rim"},
-    {"Drp"},{"Hat"},{"Clp"},{"Kk2"},{"Snr"},{"Tom"},{"Sp2"},
+    {2},
+    {"Snp"},{"Ofs"},
 };
 static const char nextPatternNames[][4] = {
     {23},
@@ -220,8 +229,9 @@ static const char oscRunNames[][4] = {
  * Accessors:  menu_onoffTagNames() (menu.c).
  * Affiliates: VOICE_CHAIN_* (voiceFold.h).
  */
+/* S101 P3: Spc, the spatializer chain (voiceSpace.h). */
 static const char voiceChainNames[][4] = {
-    {2}, {"T+D"},{"WFd"},
+    {3}, {"T+D"},{"WFd"},{"Spc"},
 };
 /*
  * DTYPE_ON_OFF tag for the Alkaline type selector (S093 P8).
@@ -256,8 +266,7 @@ static const char alkTypeNames[][4] = {
  * wav; S094 P4: Tri, under wav and pwm).
  *
  * What:       [0] = count (3), then Saw, Sqr, Tri: ALK_WAVE_SAW 0,
- *             ALK_WAVE_SQUARE 1, ALK_WAVE_TRI 2, the same list under typ wav
- *             and pwm.
+ *             ALK_WAVE_SQUARE 1, ALK_WAVE_TRI 2, the list under typ wav.
  * Why:        an Alkaline slot's wave list; menu_formatWaveCell() names it
  *             and instrumentManager_waveDomainMax() limits the range to it.
  *             The count must equal ALK_WAVE_COUNT (asserted in menu.c).
@@ -267,14 +276,30 @@ static const char alkWaveNames[][4] = {
     {3}, {"Saw"},{"Sqr"},{"Tri"},
 };
 /*
+ * Alkaline pwm waveform names (S099 P1).
+ *
+ * What:       [0] = count (4), then Saw, Sqr, Tri, R-S: ALK_WAVE_SAW 0 ..
+ *             ALK_WAVE_RS 3 under typ pwm (S099 P2: REx dropped).
+ * Why:        under pwm the list has the two chopped waves as well (D-1: pwm
+ *             only); menu_formatWaveCell() names it and
+ *             instrumentManager_waveDomainMax() limits the range to it. The
+ *             count must equal ALK_PWM_WAVE_COUNT (asserted in menu.c).
+ * Accessors:  menu_formatWaveCell() (menu.c).
+ */
+static const char alkPwmWaveNames[][4] = {
+    {4}, {"Saw"},{"Sqr"},{"Tri"},{"R-S"},
+};
+/*
  * DTYPE_ON_OFF tags for the Colloid's selectors (S095 P2; S095 P3 F9).
  *
  * What:       ONOFF_TAG_COL_ROUTE 5 (rte, colRouteNames),
- *             ONOFF_TAG_COL_FILT_TYPE 6 (typ, colFiltTypeNames). The rows'
- *             dtype byte is DTYPE_ON_OFF | (tag << 4). Tags 1-3 stay
- *             (osc1_run, voice_chain, the Alkaline/Colloid typ); 4, 7 and
- *             8-15 free (S095 P3 removed P2's int (4) and pmd (7) lists; 5 was
- *             fmd's and now names the route).
+ *             ONOFF_TAG_COL_FILT_TYPE 6 (typ, colFiltTypeNames),
+ *             ONOFF_TAG_COL_TYPE 8 (the Colloid's osc1_type, colTypeNames).
+ *             The rows' dtype byte is DTYPE_ON_OFF | (tag << 4). Tags 1-3
+ *             stay (osc1_run, voice_chain, the Alkaline typ), tag 7 is the
+ *             Tetrakt's layers; 4 and 9-15 are free (S095 P3 removed P2's
+ *             int (4) and pmd (7) lists; 5 was fmd's and now names the
+ *             route; 8 was free until S096 P3).
  * Why:        every DTYPE_MENU id is taken (S078); menu.c resolves the name
  *             table per tag in menu_onoffTagNames(), so display, clamp,
  *             automation range and the step-edit line follow the count.
@@ -285,6 +310,7 @@ static const char alkWaveNames[][4] = {
  */
 #define ONOFF_TAG_COL_ROUTE        5u
 #define ONOFF_TAG_COL_FILT_TYPE    6u
+#define ONOFF_TAG_COL_TYPE         8u
 /*
  * The Tetrakt's layer switch (S096 P1, plan §4.3).
  *
@@ -313,9 +339,8 @@ static const char alkWaveNames[][4] = {
  *                    appended in S096 P2 F3). colRouteNames: str, then the
  *                    same seven as the mono route's second filter.
  * colWaveNames       the osc1_wave cell under typ wav: Saw Rec Tri Sin
- *                    (COL_WAVE_*); under pwm the cell takes the shared pwm
- *                    branch (waveformNames: Sin Tri Saw Rec, S095 P3 F2;
- *                    menu_formatWaveCell()).
+ *                    (COL_WAVE_*); under pwm the cell takes the Colloid's
+ *                    own pwm list (colPwmWaveNames, S099 P1).
  */
 static const char colRouteNames[][4] = {
     {8}, {"str"},{"LP "},{"BP "},{"HP "},{"Nch"},{"Pek"},{"UBP"},{"off"},
@@ -327,6 +352,39 @@ static const char colWaveNames[][4] = {
     {4}, {"Saw"},{"Rec"},{"Tri"},{"Sin"},
 };
 /*
+ * The Colloid's pwm wave names (S099 P1).
+ *
+ * What:       [0] = count (4), then Tri, Saw, Rec (the platform's pwm list
+ *             and order), R-S (the chopped saw): COL_PWM_TRI .. COL_PWM_RS
+ *             (S099 P1 §15.10: Sin dropped, the values collapsed down; S099
+ *             P2: REx dropped).
+ * Why:        the shared pwm branch of menu_formatWaveCell() names the drum
+ *             engines' three from waveformNames, which ends at Noi; the
+ *             Colloid's extra wave needs its own list. The count must
+ *             equal COL_PWM_WAVE_COUNT (asserted in menu.c).
+ * Accessors:  menu_formatWaveCell() (menu.c).
+ */
+static const char colPwmWaveNames[][4] = {
+    {4}, {"Tri"},{"Saw"},{"Rec"},{"R-S"},
+};
+/*
+ * The Colloid's typ selector (S096 P3 C2c, plan §3.5).
+ *
+ * What:       ONOFF_TAG_COL_TYPE 8 (the first of the free 8..15, MenuText.h
+ *             l. 275-277); colTypeNames [0] = count (4), then wav, wtb, pwm,
+ *             wts: the Colloid typ byte 0..3 (COL_TYP_*). wts is the
+ *             wavetable scan: the frame follows pos every block and is always
+ *             interpolated between the two neighbouring frames.
+ * Why:        the Colloid no longer shares the Alkaline's typ list
+ *             (ONOFF_TAG_ALK_TYPE keeps wav wtb pwm, ALK_TYP_COUNT 3).
+ * Accessors:  ColloidParameters.c (osc1_type row); menu.c
+ *             menu_onoffTagNames().
+ * Affiliates: COL_TYP_COUNT (ColloidVoice.h), asserted in menu.c.
+ */
+static const char colTypeNames[][4] = {
+    {4}, {"wav"},{"wtb"},{"pwm"},{"wts"},
+};
+/*
  * The Tetrakt's layer-switch names (S096 P1, plan §4.3). [0] = count, then
  * the 16 masks in value order (bit 0 = A .. bit 3 = D): the letters of the
  * layers that a trigger restarts; "---" none, "all" every layer. Every name
@@ -335,6 +393,36 @@ static const char colWaveNames[][4] = {
 static const char tktLayerNames[][4] = {
     {16}, {"---"},{"A  "},{"B  "},{"AB "},{"C  "},{"AC "},{"BC "},{"ABC"},
           {"D  "},{"AD "},{"BD "},{"ABD"},{"CD "},{"ACD"},{"BCD"},{"all"},
+};
+/*
+ * The DTYPE_ON_OFF tag of the Advanced types' effect (S099 P1; S099 P2: tag 9
+ * is the fx row's; tag 10, the chorus's csr, was removed with the row).
+ *
+ * What:       ONOFF_TAG_FX_TYPE 9 (fx, fxTypeNames). The row's dtype byte is
+ *             DTYPE_ON_OFF | (tag << 4). Tags 1-3, 5-8 stay; 4 and 10-15 are
+ *             free.
+ * Why:        every DTYPE_MENU id is taken (S078); menu_onoffTagNames()
+ *             resolves the table per tag, so display, clamp, automation range
+ *             and the step-edit line follow the count.
+ * Accessors:  ColloidParameters.c, AlkalineParameters.c (the fx rows);
+ *             menu.c menu_onoffTagNames().
+ * Affiliates: ADV_FX_COUNT (InstrumentManager.h): asserted in menu.c.
+ */
+#define ONOFF_TAG_FX_TYPE          9u
+/*
+ * The effect and chorus name tables (S099 P1; S099 P2). [0] = count, then
+ * 3-character names.
+ * fxTypeNames  fx: off, chr (the BBD chorus); ADV_FX_* (S099 P2: was the
+ *               chorus's cho list, off I II 1+2 var dbl; the Juno modes, var
+ *               and dbl are now the chorus's dpt values, fxDepthNames).
+ * fxDepthNames dpt 0..2 under chr: I, II, 1+2 (BBD_DPT_I .. BBD_DPT_I_II);
+ *               3..127 display the number.
+ */
+static const char fxTypeNames[][4] = {
+    {2}, {"off"},{"chr"},
+};
+static const char fxDepthNames[][4] = {
+    {3}, {"I  "},{"II "},{"1+2"},
 };
 /*
  * Wavefolder type names: the wav cell under WFd (S089 P2).
@@ -358,7 +446,7 @@ static const char foldTypeLongNames[][9] = {
 static const char outputNames[][7] = {
     {6}, {"St1"},{"St2"},{"L1"},{"R1"},{"L2"},{"R2"},
 };
-static const char filterTypes[][8] = {
+static const char filterTypes[][4] = {
     {8}, {"LP"},{"HP"},{"BP"},{"UBP"},{"Nch"},{"Pek"},{"LP2"},{"off"},
 };
 /*
@@ -369,121 +457,28 @@ static const char filterTypes[][8] = {
 static const char midiRoutingNames[][6] = {
     {8}, {"off"},{"UtD"},{"DtD"},{"DtU"},{"bth"},{"DtA"},{"AtD"},{"all"},
 };
-static const char midiFilterNames[][16] = {
+static const char midiFilterNames[][4] = {
     {16},
     {"off"},{"N"},{"R"},{"RN"},{"C"},{"CN"},{"CR"},{"CRN"},
     {"P"},{"PN"},{"PR"},{"PRN"},{"PC"},{"PCN"},{"PCR"},{"all"},
 };
-static const char shortNames[][4] = {
-    {""}, {"coa"},{"fin"},{"atk"},{"dec"},{"eg2"},{"mod"},{"amt"},
-    {"frq"},{"drv"},{"vol"},{"pan"},{"noi"},{"rpt"},{"mix"},
-    {"res"},{"typ"},{"f1"},{"f2"},{"g1"},{"g2"},{"wav"},{"dst"},
-    {"snc"},{"rtg"},{"ofs"},{"voi"},{"slp"},{"d1"},{"d2"},
-    {"eqg"},{"eqf"},
-    {"rol"},{"mrp"},{"nte"},{"prb"},{"stp"},{"len"},{"rot"},
-    {"bpm"},{"ch"},{"out"},{"fxm"},{"nxt"},{"mod"},{"vel"},
-    /* TEXT_AUTOMATION_TRACK reused as the S081 rtk recording-track cell. */
-    {"fch"},{"flw"},{"qnt"},{"rtk"},{"val"},{"shu"},{"ssv"},
-    {"x"},{"y"},{"flx"},{"mid"},{"mrt"},{"txf"},{"rxf"},
-    {"cki"},{"co1"},{"co2"},{"pcr"},{"cpu"},{"oit"},{"sca"},
-    /* PERF per-voice Morph compact labels: voice number + "vm". */
-    {"1vm"},{"2vm"},{"3vm"},{"4vm"},{"5vm"},{"6vm"},
-    /* Read-only Pattern pool-use widget label. */
-    {"pts"},
-    /* Requested short label for the persistent Global AutoSave switch. */
-    {"ats"},
-    /* S074 bus compressor compact labels. */
-    {"cmp"},{"cam"},{"ctm"},{"csc"},{"cgr"},
-    /*
-     * S078 per-track run mode compact label (S078 P4: renamed from `mod`).
-     * `run` matches the FX sequencer's run-mode cell (menuEffects.c), so the
-     * same concept reads the same on the Effect page and the STEP track
-     * settings. Accessor: valueNames[TEXT_TRACK_PLAY_MODE] (menu.c).
-     */
-    {"run"},
-    /* S079 step-special compact labels: cdn/tim/rol/rtm/rfl (fix 2, P2). */
-    {"cdn"},{"tim"},{"rol"},{"rtm"},{"rfl"},
-    /* S080 E4/G10: BAR overlay, scene globals, and chain labels. The S080 F2
-     * duplicate "pcr" was removed in S080 P2 (Defect 5); index 63 above is the
-     * only pcr label. */
-    {"pb<"},{"pn<"},{"pb>"},{"pn>"},
-    {"scd"},{"qcd"},{"qac"},
-    {"cn1"},{"nx1"},{"cn2"},{"nx2"},
-    /* S080 P2 Defect 8a: per-track loopable. */
-    {"lop"},
-    /* S081 P2: per-track automation ramp; label `rmp` since the S083
-     * follow-up (user 2026-10-22; was `asm`). */
-    {"rmp"},
-    /* S083 follow-up: overlay roll velocity rhythm. */
-    {"pv<"},{"pv>"},
-};
+/*
+ * Short, category and long name pools (S097 P1 item 2).
+ *
+ * What: the three label pools are defined once in MenuLabels.c and indexed by
+ * enum shortNamesEnum / catNamesEnum / longNamesEnum (menu.h): by valueNames
+ * for static cells, and by ParamDescriptor.short_id / cat_id / long_id for
+ * instrument and effect rows. Why: one copy of each label, and 1-byte
+ * descriptor fields instead of three pointers (row 28 -> 20 B).
+ * Accessors: menuLabel_short(), menuLabel_cat(), menuLabel_long().
+ */
+extern const char shortNames[][4];
+extern const char catNames[][9];
+extern const char longNames[][10];
 
-static const char catNames[][16] = {
-    {""}, {"Oscilltr"},{"Veloc EG"},{"Mod EG"},{"PitchMod"},
-    {"FM"},{"Voice"},{"Noise"},{"Nois/Osc"},{"Filter"},
-    {"Mod Osc"},{"LFO"},{"Transnt"},{"EQ"},
-    {"Pattern"},{"Sound"},{"Step"},{"Euklid"},
-    {"Global"},{"Velocity"},{"Parametr"},{"Sequencr"},
-    {"Generatr"},{"MIDI"},{"Trigger"},
-    /* S074: CAT_SCENE, the full-view category of Scene-owned cells. */
-    {"Scene"},
-    /*
-     * S078 P4: CAT_TRACK, the full-view category of per-track Pattern
-     * settings. The clicked-in view of the STEP run-mode cell reads
-     * "Track   RunMode", in parallel with the FX sequencer's
-     * "FX Seq  RunMode". Accessor: valueNames[TEXT_TRACK_PLAY_MODE].
-     */
-    {"Track"},
-    /* S080 E4: BAR overlay settings category. */
-    {"Prfrmnc"},
-    /* S080 G10: scene chain settings category. */
-    {"Chain"},
-    /* S083 follow-up (user 2026-10-22): CAT_AUTOMATION for the track
-     * automation ramp cell `rmp` ("Automtn  Ramp"). */
-    {"Automtn"},
-};
-
-static const char longNames[][16] = {
-    {""}, {"Coarse"},{"Fine"},{"Attack"},{"Decay"},{"Amount"},
-    {"Frequncy"},{"Overdriv"},{"Volume"},{"Panning"},{"Mix"},
-    {"RepeatCt"},{"Resnance"},{"Type"},{"Gain"},{"Waveform"},
-    {"DstParam"},{"ClockSnc"},{"Retriggr"},{"Offset"},
-    {"DstVoice"},{"Slope"},{"Dcy Clsd"},{"Dcy Open"},
-    {"RollRate"},{"Morph"},{"Note"},{"Prbablty"},{"Number"},
-    {"Length"},{"Steps"},{"Rotation"},{"Tempo"},{"SyncInpt"},
-    {"AudioOut"},{"Channel"},{"FX Morph"},{"NextPatt"},{"Phase"},{"Mode"},
-    {"Vol mod"},{"Fetch"},{"Follow"},{"Quantize"},{"RecTrk"},
-    {"Aut Dest"},{"AutValue"},{"Shuffle"},{"Screensv"},
-    {"X Positn"},{"Y Positn"},{"Flux"},{"Velocity"},
-    {"Freqcy 1"},{"Freqcy 2"},{"Gain 1"},{"Gain 2"},
-    {"Routing"},{"TxFilter"},{"RxFilter"},
-    {"In PPQ"},{"Out1 PPQ"},{"Out2 PPQ"},{"Gate Mode"},{"PCReset"},
-    {"CPU use time"},{"OscIntrp"},{"Scale"},
-    /* Single-parameter long names for PERF per-voice Morph controls. */
-    {"1 Morph"},{"2 Morph"},{"3 Morph"},{"4 Morph"},{"5 Morph"},{"6 Morph"},
-    /* Read-only Pattern pool-use widget title; fits the 15-visible-char field. */
-    {"PtrnStoreUse"},
-    /* Requested long label; valueNames assigns it to category Global. */
-    {"AutoSave"},
-    /* S074 bus compressor long names. */
-    {"BusComp"},{"CompAmt"},{"CompTime"},{"CompSC"},{"CompGR"},
-    /* S078 per-track run mode long name (S078 P4: renamed from PlayMode to
-     * match the FX sequencer's RunMode). */
-    {"RunMode"},
-    /* S079 step-special long names (fix 2: Conditin, % Delay; P2: Rhythm). */
-    {"Conditin"},{"% Delay"},{"RollRate"},{"Rhythm"},{"RollFill"},
-    /* S080 E4/F4/G10: overlay, scene-global, and chain long names. */
-    {"BtnStat<"},{"BtnNote<"},{"BtnStat>"},{"BtnNote>"},
-    {"ChngDiv"},{"QueDiv"},{"QueActn"},
-    {"Conditn1"},{"NxtScn1"},{"Conditn2"},{"NxtScn2"},
-    /* S080 P2 Defect 8a. */
-    {"Loopable"},
-    /* S081 P2; "Ramp" since the S083 follow-up (was "Automtn", which is
-     * now the cell's category). */
-    {"Ramp"},
-    /* S083 follow-up: overlay roll velocity rhythm (Prfrmnc Rhythm</>). */
-    {"Rhythm<"},{"Rhythm>"},
-};
+static inline const char *menuLabel_short(uint8_t id) { return shortNames[id]; }
+static inline const char *menuLabel_cat(uint8_t id)   { return catNames[id]; }
+static inline const char *menuLabel_long(uint8_t id)  { return longNames[id]; }
 
 /*
  * Trigger condition display names (S079 §3; fix 3 extends to track 7;

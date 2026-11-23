@@ -3,6 +3,9 @@
 This file is the working memory for Codex/Claude Code/LLM Agent sessions on this project.
 Read it fully at the start of every session before touching any code.
 Do not append session history or resolved-issue narrative to this file; those belong in `knowledge_files/log_archive/`.
+Do not use `.claude` auto-memory. Project context lives in the root `MEMORY.md`. 
+The agent working notes are `knowledge_files/volatile/memory/VOLATILE_MEMORY.md`.
+Never create a file named `MEMORY.md` in any subdirectory.
 
 ## Document edits (user, S093, binding)
 
@@ -68,8 +71,14 @@ is in the referenced session logs and specification documents.
   `seq_rampService` must not change. `PATTERN_DYNAMIC_STACK.md` §6.1.
 - **Automation ramps (S081 P2):** held-bit writes, priority applies; end at
   next played step and every position break; never cross a loop wrap.
-- **FX sequence = master clock (user, S081):** Scene change keeps FX aligned
-  via `seq_fxRealignToMasterClock()`, never `seq_fxPublishReset()`.
+- **Scene switch = per-track identity (S098 P1):** a whole-Scene change
+  compares per track: identical tracks/slots only change the Scene index;
+  changed ones get the per-track reset, realign and voice apply. The Effect
+  is rebound when identical (FX clock kept), activated when changed.
+- **FX sequence = master clock (user, S081; S098 P1):** a Scene change with
+  an identical Effect keeps the FX clock (rebind, no realign); a changed
+  Effect realigns via `seq_fxRealignToMasterClock()`. Never
+  `seq_fxPublishReset()`.
 - **Per-track timing (S078):** read only `seq_effectiveTrack*[]`; never write
   the Pattern region from Morph/automation. DDA seed `interval − 256`;
   shuffle stored `delay − 1`. `PATTERN_DYNAMIC_STACK.md` §6.4.
@@ -102,6 +111,15 @@ interaction) and §11 (invariants). Internal engine maths:
   `EFFECTS_MODULES_DSP_REFERENCE.md` §6 (DSP and sub-type detail) and §6.2
   (binding rules: sub-type dispatch, lane maps, labels hook, dly delay time
   table, grn model, fin row, 170-cap, runtime 100 B, 24 rows, CB1–CB23).
+- **Space effects (S095 P1/P4):** Delay, Reverb, Echo in the Space group.
+  IDs: OFF 0, CrumpBit 1, Delay 2, Reverb 3, Echo 4 (`EFFECT_TYPE_COUNT` 5).
+  StereoFilter removed in P4. Arena prefix 512 B (`SK_PREFIX_BYTES`): 64 B
+  `sk_ctl_t` control block + 448 B type state header. Feed-through on type
+  change (`sk_feedBegin`/`sk_feedRead`); drain into OFF at −80 dBFS or 6 s.
+  Slot lock during feed, charged to Advanced budget. Shared parameter table
+  in `SpaceParameters.c`. Full reference:
+  `SPACE_GROUP_EFFECTS_MODELLING_REFERENCE.md` and
+  `SPACE_GROUP_EFFECTS_MODULE_REFERENCE.md`.
 - **R13, Effect page, invariants:** `EFFECTS_BUS_REFERENCE.md` §6 (R13
   resolution), §8 (Effect page), §9 (invariants).
 
@@ -109,8 +127,17 @@ interaction) and §11 (invariants). Internal engine maths:
 
 Full specification: `MENU_UI_SPEC.md` (page system, dtype, LCD, buttons,
 LEDs, endless pots, Morph views, automation underline search, Active Scene
-rule). Effect page and R13: `EFFECTS_BUS_REFERENCE.md` §6, §8. PERF surface
-and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
+rule, Advanced instrument pages §2.1.4, step editing §2.1.5). Effect page
+and R13: `EFFECTS_BUS_REFERENCE.md` §6, §8. PERF surface and latched menus:
+`PERFORMANCE_RECORD_SPEC.md` §1, §5.
+
+- **Advanced effect page (S099 P2):** `fx` / `dpt` / `rte` / `mix` on
+  page 4 (5th SELECT click). Keys `fx_type`, `fx_depth`, `fx_rate`,
+  `fx_mix`. `DTYPE_0B127_FX_DEPTH` tagged dtype: 0–2 = Juno I/II/1+2
+  modes, 3–127 = variable→doubler. Old `chorus_*` keys no longer load.
+- **Step edit (S099 P2):** screen order vel/nte/tim/fil then cdn/rol/rtm.
+  `rfl` renamed `fil`. VOICE SHIFT+step opens step edit with cursor
+  save/restore (`bh_voiceStepEdit`); held steps flash.
 
 ### Scene / Bank
 
@@ -125,9 +152,12 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   `preset_getSlotPlayedScene()`. LFO/velocity resolve through active Scene.
 - **Background .hcnames (S077):** must not raise `menu_storageBusy`; use
   `menu_residentNameDeferredFlushComplete()`.
-- **pat_background_region (S077):** 10,528 B, three non-concurrent uses
-  (AutoSave snapshot, overlap paste, Scene 17 Pattern);
+- **pat_background_region (S077; S098 P2):** 10,528 B, three non-concurrent
+  uses (AutoSave snapshot, overlap paste, Scene 17 Pattern). Scene 17 now
+  also serves Scene and Pattern Loads (not just Bank Loads).
   `filesystem_patternSnapshotInUse()` gates.
+- **Scene 17 LED (S098 T3):** `LED_MODE4` fast-blinks whenever Scene 17
+  exists, in every mode (same slot as the unlocked Bank Load blink).
 - **Parameter mirrors (S080):** `PAR_CHAIN_*` / `PAR_TRACK_LOOPABLE` after
   Globals; commit in `menu_cellCommitValue()`, not `menu_parseGlobalParam()`.
 
@@ -191,9 +221,21 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   polls per pass.
 - **AutoSave (S074):** validators probe exact length; AsyncFATFS stores
   cluster-rounded size while open; self-recovering failures → trace only.
-- **Bus compressor (S074):** St1 (panel) = `output2` = DAC1; St2 (panel) =
-  `output` = DAC2. Settings page last (`MENU_GLOBAL_SCENE_SUBPAGE` 3, `+`);
-  `PAR_BUS_COMP_*` never commit through `menu_parseGlobalParam()`.
+- **AutoSave trace rule §0 (S099 P3, binding, permanent):** diagnostics
+  must NEVER take priority over core system functions (AutoSave,
+  settings/MIDI Learn/HCNAMES, Load/Save, audio, sequencer, UI). Six
+  sub-rules: last in queue; never block/delay/reorder core work; logging
+  build = release for core functions; review every new diagnostic; core
+  persistence designed against 5 s deadline; diagnostic must not start while
+  core work is pending. `DEV_MODES.md` has the full text.
+- **Bus compressor (S074; S095 P4 retune):** St1 (panel) = `output2` = DAC1;
+  St2 (panel) = `output` = DAC2. Settings page last
+  (`MENU_GLOBAL_SCENE_SUBPAGE` 3, `+`); `PAR_BUS_COMP_*` never commit
+  through `menu_parseGlobalParam()`. S095 P4: threshold `−8 − 32a` dBFS
+  (was `−3 − 27a`), makeup ref −20 dBFS (was −12), filter drive floor
+  `1.0 + 5.4x²` (was `0.4 + 6x²`), half makeup on voice distortion
+  (`distortion_makeup[128]`, 512 B flash), live GR readout (+8 B SRAM1).
+  `MIXER_SYSTEM_DSP_REFERENCE.md` §4.
 - **Blank names:** `none.drm`/`none.fx`; empty stem → `inst`.
 - **One pan rule (S075):** 0..127, display − 63 (`DTYPE_PM63`), stored 63 =
   centre. Stereo/mono laws may differ; display and default must match.
@@ -229,15 +271,19 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   per sample, 3 VDIV (`093_SESSION_HANDOFF_LOG.md` §4, `CPU_USE_DSP_AUDIT.md`
   item 71); the per-block count tool is `tools/alkaline/control_cost.py`.
   `ALKALINE_MODULE_REFERENCE.md` §5.
-- **Alkaline (S093 P4/P6/S094, binding):** the voice is `AlkalineVoice`
-  (560 B after S094; +12 B for `otaIn`, `toneC`, `toneZ`) in the fifth
+- **Alkaline (S093 P4/P6/S094/S099, binding):** the voice is
+  `AlkalineVoice` (640 B after S099; was 564 before chorus) in the fifth
   tagged slot; Basic. Its oscillator is a **table wave**: `sawTable`,
   `alkSqrTable[octave]` for `alk_wave` 1, or `alkTriTable` for `alk_wave` 2
-  (S094 P4; `ALK_WAVE_COUNT` 3), set with `osc_setTableFreq()` — **never**
-  `osc_setFreq()`. The oscillator read is fused into the B2R loop
-  (`DiodeLadder_renderB2Osc`, bit-identical, AL-X; `ALK_FUSED_OSC 1`).
-  `ALK_TYP_PWM 2u` (S094 P1 S5): fused mode 3, `DiodeLadder_renderB2OscPwm()`,
-  read form 2, 204 instructions; `ALK_TYP_COUNT` 3. `ALK_NET_STATES` is
+  (S094 P4; `ALK_WAVE_COUNT` 3→4 with R-S at index 3, S099), set with
+  `osc_setTableFreq()` — **never** `osc_setFreq()`. The oscillator read is
+  fused into the B2R loop (`DiodeLadder_renderB2Osc`, bit-identical, AL-X;
+  `ALK_FUSED_OSC 1`). `ALK_TYP_PWM 2u` (S094 P1 S5): fused mode 3,
+  `DiodeLadder_renderB2OscPwm()`, read form 2, 204 instructions;
+  `ALK_TYP_COUNT` 3→4 (R-S mode 5, 262.8 per sample, S099).
+  S099 P1: R-S chopped PWM wave added; Advanced Alkaline (`alx`) adds
+  BBD chorus (full-rate wet, mono-in stereo-out). 35 descriptor rows (alx;
+  28 Basic + 4 fx rows + 3 base rows). `ALK_NET_STATES` is
   **6** on one balanced basis common to every Res point (r6) at 64 samples;
   any model change regenerates the tables (`tools/alkaline/gen_alk_tables.py`)
   and re-checks P3 §9.3. A switchable sample/wavetable Alkaline oscillator
@@ -251,6 +297,38 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   `instrument_drive` and 30 `alk_tone` appended (30 total). Mix page:
   vol pan ton drv. Post-filter overdrive: `OVD_OCT` 5.0, `OVD_MAKEUP_OCT`
   −2.5. Accepted worst case ≈263.7 per sample (no slot).
+- **Colloid (S095 P2/P3, S096 P2/P3, S099 P1/P2, binding):** 6th
+  instrument type, Basic class. Token `col`, extension `.col`, folder
+  `/Instrument/Colloid/`. 10 oscillators for wav/wtb (was 12 before S096
+  B1-B6), 6 for pwm/wts/nos. Division-free TPT SVF
+  (LP/BP/HP/Notch/UBP/off). Mid/side stereo. Three ADSR envelopes
+  (amplitude, filter, pitch). 1,224 B voice struct (was 1,236 before S099;
+  1,112 before S096). 63 descriptors (Basic; was 59 before S099), 8 pages.
+  S096 added: C1 real note gate, C2a pitch envelope (±24 semitones), C2b
+  noise source (hardware RNG, one-pole HP + TPT SVF), C2c wavetable scan
+  (`wts`, COL_SCAN_COUNT 6), UBP/off filter types, filter envelope range
+  widened. S099 P1: R-S chopped PWM wave added (mode 5; Alpha Juno ramp
+  chopped by band-limited pulse at +1 octave); Sin wave removed from PWM
+  (`oscPwmDRec` DP ratio 0.44 → 0.39 %); `col_chopPairAdd()` placed in
+  ITCM (`.itcm.s099p1`, 306 B); amp-attack minimum removed. S099 P2:
+  Advanced Colloid (`clx`) adds 4 fx rows (63 total). BBD chorus on
+  Advanced (half-rate wet, `BBD_COL_HALF_RATE`). ITCM: pair-loop readers
+  in `.itcm.s095p2`, 4 PWM warp loops in `.itcm.s095p3`, noise loop in
+  `.itcm.s096p3`, chop pair in `.itcm.s099p1`. Full reference:
+  `COLLOID_MODELLING_REFERENCE.md` and `COLLOID_MODULE_REFERENCE.md`.
+- **Tetrakt (S096 P1, binding):** 7th instrument type, Basic class.
+  Token `tkt`, extension `.tkt`, folder `/Instrument/Tetrakt/`. Four-layer
+  sample player. Layer chain: read → decay × velocity → drive → SRR → tone
+  (2-pole bipolar SVF) → level → pan/send. `lon` layer switch (one 4-bit
+  row, 16 named stops). Fused sample read (§19): each layer's sample read
+  folded into post loop, −44 instructions/sample, 0 B ITCM. Space stage:
+  S1 (50 ms delay line, one FxBuffer voice unit) + W2 (envelope-derived
+  allpass width). R1 fade-then-start retrigger (IDLE/PLAY/FADE/START).
+  1,064 B voice struct. 64 descriptors, 8 pages. Full reference:
+  `TETRAKT_MODELLING_REFERENCE.md` and `TETRAKT_MODULE_REFERENCE.md`.
+- **Sine table 1,024 points (S095 P2, binding):** reduced from 4,096.
+  Readers >> 22, fraction mask 0x3fffff. All existing readers updated.
+  −6,144 B flash.
 - **Alkaline knob vs feedback (S093 P6, binding):** the C side takes the Res
   **knob** (0..1); the model and SPICE take the effective feedback
   `k_eff = ALK_RES_KMAX x knob` (`ALK_RES_KMAX` 1.5, a wiper transformer
@@ -273,12 +351,14 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
 - **Drum FM ramp twins (S089 P3):** `osc_renderTypedFmRamp()` dispatches
   ramped FM copies for `slp`/`smp`/`wtb` in Drum `fm` only. Stock carriers
   keep the S088 pass. Originals are untouched (Cymbal/HiHat still use them).
-  ITCM **13,984** / 16,384 B after S094 (was 12,128 at S093 P8; crash
-  removal −≈540 B, PWM 15 loops in `.itcm.s094p1` +≈2,400 B).
+  ITCM **15,432** / 16,384 B after S099 (was 15,976 at S096; S099:
+  `.itcm.s099p1` +306 B for `col_chopPairAdd()`, Sin removal freed 856 B;
+  net −528 B from S096; headroom **952 B**).
 - **ITCM subsection order (S089):** linker script pins `.itcm.s089` then
-  `.itcm.s089p3` then `.itcm.s094p1`. New ITCM code goes in a new
-  `.itcm.sNNN` subsection after the last one. Never edit an existing ITCM
-  function's section attribute.
+  `.itcm.s089p3` then `.itcm.s094p1` then `.itcm.s095p2` then
+  `.itcm.s095p3` then `.itcm.s096p3` then `.itcm.s099p1`. New ITCM code
+  goes in a new `.itcm.sNNN` subsection after the last one. Never edit an
+  existing ITCM function's section attribute.
 - **Oscillator run modes (S088, `osc1_run`):** `rst` must stay bit-identical.
   `fre` never resets the carrier phase; `itp` resets it and crossfades the
   old carrier (`OscCarrierSnapshot`, 28 B) for 132 samples, rendered plain
@@ -304,25 +384,33 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   Savings: Drum/Snare −3, Cymbal/HiHat −6 per sample; ITCM −≈540 B;
   flash −32,769 B. Files saved at S093 that selected entry v ≥ 7 now
   play entry v − 1. No migration.
-- **PWM oscillator type (S094 P1 S3):** `OSC_TYPE_PWM` 4u on Drum, Snare,
-  Cymbal, HiHat. Hybrid: phase warp (W) for Sin/Tri, two-read (D) for
-  Saw/Rec. Integer Q15/Q14 interpolation. `OSC_BIND_PWM` 3,
+- **PWM oscillator type (S094 P1 S3; S099 P1):** `OSC_TYPE_PWM` 4u on
+  Drum, Snare, Cymbal, HiHat. Hybrid: phase warp (W) for Tri, two-read (D)
+  for Saw/Rec. Integer Q15/Q14 interpolation. `OSC_BIND_PWM` 3,
   `OSC_TYPE_MODLIST` 5 (never stored). Position law (S094 P4): pos 0 = 50 %
   (unmodified wave), pos 127 = narrowest. 128 widths from position-indexed
-  tables.
+  tables. S099: Sin removed from Colloid PWM; R-S chop added to Colloid
+  (mode 5) and Alkaline (mode 5, `ALK_PWM_WAVE_COUNT` 4). Colloid
+  `COL_PWM_WAVE_COUNT` 4 (Tri/Saw/Rec/R-S).
 - **LFO sync and rate table (S094 P1 S1):** `IM_SPECIAL_LFO_SYNC`
   (writer 23, count 24). `lfoRateHz[128]`: frq 0 = stopped, 1 = 100 s,
   semitone grid 63..127. `LFO_MAX_F` removed. Five `lfo_sync` rows become
   `ROW_MENU_SPECIAL`.
 - **Cymbal/HiHat now Basic (S094 P2 §22):** `INSTRUMENT_FLAG_BASIC` set.
-  No current type is Advanced; the Advanced machinery is preserved.
+  Colloid (S095 P2) and Tetrakt (S096 P1) are also Basic. Advanced Colloid
+  (`clx`, S099 P1) and Advanced Alkaline (`alx`, S099 P1) are the first
+  Advanced types. Engine map routes each to its Basic counterpart's engine.
 - **SRAM D-cache fix (S094 P2 §13):** MPU region 0 had S=1 (shareable)
   since S013, which on Cortex-M7 with CACR.SIWT=0 disabled D-cache for
   all SRAM. Fix: clear S bit. Result: −14.8 % on same Scene.
 - **Memory allocation speed-ups (S094 P3):** AsyncFATFS cache 8→16
   sectors (+4,224 B SRAM1); discardable hint for regular-file data reads;
   write-back stack region (MPU region 2 over SRAM2, `TEX 001 C1 B1 S0`,
-  SRD `0x01`). SRAM1 free after S094: **87,404 B** (DEV link).
+  SRD `0x01`). SRAM1 free after S094: 87,404 B; after S095: ~87,388 B
+  (handoff +16 B, compressor readout +8 B; partial offset from StereoFilter
+  removal). After S096: SRAM1 .bss **288,900 B** (MidiNoteModes ~2,380 B,
+  pressure Learn overlay 72 B, Tetrakt voice/tables). Flash **743,016 B**
+  (headroom **10,648 B**).
 
 ---
 
@@ -338,6 +426,10 @@ Unresolved decisions, code gaps, and deferred work.
   watchdog will show the stuck operation and phase (or the save will
   complete) on the next hardware test. The leading hypothesis is AsyncFATFS
   handle exhaustion. See `090_SESSION_HANDOFF_LOG.md` §4.4.
+- **Flash headroom (S099):** 730,936 B (headroom 22,728 B). S099 net
+  +10,616 B from S098 baseline (720,320): +12,824 chopped PWM + BBD chorus
+  + Advanced types, −2,208 Sin removal + LTO. ITCM 15,432 B (952 B free).
+  `elf_s099_check` gates.
 - **Flash image check (D-C1):** keep permanently or remove — still undecided.
   `flashImage.c` checks a stamped CRC32 per sector; mismatch shows
   `Img BAD s:…` and waits for BAR1.
@@ -555,7 +647,7 @@ Full 58-step annotated boot sequence: `MODULE_INTERCHANGE_SPEC.md`
    `settings.cfg` and index reads (S090 P3).
 5. `bank_revalidateVoiceEditMasks()` then boot stage 13
    (`filesystem_settleAutosaveBlocking()`) run between `liveRec_init()` and
-   `audioCodec_init()`; `preset_startDrumsetApply()` stays after the codec.
+   `audioCodec_init()`; `preset_startLoadApply()` stays after the codec.
 6. `sequencerTimer_init()` (TIM3) after `audioCodec_init()`.
 
 ---
@@ -598,7 +690,12 @@ Full specification: `MIDI_SPEC.md` (Parts I–III). Module reference:
   Scene stores `ch` 0..17, `nte` 0..128.
 - **CC1:** on G = global Morph (fan-out, never recorded); on voice = that
   Morph (recorded). **CC2** (G only): sets PERF BAR overlay.
-- **MIDI Learn:** 128 rows in `midilrn.cfg` (safe write); gesture SHIFT+PLAY+REC.
+- **MIDI Learn:** 128 rows in `midilrn.cfg` (safe write); gesture
+  SHIFT+PLAY+REC. S096 C4: channel pressure, note, velocity Learn sources
+  with delta/absolute modes (72 B overlay).
+- **Note modes (S096 P3e):** `MidiNoteModes.c/h` owns normal, layer4
+  (Tetrakt: four MIDI notes per track), paraphonic (Colloid on own
+  channel: interval assignment). ~2,380 B SRAM1 fixed pools.
 - **Transport:** Start restarts, Continue resumes from `seq_resumeTick`, SPP
   while stopped; gated by `snc`. Received Start/Stop/Continue forwarded per
   MRT but never re-sent.
@@ -700,6 +797,9 @@ arm-none-eabi-gcc -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard -O2 -f
 ```
 
 DSP source files are compiled by the Makefile's more-specific `-Ofast` rule.
+Cold boot/install/FAT files in `OS_SRCS` compile at `-Os` (S097 P2).
+`COLD_LAST` link order places cold UI/storage objects after DSP objects to
+isolate DSP code generation from cold-code churn.
 
 Image format: `[8B "LXRV2IMG"][4B payload size LE][4B checksum LE][payload]`
 Boot: hold main encoder button while powering on.

@@ -75,6 +75,11 @@ void voiceControl_noteOn(uint8_t voice, uint8_t note, uint8_t vel);
 /* Enqueue a voice trigger without requesting an automation reset (S081 §5.8).
 ** Serves roll retriggers 2+; see voiceControl_noteOnNoReset() in the .c file. */
 void voiceControl_noteOnNoReset(uint8_t voice, uint8_t note, uint8_t vel);
+/* Enqueue a layer trigger with a Tetrakt mask (S096 P3 T1): no drop of the
+** voice's queued triggers; the pending-reset bit is set as for a first hit.
+** See the full contract in MidiVoiceControl.c. */
+void voiceControl_noteOnLayers(uint8_t voice, uint8_t note, uint8_t vel,
+                               uint8_t layers);
 /* Request an automation reset for a voice with no trigger (S081 §5.8): a roll
 ** renewal carried across a step boundary. See voiceControl_resetOnly() in the
 ** .c file. */
@@ -85,5 +90,9 @@ void voiceControl_noteOff(uint8_t voice);//0xff == all voices
 ** TIM3 sequencer owner. */
 void voiceControl_processPending(void);
 uint8_t voiceControl_isVoicePlaying(uint8_t voice);
+/* Chromatic keyboard note watch (S102 P1): sets the watched track (0xFF
+** none) and returns the internal note + 1 of the latest trigger enqueued for
+** the previously watched track since the last call (0 = none). Foreground. */
+uint8_t voiceControl_noteWatch(uint8_t track);
 
 #endif /* MIDIVOICECONTROL_H_ */

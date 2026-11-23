@@ -136,17 +136,18 @@ static const effect_registry_entry_t effects_registry[EFFECT_TYPE_COUNT] = {
      * type: format_value3 receives no type id). S095 P4 T1 (SD1): the `mix`
      * row is gone; lanes 2..15 keep their rows, so FX-lane data on them
      * keeps its meaning, and lane 1 takes the one row that had no lane
-     * (Reverb `siz`, Echo `hsh`; the Delay has none, so its lane 1 is
-     * empty).
+     * (Reverb `siz`, Echo `hsh`). S100 P2: `str` takes `hed`'s lane (11);
+     * the Delay's lane 1 takes `wid`; the Echo's `wid` and `spr` have no
+     * lane (its sixteen are in use).
      */
     {
         space_delayToken3, space_delayAbbrev5, space_delayFull8,
         EFFECT_IO_STEREO_IN | EFFECT_IO_STEREO_OUT,
         space_delayDescriptors, SPACE_DELAY_PARAM_COUNT,
         { EFFECT_LANE_MORPH_SOURCE,
-          EFFECT_LANE_NONE, SPACE_DLY_TIME, SPACE_DLY_FEEDBACK, SPACE_DLY_TONE,
+          SPACE_DLY_WIDTH, SPACE_DLY_TIME, SPACE_DLY_FEEDBACK, SPACE_DLY_TONE,
           SPACE_DLY_DEGRADE, SPACE_DLY_WOW, SPACE_DLY_XFEED, SPACE_DLY_SPREAD,
-          SPACE_DLY_REVERSE, SPACE_DLY_HOLD, SPACE_DLY_HEADS, SPACE_DLY_DUCK,
+          SPACE_DLY_REVERSE, SPACE_DLY_HOLD, SPACE_DLY_STEREO, SPACE_DLY_DUCK,
           EFFECT_COMMON_PARAM_LEVEL, EFFECT_COMMON_PARAM_PAN,
           EFFECT_LANE_NONE },
         NULL, &space_delayOps, &space_delayUi,
@@ -174,7 +175,7 @@ static const effect_registry_entry_t effects_registry[EFFECT_TYPE_COUNT] = {
         { EFFECT_LANE_MORPH_SOURCE,
           SPACE_ECH_HIGH_SHELF, SPACE_ECH_TIME, SPACE_ECH_FEEDBACK, SPACE_ECH_TONE,
           SPACE_ECH_DEGRADE, SPACE_ECH_WOW, SPACE_ECH_TO_REVERB,
-          SPACE_ECH_BLEND, SPACE_ECH_DECAY, SPACE_ECH_LOW_SHELF, SPACE_ECH_HEADS,
+          SPACE_ECH_BLEND, SPACE_ECH_DECAY, SPACE_ECH_LOW_SHELF, SPACE_ECH_STEREO,
           SPACE_ECH_DUCK, SPACE_ECH_ROUTING,
           EFFECT_COMMON_PARAM_LEVEL, EFFECT_COMMON_PARAM_PAN },
         NULL, &space_echoOps, &space_echoUi,
@@ -526,9 +527,9 @@ void effects_rowLabels(effect_type_id_t type, uint8_t variant, uint8_t index,
 
     if (!descriptor)
         return;
-    s = descriptor->base.short_name;
-    c = descriptor->base.category;
-    l = descriptor->base.long_name;
+    s = menuLabel_short(descriptor->base.short_id);
+    c = menuLabel_cat(descriptor->base.cat_id);
+    l = menuLabel_long(descriptor->base.long_id);
     if (entry && entry->ui && entry->ui->labels)
         (void)entry->ui->labels(index, variant, &s, &c, &l);
     if (short3)

@@ -19,17 +19,24 @@
 #include "InstrumentManager.h"
 #include "ColloidVoice.h"
 
-/* 50 rows (S095 P3): 6 oscillator, 4 amp envelope, sustain and slew, 3
- * intervals with detune, spread and motion, 5 filter envelope with the
- * filter drive, 8 filter (frq res typ rte and four offsets), vol/pan with
- * tone and overdrive, 8 LFO rows, 2 velocity rows, 4 LFO target rows
- * (asserted against colloid_param_index_t in the .c) */
-#define COLLOID_PARAM_DESCRIPTOR_COUNT 50u
+/* 59 rows (S096 P3): the S095 P3 50 (6 oscillator, 4 amp envelope, sustain
+ * and slew, 3 intervals with detune, spread and motion, 5 filter envelope
+ * with the filter drive, 8 filter, vol/pan with tone and overdrive, 8 LFO
+ * rows, 2 velocity rows, 4 LFO target rows) plus the pitch envelope
+ * (pat pde psl pre), its amount (pam) and the noise (nlv nto nwd npn).
+ * Asserted against colloid_param_index_t in the .c. */
+#define COLLOID_PARAM_DESCRIPTOR_COUNT 59u
+/* S099 P1: the Advanced Colloid (clx) uses the same table with 64 rows: the
+ * 59 above, then cho crt cdp cmx csr (asserted against the enum). */
+#define COLLOID_ADV_PARAM_DESCRIPTOR_COUNT 63u   /* S099 P2: 59 + fx dpt rte mix (csr removed) */
 /* eight sub-pages: the front-panel SELECT1..8 buttons (menu.c) */
 #define COLLOID_MENU_PAGE_COUNT        8u
 /* Basic (C-D1, user 2026-11-12): any slot, any number per Scene, held to
  * the Basic share. A type with no class flag is not selectable (S094 P2). */
 #define COLLOID_INSTRUMENT_TYPE_FLAGS  INSTRUMENT_FLAG_BASIC
+/* S099 P1: clx is Advanced (at most two Advanced types per Scene,
+ * instrumentManager_typeSelectableForSceneSlot()). */
+#define COLLOID_ADV_INSTRUMENT_TYPE_FLAGS INSTRUMENT_FLAG_ADVANCED
 
 extern const ParamDescriptor colloid_param_descriptors[];
 extern const uint8_t colloid_param_descriptor_count;
@@ -37,6 +44,27 @@ extern const instrument_menu_page_t colloid_menu_pages[];
 extern const uint8_t colloid_menu_page_count;
 extern const char colloid_instrument_display_label[];
 extern const uint8_t colloid_instrument_type_flags;
+/* S099 P1: the clx registry row's pages and label */
+extern const instrument_menu_page_t colloid_adv_menu_pages[];
+extern const char colloid_adv_instrument_display_label[];
+
+/* S096 P3: descriptor-local indices other modules need (finding D8),
+ * asserted against colloid_param_index_t in ColloidParameters.c. */
+#define COL_IDX_COARSE      0u    /* osc1_pitch_coarse */
+#define COL_IDX_SUSTAIN     10u   /* col_sustain */
+#define COL_IDX_INTERVAL_1  12u   /* col_interval_1; in2 13, in3 14 */
+#define COL_IDX_FX_TYPE 59u   /* S099 P1: chorus_type (clx only) */
+/*
+ * The sus-row test (S096 P3, finding D8).
+ *
+ * What:       1 for the col_sustain row's descriptor, else 0 (any other
+ *             pointer, NULL included).
+ * Why:        InstrumentManager sees every value the automation drain writes
+ *             and must flag a sus = on write for the Scene-change decision;
+ *             comparing the pointer keeps the check allocation-free.
+ * Accessors:  instrumentManager_automationWritten().
+ */
+uint8_t colloidParameters_isSustainRow(const ParamDescriptor *descriptor);
 
 /*
  * Whether a Colloid cell has no effect in the voice's current mode
@@ -45,6 +73,8 @@ extern const uint8_t colloid_instrument_type_flags;
  * What:       1 for pos and psp under typ wav (the oscillators are
  *             free-running: no start phase, no frame, no width), and for spr
  *             and mot in a mono route (rte a filter type, S095 P3 F9); else 0.
+ *             S099 P1: crt and cdp unless cho is var or dbl; cmx with cho
+ *             off; csr with cho off or in a mono route.
  * Why:        the compact cell shows "---" for a value that changes nothing
  *             (menu_formatCellValue3()); the value is still stored and edited,
  *             and takes effect when the mode changes.

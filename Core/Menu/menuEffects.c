@@ -575,7 +575,7 @@ void menuEffects_shortName(const menuEffects_cell_t *cell, char *dst)
          * per-sub-type names, menuEffects_cellLabels()); the descriptor's
          * short name when the type does not rename it.
          */
-        const char *name = cell->descriptor ? cell->descriptor->short_name
+        const char *name = cell->descriptor ? menuLabel_short(cell->descriptor->short_id)
                                             : NULL;
 
         menuEffects_cellLabels(cell, &name, NULL, NULL);

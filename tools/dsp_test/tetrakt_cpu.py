@@ -62,6 +62,36 @@ def loops(elf, sym):
     return sorted(out.values(), key=lambda x: -x[0])
 
 
+def post_per_sample(elf, sym):
+    """S101 P2 B1 (sub-block form): the post loop runs inside a sub-block
+    loop (the tone coefficients step every TKT_SUB_BLOCK samples), so a
+    sample costs the inner loop plus the outer loop's own part once per
+    sub-block: inner + (outer - inner) / SUB_BLOCK. Each loop is measured
+    within its own range."""
+    r = E.rows(elf, sym)
+    idx = {a: i for i, (a, _, _) in enumerate(r)}
+    heads = sorted({E.target(ops) for (addr, op, ops) in r
+                    if E.BRANCH.match(op) and E.target(ops) is not None
+                    and E.target(ops) <= addr and E.target(ops) in idx})
+    closer = {}
+    for i, (addr, op, ops) in enumerate(r):
+        t = E.target(ops) if E.BRANCH.match(op) else None
+        if t in heads and t <= addr:
+            closer[t] = max(closer.get(t, 0), i)
+    found = []
+    for h in heads:
+        p = E.loop_paths(r, idx, h, closer[h])
+        if p:
+            found.append(max(x[0] for x in p))
+    if len(found) < 2:
+        return found[0]
+    inner, outer = min(found), max(found)
+    return inner + (outer - inner) / SUB_BLOCK
+
+
+SUB_BLOCK = 8   # TKT_SUB_BLOCK (TetraktVoice.c)
+
+
 def segmented(elf, sym):
     """(frame, segment) of a function whose frame loop runs inside a
     segment loop: frame = the tightest backward branch's own cycle within
@@ -116,7 +146,8 @@ def main():
             sys.exit(f'tetrakt_cpu.py: no loop in {name}')
 
     frame, seg = segmented(a.elf, 'tkt_spaceOut')
-    per_sample = (store[0][0] + 3 * add[0][0] + frame)
+    per_sample = (post_per_sample(a.elf, 'tkt_layerPostStore')
+                  + 3 * post_per_sample(a.elf, 'tkt_layerPostAdd') + frame)
     blk = (B.block_path(a.elf, 'Tetrakt_calcVoiceAsync')[0] +
            4 * B.block_path(a.elf, 'tkt_layerControl')[0] +
            B.block_path(a.elf, 'Tetrakt_calcVoiceSyncBlock')[0] +
@@ -129,6 +160,12 @@ def main():
     if present(a.elf, 'tkt_spaceControl'):
         blk += B.block_path(a.elf, 'tkt_spaceControl')[0]
     total = per_sample + blk / FRAMES
+    # S101 P2 A2q: one layer's control a block in the steady state (the other
+    # three carried, inlined into the async); a block where every layer
+    # STARTs (a hit) runs all four controls and the binds: `blk` above.
+    steady = (blk - 3 * B.block_path(a.elf, 'tkt_layerControl')[0]
+              - BIND_LAYERS * (B.block_path(a.elf, 'tkt_bindLayer')[0] +
+                               B.block_path(a.elf, 'osc_userBind')[0]))
     note = ''
     fail = total > GATE
     if fail:
@@ -142,6 +179,9 @@ def main():
     print(f'tetrakt: loops {per_sample} + per block {blk}/{FRAMES} = {total:.1f}{note}')
     print(f'  spaceOut frame {frame}, segment {seg} x {SPACE_SEGMENTS}; '
           f'binds {BIND_LAYERS} x START')
+    print(f'  S101 P2 A2q steady (one layer control a block, no START): '
+          f'loops {per_sample} + per block {steady}/{FRAMES} = '
+          f'{per_sample + steady / FRAMES:.1f}')
     sys.exit(1 if fail else 0)
 
 

@@ -3,8 +3,9 @@
  * Ported from original LXR AVR buttonHandler.h by Julian Schmidt.
  *
  * CONCURRENCY: buttonHandler_buttonPressed / buttonReleased are called by the
- * foreground scan (din_dout_exchange via timebase_serviceFrontPanel at about
- * 500 Hz). They only update held state and enqueue an event; they do not call
+ * foreground scan (din_dout_exchange via timebase_serviceFrontPanelInput at
+ * about 500 Hz: after each audio render commit and once per main-loop pass,
+ * S101). They only update held state and enqueue an event; they do not call
  * LCD/menu actions. buttonHandler_processEvents() in the main loop dispatches
  * one event per call, with two bounded calls separated by audio rendering.
  */
@@ -20,7 +21,7 @@
 #define SELECT_MODE_LOAD_SAVE   0x03
 /* SHIFT+PERF selects the Effect page; the retired Euklid mode is compiled out. */
 #define SELECT_MODE_FX          0x05
-#define SELECT_MODE_SOM_GEN     0x06
+/* 0x06 (SHIFT+MODE STEP) was the SOM generator; unused since S097. */
 #define SELECT_MODE_MENU        0x07
 
 /*
@@ -134,7 +135,9 @@ void    buttonHandler_clearAllMutes(void);
  * re-configured).
  * buttonHandler_overlayMidiNoteOn(): start overlay `which` (1/2) on `track`
  * at `internal` pitch; `midiNote` is remembered so its note-off ends a
- * roll; ageUs is the arrival age for the first hit's record placement.
+ * roll; ageUs is the arrival age for the first hit's record placement;
+ * sub is the note's place within a wide (Tetrakt) track's group of four,
+ * which selects the layer every hit plays (S096 P3).
  * buttonHandler_overlayMidiNoteOff(): end the roll held by `midiNote`
  * (the resolved track first, then any track holding that note); a flam's
  * main hit still plays.
@@ -145,7 +148,7 @@ uint8_t buttonHandler_overlayActive(void);
 void    buttonHandler_setOverlay(uint8_t which);
 void    buttonHandler_overlayMidiNoteOn(uint8_t track, uint8_t which,
                                         uint8_t internal, uint8_t midiNote,
-                                        uint16_t ageUs);
+                                        uint16_t ageUs, uint8_t sub);
 void    buttonHandler_overlayMidiNoteOff(uint8_t track, uint8_t midiNote);
 /* S083 C5: flash SHIFT/PLAY/REC while Learn is active; restore on off. */
 void    buttonHandler_setLearnLeds(uint8_t on);
