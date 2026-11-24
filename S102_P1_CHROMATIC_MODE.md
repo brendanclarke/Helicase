@@ -1,8 +1,10 @@
 # S102 P1 — Chromatic keyboard overlay: implementation notes
 
-**Date:** 2026-11-22. **Branch:** `dev-ph7-alkaline`, base `8ca780d1`
-("clean up documents and test scratch"). **Status:** implemented,
-uncommitted, built and loop-gated. **Not yet tested on the device** (§8).
+**Date:** 2026-11-22; Fix 1 2026-11-24. **Branch:** `dev-ph7-alkaline`,
+base `8ca780d1` ("clean up documents and test scratch"). **Status:** the
+first build is committed in `ef3d3802`; Fix 1 (§11) is uncommitted and built.
+**Device:** the first build was tested and did not hold notes (§11); Fix 1 is
+not yet tested on the device (§8, §11).
 
 **Your instruction (2026-11-22):** chromatic overlay on SHIFT+BAR `<`/`>`
 from any mode; SEQ row = keyboard on the selected track; each key uses the
@@ -12,7 +14,8 @@ BAR LEDs show the octave; no chase, one brief pulse per note played by the
 active track; nothing else interrupted; SHIFT+BAR again leaves; octave
 remembered for the boot session only. "Implement that directly."
 
-**The image:** `build/LXRV2_lxr02.img`, 673,812 B payload (HEAD: 673,576 B).
+**The image:** `build/LXRV2_lxr02.img`, 674,520 B payload, with Fix 1
+(before S102: 673,576 B; first build: 673,812 B).
 
 ---
 
@@ -21,25 +24,25 @@ remembered for the boot session only. "Implement that directly."
 | § | Change | Status |
 |---|---|---|
 | 2 | `buttonHandler.c`: keyboard state, press/release routers, pulse service, overflow reset | built |
+| 11 | Fix 1, `buttonHandler.c`: single types played as MIDI notes (`midiNoteMode_noteOn/Off`), so a Colloid holds | built, device test open |
 | 3 | `buttonHandler.c`: three touch points in the existing BAR-overlay engine (ownership, rhythm) | built |
 | 4 | `ledHandler.c/.h`, `dout.c/.h`, `din.c`: the owned-LED composite for SEQ1..16 and both BAR LEDs | built |
 | 5 | `MidiVoiceControl.c/.h`: the note watch at the trigger enqueue | built |
-| 6 | Linked-image checks: mixer and render-drain hot loops vs HEAD | **equal** (41 + 28 loops) |
+| 6 | Linked-image checks: mixer and render-drain hot loops vs HEAD | mixer 41 equal; render drain: 9 control-rate loops longer after Fix 1 (open, §11) |
 
-**The figures:**
+**The figures** (before S102 = `8ca780d1`):
 
-| | HEAD | Now | Δ |
-|---|---:|---:|---:|
-| Flash (image payload) | 673,576 B | 673,812 B | +236 B |
-| `.text` | 673,136 B | 673,360 B | +224 B |
-| `.data` | 440 B | 452 B | +12 B (`bh_chroma` 10 B, `voiceControl_watchTrack` 1 B, alignment) |
-| `.bss` | 422,480 B | 422,496 B | +16 B (§7) |
-| ITCM | 15,424 B | 15,424 B | 0 |
-| `mixer_calcNextSampleBlock` hot loops | 41 | 41 equal | 0 grew, 0 shrank; function size identical |
-| `audio_check_and_render` hot loops | 28 | 28 equal | 0 grew, 0 shrank; function size identical |
+| | Before S102 | First build | With Fix 1 | Δ total |
+|---|---:|---:|---:|---:|
+| Flash (image payload) | 673,576 B | 673,812 B | 674,520 B | +944 B |
+| `.text` | 673,136 B | 673,360 B | 674,072 B | +936 B |
+| `.data` | 440 B | 452 B | 448 B | +8 B (section alignment) |
+| `.bss` | 422,480 B | 422,496 B | 422,512 B | +32 B (section alignment) |
+| ITCM | 15,424 B | 15,424 B | 15,424 B | 0 |
+| `mixer_calcNextSampleBlock` hot loops | 41 | 41 equal | 41 equal | 0 |
+| `audio_check_and_render` hot loops | 28 | 28 equal | 9 grew by 1–4 (control rate) | open, §11 |
 
-**Needs your sign-off:** 23 B of new SRAM1 (§7). Under the RAM rule this
-needs approval; it is in the build now so the feature can be tested.
+**RAM:** 41 B of new SRAM1 (§7), **approved by you 2026-11-24**.
 
 ---
 
@@ -72,27 +75,32 @@ needs approval; it is in the build now so the feature can be tested.
 
 - The track is `menu_getActiveVoice()` at the moment of the press, and only
   that track.
-- The trigger type is the entry BAR's `pb<` / `pb>` (single at
-  127/100/64/32, `flm`/`fls` flam, or a roll at one of the nine step rates),
-  fired through the existing overlay engine (`buttonHandler_overlayStart()`),
-  exactly as a received MIDI note under that overlay. A roll uses the entry
-  BAR's `pv<` / `pv>` rhythm. `pn<` / `pn>` are not used: the key is the
-  pitch.
+- Every key is played as a received MIDI note on the selected track. The
+  entry BAR's `pb<` / `pb>` decides how (Fix 1, §11):
+  - **Single types** (`vmx` `v10` `v64` `v32`, velocity 127/100/64/32): the
+    key press is `midiNoteMode_noteOn()` on the track's effective MIDI
+    channel and the release is `midiNoteMode_noteOff()`, the same calls a
+    received note-on/off makes when no BAR overlay takes it. A Colloid on
+    its own channel plays paraphonically and **holds while the key is
+    down**; more held keys become intervals, as from a MIDI keyboard. Other
+    tracks get the MIDI single trigger (Alkaline: its 7/12-step gate; drums
+    and Tetrakt: one-shot), exactly as over MIDI.
+  - **Flam and roll types** (`flm`, `fls`, the nine roll rates): the overlay
+    engine (`buttonHandler_overlayStart()`), as a MIDI note under a BAR
+    overlay, with the MIDI note-off rule on release: a roll stops, a flam
+    keeps its main hit (B-12). A roll uses the entry BAR's `pv<` / `pv>`.
+    One sounding flam/roll key: a second key replaces the first.
+  - `pn<` / `pn>` are not used: the key is the pitch.
+- As over MIDI: the PERF BAR overlay, when on, turns the Colloid's
+  paraphonic mode off; a Colloid on `glb` is not paraphonic.
+- Each key remembers its note, track and channel, so its release is the
+  right note-off after an octave or selection change. A key on a newly
+  selected track first sends note-offs for the old track's held keys.
 - A muted track stays silent, as for a received MIDI note.
-- **Held while held:** releasing the sounding key ends the gesture the way a
-  PERF VOICE overlay release does (`buttonHandler_overlayEndTrack()`: live
-  entry stopped, last hits reported, voice note-off, MIDI-out note-off,
-  recorded roll ended). A single has already played; a roll stops; a flam
-  released inside its 1/32 loses the main hit, as the PERF VOICE overlay
-  does (§9 Q2).
-- **One sounding key.** A second key replaces the first note (one overlay
-  entry per track, as for MIDI). Releasing a key that is no longer sounding
-  does nothing. Changing the selected track while a key is held: the next
-  key ends the old track's note first.
-- **Recording:** each hit goes to `liveRec_triggerIn()` through the overlay
-  engine (source `LIVEREC_SRC_MIDI`; LiveRecord does not branch on the
-  source), so it records whenever live record is on, rolls as spans with
-  their `pv` rhythm, exactly as MIDI overlay notes.
+- **Recording:** the note modes and the overlay engine report to
+  `liveRec_triggerIn()` exactly as for MIDI (source `LIVEREC_SRC_MIDI`), so
+  everything records whenever live record is on (paraphonic `sus` and
+  intervals as automation, rolls as spans with their `pv` rhythm).
 
 ### 1.4 What is not touched
 
@@ -119,6 +127,9 @@ needs approval; it is in the build now so the feature can be tested.
   outside the 16 keys show nothing. One pulse at a time: a new note moves
   the pulse at once (one mono track rarely plays two notes within 50 ms; a
   Tetrakt layer chord is one pitch).
+- A paraphonic Colloid's second and later held keys set intervals and fire
+  no trigger (as over MIDI), so they do not pulse; only the first key's
+  trigger does.
 
 ### 1.6 Button routing details
 
@@ -131,8 +142,9 @@ needs approval; it is in the build now so the feature can be tested.
 - The keyboard intercept runs before live erase, held COPY, the Load Scene
   and VOICE Scene-mask SEQ overlays and the Load/Save BAR text helpers: all
   of those are SEQ/BAR uses, and the keyboard owns SEQ and BAR while up.
-- Event-ring overflow: the sounding note ends and the masks clear; the
-  overlay stays up (it is a latch).
+- Event-ring overflow and exit: every held note ends (note-offs for MIDI
+  keys, the overlay gesture ended) and the masks clear on overflow; the
+  overlay stays up on overflow (it is a latch).
 
 ---
 
@@ -143,8 +155,12 @@ needs approval; it is in the build now so the feature can be tested.
   `barMask`, `pulseKey`, `pulseEnd`.
 - `buttonHandler_chromaPress()` — first line of `processPress()`.
 - `buttonHandler_chromaRelease()` — first line of `processRelease()`.
-- `buttonHandler_chromaKeyOn()`, `_EndNote()`, `_Exit()`, `_Paint()`,
-  `_BaseNote()`.
+- **State `bh_chromaNotes`** (18 B, `.bss`, Fix 1): `noteTrack`,
+  `noteChannel`, `keyNote[16]` (note | 0x80 while the key holds a MIDI note).
+  Kept out of `bh_chroma` (see §11 figures).
+- `buttonHandler_chromaKeyOn()` (single → `midiNoteMode_noteOn()`, flam/roll
+  → `buttonHandler_overlayStart()`), `_NotesOff()`, `_NotesHeld()`,
+  `_EndNote()`, `_Exit()`, `_Paint()`, `_BaseNote()`.
 - `buttonHandler_chromaPulseService()` — every `buttonHandler_tick()`:
   re-arms the note watch on the selected track, takes the latest note, runs
   the 50 ms pulse.
@@ -201,6 +217,8 @@ note. Ownership is the one byte `bh_chroma.track`:
 
 ## 6. Checks run
 
+**First build** (Fix 1 results are in §11):
+
 - `make all && make img`: clean (only the usual newlib stub warnings).
 - Baseline rebuilt from HEAD in a scratch worktree (removed afterwards).
 - `elf_loopdump.py` + `elf_hotloops.py --compare`:
@@ -214,7 +232,7 @@ note. Ownership is the one byte `bh_chroma.track`:
   exchange.
 - No host test: the feature is panel and LED routing with no host harness.
 
-## 7. RAM (needs sign-off)
+## 7. RAM (approved by you 2026-11-24)
 
 | Symbol | Bytes | Region | Owner |
 |---|---:|---|---|
@@ -224,10 +242,11 @@ note. Ownership is the one byte `bh_chroma.track`:
 | `dout_sw43Owned` | 1 | SRAM1 `.bss` | `dout.c` |
 | `voiceControl_watchTrack` | 1 | SRAM1 `.data` | `MidiVoiceControl.c` |
 | `voiceControl_watchNote` | 1 | SRAM1 `.bss` | `MidiVoiceControl.c` |
-| **Total** | **23** | SRAM1 | |
+| `bh_chromaNotes` | 18 | SRAM1 `.bss` | `buttonHandler.c` (Fix 1) |
+| **Total** | **41** | SRAM1 | |
 
 Not from the DTCM or SRAM1 earmarks (delay lines, Pattern data): these are
-new statics. Flash +236 B.
+new statics. Flash +944 B.
 
 ## 8. Device tests (open)
 
@@ -235,7 +254,10 @@ new statics. Flash +236 B.
    menu open): black keys lit, both BARs lit; screen unchanged.
 2. Keys play the selected track at the `pb<` type; repeat entering with
    SHIFT+BAR `>` for `pb>`. Single, flam and roll each: the roll stops at
-   release, uses `pv<` / `pv>`.
+   release, uses `pv<` / `pv>`; a flam released early still plays its main.
+2a. (Fix 1) Colloid on its own channel, PERF overlay off, single type: a held
+   key sustains and releases on key-up, like the MIDI keyboard; two held keys
+   play the interval; a key held across an octave change still releases.
 3. BAR `>` ×3: only `>` lit, pitch up 3 octaves; a 4th press does nothing.
    BAR `<` back past the middle: only `<` lit. Exit and re-enter: octave kept.
    Power cycle: middle octave.
@@ -249,19 +271,17 @@ new statics. Flash +236 B.
    if running) and BAR LEDs are as the mode shows them.
 8. Hold a key, turn a knob in VOICE mode: the knob edits the voice, not a
    held step.
-9. Hold a roll key and exit with SHIFT+BAR: the roll stops; releasing the key
-   afterwards does nothing.
+9. Hold a roll key (or a held Colloid key) and exit with SHIFT+BAR: the note
+   stops; releasing the key afterwards does nothing.
 10. Muted selected track: keys silent.
 
 ## 9. Decisions taken in the build (tell me to change any)
 
 - **Q1 Middle C.** Internal 60 (shown `C5`), not 63 (the voice's own pitch,
   shown `D#5`). Range: SEQ1 = 24 at −3, SEQ16 = 111 at +3.
-- **Q2 Release.** Panel VOICE release rules (all types end on release,
-  including a flam main not yet fired), not the MIDI rule (a MIDI note-off
-  ends only a roll; a flam keeps its main, B-12). This is "held as long as the
-  button is held". Switching to the MIDI rule is a two-line change in
-  `buttonHandler_chromaRelease()`.
+- **Q2 Release.** Superseded by Fix 1 (§11): the release is the MIDI
+  note-off (note modes for single types; a roll ends, a flam keeps its main
+  under the overlay engine). The first build's panel VOICE rule was wrong.
 - **Q3 One live rhythm.** While a keyboard roll is held, other live rolls
   (VOICE, MIDI) use the keyboard BAR's `pv` (the engine has one rhythm
   value).
@@ -278,7 +298,56 @@ new statics. Flash +236 B.
   overlay is kept.
 - `MODULE_INTERCHANGE_SPEC.md` "BAR overlay trigger engine": a third user
   (the keyboard) with ownership via `bh_chroma.track`; the live rhythm rule.
+- `MIDI_SPEC.md` (note modes, MidiNoteModes): the keyboard is a second caller
+  of `midiNoteMode_noteOn()` / `midiNoteMode_noteOff()` (single types).
 - `buttonHandler.h` enum comment still says BAR1/BAR2 have "no port
   functionality assigned" (stale since S080; code, not docs — left as is).
 - Root `MEMORY.md` flash/SRAM figures (Open Items "Flash headroom") if you
   track them per session.
+
+---
+
+## 11. Fix 1 (2026-11-24): keys did not hold the note
+
+**Report:** on a Colloid with a MIDI keyboard on the Colloid's channel,
+holding a MIDI key sustains; holding a keyboard key did not.
+
+**Cause:** with the PERF BAR overlay off, a received note on a Colloid on its
+own channel goes to `midiNoteMode_noteOn()` → the paraphonic mode, which turns
+on `sus` and the slot's MIDI hold until the note-off. The keyboard fired the
+overlay engine's one-shot single instead, so nothing held. That broke the
+"just as if played over MIDI" instruction; §1.3 and §9 Q2 were wrong.
+
+**Fix (`buttonHandler.c`):**
+- Single types (`vmx` `v10` `v64` `v32`): a key press is
+  `midiNoteMode_noteOn(track, channel, note, 0, note, velocity, 0)`. The
+  channel is the track's effective channel (`midiNoteMap_effectiveChannel()`).
+  The velocity is 127/100/64/32. These are the same calls MidiNotes makes for
+  a resolved note that no BAR overlay takes. The key's release is
+  `midiNoteMode_noteOff()` for the same track, channel and note. So a Colloid
+  on its own channel holds, and extra held keys become paraphonic intervals,
+  exactly as from the MIDI keyboard. Other tracks get the MIDI single
+  trigger, and LiveRecord gets what MIDI reports.
+- Each key remembers its note (`bh_chromaNotes.keyNote[]`), so changing the
+  octave while holding still releases the right note. A key on a newly
+  selected track first sends note-offs for the keys held on the old track.
+  Exit and event-ring overflow send note-offs for every held key.
+- Flam and roll types keep the overlay engine, now with the MIDI note-off
+  rule: a roll ends on release, and a flam keeps its main hit (B-12).
+- As over MIDI: the PERF BAR overlay, when it is on, turns the Colloid's
+  paraphonic mode off (`midiNoteMode_trackMode()`), and a Colloid on `glb`
+  does not go paraphonic.
+
+**RAM:** +18 B SRAM1 `.bss` (`bh_chromaNotes`: track, channel, 16 notes).
+S102 total 41 B, approved by you 2026-11-24 (§7).
+
+**Figures:** image 674,520 B (+944 B over HEAD before S102). Mixer hot loops:
+41 equal. `audio_check_and_render`: 9 automation-drain / special-writer loops
+are 1–4 instructions longer per automation entry (control rate). The code in
+that function did not change. LTO's data layout did; moving the new fields
+out of `bh_chroma` into their own `.bss` static did not help. Open.
+
+**Device test:** Colloid on its own channel, PERF overlay off, enter with a
+BAR whose `pb` is a single: a held key sustains and releases on key-up; two
+held keys play the interval as from MIDI; a key held across an octave change
+still releases.

@@ -40,6 +40,7 @@
 #include "MidiLearn.h"
 #include "MidiNotes.h"
 #include "MidiNoteModes.h"   /* S096 P3: the overlay's layer mask */
+#include "MidiNoteMap.h"     /* S102 P1: the keyboard's MIDI channel */
 #include <string.h>
 #include <stdint.h>
 #include "AutosaveTrace.h"
@@ -449,10 +450,15 @@ static uint8_t bh_overlayHeldType = 0xFFu;
  *            their releases are consumed.
  *  pulseKey/pulseEnd: the key showing a note just played by the selected
  *            track (one brief inversion), 0xFF none; time_sysTick deadline.
+ *  noteTrack/noteChannel/keyNote[16]: keys played as MIDI notes (single
+ *            types): keyNote[k] = internal note | BH_CHROMA_KEY_NOTEMODE
+ *            while key k holds a note, else 0; every such note was sent to
+ *            noteTrack on noteChannel, so its release is the matching
+ *            MIDI note-off (S102 P1 fix: the Colloid paraphonic hold).
  * Why: the user's S102 brief. The PERF BAR overlay (bh_overlayActive) is
  * untouched: it keeps working for VOICE buttons and MIDI notes, and the BAR
  * buttons cannot change it while the keyboard is up.
- * RAM: 10 B SRAM1 (S102 P1). Writers: buttonHandler_chroma*() below,
+ * RAM: 10 B SRAM1 (S102 P1), + 18 B bh_chromaNotes (the MIDI note path). Writers: buttonHandler_chroma*() below,
  * overlayStart()/overlayEndTrack() (ownership).
  */
 typedef struct {
@@ -467,6 +473,19 @@ typedef struct {
 } bh_chroma_t;
 
 static bh_chroma_t bh_chroma = { 0u, 0, 0xFFu, 0xFFu, 0u, 0u, 0xFFu, 0u };
+
+/* The keys held as MIDI notes (S102 P1 fix; see noteTrack above). Kept out
+ * of bh_chroma, zero-initialised: growing the initialised struct moved the
+ * data block LTO addresses the render drain through (S102 P1 loop check). */
+typedef struct {
+    uint8_t noteTrack;
+    uint8_t noteChannel;
+    uint8_t keyNote[16];
+} bh_chroma_notes_t;
+
+static bh_chroma_notes_t bh_chromaNotes;
+
+#define BH_CHROMA_KEY_NOTEMODE 0x80u   /* keyNote: a note held as MIDI */
 
 #define BH_CHROMA_MIDDLE_C    60u      /* internal note shown as C5 (step `nte`) */
 #define BH_CHROMA_OCTAVE_MAX  3
@@ -1491,12 +1510,13 @@ void buttonHandler_overlayMidiNoteOff(uint8_t track, uint8_t midiNote)
  * voice's own pitch is internal 63). BAR LEDs: both lit at the middle
  * octave, only `>` above it, only `<` below it.
  * Keys: a press plays the selected track (menu_getActiveVoice() at the
- * press) through the overlay engine with the entry BAR's trigger type
- * (single at its velocity, flam, or roll at its rate and `pv` rhythm),
- * reported to LiveRecord as a MIDI hit, so it records whenever live record
- * is on. A muted track stays silent, as for a received MIDI note. The
- * release of the sounding key ends the gesture as a panel VOICE release
- * does (buttonHandler_overlayEndTrack()). Keys and BARs pressed inside the
+ * press) as a received MIDI note with the entry BAR's trigger type (single
+ * at its velocity through the MIDI note modes; flam, or roll at its rate and
+ * `pv` rhythm, through the overlay engine), reported to LiveRecord as MIDI
+ * hits, so it records whenever live record
+ * is on. A muted track stays silent, as for a received MIDI note. A key's
+ * release is that note's MIDI note-off (buttonHandler_chromaKeyOn(),
+ * buttonHandler_chromaRelease()). Keys and BARs pressed inside the
  * overlay keep their releases even after it is left. No other button,
  * knob or screen function changes.
  */
@@ -1528,16 +1548,77 @@ static void buttonHandler_chromaEndNote(void)
 }
 
 /*
- * One keyboard key down: one sounding note at a time. A note still owned on
- * another track (the selection changed while it was held) ends first; on the
- * same track the new gesture replaces it (buttonHandler_overlayStart()).
+ * Note-offs for every key held as a MIDI note (exit, overflow, a key on
+ * another track): the same calls a received note-off makes.
+ */
+static void buttonHandler_chromaNotesOff(void)
+{
+    uint8_t k;
+
+    for (k = 0u; k < 16u; k++) {
+        if ((bh_chromaNotes.keyNote[k] & BH_CHROMA_KEY_NOTEMODE) == 0u)
+            continue;
+        (void)midiNoteMode_noteOff(bh_chromaNotes.noteTrack, bh_chromaNotes.noteChannel,
+                                   (uint8_t)(bh_chromaNotes.keyNote[k] & 0x7Fu), 0u);
+        bh_chromaNotes.keyNote[k] = 0u;
+    }
+}
+
+/* 1 while any key holds a MIDI note. */
+static uint8_t buttonHandler_chromaNotesHeld(void)
+{
+    uint8_t k;
+
+    for (k = 0u; k < 16u; k++)
+        if (bh_chromaNotes.keyNote[k] & BH_CHROMA_KEY_NOTEMODE)
+            return 1u;
+    return 0u;
+}
+
+/*
+ * One keyboard key down, played as a received MIDI note on the selected
+ * track (S102 P1 fix).
+ *
+ * Single types (`vmx` `v10` `v64` `v32`): the key is a MIDI note-on at that
+ * velocity on the track's effective channel, through midiNoteMode_noteOn()
+ * exactly as MidiNotes delivers a resolved note when no BAR overlay takes
+ * it: a Colloid on its own channel plays paraphonically and holds (sus and
+ * the MIDI hold) until the key's note-off; other tracks get the MIDI single
+ * trigger; a Tetrakt plays its layer A. The note-off goes to the same track
+ * and channel even if the selection or octave changed meanwhile; keys on a
+ * newly selected track first send note-offs for the old track's keys.
+ * Flam and roll types: the overlay engine, as a MIDI note under a BAR
+ * overlay (one sounding gesture per keyboard).
+ * A muted track stays silent, as for MIDI (its note-on is dropped).
  */
 static void buttonHandler_chromaKeyOn(uint8_t key)
 {
+    static const uint8_t singleVel[4] = {127u, 100u, 64u, 32u};
     uint8_t track = menu_getActiveVoice();
     uint8_t note = (uint8_t)(buttonHandler_chromaBaseNote() + key);
+    uint8_t type = (bh_chroma.which == 1u) ? parameter_values[PAR_PERF_BTN_LT]
+                                           : parameter_values[PAR_PERF_BTN_RT];
 
     bh_chroma.keyMask |= (uint16_t)(1u << key);
+    if (type > BH_OVERLAY_TYPE_MAX)
+        type = 0u;
+    if (type < BH_OVERLAY_TYPE_FLAM_FIRST) {
+        if (buttonHandler_chromaNotesHeld() && bh_chromaNotes.noteTrack != track)
+            buttonHandler_chromaNotesOff();
+        if (track >= NUM_TRACKS || seq_isTrackMuted(track))
+            return;
+        if (!buttonHandler_chromaNotesHeld()) {
+            midiNoteMap_settings_t map;
+
+            midiNoteMap_load(scene_getActiveIndex(), &map);
+            bh_chromaNotes.noteTrack = track;
+            bh_chromaNotes.noteChannel = midiNoteMap_effectiveChannel(&map, track);
+        }
+        (void)midiNoteMode_noteOn(track, bh_chromaNotes.noteChannel, note, 0u, note,
+                                  singleVel[type], 0u);
+        bh_chromaNotes.keyNote[key] = (uint8_t)(note | BH_CHROMA_KEY_NOTEMODE);
+        return;
+    }
     if (bh_chroma.track < NUM_TRACKS && bh_chroma.track != track)
         buttonHandler_chromaEndNote();
     if (track >= NUM_TRACKS || seq_isTrackMuted(track))
@@ -1552,6 +1633,7 @@ static void buttonHandler_chromaKeyOn(uint8_t key)
 static void buttonHandler_chromaExit(void)
 {
     buttonHandler_chromaEndNote();
+    buttonHandler_chromaNotesOff();
     bh_chroma.which = 0u;
     bh_chroma.pulseKey = 0xFFu;
     led_ownedRelease();       /* the mode's own SEQ/BAR display, as it is now */
@@ -1621,8 +1703,22 @@ static uint8_t buttonHandler_chromaRelease(uint8_t buttonNr)
     if (seq < 0 || (bh_chroma.keyMask & (uint16_t)(1u << seq)) == 0u)
         return 0u;
     bh_chroma.keyMask = (uint16_t)(bh_chroma.keyMask & ~(uint16_t)(1u << seq));
-    if ((uint8_t)seq == bh_chroma.key)
-        buttonHandler_chromaEndNote();
+    if (bh_chromaNotes.keyNote[seq] & BH_CHROMA_KEY_NOTEMODE) {
+        /* the MIDI note-off of the key's note (the paraphonic release) */
+        (void)midiNoteMode_noteOff(bh_chromaNotes.noteTrack, bh_chromaNotes.noteChannel,
+                                   (uint8_t)(bh_chromaNotes.keyNote[seq] & 0x7Fu), 0u);
+        bh_chromaNotes.keyNote[seq] = 0u;
+        return 1u;
+    }
+    if ((uint8_t)seq == bh_chroma.key) {
+        /* MIDI note-off rule under an overlay: a roll ends, a flam keeps its
+         * main hit (B-12) */
+        if (bh_chroma.track < NUM_TRACKS &&
+            bh_overlay[bh_chroma.track].count == 0xFFu)
+            buttonHandler_overlayEndTrack(bh_chroma.track);
+        bh_chroma.track = 0xFFu;
+        bh_chroma.key = 0xFFu;
+    }
     return 1u;
 }
 
@@ -1634,6 +1730,7 @@ static uint8_t buttonHandler_chromaRelease(uint8_t buttonNr)
 static void buttonHandler_chromaForceRelease(void)
 {
     buttonHandler_chromaEndNote();
+    buttonHandler_chromaNotesOff();
     bh_chroma.keyMask = 0u;
     bh_chroma.barMask = 0u;
 }
