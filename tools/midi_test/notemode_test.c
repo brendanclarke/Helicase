@@ -2,7 +2,10 @@
  * notemode_test.c - host laws for Core/MIDI/MidiNoteModes.c (S096 P3).
  *
  * What: mode resolution, sub -> layer mask, the NORMAL and LAYER4 note-on
- * paths, six layer tracks, and repeated layer notes in one pass. The module
+ * paths, six layer tracks, and repeated layer notes in one pass; S103 P6:
+ * the paraphonic release hold (NM-HOLD1..7: a release's writes wait
+ * MNM_RELEASE_HOLD_US, vanish when the chord ends, and go out early before
+ * a new key, a Pattern trigger or a Scene change). The module
  * is linked alone with SceneData, the sequencer, LiveRecord and the overlay
  * stubbed (notemode_host.h).
  * Accessors: make -C tools/midi_test run.
@@ -20,6 +23,8 @@ uint8_t host_active_scene;
 uint8_t host_global_channel;
 uint8_t host_overlay;
 uint8_t host_epoch;
+/* S103 P6: the host TIM2 (notemode_host.h) */
+uint32_t host_now_us;
 
 static struct { uint8_t track; uint16_t target; uint8_t value; } qlog[128];
 static unsigned qn;
@@ -102,6 +107,7 @@ static void reset_scene(void)
 	host_global_channel = 10u;
 	host_overlay = 0u;
 	host_epoch = 0u;
+	host_now_us = 1000000u;
 	qn = 0u;
 	holdSlot = 0xFFu;
 	holdOn = 0xFFu;
@@ -232,6 +238,10 @@ int main(void)
 	/* release the fundamental: coa and every interval move to F' = 64 */
 	qn = 0u;
 	(void)midiNoteMode_noteOff(0u, 2u, 60u, 0u);
+	/* S103 P6: the hand-over's writes wait for the release hold */
+	CHECK(qn == 0u, "NM-HOLD: the fundamental's writes wait");
+	host_now_us += 51000u;
+	midiNoteMode_service();
 	CHECK(qn == 4u, "fundamental release queues coa and 3 intervals");
 	{
 		unsigned hasCoa = 0u, has66 = 0u, has70 = 0u, has73 = 0u;
@@ -256,6 +266,9 @@ int main(void)
 	/* a non-fundamental release returns its group to the patch value */
 	qn = 0u;
 	(void)midiNoteMode_noteOff(0u, 2u, 71u, 0u);
+	CHECK(qn == 0u, "NM-HOLD: an owner's restore waits");
+	host_now_us += 51000u;
+	midiNoteMode_service();
 	CHECK(qn == 1u && qlog[0].target == instrumentParam_make(0u, COL_IDX_INTERVAL_1 + 2u) &&
 	      qlog[0].value == 63u, "non-fundamental release restores in3");
 
@@ -266,6 +279,12 @@ int main(void)
 	(void)midiNoteMode_noteOff(0u, 2u, 74u, 0u);
 	CHECK(qlog[qn - 1u].target == instrumentParam_make(0u, COL_IDX_SUSTAIN) &&
 	      qlog[qn - 1u].value == 0u && holdOn == 0u, "all keys up: sus off");
+	/* NM-HOLD1 (S103 P6): the chord was released inside the hold: only
+	 * sus = off was queued, and nothing follows when the hold would end */
+	CHECK(qn == 1u, "NM-HOLD1: a whole-chord release writes only sus = off");
+	host_now_us += 100000u;
+	midiNoteMode_service();
+	CHECK(qn == 1u, "NM-HOLD1: no deferred write after the group is freed");
 	host_reset_calls();
 	(void)midiNoteMode_noteOn(0u, 2u, 60u, 0u, 48u, 100u, 0u);
 	CHECK(normal_calls == 1u, "the freed group starts again");
@@ -275,6 +294,8 @@ int main(void)
 	(void)midiNoteMode_noteOn(0u, 2u, 67u, 0u, 55u, 90u, 0u);   /* in2 */
 	qn = 0u;
 	(void)midiNoteMode_noteOff(0u, 2u, 60u, 0u);
+	host_now_us += 51000u;   /* S103 P6: after the release hold */
+	midiNoteMode_service();
 	{
 		unsigned hasRestore = 0u, has66 = 0u, i;
 
@@ -343,6 +364,104 @@ int main(void)
 	for (t = 0u; t < 6u; t++)
 		(void)midiNoteMode_noteOn(t, (uint8_t)(2u + t), 60u, 0u, 48u, 100u, 0u);
 	CHECK(normal_calls == 6u, "six paraphonic Colloids trigger");
+
+	/*
+	 * S103 P6: the release hold, NM-HOLD2..7. Each starts a fresh group:
+	 * C3 (60, the fundamental), E3 (64, in1 = 67), G3 (67, in2 = 70); the
+	 * patch is coa 48, in1..in3 63.
+	 */
+#define HOLD_SETUP() do { \
+	reset_scene(); \
+	host_slot_type[0][0] = INSTRUMENT_TYPE_COL; \
+	host_track_channel[0][0] = 2u; \
+	host_slot_param[0][0][COL_IDX_COARSE] = 48u; \
+	host_slot_param[0][0][COL_IDX_INTERVAL_1] = 63u; \
+	host_slot_param[0][0][COL_IDX_INTERVAL_1 + 1u] = 63u; \
+	host_slot_param[0][0][COL_IDX_INTERVAL_1 + 2u] = 63u; \
+	(void)midiNoteMode_noteOn(0u, 2u, 60u, 0u, 48u, 100u, 0u); \
+	(void)midiNoteMode_noteOn(0u, 2u, 64u, 0u, 52u, 100u, 0u); \
+	(void)midiNoteMode_noteOn(0u, 2u, 67u, 0u, 55u, 100u, 0u); \
+	qn = 0u; \
+} while (0)
+#define Q_IS(k, idx, val) (qlog[k].target == instrumentParam_make(0u, (idx)) && \
+                           qlog[k].value == (val))
+
+	/* NM-HOLD2: an owner's release waits 50 ms, then restores once */
+	HOLD_SETUP();
+	(void)midiNoteMode_noteOff(0u, 2u, 64u, 0u);
+	host_now_us += 49000u;
+	midiNoteMode_service();
+	CHECK(qn == 0u, "NM-HOLD2: nothing before 50 ms");
+	host_now_us += 2000u;
+	midiNoteMode_service();
+	CHECK(qn == 1u && Q_IS(0, COL_IDX_INTERVAL_1, 63u),
+	      "NM-HOLD2: in1 back to the patch at 51 ms");
+	CHECK(last_lr.kind == LIVEREC_HIT_AUTO && last_lr.autoCount == 1u &&
+	      last_lr.autoValue[0] == 63u, "NM-HOLD2: reported once to LiveRecord");
+	midiNoteMode_service();
+	CHECK(qn == 1u, "NM-HOLD2: written once");
+
+	/* NM-HOLD3: the fundamental's hand-over, deferred, same values */
+	HOLD_SETUP();
+	(void)midiNoteMode_noteOff(0u, 2u, 60u, 0u);
+	host_now_us += 51000u;
+	midiNoteMode_service();
+	CHECK(qn == 3u && Q_IS(0, COL_IDX_COARSE, 52u) &&
+	      Q_IS(1, COL_IDX_INTERVAL_1, 63u) && Q_IS(2, COL_IDX_INTERVAL_1 + 1u, 66u),
+	      "NM-HOLD3: coa +4, in1 (F''s old group) to the patch, in2 +3");
+
+	/* NM-HOLD4: a key pressed inside the hold flushes first, then lands */
+	HOLD_SETUP();
+	(void)midiNoteMode_noteOff(0u, 2u, 64u, 0u);
+	host_now_us += 20000u;
+	(void)midiNoteMode_noteOn(0u, 2u, 69u, 0u, 57u, 100u, 0u);
+	CHECK(qn == 2u && Q_IS(0, COL_IDX_INTERVAL_1, 63u) &&
+	      Q_IS(1, COL_IDX_INTERVAL_1, 72u),
+	      "NM-HOLD4: the restore, then the new key's in1 (+9), in that order");
+	host_now_us += 60000u;
+	midiNoteMode_service();
+	CHECK(qn == 2u, "NM-HOLD4: nothing left pending");
+
+	/* NM-HOLD5: a Pattern trigger and a Scene change flush first */
+	HOLD_SETUP();
+	(void)midiNoteMode_noteOff(0u, 2u, 67u, 0u);
+	midiNoteMode_prepareTrigger(0u);
+	CHECK(qn >= 1u && Q_IS(0, COL_IDX_INTERVAL_1 + 1u, 63u),
+	      "NM-HOLD5: a Pattern trigger writes the pending restore first");
+	HOLD_SETUP();
+	(void)midiNoteMode_noteOff(0u, 2u, 64u, 0u);
+	host_epoch++;
+	midiNoteMode_service();
+	CHECK(qn >= 1u && Q_IS(0, COL_IDX_INTERVAL_1, 63u),
+	      "NM-HOLD5: a Scene change writes the pending restore first");
+
+	/* NM-HOLD6: the TIM2 wrap */
+	HOLD_SETUP();
+	host_now_us = 0xFFFFFFFFu - 10000u;
+	(void)midiNoteMode_noteOff(0u, 2u, 64u, 0u);
+	host_now_us += 40000u;   /* wraps past 0 */
+	midiNoteMode_service();
+	CHECK(qn == 0u, "NM-HOLD6: 40 ms across the wrap is still held");
+	host_now_us += 11000u;
+	midiNoteMode_service();
+	CHECK(qn == 1u && Q_IS(0, COL_IDX_INTERVAL_1, 63u),
+	      "NM-HOLD6: fires at 51 ms across the wrap");
+
+	/* NM-HOLD7: each release restarts the hold; both then go out together */
+	HOLD_SETUP();
+	(void)midiNoteMode_noteOff(0u, 2u, 64u, 0u);
+	host_now_us += 30000u;
+	(void)midiNoteMode_noteOff(0u, 2u, 67u, 0u);
+	host_now_us += 30000u;
+	midiNoteMode_service();
+	CHECK(qn == 0u, "NM-HOLD7: 30 ms after the latest release is still held");
+	host_now_us += 21000u;
+	midiNoteMode_service();
+	CHECK(qn == 2u && Q_IS(0, COL_IDX_INTERVAL_1, 63u) &&
+	      Q_IS(1, COL_IDX_INTERVAL_1 + 1u, 63u),
+	      "NM-HOLD7: both restores at 51 ms after the latest release");
+#undef HOLD_SETUP
+#undef Q_IS
 
 	/*
 	 * S096 P3 assessment F10: every key, full detail. All 128 notes held on

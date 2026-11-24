@@ -300,7 +300,10 @@ const ParamDescriptor colloid_param_descriptors[] = {
     ROW("col_interval_1", CAT_PITCH, LONG_INTRVL1, SHORT_IN1, DTYPE_PM63, MOD_PM63, interval[0], TYPE_UINT8),
     ROW("col_interval_2", CAT_PITCH, LONG_INTRVL2, SHORT_IN2, DTYPE_PM63, MOD_PM63, interval[1], TYPE_UINT8),
     ROW("col_interval_3", CAT_PITCH, LONG_INTRVL3, SHORT_IN3, DTYPE_PM63, MOD_PM63, interval[2], TYPE_UINT8),
-    /* dtn (F5: up to +-250 cents), spr (F6: x5), mot (F6: depth x5) */
+    /* dtn (F5: up to +-250 cents), spr (F6: x5), mot (F6: depth x5).
+     * S103 P6: in a mono route spr is the filter A / B balance and mot the
+     * serial <-> parallel morph (ColloidVoice.c col_monoMixControl()); the
+     * long view says so there (menu.c menu_instrumentCellLabels()). */
     ROW("col_detune", CAT_UNISON, LONG_DETUNE, SHORT_DTN, DTYPE_0B127, MOD_0_127, detune, TYPE_FLT),
     ROW("col_spread", CAT_UNISON, LONG_SPREAD, SHORT_SPR, DTYPE_0B127, MOD_0_127, spread, TYPE_FLT),
     ROW("col_motion", CAT_UNISON, LONG_MOTION, SHORT_MOT, DTYPE_0B127, MOD_0_127, motion, TYPE_FLT),
@@ -545,11 +548,15 @@ uint8_t colloidParameters_cellInactive(const ColloidVoice *voice,
     case COL_PARAM_POS_SPREAD:
         /* free-running wav oscillators: no start phase, frame or width */
         return (uint8_t)(voice->osc.oscType == OSC_TYPE_WAV);
-    case COL_PARAM_SPREAD:
-    case COL_PARAM_MOTION:
+    /*
+     * S103 P6: spr and mot are live in every route: in stereo they place the
+     * stack (spread, motion), in a mono route they set the two filters' mix
+     * (spr the A / B balance, mot serial <-> parallel; ColloidVoice.c
+     * col_monoMixControl()). They showed "---" in a mono route until S103 P6.
+     */
     case COL_PARAM_NOISE_PAN:   /* S096 P3: no pan in a mono route */
-        /* a mono route (rte a filter type): positions have no effect (C-D16,
-         * S095 P3 F9) */
+        /* a mono route (rte a filter type): no position has an effect
+         * (C-D16, S095 P3 F9) */
         return (uint8_t)(voice->route != COL_RTE_STR && voice->route < COL_RTE_COUNT);
     /* S099 P1: the chorus rows; S099 P2: the effect's rows, blank only with
      * fx off (rte stays live under the Juno modes, which ignore it: user) */

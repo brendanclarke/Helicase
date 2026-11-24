@@ -175,6 +175,13 @@ def main():
             and present(a.elf, 'col_chopBlock'))
     # S099 P1 review: the chorus loops are inlined into bbdChorus_renderColloid()
     clx = (present(a.elf, 'bbdChorus_control') and present(a.elf, 'bbdChorus_renderColloid'))
+    # S103 P6: the mono route's mix control (col_monoMixControl(), out of
+    # line, called by the async only under a mono route) is charged to the
+    # ser modes only; and gate G6-1: no ser mode may cost more than its par
+    # mode, which sets the Colloid's charge (S103_P6_COLLOID_TWEAKS.md §1.4).
+    mono_ctl = (B.block_path(a.elf, 'col_monoMixControl')[0]
+                if present(a.elf, 'col_monoMixControl') else 0)
+    par_total = {}
     want = {}
     if a.baseline:
         for line in open(a.baseline):
@@ -201,12 +208,18 @@ def main():
                        + pairs * B.block_path(a.elf, 'col_chopPairAdd')[0]
                        + n * loops(a.elf, 'col_chopBlock')[0][0]
                        + B.block_path(a.elf, 'col_chopBlock')[0]
-                       + B.block_path(a.elf, render)[0])
+                       + B.block_path(a.elf, render)[0]
+                       + (mono_ctl if mode == 'ser' else 0))
                 total = per_sample + blk / FRAMES
                 name = f'chop{n}-{mode}'
                 note = ''
                 if name in want and total > want[name] + 0.5:
                     note = f'  GREW (baseline {want[name]:.1f})'
+                    fail = True
+                if mode == 'par':
+                    par_total[f'chop{n}'] = total
+                elif total > par_total[f'chop{n}']:
+                    note += '  OVER its par mode (G6-1)'
                     fail = True
                 print(f'{name}: loops {per_sample:.1f} + per block {blk}/{FRAMES} = {total:.1f}{note}')
             continue
@@ -221,7 +234,8 @@ def main():
                           + render_per_sample(a.elf, render))
             blk = (base_blk + n * ctl_len + B.block_path(a.elf, store)[0]
                    + (pairs - 1) * B.block_path(a.elf, add)[0]
-                   + B.block_path(a.elf, render)[0])
+                   + B.block_path(a.elf, render)[0]
+                   + (mono_ctl if mode == 'ser' else 0))
             # S096 P3: the wts frame positions run in their own per-block
             # pass (col_scanControl(), one loop iteration per oscillator)
             if typ == 'scan' and present(a.elf, 'col_scanControl'):
@@ -232,6 +246,11 @@ def main():
             note = ''
             if name in want and total > want[name] + 0.5:
                 note = f'  GREW (baseline {want[name]:.1f})'
+                fail = True
+            if mode == 'par':
+                par_total[f'{typ}{n}'] = total
+            elif total > par_total[f'{typ}{n}']:
+                note += '  OVER its par mode (G6-1)'
                 fail = True
             print(f'{name}: loops {per_sample:.1f} + per block {blk}/{FRAMES} = {total:.1f}{note}')
             if typ == 'pwm' and n == PWM_COUNT and mode == 'par' and clx:

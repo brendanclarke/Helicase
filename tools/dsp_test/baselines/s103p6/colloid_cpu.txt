@@ -1,0 +1,11 @@
+plain12-par: loops 302.2 + per block 3649/32 = 416.3
+plain12-ser: loops 293.0 + per block 3715/32 = 409.1
+pwm6-par: loops 323.2 + per block 2482/32 = 400.8
+clx-pwm6-par: 400.8 + 46.9 = 447.7
+pwm6-ser: loops 314.0 + per block 2548/32 = 393.6
+pwmw6-par: loops 326.2 + per block 2486/32 = 403.9
+pwmw6-ser: loops 317.0 + per block 2552/32 = 396.8
+scan6-par: loops 316.2 + per block 2819/32 = 404.3
+scan6-ser: loops 307.0 + per block 2885/32 = 397.2
+chop6-par: loops 295.2 + per block 2928/32 = 386.8
+chop6-ser: loops 286.0 + per block 2994/32 = 379.6

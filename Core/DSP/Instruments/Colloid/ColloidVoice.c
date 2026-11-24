@@ -224,6 +224,9 @@ _Static_assert(COL_PWM_WARP_COUNT == 6u, "COL_NORM_PWM_WARP is 1 / sqrt(6)");
 #define COL_NOISE_TRACK_REF   7.03135971f /* log2(130.813 Hz): C3, the init pitch */
 #define COL_NOISE_MAKEUP_W    5.07f       /* width make-up: 1 + 5.07 (1 - w)^2 */
 #define COL_SLEW2             0.4816f     /* 1 - (1 - COL_SLEW)^2: a corner updated every other block */
+/* S103 P6: the mono mix's plateau margin (col_monoMixControl()): byte 63 of
+ * spr gives kA = kB = 1 exactly despite the float row's rounding. */
+#define COL_MONO_EPS          1.0e-4f
 #define COL_NOISE_STACK       (1.0f / 32768.0f)  /* one RNG value to +-1 */
 
 /* x clamped to 0..1 (descriptor floats are byte / 127, but an LFO or
@@ -1220,6 +1223,16 @@ void Colloid_initVoice(ColloidVoice *voice)
 	voice->ampLast = 0.0f;
 	voice->inGain = COL_NORM_WAV;
 	voice->inGainR = COL_NORM_WAV;
+	/* S103 P6: the mono mix at rest on the S102 serial chain (B fed A's
+	 * output only, the output B only), so a first mono block that ramps from
+	 * here starts where the earlier firmware was */
+	voice->monoCX = 0.0f;
+	voice->monoCXStep = 0.0f;
+	voice->monoDry = 1.0f;
+	voice->monoOA = 0.0f;
+	voice->monoOAStep = 0.0f;
+	voice->monoOB = 1.0f;
+	voice->monoOBStep = 0.0f;
 	voice->postGain = 1.0f;
 	voice->postMakeup = 1.0f;
 	voice->postWet = 0.0f;
@@ -1318,6 +1331,65 @@ void Colloid_triggerVoice(ColloidVoice *voice, const uint8_t source_slot,
 			voice->pwD0[i] = voice->pwD[i];
 		}
 	}
+}
+
+/*
+ * The mono route's filter mix for this block (S103 P6,
+ * S103_P6_COLLOID_TWEAKS.md §1.2; your answers 2026-11-24: Q1 serial middle
+ * = both, Q3 parallel equal-power).
+ *
+ * What:       b = spr x 127 (continuous under Morph / the LFO), m = mot,
+ *             e = COL_MONO_EPS:
+ *               kA = clamp01((127 - b) / 64 x (1 + e))  A's share of the
+ *                    serial chain: 1 up to b 63, 0 at 127;
+ *               kB = clamp01(b / 63 x (1 + e))          B's share: 0 at 0,
+ *                    1 from b 63;
+ *               s  = (kB + 1 - kA) / 2                  the parallel balance:
+ *                    0, exactly 0.5 at 63, 1;
+ *               serial (m 0):   B fed kA of A's output and 1 - kA of the dry
+ *                               input; out = (1 - kB) A + kB B;
+ *               parallel (m 1): B fed the dry input; out = sqrt(1 - s) A +
+ *                               sqrt(s) B (equal power);
+ *               between:        cA = (1 - m) kA, CX = 1 - cA;
+ *                               oA = (1 - m)(1 - kB) + m sqrt(1 - s);
+ *                               oB = (1 - m) kB + m sqrt(s).
+ *             monoDry = dgB / dgL (px, the first drive's input, scaled to
+ *             B's own drive gain); monoOA's target is oA / inGainR (the loop
+ *             weighs the g2-folded A output). Each ramped value's step is
+ *             (target - now) / 32.
+ * Why:        spr 0 is A alone (before the inter-stage shaper: a true
+ *             bypass of the second stage), 127 B alone on its own drive (as
+ *             its channel under str), 63 both: in serial the full chain,
+ *             which is the S102 sound exactly (CX 0, oA 0, oB 1: law
+ *             CO-MONO1), in parallel each at -3 dB. e makes byte 63 land on
+ *             kA = kB = 1 although the row is a float (63/127 x 127 is 63
+ *             +- 4e-6), so the plateau is exact. Linear in serial (A and A->B
+ *             are correlated), equal-power in parallel (Q3).
+ * Inputs:     voice (spread, motion, inGainR as set this block), dgL, dgB
+ *             (the first and second drive gains, 2^(4 drv), 2^(4 (drv +
+ *             dro)); dgB before the async's mono overwrite of dgR).
+ * Cost:       per block, mono only: three clamps, two VSQRT, two VDIV.
+ *             noinline: kept out of the async's code, so the stereo path
+ *             does not change by one instruction (gate G6-2).
+ * Accessors:  Colloid_calcVoiceAsync() (rte a filter type).
+ */
+static __attribute__((noinline)) void col_monoMixControl(ColloidVoice *voice,
+                                                         const float dgL, const float dgB)
+{
+	const float b = col_clamp01(voice->spread) * 127.0f;
+	const float m = col_clamp01(voice->motion);
+	const float kA = col_clamp01((127.0f - b) * (1.0f / 64.0f) * (1.0f + COL_MONO_EPS));
+	const float kB = col_clamp01(b * (1.0f / 63.0f) * (1.0f + COL_MONO_EPS));
+	const float s = 0.5f * (kB + 1.0f - kA);
+	const float cA = (1.0f - m) * kA;
+	const float oA = (1.0f - m) * (1.0f - kB) + m * __builtin_sqrtf(1.0f - s);
+	const float oB = (1.0f - m) * kB + m * __builtin_sqrtf(s);
+	const float inv = 1.0f / (float)OUTPUT_DMA_SIZE;
+
+	voice->monoDry = dgB / dgL;
+	voice->monoCXStep = ((1.0f - cA) - voice->monoCX) * inv;
+	voice->monoOAStep = (oA / voice->inGainR - voice->monoOA) * inv;
+	voice->monoOBStep = (oB - voice->monoOB) * inv;
 }
 
 void Colloid_calcVoiceAsync(ColloidVoice *voice)
@@ -1490,6 +1562,11 @@ void Colloid_calcVoiceAsync(ColloidVoice *voice)
 		dgR = alk_exp2f(COL_DRIVE_OCT * driveR);
 		voice->inGain = norm * dgL;
 		voice->inGainR = (isStr ? norm : 1.0f) * dgR;
+		/* S103 P6: the mono mix (spr balance, mot serial <-> parallel), from
+		 * the true second drive gain before the line below replaces it; mono
+		 * only, so the stereo route's async is unchanged */
+		if (!isStr)
+			col_monoMixControl(voice, dgL, dgR);
 		if (!isStr)
 			dgR = dgL;   /* mono: the noise enters the first stage only */
 	}
@@ -1803,13 +1880,33 @@ static __attribute__((noinline)) void col_renderPar(ColloidVoice *voice, int16_t
  *             (drv + dro)), Q7) is folded into A's output mix (mH, mB, mL x
  *             g2) before the loop, so it costs nothing per sample; at drv 0,
  *             dro 0 it is 1, P2's shaper-only stage. The side bus is not
- *             read: the voice is mono and the positions have no effect (spr
- *             and mot show "---").
+ *             read: the voice is mono and the stack's positions have no
+ *             effect (S103 P6: spr and mot now set the filter mix here, see
+ *             below; until then they showed "---").
  *             S096 P3 C2b: the noise, mono: one FMA into the first drive
- *             (the pan has no effect in a mono route, as spr/mot).
+ *             (the pan has no effect in a mono route).
  * Why:        the second shaper bounds the first filter's resonant peak into
  *             the second filter; dro sets how hard (the user's note: the
  *             second stage is the first plus offsets).
+ * S103 P6 (S103_P6_COLLOID_TWEAKS.md §1): spr and mot set the two filters'
+ *             mix in this route (they placed the stack in stereo only).
+ *   What:     px = M x inGain + noise (the first drive's input); yAg = A's
+ *             output with g2 folded (as before); B's input
+ *               uB = drive((1 - cx) yAg + cx rD px),
+ *             cx the dry-feed share, rD = dgR / dgL (px at B's own drive
+ *             gain, B's input as its channel under str); the output
+ *               y = oa yAg + ob yB,
+ *             then the post stage as before. cx, oa, ob ramp per sample from
+ *             the last block's ends to col_monoMixControl()'s targets.
+ *   Why:      the law is col_monoMixControl()'s: spr 0 A only, 127 B only,
+ *             63 both (serial: the full chain; parallel: equal power); mot 0
+ *             serial, 127 parallel. At spr 63, mot 0 (cx 0, oa 0, ob 1)
+ *             every new term is 0 x finite or 1 x v, so the output is the
+ *             S102 loop's bit for bit (law CO-MONO1).
+ *   Cost:     +3 ramps and about 8 operations a sample, against the measured
+ *             26.8 a sample the mono modes sat under the stereo modes, which
+ *             set the Colloid's charge (gate G6-1: every ser mode stays at or
+ *             under its par mode).
  * Accessors:  Colloid_calcVoiceSyncBlock() (rte LP..Pek).
  */
 static __attribute__((noinline)) void col_renderSer(ColloidVoice *voice, int16_t *outL)
@@ -1829,10 +1926,15 @@ static __attribute__((noinline)) void col_renderSer(ColloidVoice *voice, int16_t
 	/* the inter-stage gain folded into A's mix (exact at g2 = 1) */
 	const float mHA = A->mH * g2, mBA = A->mB * g2, mLA = A->mL * g2;
 	const float mHB = B->mH, mBB = B->mB, mLB = B->mL;
-	/* S096 P3 C2b: the noise, mono (the pan has no effect in a mono route,
-	 * as spr/mot): one gain into the first drive. */
+	/* S096 P3 C2b: the noise, mono (the pan has no effect in a mono route):
+	 * one gain into the first drive (S103 P6: and, through px, B's dry
+	 * feed). */
 	const float nG1 = voice->nG1, nG2 = voice->nG2;
 	const float nGM = 0.5f * (voice->nGL + voice->nGR);
+	/* S103 P6: the mono mix (see the comment block above) */
+	const float rD = voice->monoDry;
+	const float cxS = voice->monoCXStep, oaS = voice->monoOAStep, obS = voice->monoOBStep;
+	float cx = voice->monoCX, oa = voice->monoOA, ob = voice->monoOB;
 	float a1A = A->a1, a2A = A->a2, a3A = A->a3, ic1A = A->ic1, ic2A = A->ic2;
 	float a1B = B->a1, a2B = B->a2, a3B = B->a3, ic1B = B->ic1, ic2B = B->ic2;
 	float nHpZ = voice->nHpZ, nLpZ = voice->nLpZ;
@@ -1851,26 +1953,33 @@ static __attribute__((noinline)) void col_renderSer(ColloidVoice *voice, int16_t
 		const float nv2 = (nhp - nLpZ) * nG2;
 		const float nOut = nv2 + nLpZ;
 		float v1, v2, v3, y;
-		float x;
+		float x, px, yAg, uB;
 		int16_t o;
 
 		nHpZ = nlpo + nv;
 		nLpZ = nOut + nv2;
-		x = col_drive((float)busM[n] * gin + nOut * nGM);
+		/* S103 P6: px is kept, B's dry feed scales it to B's own drive */
+		px = (float)busM[n] * gin + nOut * nGM;
+		x = col_drive(px);
 
 		v3 = x - ic2A;
 		v1 = a1A * ic1A + a2A * v3;
 		v2 = ic2A + a2A * ic1A + a3A * v3;
 		ic1A = 2.0f * v1 - ic1A;
 		ic2A = 2.0f * v2 - ic2A;
-		y = col_drive(mHA * x + mBA * v1 + mLA * v2);
+		yAg = mHA * x + mBA * v1 + mLA * v2;
+		/* S103 P6: B's input: A's output (serial) and / or the dry input
+		 * (parallel); cx 0 is the S102 chain exactly */
+		uB = col_drive((1.0f - cx) * yAg + (cx * rD) * px);
 
-		v3 = y - ic2B;
+		v3 = uB - ic2B;
 		v1 = a1B * ic1B + a2B * v3;
 		v2 = ic2B + a2B * ic1B + a3B * v3;
 		ic1B = 2.0f * v1 - ic1B;
 		ic2B = 2.0f * v2 - ic2B;
-		y = mHB * y + mBB * v1 + mLB * v2;
+		y = mHB * uB + mBB * v1 + mLB * v2;
+		/* S103 P6: the balance (oa 0, ob 1: B's output alone, as S102) */
+		y = oa * yAg + ob * y;
 
 		/* S095 P3 F10: overdrive, the amp, then the tone (once: mono) */
 		y = col_post(y, pg, pmk, pwet) * amp;
@@ -1881,11 +1990,18 @@ static __attribute__((noinline)) void col_renderSer(ColloidVoice *voice, int16_t
 		a1A += da1A; a2A += da2A; a3A += da3A;
 		a1B += da1B; a2B += da2B; a3B += da3B;
 		amp += ampStep;
+		cx += cxS;   /* S103 P6: the mono mix's ramps */
+		oa += oaS;
+		ob += obS;
 	}
 	A->ic1 = ic1A; A->ic2 = ic2A;
 	B->ic1 = ic1B; B->ic2 = ic2B;
 	voice->nHpZ = nHpZ;
 	voice->nLpZ = nLpZ;
+	/* S103 P6: the mono mix starts the next block where this one ended */
+	voice->monoCX = cx;
+	voice->monoOA = oa;
+	voice->monoOB = ob;
 	/* both channels' tone states follow, so a change to str starts smooth */
 	voice->toneZL = tz;
 	voice->toneZR = tz;

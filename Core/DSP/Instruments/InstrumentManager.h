@@ -1007,6 +1007,19 @@ uint8_t instrumentManager_slotVoiceChain(uint8_t slot);
  * Affiliates: voiceFold_process() (the same clamp).
  */
 uint8_t instrumentManager_slotFoldType(uint8_t slot);
+/*
+ * Whether a slot holds a Colloid in a mono route (S103 P6).
+ *
+ * What:       1 when the slot's engine is the Colloid (col or clx) and its
+ *             rte is a filter type (the mono route), else 0.
+ * Why:        under a mono route the Colloid's spr / mot rows set the filter
+ *             mix instead of the stack's placement (S103_P6_COLLOID_TWEAKS.md
+ *             §1), so Menu relabels their long view without owning the
+ *             tagged runtime mapping (as instrumentManager_slotVoiceChain()).
+ * Inputs:     slot.  Outputs: 0 / 1.
+ * Accessors:  menu.c menu_instrumentCellLabels().
+ */
+uint8_t instrumentManager_slotColloidMono(uint8_t slot);
 void instrumentManager_calcSlotAsync(uint8_t slot);
 void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
                                          uint8_t size);

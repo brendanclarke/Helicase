@@ -14,6 +14,15 @@ typedef struct {
 	struct { uint8_t instrument_parameters[64]; } parameter_images;
 } kit_instrument_slot_t;
 
+/* S103 P6: MidiNoteModes.c resolves a type to its engine (S099: clx plays the
+ * Colloid's engine). The host has no Advanced types, so every type is its
+ * own engine. This stand-in was missing since S099, so the harness no longer
+ * compiled; the committed binary was stale. */
+static inline instrument_type_t instrumentManager_typeEngine(instrument_type_t t)
+{
+	return t;
+}
+
 /* The Colloid row indices the paraphonic mode writes (ColloidParameters.h). */
 #define COL_IDX_COARSE      0u
 #define COL_IDX_SUSTAIN     10u
@@ -45,6 +54,15 @@ static inline uint8_t scene_getTrackMidiChannel(uint8_t scene, uint8_t track)
 	return (scene <= 15u && track < 7u) ? host_track_channel[scene][track] : 17u;
 }
 static inline uint8_t seq_getPlaybackEpoch(void) { return host_epoch; }
+/* S103 P6: the release hold's clock. host_now_us stands in for TIM2 (the
+ * laws move it by hand); the difference is the firmware's unsigned form
+ * (timebase.c timebase_tim2Delta()), so a wrap behaves as on the device. */
+extern uint32_t host_now_us;
+static inline uint32_t timebase_tim2Now(void) { return host_now_us; }
+static inline uint32_t timebase_tim2Delta(uint32_t newer, uint32_t older)
+{
+	return (uint32_t)(newer - older);
+}
 static inline instrument_param_id_t instrumentParam_make(uint8_t slot,
                                                          uint8_t index)
 {

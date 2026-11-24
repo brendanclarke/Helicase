@@ -43,6 +43,13 @@
  *                       (within 1 %);
  *               CO-SER  a mono route (rte LP): the left and right blocks
  *                       are equal;
+ *               CO-MONO (S103 P6) the mono route's filter mix: spr 63,
+ *                       mot 0 is the S102 loop bit for bit (a frozen copy);
+ *                       spr 0 is filter A alone, spr 127 filter B alone on
+ *                       its own drive (serial and parallel); parallel with
+ *                       identical filters at spr 63 is sqrt 2 x one filter
+ *                       (equal power); the law's corner values; the ramps
+ *                       land on their targets;
  *               CO-RTE  (S095 P3 F9) rte str at zero offsets: both filters'
  *                       coefficients equal and, with no side signal, L == R;
  *                       a cutoff offset moves the right filter only;
@@ -141,13 +148,13 @@ int16_t GetRngValue(void)
 #define BLK OUTPUT_DMA_SIZE
 enum { G_OSC, G_POS, G_W, G_MOT, G_INT, G_SLEW, G_EG, G_AMP, G_SVF, G_SER, G_RTE, G_POST,
        G_PWM, G_WTB, G_MX, G_RND, G_JOIN, G_PWG, G_GATE, G_RETRIG, G_ROLLGATE,
-       G_CHANGE, G_PENV, G_NOISE, G_SCAN, G_CHP, G_E1, G_N };
+       G_CHANGE, G_PENV, G_NOISE, G_SCAN, G_CHP, G_E1, G_MONO, G_N };
 static const char *g_name[G_N] = { "CO-OSC", "CO-POS", "CO-W", "CO-MOT", "CO-INT", "CO-SLEW",
                                    "CO-EG", "CO-AMP", "CO-SVF", "CO-SER", "CO-RTE", "CO-POST",
                                    "CO-PWM", "CO-WTB", "MX-ST", "CO-RND", "CO-JOIN",
                                    "CO-PWG", "CO-GATE", "CO-RETRIG", "CO-ROLLGATE",
                                    "CO-CHANGE", "CO-PENV", "CO-NOISE", "CO-SCAN",
-                                   "CO-CHP", "MX-E1" };
+                                   "CO-CHP", "MX-E1", "CO-MONO" };
 static unsigned g_fail[G_N];
 
 static void fail(int g, const char *what, double a, double b)
@@ -1102,6 +1109,275 @@ static void test_ser(void)
 	}
 }
 
+/*
+ * CO-MONO (S103 P6, S103_P6_COLLOID_TWEAKS.md §1.5): the mono route's
+ * filter mix.
+ *
+ * The frozen loop below is col_renderSer() exactly as committed at b79707b3
+ * (S103 P5 tree, before S103 P6), renamed. It is the reference for the
+ * bit-identity law: spr 63 / mot 0 must render the same int16 samples.
+ * Method (every law): a voice is run for many blocks in the configuration,
+ * so its states and its bus are a real block's; then the block's bus is
+ * rendered again from one snapshot by two loops (or one loop on two
+ * snapshots that differ in one place), each from the same RNG state.
+ */
+static __attribute__((noinline)) void col_renderSerS102(ColloidVoice *voice, int16_t *outL)
+{
+	ColSvf *const A = &voice->svfA;
+	ColSvf *const B = &voice->svfB;
+	const int32_t *const busM = voice->busM;
+	int16_t *const outR = voice->right;
+	const float gin = voice->inGain;
+	const float g2 = voice->inGainR;
+	const float pg = voice->postGain, pmk = voice->postMakeup, pwet = voice->postWet;
+	const float tc = voice->toneC;
+	const float ampStep = (voice->ampEg.level - voice->ampLast)
+	                    * (COL_OUT_SCALE / (float)OUTPUT_DMA_SIZE);
+	const float da1A = A->da1, da2A = A->da2, da3A = A->da3;
+	const float da1B = B->da1, da2B = B->da2, da3B = B->da3;
+	/* the inter-stage gain folded into A's mix (exact at g2 = 1) */
+	const float mHA = A->mH * g2, mBA = A->mB * g2, mLA = A->mL * g2;
+	const float mHB = B->mH, mBB = B->mB, mLB = B->mL;
+	/* S096 P3 C2b: the noise, mono (the pan has no effect in a mono route,
+	 * as spr/mot): one gain into the first drive. */
+	const float nG1 = voice->nG1, nG2 = voice->nG2;
+	const float nGM = 0.5f * (voice->nGL + voice->nGR);
+	float a1A = A->a1, a2A = A->a2, a3A = A->a3, ic1A = A->ic1, ic2A = A->ic2;
+	float a1B = B->a1, a2B = B->a2, a3B = B->a3, ic1B = B->ic1, ic2B = B->ic2;
+	float nHpZ = voice->nHpZ, nLpZ = voice->nLpZ;
+	float amp = voice->ampLast * COL_OUT_SCALE;
+	float tz = voice->toneZL;
+	uint32_t n;
+
+	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
+		/* the RNG in int16 units: COL_NOISE_STACK is folded into nGL / nGR
+		 * (the one-poles are linear), one multiply less per sample */
+		const float nz = (float)col_rngRead();
+		/* form B, as col_renderPar() */
+		const float nv = (nz - nHpZ) * nG1;
+		const float nlpo = nv + nHpZ;
+		const float nhp = nz - nlpo;
+		const float nv2 = (nhp - nLpZ) * nG2;
+		const float nOut = nv2 + nLpZ;
+		float v1, v2, v3, y;
+		float x;
+		int16_t o;
+
+		nHpZ = nlpo + nv;
+		nLpZ = nOut + nv2;
+		x = col_drive((float)busM[n] * gin + nOut * nGM);
+
+		v3 = x - ic2A;
+		v1 = a1A * ic1A + a2A * v3;
+		v2 = ic2A + a2A * ic1A + a3A * v3;
+		ic1A = 2.0f * v1 - ic1A;
+		ic2A = 2.0f * v2 - ic2A;
+		y = col_drive(mHA * x + mBA * v1 + mLA * v2);
+
+		v3 = y - ic2B;
+		v1 = a1B * ic1B + a2B * v3;
+		v2 = ic2B + a2B * ic1B + a3B * v3;
+		ic1B = 2.0f * v1 - ic1B;
+		ic2B = 2.0f * v2 - ic2B;
+		y = mHB * y + mBB * v1 + mLB * v2;
+
+		/* S095 P3 F10: overdrive, the amp, then the tone (once: mono) */
+		y = col_post(y, pg, pmk, pwet) * amp;
+		tz = y + tc * (tz - y);
+		o = (int16_t)__SSAT((int32_t)tz, 16);
+		outL[n] = o;
+		outR[n] = o;
+		a1A += da1A; a2A += da2A; a3A += da3A;
+		a1B += da1B; a2B += da2B; a3B += da3B;
+		amp += ampStep;
+	}
+	A->ic1 = ic1A; A->ic2 = ic2A;
+	B->ic1 = ic1B; B->ic2 = ic2B;
+	voice->nHpZ = nHpZ;
+	voice->nLpZ = nLpZ;
+	/* both channels' tone states follow, so a change to str starts smooth */
+	voice->toneZL = tz;
+	voice->toneZR = tz;
+}
+
+
+static ColloidVoice monoS1, monoS2;
+static int16_t monoO1[BLK], monoO2[BLK];
+
+/* a sounding mono voice: rte LP, drive, offsets, noise and resonance on */
+static void mono_setup(float spr, float mot)
+{
+	unsigned b;
+
+	voice_init(); host_running = 1u;
+	V.route = 1u + COL_FT_LP; V.filtType = COL_FT_BP;
+	V.res = 0.5f; V.cut = 0.45f; V.drive = 0.3f;
+	V.cutOfs = (63.0f + 15.0f) / 127.0f; V.driveOfs = (63.0f + 10.0f) / 127.0f;
+	V.nLevel = 40u;
+	V.spread = spr; V.motion = mot;
+	V.osc.midiFreq = (uint16_t)((60u << 8) | 63u);
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	for (b = 0u; b < 120u; b++)
+		block();
+}
+
+/* render the last block's bus again from V's state, with loop fn, into out */
+static void mono_render(ColloidVoice *S, void (*fn)(ColloidVoice *, int16_t *),
+                        int16_t *out, uint32_t rng0)
+{
+	host_rng = rng0;
+	fn(S, out);
+}
+
+static int mono_diff(int tol)
+{
+	unsigned i;
+	int worst = 0;
+
+	for (i = 0u; i < BLK; i++) {
+		const int d = abs((int)monoO1[i] - (int)monoO2[i]);
+
+		if (d > worst)
+			worst = d;
+	}
+	return worst > tol ? worst : 0;
+}
+
+static void test_mono(void)
+{
+	uint32_t r0;
+	unsigned b;
+	int d;
+
+	/* 1. spr 63, mot 0: the S102 loop bit for bit, over 60 blocks */
+	mono_setup(63.0f / 127.0f, 0.0f);
+	if (V.monoCX != 0.0f || V.monoOA != 0.0f || V.monoOB != 1.0f ||
+	    V.monoCXStep != 0.0f || V.monoOAStep != 0.0f || V.monoOBStep != 0.0f)
+		fail(G_MONO, "spr 63 / mot 0 is not the plain chain (cx, oa, ob)", V.monoCX, V.monoOB);
+	for (b = 0u; b < 60u; b++) {
+		block();
+		r0 = host_rng;
+		monoS1 = V; monoS2 = V;
+		mono_render(&monoS1, col_renderSer, monoO1, r0);
+		mono_render(&monoS2, col_renderSerS102, monoO2, r0);
+		if ((d = mono_diff(0)) != 0) { fail(G_MONO, "spr 63 / mot 0 differs from S102", d, 0); break; }
+	}
+
+	/* 2. spr 0 (serial and parallel): A only, B does not matter */
+	{
+		const float mots[2] = { 0.0f, 1.0f };
+		unsigned k;
+
+		for (k = 0u; k < 2u; k++) {
+			mono_setup(0.0f, mots[k]);
+			r0 = host_rng;
+			monoS1 = V; monoS2 = V;
+			col_svfInit(&monoS2.svfB, 0.9f, 0.2f, COL_FT_HP);   /* another B */
+			monoS2.svfB.ic1 = 0.3f; monoS2.svfB.ic2 = -0.2f;
+			mono_render(&monoS1, col_renderSer, monoO1, r0);
+			mono_render(&monoS2, col_renderSer, monoO2, r0);
+			if ((d = mono_diff(1)) != 0)
+				fail(G_MONO, k ? "spr 0, parallel: B is heard" : "spr 0, serial: B is heard", d, 0);
+		}
+		/* 3. spr 127: B only, A does not matter (B fed its own drive) */
+		for (k = 0u; k < 2u; k++) {
+			mono_setup(1.0f, mots[k]);
+			r0 = host_rng;
+			monoS1 = V; monoS2 = V;
+			col_svfInit(&monoS2.svfA, 0.9f, 0.2f, COL_FT_HP);   /* another A */
+			monoS2.svfA.ic1 = 0.3f; monoS2.svfA.ic2 = -0.2f;
+			mono_render(&monoS1, col_renderSer, monoO1, r0);
+			mono_render(&monoS2, col_renderSer, monoO2, r0);
+			if ((d = mono_diff(1)) != 0)
+				fail(G_MONO, k ? "spr 127, parallel: A is heard" : "spr 127, serial: A is heard", d, 0);
+		}
+	}
+
+	/* 4. parallel, identical filters (zero offsets, drive 0, A's type =
+	 *    rte's): spr 63 is sqrt 2 x the spr 0 output (equal power, Q3) */
+	{
+		unsigned i;
+		int bad = 0;
+
+		voice_init(); host_running = 1u;
+		V.route = 1u + COL_FT_LP; V.filtType = COL_FT_LP;
+		V.res = 0.3f; V.cut = 0.45f; V.drive = 0.0f; V.vcaDrive = 0u; V.tone = 127u;
+		V.spread = 63.0f / 127.0f; V.motion = 1.0f;
+		V.osc.midiFreq = (uint16_t)((60u << 8) | 63u);
+		Colloid_triggerVoice(&V, 0u, 60u, 63u, 5514u, 1u);
+		for (b = 0u; b < 200u; b++)
+			block();
+		r0 = host_rng;
+		monoS1 = V; monoS2 = V;
+		/* the spr 0 twin: A alone (oa 1, ob 0, cx 1), at rest */
+		monoS2.monoOA = 1.0f / monoS2.inGainR; monoS2.monoOB = 0.0f; monoS2.monoCX = 1.0f;
+		monoS2.monoOAStep = monoS2.monoOBStep = monoS2.monoCXStep = 0.0f;
+		mono_render(&monoS1, col_renderSer, monoO1, r0);
+		mono_render(&monoS2, col_renderSer, monoO2, r0);
+		for (i = 0u; i < BLK; i++)
+			if (abs(monoO2[i]) < 20000 &&
+			    fabs((double)monoO1[i] - 1.41421356 * (double)monoO2[i]) > 3.0)
+				bad++;
+		if (bad) fail(G_MONO, "parallel identical filters at spr 63 != sqrt 2 x one", bad, 0);
+		if (V.monoDry != 1.0f) fail(G_MONO, "dro 0: B's dry gain is not A's", V.monoDry, 1.0);
+	}
+
+	/* 5. the law's corners (col_monoMixControl()): (cx, oa x g2, ob) */
+	{
+		static const struct { float spr, mot, cx, oa, ob; } c[] = {
+			{ 0.0f,          0.0f, 0.0f, 1.0f,        0.0f },
+			{ 63.0f / 127.0f, 0.0f, 0.0f, 0.0f,        1.0f },
+			{ 1.0f,          0.0f, 1.0f, 0.0f,        1.0f },
+			{ 0.0f,          1.0f, 1.0f, 1.0f,        0.0f },
+			{ 63.0f / 127.0f, 1.0f, 1.0f, 0.70710678f, 0.70710678f },
+			{ 1.0f,          1.0f, 1.0f, 0.0f,        1.0f },
+		};
+		unsigned k;
+
+		for (k = 0u; k < sizeof(c) / sizeof(c[0]); k++) {
+			voice_init();
+			V.route = 1u + COL_FT_LP;
+			V.spread = c[k].spr; V.motion = c[k].mot;
+			V.inGainR = 1.7f;
+			col_monoMixControl(&V, 1.0f, 1.7f);
+			if (fabsf(V.monoCX + 32.0f * V.monoCXStep - c[k].cx) > 1e-5f ||
+			    fabsf((V.monoOA + 32.0f * V.monoOAStep) * 1.7f - c[k].oa) > 1e-5f ||
+			    fabsf(V.monoOB + 32.0f * V.monoOBStep - c[k].ob) > 1e-5f)
+				fail(G_MONO, "a corner of the mono law", k, c[k].ob);
+			if (fabsf(V.monoDry - 1.7f) > 1e-6f)
+				fail(G_MONO, "monoDry = dgB / dgL", V.monoDry, 1.7);
+		}
+	}
+
+	/* 6. the ramps land: a 0 -> 127 spr step in one block reaches its
+	 *    targets at the block's end; a fast sweep stays finite */
+	{
+		float tcx, toa, tob;
+
+		mono_setup(0.0f, 0.3f);
+		V.spread = 1.0f;
+		Colloid_calcVoiceAsync(&V);
+		tcx = V.monoCX + 32.0f * V.monoCXStep;
+		toa = V.monoOA + 32.0f * V.monoOAStep;
+		tob = V.monoOB + 32.0f * V.monoOBStep;
+		Colloid_calcVoiceSyncBlock(&V, L, BLK);
+		if (fabsf(V.monoCX - tcx) > 1e-5f || fabsf(V.monoOA - toa) > 1e-5f ||
+		    fabsf(V.monoOB - tob) > 1e-5f || fabsf(tcx - V.monoCX) > 1e-5f ||
+		    V.monoCX < 0.5f)
+			fail(G_MONO, "a spr step does not land at the block's end", V.monoCX, tcx);
+		for (b = 0u; b < 2000u; b++) {
+			V.spread = (b & 1u) ? 1.0f : 0.0f;
+			V.motion = (float)(b % 128u) / 127.0f;
+			block();
+			if (!isfinite(V.monoCX) || !isfinite(V.monoOA) || !isfinite(V.monoOB) ||
+			    !isfinite(V.svfB.ic1) || !isfinite(V.svfA.ic1)) {
+				fail(G_MONO, "a fast spr / mot sweep went non-finite", b, 0);
+				break;
+			}
+		}
+	}
+}
+
 /* CO-RTE (S095 P3 F9) */
 static void test_route(void)
 {
@@ -1947,6 +2223,8 @@ int main(void)
 	test_pwg();
 	/* S099 P1: last, so the existing laws keep the RNG stream they had */
 	test_chop();
+	/* S103 P6: after the chop, so every earlier law keeps its RNG stream */
+	test_mono();
 	for (g = 0u; g < G_N; g++) {
 		printf("colloid %-7s failures: %u\n", g_name[g], g_fail[g]);
 		total += g_fail[g];

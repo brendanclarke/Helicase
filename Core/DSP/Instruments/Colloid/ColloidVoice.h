@@ -483,6 +483,38 @@ typedef struct ColloidVoiceStruct
 	float    inGain;        /* this block's bus-to-drive gain, left / first filter */
 	float    inGainR;       /* this block's bus-to-drive gain, right (str) or
 	                         * the inter-stage gain (mono), F9 */
+	/*
+	 * The mono route's filter mix (S103 P6, S103_P6_COLLOID_TWEAKS.md §1;
+	 * RAM approved 2026-11-24: +28 B, inside the 1,264 B slot reserve).
+	 *
+	 * What:       in a mono route (rte a filter type) spr sets the balance
+	 *             between filter A (typ, the primary) and filter B (rte and
+	 *             the offsets, the secondary), and mot morphs serial (A then
+	 *             B, as before) to parallel (both fed the same input). Per
+	 *             sample (col_renderSer()):
+	 *               uB = drive((1 - monoCX) yAg + monoCX monoDry px)
+	 *               y  = monoOA yAg + monoOB yB
+	 *             px the first drive's input (M x inGain + the noise), yAg
+	 *             filter A's output with the inter-stage gain g2 folded in,
+	 *             yB filter B's output.
+	 *             monoCX / monoCXStep  B's dry-feed share now / per sample;
+	 *             monoDry              dgR / dgL: px at B's own drive gain
+	 *                                  (B's input as its channel under str);
+	 *             monoOA / monoOAStep  A's output weight, divided by g2 (it
+	 *                                  weighs the g2-folded yAg);
+	 *             monoOB / monoOBStep  B's output weight.
+	 *             Targets from spr / mot per block (col_monoMixControl()),
+	 *             ramped per sample over the block.
+	 * Why:        spr and mot placed the stack in stereo only and did nothing
+	 *             in a mono route (your request, 2026-11-24). At spr 63,
+	 *             mot 0 the values are 0, 0, 1: the S102 serial chain bit for
+	 *             bit (law CO-MONO1). Initialised to that.
+	 * Accessors:  col_monoMixControl() (async, mono only), col_renderSer().
+	 */
+	float    monoCX, monoCXStep;
+	float    monoDry;
+	float    monoOA, monoOAStep;
+	float    monoOB, monoOBStep;
 	float    postGain;      /* F10: the overdrive's input gain (alkOvdGain) */
 	float    postMakeup;    /* F10: its make-up (alkOvdMakeup) */
 	float    postWet;       /* F10: 0 at drive 0 (exact bypass) .. 1 from drive 8 */

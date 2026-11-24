@@ -12885,6 +12885,26 @@ static void menu_instrumentCellLabels(uint8_t slot,
             return;
         }
     }
+    /*
+     * S103 P6: a Colloid in a mono route uses spr / mot for the filter mix
+     * (spr the A / B balance, mot serial <-> parallel; ColloidVoice.c
+     * col_monoMixControl()), so their long view reads "Filter Balance" and
+     * "Filter Ser>Par" there instead of the stack's "Unison Spread / Motion".
+     * The short labels stay spr / mot (your names for them). Keyed by file
+     * key, as the WFd rule below.
+     */
+    if (instrumentManager_slotColloidMono(slot)) {
+        if (strcmp(descriptor->file_key, "col_spread") == 0) {
+            *cat = menuLabel_cat(CAT_FILTER);
+            *lng = "Balance";
+            return;
+        }
+        if (strcmp(descriptor->file_key, "col_motion") == 0) {
+            *cat = menuLabel_cat(CAT_FILTER);
+            *lng = "Ser>Par";
+            return;
+        }
+    }
     if (instrumentManager_slotVoiceChain(slot) != VOICE_CHAIN_WAVEFOLDER)
         return;
     if (strcmp(descriptor->file_key, "transient_wave") == 0) {

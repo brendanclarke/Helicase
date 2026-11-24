@@ -3893,6 +3893,17 @@ static void instrumentManager_spaceBind(uint8_t slot, uint8_t want)
  *             as voiceFold_process() clamps it, so the label names the type
  *             that plays.
  */
+/* S103 P6: contract in InstrumentManager.h (the Colloid's mono route). */
+uint8_t instrumentManager_slotColloidMono(uint8_t slot)
+{
+    const ColloidVoice *voice;
+
+    if (instrumentManager_typeEngine(instrumentManager_slotType(slot)) != INSTRUMENT_TYPE_COL)
+        return 0u;
+    voice = instrumentManager_colloidRuntime(slot);
+    return (uint8_t)(voice && voice->route != COL_RTE_STR && voice->route < COL_RTE_COUNT);
+}
+
 uint8_t instrumentManager_slotFoldType(uint8_t slot)
 {
     const TransientGenerator *transient = instrumentManager_transient(slot);

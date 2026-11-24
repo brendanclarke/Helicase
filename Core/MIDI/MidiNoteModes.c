@@ -15,6 +15,7 @@
 #include "LiveRecord.h"
 #include "InstrumentManager.h"
 #include "ColloidParameters.h"   /* S096 P3 C3: COL_IDX_* */
+#include "timebase.h"            /* S103 P6: timebase_tim2Now/Delta (the release hold) */
 #endif
 #include "MidiNoteMap.h"     /* MIDI_NOTEMAP_ROOT_INTERNAL (header-only) */
 #include <string.h>
@@ -56,7 +57,10 @@ typedef struct {            /* one group, 388 B */
 
 typedef struct {            /* one voice slot, 8 B */
     uint8_t group;          /* 0..5, or 0xFF */
-    uint8_t flags;          /* midiHold mirror, reassert pending */
+    uint8_t flags;          /* S103 P6: the release hold's pending mask
+                             * (MNM_REL_*); unused before S103 P6, whose
+                             * old comment ("midiHold mirror, reassert
+                             * pending") described nothing in the tree */
     uint8_t note0;          /* PARA: the trigger note F0; POLY: the note playing */
     uint8_t fund;           /* PARA: the current fundamental F */
     uint8_t age;            /* POLY: steal order */
@@ -65,6 +69,41 @@ typedef struct {            /* one voice slot, 8 B */
 
 static midiNoteMode_group_t midiNoteMode_group[MIDI_NOTEMODE_GROUPS];
 static midiNoteMode_voice_t midiNoteMode_voice[MIDI_NOTEMODE_GROUPS];
+/*
+ * The paraphonic release hold (S103 P6, S103_P6_COLLOID_TWEAKS.md §2;
+ * RAM approved 2026-11-24, +24 B SRAM1).
+ *
+ * What:       a paraphonic key release that leaves keys held no longer
+ *             queues its automation at once (the interval back to the patch,
+ *             or the coa / interval re-root after the fundamental). It sets
+ *             the targets it would have written in the slot's pending mask
+ *             (midiNoteMode_voice[slot].flags, MNM_REL_*) and stamps
+ *             midiNoteMode_relStart[slot] with TIM2. The writes go out
+ *             (midiNoteMode_flushRelease()) when MNM_RELEASE_HOLD_US has
+ *             passed since the latest release (midiNoteMode_service()), or
+ *             at once before anything that needs a consistent chord: a new
+ *             key (midiNoteMode_paraOn()), a Pattern trigger
+ *             (midiNoteMode_prepareTrigger()) or a Scene change (the epoch
+ *             branch of midiNoteMode_service()). If the last key is
+ *             released first, the group is freed with the mask and nothing
+ *             is written: the chord rings through its release unchanged.
+ * Why:        a chord is released one finger at a time; every release but
+ *             the last moved some oscillators, and the Colloid's slew made
+ *             that audible as a pitch tail in the amp release (your report,
+ *             2026-11-24). Presses are not delayed.
+ * Values:     MNM_RELEASE_HOLD_US 50,000 (50 ms, by ear; try 30..80 ms on
+ *             the device). Each release restarts the hold, so a chord
+ *             released over any span shorter than 50 ms per gap writes
+ *             nothing.
+ * Lifetime:   relStart is meaningful only while the slot's mask is non-zero;
+ *             the mask is cleared by the flush and by midiNoteMode_freeGroup().
+ * Context:    main loop (MIDI dispatch and midiNoteMode_service()).
+ */
+#define MNM_RELEASE_HOLD_US 50000u
+#define MNM_REL_COA         0x01u   /* coa (the fundamental moved) */
+#define MNM_REL_IN1         0x02u   /* in1; in2 = IN1 << 1, in3 = IN1 << 2 */
+#define MNM_REL_MASK        0x0Fu
+static uint32_t midiNoteMode_relStart[MIDI_NOTEMODE_GROUPS];
 static uint8_t midiNoteMode_age;
 /* S096 P3 C3: the playback epoch the pools last saw, so a Scene change
  * re-asserts sus / coa / intervals once (plan §4.4). A Scene change affects
@@ -74,9 +113,11 @@ static uint8_t midiNoteMode_epoch;
 _Static_assert(sizeof(midiNoteMode_key_t) == 3u, "a held key is three bytes");
 _Static_assert(sizeof(midiNoteMode_group_t) == 388u, "a group is 388 bytes");
 _Static_assert(sizeof(midiNoteMode_voice_t) == 8u, "a voice is eight bytes");
+/* S103 P6: + midiNoteMode_relStart (24 B, approved 2026-11-24): 2,380 B
+ * approved before, plus the epoch byte inside the old 4 B allowance. */
 _Static_assert(sizeof(midiNoteMode_group) + sizeof(midiNoteMode_voice) +
-                   sizeof(midiNoteMode_age) <= 2384u,
-               "the note-mode pools exceed the approved 2,380 B");
+                   sizeof(midiNoteMode_age) + sizeof(midiNoteMode_relStart) <= 2408u,
+               "the note-mode pools exceed the approved 2,404 B");
 
 /* The slot a visible track plays (track 6 -> slot 5). */
 static uint8_t midiNoteMode_slotOf(uint8_t track)
@@ -98,6 +139,7 @@ void midiNoteMode_init(void)
 
     memset(midiNoteMode_group, 0, sizeof(midiNoteMode_group));
     memset(midiNoteMode_voice, 0, sizeof(midiNoteMode_voice));
+    memset(midiNoteMode_relStart, 0, sizeof(midiNoteMode_relStart));   /* S103 P6 */
     for (i = 0u; i < MIDI_NOTEMODE_GROUPS; i++)
         midiNoteMode_voice[i].group = 0xFFu;
     midiNoteMode_age = 0u;
@@ -197,9 +239,14 @@ static void midiNoteMode_freeGroup(uint8_t gi)
 
     if (gi >= MIDI_NOTEMODE_GROUPS)
         return;
+    /* S103 P6: a freed group drops any pending release writes with it (the
+     * last key went up inside the hold, or the group was revalidated away):
+     * nothing deferred may reach the slot afterwards. */
     for (slot = 0u; slot < MIDI_NOTEMODE_GROUPS; slot++)
-        if (midiNoteMode_voice[slot].group == gi)
+        if (midiNoteMode_voice[slot].group == gi) {
             midiNoteMode_voice[slot].group = 0xFFu;
+            midiNoteMode_voice[slot].flags = 0u;
+        }
     midiNoteMode_group[gi].mode = 0u;
     midiNoteMode_group[gi].count = 0u;
 }
@@ -291,6 +338,76 @@ static void midiNoteMode_report(uint8_t track, uint8_t note, uint8_t vel,
 }
 
 /*
+ * The release hold's flush (S103 P6, S103_P6_COLLOID_TWEAKS.md §2.2).
+ *
+ * What:       for each target in the slot's pending mask, the value from the
+ *             group's state now (the key list, owners and fund were updated
+ *             at the release itself):
+ *               coa  = the patch coa + fund - note0 (clamped);
+ *               in_o = 63 + key - fund for the key that owns group o now,
+ *                      else the patch byte (clamped as paraOn's);
+ *             queued as transient automation (seq_queueForegroundAutomation()),
+ *             reported to LiveRecord as one automation-only event (at most
+ *             the four targets the record holds), then the mask is cleared.
+ *             No mask: nothing.
+ * Why:        the release's writes are deferred by MNM_RELEASE_HOLD_US so a
+ *             whole chord can be released with no pitch movement (see the
+ *             hold's block above). Computing the values at flush time, not
+ *             storing them at release, keeps every pending change consistent
+ *             with the latest key list when several releases fall in one
+ *             hold, and gives exactly the values the immediate S096 P3 writes
+ *             gave when nothing changed in between (laws NM-HOLD2/3).
+ *             LiveRecord uses only the placement of an automation-only event
+ *             (LiveRecord.c, the LIVEREC_HIT_AUTO branch), so the current
+ *             fundamental stands in for the released note.
+ * Inputs:     track (the queue's owner track), slot, gi (the slot's group).
+ * Context:    main loop. Accessors: midiNoteMode_paraOn(),
+ *             midiNoteMode_prepareTrigger(), midiNoteMode_service().
+ */
+static void midiNoteMode_flushRelease(uint8_t track, uint8_t slot, uint8_t gi)
+{
+    midiNoteMode_voice_t *v = &midiNoteMode_voice[slot];
+    const midiNoteMode_group_t *g = &midiNoteMode_group[gi];
+    uint16_t targets[4];
+    uint8_t values[4];
+    uint8_t n = 0u;
+    uint8_t o, i;
+
+    if ((v->flags & MNM_REL_MASK) == 0u)
+        return;
+    if ((v->flags & MNM_REL_COA) != 0u) {
+        const uint8_t coa = midiNoteMode_clampByte(
+            (int16_t)midiNoteMode_patchByte(slot, COL_IDX_COARSE) +
+            (int16_t)v->fund - (int16_t)v->note0);
+
+        targets[n] = instrumentParam_make(slot, COL_IDX_COARSE);
+        values[n] = coa;
+        midiNoteMode_queue(track, targets[n], values[n]);
+        n++;
+    }
+    for (o = 1u; o <= 3u; o++) {
+        const uint8_t index = (uint8_t)(COL_IDX_INTERVAL_1 + o - 1u);
+        uint8_t value;
+
+        if ((v->flags & (uint8_t)(MNM_REL_IN1 << (o - 1u))) == 0u)
+            continue;
+        value = midiNoteMode_patchByte(slot, index);
+        for (i = 0u; i < g->count; i++)
+            if (g->key[i].owner == o) {
+                value = midiNoteMode_clampByte(63 + (int16_t)g->key[i].note -
+                                               (int16_t)v->fund);
+                break;
+            }
+        targets[n] = instrumentParam_make(slot, index);
+        values[n] = value;
+        midiNoteMode_queue(track, targets[n], values[n]);
+        n++;
+    }
+    v->flags = (uint8_t)(v->flags & ~MNM_REL_MASK);
+    midiNoteMode_report(track, v->fund, 0u, LIVEREC_HIT_AUTO, 0u, targets, values, n);
+}
+
+/*
  * A paraphonic note-on (S096 P3 C3, plan §4.3).
  *
  * What: the first key of a group (no keys held) fires one resetting trigger
@@ -327,6 +444,17 @@ static uint8_t midiNoteMode_paraOn(uint8_t track, uint8_t channel,
         g->key[ki].vel = vel;   /* a repeated note-on updates its velocity */
         return 1u;
     }
+    /*
+     * S103 P6: a new key inside a release hold first sends the pending
+     * release writes (midiNoteMode_flushRelease()), so it lands on a
+     * consistent chord: the freed groups and any re-root are written, then
+     * this key's own interval below. Both go to the same queue in that order
+     * and drain before the next block renders (sequencer.c,
+     * seq_queueForegroundAutomation()), so where the new key takes a group
+     * that was just restored, its write is the one the voice sees, with no
+     * block rendered in between. The press itself is never delayed.
+     */
+    midiNoteMode_flushRelease(track, slot, gi);
     if (g->count >= MIDI_NOTEMODE_KEYS)
         return 1u;
     if (g->count == 0u) {
@@ -403,6 +531,14 @@ static uint8_t midiNoteMode_paraOn(uint8_t track, uint8_t channel,
  *    (decided Q9).
  * Results: C3 E3 G3 held, C3 released: F' = E3; coa + 4; in2 (G3) = +3; in1
  * (E3's old group) back to the patch.
+ * S103 P6 (the release hold): while keys remain, the key list, the owners
+ * and fund change here at once as before, but the writes above are not
+ * queued: their targets go into the slot's pending mask and the hold starts
+ * (midiNoteMode_relStart). midiNoteMode_flushRelease() writes them, with the
+ * same values, MNM_RELEASE_HOLD_US after the latest release, or before a new
+ * key, a Pattern trigger or a Scene change. The last key's release still
+ * writes sus = off at once; the group is freed with its mask, so the
+ * deferred writes are never sent and the chord rings out unchanged.
  */
 static uint8_t midiNoteMode_paraOff(uint8_t track, uint8_t internal)
 {
@@ -433,57 +569,33 @@ static uint8_t midiNoteMode_paraOff(uint8_t track, uint8_t internal)
         return 1u;
     }
     if (owner == 0u) {
-        uint16_t targets[4];
-        uint8_t values[4];
-        uint8_t n = 0u;
+        /*
+         * S103 P6: the fundamental released. The hand-over itself is
+         * unchanged (F' = the earliest remaining key, its old group freed,
+         * fund = F'), but its writes are deferred: coa, F''s old group (back
+         * to the patch) and every group a remaining key owns (rewritten
+         * against F') go into the pending mask. The S096 P3 form queued and
+         * reported them here.
+         */
         uint8_t i;
         const uint8_t fPrime = g->key[0].note;
         const uint8_t oldOwner = g->key[0].owner;
-        const uint8_t coa = midiNoteMode_clampByte(
-            (int16_t)midiNoteMode_patchByte(slot, COL_IDX_COARSE) +
-            (int16_t)fPrime - (int16_t)midiNoteMode_voice[slot].note0);
+        uint8_t mask = MNM_REL_COA;
 
-        midiNoteMode_queue(track, instrumentParam_make(slot, COL_IDX_COARSE), coa);
-        targets[n] = instrumentParam_make(slot, COL_IDX_COARSE);
-        values[n++] = coa;
-        if (oldOwner >= 1u && oldOwner <= 3u) {
-            const uint8_t patch = midiNoteMode_patchByte(slot,
-                (uint8_t)(COL_IDX_INTERVAL_1 + oldOwner - 1u));
-
-            midiNoteMode_queue(track,
-                instrumentParam_make(slot,
-                    (uint8_t)(COL_IDX_INTERVAL_1 + oldOwner - 1u)), patch);
-            targets[n] = instrumentParam_make(slot,
-                (uint8_t)(COL_IDX_INTERVAL_1 + oldOwner - 1u));
-            values[n++] = patch;
-        }
+        if (oldOwner >= 1u && oldOwner <= 3u)
+            mask |= (uint8_t)(MNM_REL_IN1 << (oldOwner - 1u));
         g->key[0].owner = 0u;
-        for (i = 0u; i < g->count; i++) {
-            if (g->key[i].owner >= 1u && g->key[i].owner <= 3u) {
-                const uint8_t value = midiNoteMode_clampByte(
-                    63 + (int16_t)g->key[i].note - (int16_t)fPrime);
-                const uint16_t target = instrumentParam_make(slot,
-                    (uint8_t)(COL_IDX_INTERVAL_1 + g->key[i].owner - 1u));
-
-                midiNoteMode_queue(track, target, value);
-                if (n < 4u) {
-                    targets[n] = target;
-                    values[n++] = value;
-                }
-            }
-        }
+        for (i = 0u; i < g->count; i++)
+            if (g->key[i].owner >= 1u && g->key[i].owner <= 3u)
+                mask |= (uint8_t)(MNM_REL_IN1 << (g->key[i].owner - 1u));
         midiNoteMode_voice[slot].fund = fPrime;
-        midiNoteMode_report(track, internal, 0u, LIVEREC_HIT_AUTO, 0u,
-                            targets, values, n);
+        midiNoteMode_voice[slot].flags |= mask;
+        midiNoteMode_relStart[slot] = timebase_tim2Now();
     } else if (owner >= 1u && owner <= 3u) {
-        const uint8_t patch = midiNoteMode_patchByte(slot,
-            (uint8_t)(COL_IDX_INTERVAL_1 + owner - 1u));
-        const uint16_t target = instrumentParam_make(slot,
-            (uint8_t)(COL_IDX_INTERVAL_1 + owner - 1u));
-
-        midiNoteMode_queue(track, target, patch);
-        midiNoteMode_report(track, internal, 0u, LIVEREC_HIT_AUTO, 0u,
-                            &target, &patch, 1u);
+        /* S103 P6: another owner released: its group's return to the patch
+         * value is deferred (the pending mask), as above. */
+        midiNoteMode_voice[slot].flags |= (uint8_t)(MNM_REL_IN1 << (owner - 1u));
+        midiNoteMode_relStart[slot] = timebase_tim2Now();
     }
     return 1u;
 }
@@ -564,7 +676,12 @@ void midiNoteMode_prepareTrigger(uint8_t voice)
         return;
     /* A slot with held paraphonic keys re-queues sus / coa / intervals before
      * this pass's drain, so a Pattern trigger does not undo the live hand
-     * (decided Q6). */
+     * (decided Q6).
+     * S103 P6: a pending release is written first: queueState() re-asserts
+     * coa and the owned intervals only, so without the flush a group freed
+     * inside the hold would keep its old interval through the trigger's
+     * reset-and-restore. */
+    midiNoteMode_flushRelease(voice, slot, gi);
     midiNoteMode_queueState(voice, slot, gi);
 }
 
@@ -620,9 +737,21 @@ void midiNoteMode_service(void)
         }
         if (epochChanged) {
             /* A Scene change: keep the keys and re-assert the live values
-             * (decided Q4). */
+             * (decided Q4). S103 P6: a pending release is written first,
+             * for the reason given in midiNoteMode_prepareTrigger(). */
+            midiNoteMode_flushRelease(track, slot, gi);
             midiNoteMode_queueState(track, slot, gi);
         }
+        /*
+         * S103 P6: the release hold's end. Once MNM_RELEASE_HOLD_US has
+         * passed since the slot's latest release (TIM2, wrap-safe unsigned
+         * difference), the pending writes go out. One compare per group per
+         * main-loop pass; nothing when no release is pending.
+         */
+        if ((midiNoteMode_voice[slot].flags & MNM_REL_MASK) != 0u &&
+            timebase_tim2Delta(timebase_tim2Now(), midiNoteMode_relStart[slot]) >=
+                MNM_RELEASE_HOLD_US)
+            midiNoteMode_flushRelease(track, slot, gi);
     }
     midiNoteMode_epoch = epochNow;
 }

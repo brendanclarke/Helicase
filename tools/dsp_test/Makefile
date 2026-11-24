@@ -1026,6 +1026,29 @@ colloid: $(GEN)/Oscillator.host.h $(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables
 	@if ./build/colloid_break_scan >/dev/null 2>&1; then \
 	  echo "colloid_break_scan: FAILED (a stepping scan blend not caught)"; exit 1; \
 	else echo "colloid_break_scan: caught (law CO-SCAN fails as expected)"; fi
+	@# S103 P6: the mono route's filter mix. monofeed feeds B from A's output
+	@# always (no dry feed: spr 127 must still be B alone, CO-MONO fails);
+	@# monoramp drops the mix's per-sample ramps (a spr step must land at the
+	@# block's end, CO-MONO fails).
+	mkdir -p build/break_col_monofeed build/break_col_monoramp
+	sed 's/uB = col_drive((1.0f - cx) \* yAg + (cx \* rD) \* px);/uB = col_drive(yAg);/' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_monofeed/ColloidVoice.host.c
+	@grep -q 'uB = col_drive(yAg);' build/break_col_monofeed/ColloidVoice.host.c || \
+	  { echo "colloid_break_monofeed: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_monofeed $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_monofeed -lm
+	@if ./build/colloid_break_monofeed >/dev/null 2>&1; then \
+	  echo "colloid_break_monofeed: FAILED (B fed from A in parallel not caught)"; exit 1; \
+	else echo "colloid_break_monofeed: caught (law CO-MONO fails as expected)"; fi
+	sed -e '/cx += cxS;/d' -e '/oa += oaS;/d' -e '/ob += obS;/d' \
+	  $(GEN)/ColloidVoice.host.c > build/break_col_monoramp/ColloidVoice.host.c
+	@! grep -q 'cx += cxS;' build/break_col_monoramp/ColloidVoice.host.c || \
+	  { echo "colloid_break_monoramp: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_col_monoramp $(HOSTFLAGS) $(OSC_HOST_INC) modules/colloid.c \
+	  $(CAT_HOST_SRC) -o build/colloid_break_monoramp -lm
+	@if ./build/colloid_break_monoramp >/dev/null 2>&1; then \
+	  echo "colloid_break_monoramp: FAILED (a mix without its ramps not caught)"; exit 1; \
+	else echo "colloid_break_monoramp: caught (law CO-MONO fails as expected)"; fi
 # S099 P1 breaks (law CO-CHP must fail each): the ramp wrapped at the cycle
 # end; the gate's floor offset missing; the gate a sum.
 	mkdir -p build/break_col_chwrap build/break_col_chc build/break_col_chsign
