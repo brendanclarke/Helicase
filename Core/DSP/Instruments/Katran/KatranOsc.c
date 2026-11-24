@@ -1,7 +1,8 @@
 /*
  * KatranOsc.c - Katran's oscillator loops (S103 P1; S103 P2: the full-rate /
  * half-rate core pair, the PWM-sum and arena-store fixes, loop state in
- * registers).
+ * registers; S103 P4: the cores are named A (full rate) and B (half rate),
+ * and the OSC A sync reset is branch-free).
  * Contract: KatranOsc.h. Placement: flash (no ITCM section; P§2.3).
  */
 #include "KatranOsc.h"
@@ -227,8 +228,8 @@ void kat_bArena(KatranVoice *v)
 }
 
 /*
- * One copy of OSC A, one block (S103 P2: the shared body of the eight *L / *H
- * loops).
+ * One copy of OSC A, one block (S103 P2: the shared body of the eight loops;
+ * S103 P4: *CoreA / *CoreB, formerly *L / *H).
  *
  * What:       per sample n of `count` (32 full rate, 16 half rate):
  *             1. the hard sync: st = P x wrap + D[n], where wrap is OSC B's
@@ -247,7 +248,7 @@ void kat_bArena(KatranVoice *v)
  *             matches the full-rate copy's law), and the PWM D second phase
  *             glides over 16 samples instead of 32 (j = inc - dW x 2^22 /
  *             count, which lands q exactly on the block's end width).
- * Why:        S103 P2: core R runs at half rate. One body for both rates and
+ * Why:        S103 P2: core B runs at half rate. One body for both rates and
  *             all four forms keeps the forms identical between the cores;
  *             `form` and `half` are constants in each wrapper, so the compiler
  *             removes the other forms and rates (constant CPU per wrapper).
@@ -258,7 +259,7 @@ void kat_bArena(KatranVoice *v)
  *             with the first (q -= ph before ph = 0), so the pulse keeps its
  *             width across the reset; the P1 form left q behind until the next
  *             block.
- * Inputs:     v, c (0 = core L, 1 = core R), th, sign (PWMD), form, half.
+ * Inputs:     v, c (0 = core A, 1 = core B), th, sign (PWMD), form, half.
  * Outputs:    blkA[0..count-1]; phA[c], rowA[c], syncPrev[c]; under ARENA
  *             dcX[c], damp[c].
  */
@@ -295,16 +296,28 @@ static inline __attribute__((always_inline)) void kat_aBody(KatranVoice *v, cons
 		const int32_t wrapB = half ? (int32_t)((blkB[n << 1] | blkB[(n << 1) + 1u]) & 1)
 		                           : (int32_t)(blkB[n] & 1);
 		const int32_t st = wrapB * KAT_SYNC_WRAP + (int32_t)dSelf[n];
-		const int32_t cur = (st > th);
+		const uint32_t cur = (uint32_t)(st > th);
+		/*
+		 * S103 P4: the reset without a branch. rst is 1 on an upward
+		 * crossing (cur set, the previous test clear); keep is then 0, else
+		 * all ones, so `ph & keep` is the reset phase and `ph & ~keep` the
+		 * amount the PWM D second phase moves with it (q -= ph, as P2's B5).
+		 * prev may hold the init value -1 ("unknown"): ~prev is then 0 and
+		 * the first sample never resets, as the P2 `prev == 0` test.
+		 * Why: the P2 `if (cur && prev == 0) { ... }` compiled into a
+		 * branchy loop whose longest path measured 56 instructions a sample
+		 * (OSC A, PWM D, core A), against 30 for OSC B's same form with no
+		 * sync. The select form keeps one straight path.
+		 */
+		const uint32_t rst = cur & ~(uint32_t)prev;
+		const uint32_t keep = rst - 1u;
 		int32_t s;
 		uint32_t np;
 
-		if (cur && prev == 0) {
-			q -= ph;          /* keep the pulse width across the reset */
-			ph = 0u;
-			row = rowNext;
-		}
-		prev = cur;
+		q -= ph & ~keep;
+		ph &= keep;
+		row = rst ? rowNext : row;
+		prev = (int32_t)cur;
 		if (form == KAT_FORM_PWMD)
 			s = (kat_read(row, ph) + sign * kat_read(row, q)) >> 1;
 		else if (form == KAT_FORM_WARP)
@@ -328,44 +341,47 @@ static inline __attribute__((always_inline)) void kat_aBody(KatranVoice *v, cons
 	}
 }
 
-/* OSC A, core L (full rate): one wrapper per form. Contract: KatranOsc.h. */
-void kat_aPlainL(KatranVoice *v, const int32_t th)
+/*
+ * OSC A's eight wrappers (S103 P4: core A / core B, formerly the *L / *H
+ * sets): core A's copy at the full rate, core B's at half rate. Contract:
+ * KatranOsc.h.
+ */
+void kat_aPlainCoreA(KatranVoice *v, const int32_t th)
 {
 	kat_aBody(v, 0u, th, 1, KAT_FORM_PLAIN, 0u);
 }
 
-void kat_aPwmDL(KatranVoice *v, const int32_t th, const int32_t sign)
+void kat_aPwmDCoreA(KatranVoice *v, const int32_t th, const int32_t sign)
 {
 	kat_aBody(v, 0u, th, sign, KAT_FORM_PWMD, 0u);
 }
 
-void kat_aWarpL(KatranVoice *v, const int32_t th)
+void kat_aWarpCoreA(KatranVoice *v, const int32_t th)
 {
 	kat_aBody(v, 0u, th, 1, KAT_FORM_WARP, 0u);
 }
 
-void kat_aArenaL(KatranVoice *v, const int32_t th)
+void kat_aArenaCoreA(KatranVoice *v, const int32_t th)
 {
 	kat_aBody(v, 0u, th, 1, KAT_FORM_ARENA, 0u);
 }
 
-/* OSC A, core R (half rate): one wrapper per form. Contract: KatranOsc.h. */
-void kat_aPlainH(KatranVoice *v, const int32_t th)
+void kat_aPlainCoreB(KatranVoice *v, const int32_t th)
 {
 	kat_aBody(v, 1u, th, 1, KAT_FORM_PLAIN, 1u);
 }
 
-void kat_aPwmDH(KatranVoice *v, const int32_t th, const int32_t sign)
+void kat_aPwmDCoreB(KatranVoice *v, const int32_t th, const int32_t sign)
 {
 	kat_aBody(v, 1u, th, sign, KAT_FORM_PWMD, 1u);
 }
 
-void kat_aWarpH(KatranVoice *v, const int32_t th)
+void kat_aWarpCoreB(KatranVoice *v, const int32_t th)
 {
 	kat_aBody(v, 1u, th, 1, KAT_FORM_WARP, 1u);
 }
 
-void kat_aArenaH(KatranVoice *v, const int32_t th)
+void kat_aArenaCoreB(KatranVoice *v, const int32_t th)
 {
 	kat_aBody(v, 1u, th, 1, KAT_FORM_ARENA, 1u);
 }

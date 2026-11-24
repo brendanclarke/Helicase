@@ -1198,6 +1198,10 @@ tetrakt_tables:
 #             drops the delay read's fraction (law KA-DLY must fail) and
 #             katran_break_pwm stores the PWM D sum unhalved, the bug B2 form
 #             (law KA-RANGE must fail).
+#             S103 P4: two more: katran_break_fold drops the 1/32768 from the
+#             folded TORCIDO dry gain tw0 (a wrong folded scale: law KA-FOLD
+#             must fail) and katran_break_rot (S103 P5) puts wid 0 on the
+#             collapsing law (k = +1: law KA-ROT must fail).
 # Accessors:  make -C tools/dsp_test katran | katran_tables | katran_cpu_check.
 KAT := $(ROOT)/Core/DSP/Instruments/Katran
 katran: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c $(GEN)/oscPwmTables.host.h \
@@ -1237,6 +1241,25 @@ katran: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c $(GEN)/oscPwmTables.ho
 	@if ./build/katran_break_pwm >/dev/null 2>&1; then \
 	  echo "katran_break_pwm: FAILED (an unhalved PWM D sum not caught)"; exit 1; \
 	else echo "katran_break_pwm: caught (law KA-RANGE fails as expected)"; fi
+	mkdir -p build/break_kat_fold build/break_kat_rot
+	sed 's/(1.0f - v->tWet) \* KAT_INV_32768;/(1.0f - v->tWet);/' \
+	  $(GEN)/KatranVoice.host.c > build/break_kat_fold/KatranVoice.host.c
+	@! grep -q '(1.0f - v->tWet) \* KAT_INV_32768;' build/break_kat_fold/KatranVoice.host.c || \
+	  { echo "katran_break_fold: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_kat_fold $(HOSTFLAGS) $(OSC_HOST_INC) -DWAVETABLE_ROW_POINTS=1024u \
+	  modules/katran.c -o build/katran_break_fold -lm
+	@if ./build/katran_break_fold >/dev/null 2>&1; then \
+	  echo "katran_break_fold: FAILED (a wrong folded scale not caught)"; exit 1; \
+	else echo "katran_break_fold: caught (law KA-FOLD fails as expected)"; fi
+	sed 's/k = -1.0f;$$/k = 1.0f;/' \
+	  $(GEN)/KatranVoice.host.c > build/break_kat_rot/KatranVoice.host.c
+	@! grep -q 'k = -1.0f;$$' build/break_kat_rot/KatranVoice.host.c || \
+	  { echo "katran_break_rot: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_kat_rot $(HOSTFLAGS) $(OSC_HOST_INC) -DWAVETABLE_ROW_POINTS=1024u \
+	  modules/katran.c -o build/katran_break_rot -lm
+	@if ./build/katran_break_rot >/dev/null 2>&1; then \
+	  echo "katran_break_rot: FAILED (a collapsing wid 0 not caught)"; exit 1; \
+	else echo "katran_break_rot: caught (law KA-ROT fails as expected)"; fi
 
 katran_tables:
 	cd $(ROOT) && python3 tools/katran/gen_kat_tables.py --check

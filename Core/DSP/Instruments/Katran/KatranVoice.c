@@ -1,5 +1,6 @@
 /*
- * KatranVoice.c - the Katran drone / noise voice (S103 P1).
+ * KatranVoice.c - the Katran drone / noise voice (S103 P1; S103 P4: cores A
+ * and B, the stereo rotation, scale folding).
  * Contract: KatranVoice.h; behaviour and laws: S103_KATRAN_NOISE_SYNTH.md
  * revision 3 and S103_P1_IMPLEMENTATION.md.
  */
@@ -63,16 +64,18 @@
 /*
  * The half-rate core's laws (S103 P2).
  *
- * KAT_PI_OVER_FS_H   pi / (fs / 2): core R's loop filter prewarp.
- * KAT_CUT_ST_MAX_H   core R's cutoff ceiling, 104 semitones above 20 Hz
+ * KAT_PI_OVER_FS_H   pi / (fs / 2): core B's loop filter prewarp.
+ * KAT_CUT_ST_MAX_H   core B's cutoff ceiling, 104 semitones above 20 Hz
  *                    (8.1 kHz): tan()'s [3/2] Pade form stays accurate and
  *                    finite there (argument 1.15 rad; its pole is 1.58 rad,
  *                    which 15.96 kHz at fs / 2 would pass).
- * KAT_F_MAX_H        core R's table oscillator ceiling, 0.45 (fs / 2).
+ * KAT_F_MAX_H        core B's table oscillator ceiling, 0.45 (fs / 2).
  */
 #define KAT_PI_OVER_FS_H      (2.0f * KAT_PI_OVER_FS)
 #define KAT_CUT_ST_MAX_H      104.0f
 #define KAT_F_MAX_H           (0.5f * KAT_F_MAX)
+/* S103 P4: the int16 scale the folded gains carry (1 / 32,768). */
+#define KAT_INV_32768         (1.0f / 32768.0f)
 
 /*
  * The voice's xorshift and the per-sample RNG read (S103 P1).
@@ -555,7 +558,8 @@ static inline uint32_t kat_arenaStart(const KatranVoice *v, const float pos)
  *                Colloid (ColloidVoice.c:1388-1395), log2 Hz; B = the note +
  *                (bCoarse - 48) semitones + (bFine - 63) / 63 x 0.5 semitone
  *                + the patch LFO's inv x lfl x 0.3 semitone (D§5.7: inv to
- *                OSC B fine). A's L/R: one alk_exp2f() for A, then the
+ *                OSC B fine). A's two copies (core A, core B; S103 P4 names):
+ *                one alk_exp2f() for A, then the
  *                second-order 2^(+-d) detune ratio for d = dtn'^2 x 25 cents
  *                (C4). Increments inc = f x 2^32 / fs, f capped at 0.45 fs
  *                for the table forms; for the arena form, uncapped (P§3.4).
@@ -565,8 +569,9 @@ static inline uint32_t kat_arenaStart(const KatranVoice *v, const float pos)
  *                pwm -> PWMD (Saw, Rec) or WARP (Tri).
  *             3. the next row (applied by the loop at the oscillator's next
  *                cycle start, K-D10): wav/pwm the octave row for this block's
- *                pitch; wtb the frame round(pos' x (F - 1)) (A L: pos - psp,
- *                A R: pos + psp, psp = dtn' x 16 steps; B: bPos + the patch
+ *                pitch; wtb the frame round(pos' x (F - 1)) (A core A:
+ *                pos - psp, A core B: pos + psp, psp = dtn' x 16 steps; B:
+ *                bPos + the patch
  *                LFO's cv x lfl x 24 steps); ARENA the window start
  *                S = round(pos' x (arenaN - 1,024)) with the same offsets.
  *             4. PWM widths: the S094 P4 position law (oscPwmDRec/DSaw,
@@ -596,18 +601,19 @@ static __attribute__((noinline)) void kat_oscControl(KatranVoice *v)
 	const float ratio = kat_detuneRatio(dOct);
 	const float lfl = (float)(v->plfoLevel & 127u) * (1.0f / 127.0f);
 	const float pos = (float)(osc->position & 127u);
-	const float posL = fminf(fmaxf(pos - psp, 0.0f), 127.0f);
-	const float posR = fminf(fmaxf(pos + psp, 0.0f), 127.0f);
+	/* S103 P4: OSC A's core A / core B copies (they were posCA / posCB) */
+	const float posCA = fminf(fmaxf(pos - psp, 0.0f), 127.0f);
+	const float posCB = fminf(fmaxf(pos + psp, 0.0f), 127.0f);
 	const float posB = fminf(fmaxf((float)(v->bPos & 127u) + v->cv * lfl * 24.0f,
 	                               0.0f), 127.0f);
-	const int16_t *rowL;
-	const int16_t *rowR;
+	const int16_t *rowCA;
+	const int16_t *rowCB;
 	const int16_t *rowB;
 	float base, log2B;
 	int16_t n;
 	float x;
 	float fA, fB;
-	float fAR, fAR2;     /* S103 P2: core R's frequency, and twice it (its rows) */
+	float fAR, fAR2;     /* S103 P2: core B's frequency, and twice it (its rows) */
 	float posW[3];
 	uint32_t c;
 
@@ -628,7 +634,7 @@ static __attribute__((noinline)) void kat_oscControl(KatranVoice *v)
 	if (!bArena)
 		fB = fminf(fB, KAT_F_MAX);
 	/*
-	 * S103 P2: core R's copy of OSC A runs at half rate (KatranOsc.c *H
+	 * S103 P2: core B's copy of OSC A runs at half rate (KatranOsc.c *CoreB
 	 * loops step 2 x incA[1]). incA[1] keeps the full-rate law, so both copies
 	 * follow the same pitch; its table forms are capped at 0.45 (fs / 2), the
 	 * half rate's Nyquist margin (the arena form stays uncapped, P§3.4), and
@@ -645,34 +651,34 @@ static __attribute__((noinline)) void kat_oscControl(KatranVoice *v)
 	if (aArena) {
 		const int16_t *const arena = v->arena ? v->arena : katZeroRow;
 
-		rowL = (v->arenaN >= KAT_ARENA_WIN) ? arena + kat_arenaStart(v, posL) : katZeroRow;
-		rowR = (v->arenaN >= KAT_ARENA_WIN) ? arena + kat_arenaStart(v, posR) : katZeroRow;
+		rowCA = (v->arenaN >= KAT_ARENA_WIN) ? arena + kat_arenaStart(v, posCA) : katZeroRow;
+		rowCB = (v->arenaN >= KAT_ARENA_WIN) ? arena + kat_arenaStart(v, posCB) : katZeroRow;
 	} else if (isWtb) {
 		const uint32_t frames = osc->sampleCacheSize ? osc->sampleCacheSize : 1u;
-		const uint32_t frL = (uint32_t)(posL * (float)(frames - 1u) / 127.0f + 0.5f);
-		const uint32_t frR = (uint32_t)(posR * (float)(frames - 1u) / 127.0f + 0.5f);
+		const uint32_t frL = (uint32_t)(posCA * (float)(frames - 1u) / 127.0f + 0.5f);
+		const uint32_t frR = (uint32_t)(posCB * (float)(frames - 1u) / 127.0f + 0.5f);
 		const int16_t *const data = osc->sampleCacheData;
 
-		rowL = data ? data + ((frL < frames) ? frL : frames - 1u) * WAVETABLE_ROW_POINTS
+		rowCA = data ? data + ((frL < frames) ? frL : frames - 1u) * WAVETABLE_ROW_POINTS
 		            : sawTable[1];
-		rowR = data ? data + ((frR < frames) ? frR : frames - 1u) * WAVETABLE_ROW_POINTS
+		rowCB = data ? data + ((frR < frames) ? frR : frames - 1u) * WAVETABLE_ROW_POINTS
 		            : sawTable[1];
 	} else if (isPwm && pwmForm == KAT_FORM_WARP) {
-		/* S103 P2: rowR from fAR2, core R's half rate (see above) */
+		/* S103 P2: rowCB from fAR2, core B's half rate (see above) */
 		const uint32_t o = kat_octave(fA);
 		const uint32_t oR = kat_octave(fAR2);
 
-		rowL = triTable[(o < 10u) ? o : 10u];
-		rowR = triTable[(oR < 10u) ? oR : 10u];
+		rowCA = triTable[(o < 10u) ? o : 10u];
+		rowCB = triTable[(oR < 10u) ? oR : 10u];
 	} else if (isPwm) {
 		const uint32_t o = kat_octave(fA);
 		const uint32_t oR = kat_octave(fAR2);
 
-		rowL = sawTable[(o == 0u) ? 1u : o];
-		rowR = sawTable[(oR == 0u) ? 1u : oR];
+		rowCA = sawTable[(o == 0u) ? 1u : o];
+		rowCB = sawTable[(oR == 0u) ? 1u : oR];
 	} else if (!isWtb && wave == 3u) {
-		rowL = sine_table;
-		rowR = rowL;
+		rowCA = sine_table;
+		rowCB = rowCA;
 	} else {
 		const uint32_t o = kat_octave(fA);
 		const uint32_t oR = kat_octave(fAR2);
@@ -682,8 +688,8 @@ static __attribute__((noinline)) void kat_oscControl(KatranVoice *v)
 		                    : (const int16_t (*)[1024])sawTable);
 		const uint32_t lvl1 = (uint32_t)(stock != (const int16_t (*)[1024])triTable);
 
-		rowL = stock[((o == 0u) && lvl1) ? 1u : o];
-		rowR = stock[((oR == 0u) && lvl1) ? 1u : oR];
+		rowCA = stock[((o == 0u) && lvl1) ? 1u : o];
+		rowCB = stock[((oR == 0u) && lvl1) ? 1u : oR];
 	}
 	if (bArena) {
 		const int16_t *const arena = v->arena ? v->arena : katZeroRow;
@@ -715,13 +721,13 @@ static __attribute__((noinline)) void kat_oscControl(KatranVoice *v)
 
 		rowB = stock[((o == 0u) && stock != (const int16_t (*)[1024])triTable) ? 1u : o];
 	}
-	v->rowANext[0] = rowL;
-	v->rowANext[1] = rowR;
+	v->rowANext[0] = rowCA;
+	v->rowANext[1] = rowCB;
 	v->rowBNext = rowB;
 
 	/* the pwm widths, slewed from the last block's end */
-	posW[0] = posL;
-	posW[1] = posR;
+	posW[0] = posCA;
+	posW[1] = posCB;
 	posW[2] = posB;
 	for (c = 0u; c < 3u; c++) {
 		const int32_t target = (int32_t)posW[c] - (int32_t)v->pwPos[c];
@@ -749,8 +755,8 @@ static __attribute__((noinline)) void kat_oscControl(KatranVoice *v)
  * What:       base T = katTimeSamples[tim] (log, 32 .. 1,792 samples) x
  *             2^(-dtk' x (B's pitch offset in octaves)) (one alk_exp2f():
  *             the delay follows OSC B's pitch, so the comb tracks it);
- *             spread s = max(0, (spr - 63) / 64): T_L = T (1 + 0.12 s),
- *             T_R = T (1 - 0.12 s); drift: each core's driftTgt takes a new
+ *             spread s = max(0, (spr - 63) / 64): T_A = T (1 + 0.12 s),
+ *             T_B = T (1 - 0.12 s); drift: each core's driftTgt takes a new
  *             draw in +-1.5 % x drf' every 16 blocks and drift slews to it by
  *             1/16 a block; clamp 32 .. 2,040. The per-sample step is
  *             tStep = (target - tNow) / 32 (the time ramps per sample: a time
@@ -786,9 +792,9 @@ static void kat_delayControl(KatranVoice *v, float loopSt[2])
 		target = fminf(fmaxf(target, KAT_TIME_MIN), 2040.0f);
 		loopSt[c] = 12.0f * alk_log2f(REAL_FS / target) - 51.8f;
 		/*
-		 * S103 P2: core R's delay runs in half-rate samples. The target above
+		 * S103 P2: core B's delay runs in half-rate samples. The target above
 		 * is in full-rate samples for both cores (one law, one spread, one
-		 * drift, one loop pitch for F1's tracking); core R takes half of it,
+		 * drift, one loop pitch for F1's tracking); core B takes half of it,
 		 * so the same tim gives the same comb pitch on both cores, and ramps
 		 * over its 16 half-rate samples. Its minimum (16 half-rate samples,
 		 * KAT_TIME_MIN_H) is one half-rate block: the whole block's output is
@@ -806,7 +812,7 @@ static void kat_delayControl(KatranVoice *v, float loopSt[2])
  * One core's delay outputs for the block (S103 P1, D§4 L1; S103 P2: the
  * fixed-point read, bug B1, and the full / half-rate pair).
  *
- * What:       per sample n of `count` (32 for core L, 16 for core R): the
+ * What:       per sample n of `count` (32 for core A, 16 for core B): the
  *             timed tap at w + n - T(n), linearly interpolated, and the dry
  *             tap one block back (KAT_TAP_DRY full rate, KAT_TAP_DRY_H half
  *             rate); D = (timed + dry) / 2 (dmx fixed at 64, P§8.3), stored as
@@ -863,51 +869,66 @@ static inline __attribute__((always_inline)) void kat_delayBody(KatranVoice *v, 
 	v->tNow[c] += (float)count * v->tStep[c];
 }
 
-/* Core L's delay read (full rate) and core R's (half rate): one noinline
+/* Core A's delay read (full rate) and core B's (half rate): one noinline
  * wrapper each, so katran_cpu.py counts each by name (the P1 two-core outer
- * loop left it unclear whether the count was one core's sample or both). */
-static __attribute__((noinline)) void kat_delayReadL(KatranVoice *v)
+ * loop left it unclear whether the count was one core's sample or both).
+ * S103 P4: named for the core (formerly kat_delayReadL / kat_delayReadH). */
+static __attribute__((noinline)) void kat_delayReadA(KatranVoice *v)
 {
 	kat_delayBody(v, 0u, 0u);
 }
 
-static __attribute__((noinline)) void kat_delayReadH(KatranVoice *v)
+static __attribute__((noinline)) void kat_delayReadB(KatranVoice *v)
 {
 	kat_delayBody(v, 1u, 1u);
 }
 
 /*
  * One core's audio for the block (S103 P1, P§4 L4; S103 P2: the full-rate
- * core L and the half-rate core R).
+ * core A and the half-rate core B; S103 P4: the names, and scale folding).
  *
- * What:       per sample n of `count` (32 core L, 16 core R):
- *             t1 = TOR1(D[n]): x = D x tGain, x' = clamp(x, +-1.5),
- *             y = x' - (4/27) x'^3 + tTube x'^2 (C2), t1 = lv1 (tWet y +
- *             (1 - tWet) D); t2 = lv2 x cubic(tGain2 x exc ((1 - nse) A[n] +
- *             nse noise)); u = F2(F1(t1 + t2)); ring[w] = SSAT16(gr (u + xfb
- *             D_other + fb D) x 32768); r = t1 ((1 - rk) + rk bLvl B);
- *             core L: buf[n] = SSAT16((r + g2 t1) x 32767);
- *             core R: o = r (1 + g1); right[2n] = SSAT16((hPrev + o) / 2 x
- *             32767), right[2n + 1] = SSAT16(o x 32767), hPrev = o (the 2x
- *             linear interpolation to the full rate, half a full-rate sample
- *             of delay).
- *             The other core's delay output: core L reads core R's 16-sample
- *             block held (blkD[1][n >> 1]); core R reads core L's decimated
- *             (blkD[0][2n]). OSC B is full rate: core R reads blkB[2n].
- *             Core R's ramps (gr, fb, rk, g1) step twice as far per sample,
- *             so both cores reach the block's end values; its F1
- *             coefficients come from kat_svfControl() at fs / 2 with a
- *             16-sample ramp; its F2 coefficient is f2K (2 - f2K), the same
- *             one-pole corner at half the rate (1 - (1 - k)^2).
- * Why:        S103 P2 (your decision): core R at half rate keeps two
+ * What:       per sample n of `count` (32 core A, 16 core B), with D, A, B,
+ *             D_other and the noise taken as int16-valued floats (no scale):
+ *             t1 = TOR1: y = cubic-tube(D x tgS) (tgS = tGain / 32768; x' =
+ *             clamp(x, +-1.5), y = x' - (4/27) x'^3 + tTube x'^2, C2),
+ *             t1 = tw1 y + tw0 D (tw1 = lv1 tWet, tw0 = lv1 (1 - tWet) /
+ *             32768); t2 = lv2 cubic(eA A + eN noise) (eA = tGain2 exc
+ *             (1 - nse) / 32768, eN = tGain2 exc nse / 32768); u = F2(F1(t1 +
+ *             t2)); ring[w] = SSAT16(grq (u + xfbS D_other + fbq D)) (grq =
+ *             32768 gr, xfbS = xfb / 32768, fbq = fb / 32768);
+ *             o = t1 (o0 + o1 B), o0 / o1 the core's output gains (cA0 / cA1
+ *             or cB0 / cB1, KatranVoice.h: the ring crossfade, the VCA and
+ *             the int16 output scale together);
+ *             core A: buf[n] = SSAT16(o);
+ *             core B: right[2n] = SSAT16((hPrev + o) / 2), right[2n + 1] =
+ *             SSAT16(o), hPrev = o (the 2x linear interpolation to the full
+ *             rate, half a full-rate sample of delay).
+ *             buf and right then hold core A's and core B's blocks; the
+ *             stereo matrix (kat_outRender()) places them.
+ *             The other core's delay output: core A reads core B's 16-sample
+ *             block held (blkD[1][n >> 1]); core B reads core A's decimated
+ *             (blkD[0][2n]). OSC B is full rate: core B reads blkB[2n].
+ *             Core B's ramps step twice as far per sample, so both cores
+ *             reach the block's end values; its F1 coefficients come from
+ *             kat_svfControl() at fs / 2 with a 16-sample ramp; its F2
+ *             coefficient is f2K (2 - f2K), the same one-pole corner at half
+ *             the rate (1 - (1 - k)^2).
+ * Why:        S103 P2 (your decision): core B at half rate keeps two
  *             independent loops for about half the second core's cost (its
- *             loop band stops at 11 kHz). Core L and core R are separate
- *             noinline functions with constant c and half: the P1 single
- *             function chose its output per sample ((c == 0u) ? ...) and
- *             ramped both VCA gains in both cores; here each core ramps only
- *             its own. One RNG read per core sample: 1.5 a full-rate sample
- *             (was 2).
- * Inputs:     v, c (0 L, 1 R), out (buf for L, right for R), half.
+ *             loop band stops at 11 kHz). The two cores are separate noinline
+ *             functions with constant c and half.
+ *             S103 P4 (scale folding, S103 P2 §6 S1; your instruction to get
+ *             Katran 5 % or more under the Basic share): every int16 load used
+ *             to be converted and then multiplied by 1/32768, the exciter took
+ *             exc, (1 - nse) and tGain2 per sample, the ring crossfade
+ *             computed (1 - rk) and rk x bLvl x B, core A added g2 x t1, and
+ *             every store multiplied by 32767 or 32768. Those factors are
+ *             per block, so they are folded into eight per-block gains here
+ *             and into the four output gains (two ramped per core), and the
+ *             loop keeps the same arithmetic in fewer multiplies. The same
+ *             ramps as P2 (seven a core). The B LSB (OSC B's wrap flag) is no
+ *             longer masked off: it is one LSB of the modulator, -90 dB.
+ * Inputs:     v, c (0 core A, 1 core B), out (buf for A, right for B), half.
  */
 static inline __attribute__((always_inline)) void kat_coreBody(KatranVoice *v, const uint32_t c,
                                                                int16_t *out, const uint32_t half)
@@ -920,18 +941,26 @@ static inline __attribute__((always_inline)) void kat_coreBody(KatranVoice *v, c
 	const int16_t *const dOther = v->blkD[other];
 	const int16_t *const blkA = v->blkA;
 	const int16_t *const blkB = v->blkB;
-	const float bLvl = (float)(v->bLevel & 127u) * (1.0f / 127.0f);
-	const float exc = v->tExc;
-	const float nse = v->tNse;
-	const float xfb = v->xfb;
-	const float tg = v->tGain, tg2 = v->tGain2, tube = v->tTube, twet = v->tWet;
-	const float grS = rs * v->grStep, fbS = rs * v->fbStep, rkS = rs * v->rkStep;
-	const float gS = half ? (rs * v->g1Step) : v->g2Step;
+	/* the folded per-block gains (see What) */
+	const float tgS = v->tGain * KAT_INV_32768;
+	const float tube = v->tTube;
+	const float tw1 = KAT_TOR_LV1 * v->tWet;
+	const float tw0 = KAT_TOR_LV1 * (1.0f - v->tWet) * KAT_INV_32768;
+	const float eG = v->tGain2 * v->tExc * KAT_INV_32768;
+	const float eA = eG * (1.0f - v->tNse);
+	const float eN = eG * v->tNse;
+	const float xfbS = v->xfb * KAT_INV_32768;
+	const float grS = rs * 32768.0f * v->grStep;
+	const float fbS = rs * KAT_INV_32768 * v->fbStep;
+	const float o0S = rs * (half ? v->cB0Step : v->cA0Step);
+	const float o1S = rs * (half ? v->cB1Step : v->cA1Step);
 	KatSvf *const f1 = &v->f1[c];
 	const float mH = f1->mH, mB = f1->mB, mL = f1->mL;
 	const float f2k = half ? (v->f2K * (2.0f - v->f2K)) : v->f2K;
-	float gr = v->gr, fb = v->fb, rk = v->rk;
-	float gv = half ? v->g1 : v->g2;
+	float gr = 32768.0f * v->gr;
+	float fb = KAT_INV_32768 * v->fb;
+	float o0 = half ? v->cB0 : v->cA0;
+	float o1 = half ? v->cB1 : v->cA1;
 	float a1 = f1->a1, a2 = f1->a2, a3 = f1->a3;
 	const float da1 = f1->da1, da2 = f1->da2, da3 = f1->da3;
 	float ic1 = f1->ic1, ic2 = f1->ic2;
@@ -943,20 +972,19 @@ static inline __attribute__((always_inline)) void kat_coreBody(KatranVoice *v, c
 	for (n = 0u; n < count; n++) {
 		const uint32_t bi = half ? (n << 1) : n;
 		const uint32_t oi = half ? (n << 1) : (n >> 1);
-		const float D = (float)dSelf[n] * (1.0f / 32768.0f);
-		const float A = (float)blkA[n] * (1.0f / 32768.0f);
-		const float Bv = (float)(blkB[bi] & (int16_t)0xFFFE) * (1.0f / 32768.0f);
-		const float Do = (float)dOther[oi] * (1.0f / 32768.0f);
-		const float nz = (float)kat_rngRead() * (1.0f / 32768.0f);
-		const float y = kat_tube(D * tg, tube);
-		const float t1 = KAT_TOR_LV1 * (twet * y + (1.0f - twet) * D);
-		const float e = exc * ((1.0f - nse) * A + nse * nz);
-		const float t2 = KAT_TOR_LV2 * kat_cubic(tg2 * e);
+		const float D = (float)dSelf[n];
+		const float A = (float)blkA[n];
+		const float Bv = (float)blkB[bi];
+		const float Do = (float)dOther[oi];
+		const float nz = (float)kat_rngRead();
+		const float y = kat_tube(D * tgS, tube);
+		const float t1 = tw1 * y + tw0 * D;
+		const float t2 = KAT_TOR_LV2 * kat_cubic(eA * A + eN * nz);
 		const float xin = t1 + t2;
 		const float v3 = xin - ic2;
 		const float v1 = a1 * ic1 + a2 * v3;
 		const float v2 = ic2 + a2 * ic1 + a3 * v3;
-		float yf, z, u, r, wr;
+		float yf, z, u, o, wr;
 
 		ic1 = 2.0f * v1 - ic1;
 		ic2 = 2.0f * v2 - ic2;
@@ -965,23 +993,21 @@ static inline __attribute__((always_inline)) void kat_coreBody(KatranVoice *v, c
 		u = yf - z;
 		z += f2k * (yf - z);
 		f2z = z;
-		r = t1 * ((1.0f - rk) + rk * (bLvl * Bv));
-		wr = gr * (u + xfb * Do + fb * D);
-		ring[w & KAT_RING_MASK] = kat_sat16f(wr * 32768.0f);
+		wr = gr * (u + xfbS * Do + fb * D);
+		ring[w & KAT_RING_MASK] = kat_sat16f(wr);
+		o = t1 * (o0 + o1 * Bv);
 		if (half) {
-			const float o = r * (1.0f + gv);
-
-			out[n << 1] = kat_sat16f(0.5f * (hPrev + o) * KAT_OUT_SCALE);
-			out[(n << 1) + 1u] = kat_sat16f(o * KAT_OUT_SCALE);
+			out[n << 1] = kat_sat16f(0.5f * (hPrev + o));
+			out[(n << 1) + 1u] = kat_sat16f(o);
 			hPrev = o;
 		} else {
-			out[n] = kat_sat16f((r + gv * t1) * KAT_OUT_SCALE);
+			out[n] = kat_sat16f(o);
 		}
 		w++;
 		gr += grS;
 		fb += fbS;
-		rk += rkS;
-		gv += gS;
+		o0 += o0S;
+		o1 += o1S;
 		a1 += da1;
 		a2 += da2;
 		a3 += da3;
@@ -994,73 +1020,194 @@ static inline __attribute__((always_inline)) void kat_coreBody(KatranVoice *v, c
 		v->hPrev = hPrev;
 }
 
-/* Core L (full rate, into buf) and core R (half rate, into right[]): one
- * noinline function each (katran_cpu.py counts them by name). */
-static __attribute__((noinline)) void kat_coreRenderL(KatranVoice *v, int16_t *out)
+/* Core A (full rate, into buf) and core B (half rate, into right[]): one
+ * noinline function each (katran_cpu.py counts them by name). S103 P4: named
+ * for the core (formerly kat_coreRenderL / kat_coreRenderH). */
+static __attribute__((noinline)) void kat_coreRenderA(KatranVoice *v, int16_t *out)
 {
 	kat_coreBody(v, 0u, out, 0u);
 }
 
-static __attribute__((noinline)) void kat_coreRenderH(KatranVoice *v)
+static __attribute__((noinline)) void kat_coreRenderB(KatranVoice *v)
 {
 	kat_coreBody(v, 1u, v->right, 1u);
 }
 
 /*
- * The output stage, in place on buf and right (S103 P1, P§4 L5).
+ * The stereo matrix's gains for this block (S103 P4; S103 P5: wid bipolar,
+ * the no-collapse form; S103_P5_KATRAN_TWEAKS.md).
  *
- * What:       per sample: L, R from the blocks (x 1/32768); F3 on each with
- *             the shared ramped coefficients (C1; the R side keeps its own
- *             integrator states f3R1/f3R2); width: m = (L + R) / 2,
- *             s = (L - R) / 2 x wid; L = m + s, R = m - s; x the CE1 gain
- *             (ramped); x KAT_OUT_NORM; SSAT16 stores.
- * Why:        one coefficient ramp for both sides (C1); the width before the
- *             level so wid 0 is true mono.
+ * What:       core A's pan p = -cos(2 pi rotPh) (rotPh 0: p = -1, core A
+ *             left); the equal-power pair gL = sqrt((1 - p) / 2),
+ *             gR = sqrt((1 + p) / 2). Two base rows (L, R from a, b):
+ *               L0 = gL a + gR b,  R0 = k gR a + r1 b,
+ *               r1 = sqrt(1 - k^2 gR^2)  (= gL at k = +-1).
+ *             r1 keeps R0's power at 1 for every k: a plain gL there would
+ *             leave R silent half-way through the blend at rotPh 0.5 (k 0,
+ *             gL 0), where -a and +a cancel.
+ *             k = -1 is the no-collapse form: the rows are orthogonal and of
+ *             equal norm (a rotation of the pair), so L and R stay
+ *             decorrelated at every phase and the image never narrows as
+ *             the cores cross; at rotPh 0.5 it is L = b, R = -a (core A on
+ *             the right, its polarity inverted, which alone is inaudible).
+ *             k = +1 is the S103 P4 pan law (both rows the same pair
+ *             swapped): the cores pass through the centre (the collapse).
+ *             Then the M/S width w: L = m + w s, R = m - w s on (L0, R0).
+ *             wid, bipolar (stored 63 = display 0; d = display -63..+64):
+ *               d  +1..+64   k = -1, w = 1 + d / 64 (to 2): wider, no
+ *                            collapse (P4's 64..127 on the no-collapse form);
+ *               d   0        k = -1, w = 1: full spread, no collapse;
+ *               d  -1..-12   k = -1 + 2 (-d) / 12, w = 1: blends to the
+ *                            collapsing law, reached at -12;
+ *               d -13..-63   k = +1, w = (63 + d) / 51: full spread with the
+ *                            collapse at -12, narrowing to mono at -63 (the
+ *                            P4 law, w 1 .. 0).
+ *             Times g = CE1's gain (1 - dp1 + dp1 x CE1) x KAT_OUT_NORM x
+ *             32767 / 32768 (int16 in, int16 out). m[0..3]: L from a, L from
+ *             b, R from a, R from b.
+ *             rotPh 0 is L = core A, R = core B for every wid >= -12 and
+ *             every k (gR = 0): the P2 output.
+ * Why:        S103 P4 (your request): the cores sound different, so they
+ *             turn round the field instead of owning L and R. S103 P5 (your
+ *             request): the default spread must not collapse; the
+ *             collapsing law stays reachable at -12, and below it the
+ *             narrowing to mono.
+ * Cost:       per block: one sine_table read, three VSQRT; per sample: the
+ *             4-coefficient matrix (kat_outRender()).
+ */
+static void kat_stereoTargets(const KatranVoice *v, float m[4])
+{
+	/* sine_table holds -cos (sine_table[0] = -32,767, [512] = +32,766), so
+	 * the read itself is p = -cos(2 pi rotPh). Scaled by 1 / 32,766 so both
+	 * ends reach +-1 (the clamps below take the -1.00003): a hard pan is
+	 * exact, with no -48 dB leak into the other side. */
+	const uint32_t idx = (uint32_t)(v->rotPh * 1024.0f) & 0x3FFu;
+	const float p = (float)sine_table[idx] * (1.0f / 32766.0f);
+	const float gL = sqrtf(kat_clamp01(0.5f * (1.0f - p)));
+	const float gR = sqrtf(kat_clamp01(0.5f * (1.0f + p)));
+	const int32_t d = (int32_t)(v->width & 127u) - 63;
+	const float dp1 = (float)(v->ce1Depth & 127u) * (1.0f / 127.0f);
+	const float g = (1.0f - dp1 + dp1 * v->ce[0].level)
+	              * KAT_OUT_NORM * (KAT_OUT_SCALE * KAT_INV_32768);
+	float k, w, hp, hm, r1;
+
+	if (d >= 0) {
+		k = -1.0f;
+		w = 1.0f + (float)d * (1.0f / 64.0f);
+	} else if (d >= -KAT_WID_BLEND) {
+		k = -1.0f + (float)(-d) * (2.0f / (float)KAT_WID_BLEND);
+		w = 1.0f;
+	} else {
+		k = 1.0f;
+		w = (float)(63 + d) * (1.0f / (float)(63 - KAT_WID_BLEND));
+	}
+	r1 = sqrtf(kat_clamp01(1.0f - k * k * gR * gR));
+	hp = 0.5f * (1.0f + w) * g;
+	hm = 0.5f * (1.0f - w) * g;
+	m[0] = hp * gL + hm * k * gR;
+	m[1] = hp * gR + hm * r1;
+	m[2] = hm * gL + hp * k * gR;
+	m[3] = hm * gR + hp * r1;
+}
+
+/*
+ * The rotation's block and the matrix ramp (S103 P4).
+ *
+ * What:       rot 0: the phase holds. rot 1..127: rate = 0.01 Hz x
+ *             2^((rot - 1) / 126 x log2(400) + rotJit), rotPh += rate x 32 /
+ *             fs; at each new turn rotJit = chs' x KAT_ROT_JIT x r (r uniform
+ *             +-1, the voice's xorshift), so a high chaos makes every turn a
+ *             little faster or slower. Then the matrix targets
+ *             (kat_stereoTargets()) and the per-sample steps from the gains
+ *             now (the last block's end).
+ * Why:        free-running like the chaos envelopes: no trigger, transport or
+ *             kick resets it.
+ */
+static void kat_stereoControl(KatranVoice *v)
+{
+	const uint8_t rot = (uint8_t)(v->rotate & 127u);
+	float m[4];
+	uint32_t i;
+
+	if (rot) {
+		const float rate = KAT_ROT_HZ_MIN
+		    * alk_exp2f((float)(rot - 1u) * (KAT_ROT_LOG2_SPAN / 126.0f) + v->rotJit);
+
+		v->rotPh += rate * ((float)OUTPUT_DMA_SIZE / REAL_FS);
+		if (v->rotPh >= 1.0f) {
+			const float chs = (float)(v->chaos & 127u) * (1.0f / 127.0f);
+
+			v->rotPh -= floorf(v->rotPh);
+			v->rotJit = chs * KAT_ROT_JIT * kat_rngBipolar(&v->rng);
+		}
+	}
+	kat_stereoTargets(v, m);
+	for (i = 0u; i < 4u; i++)
+		v->mxStep[i] = (m[i] - v->mx[i]) * (1.0f / (float)OUTPUT_DMA_SIZE);
+}
+
+/*
+ * The output stage, in place on buf and right (S103 P1, P§4 L5; S103 P4:
+ * the stereo matrix).
+ *
+ * What:       per sample: a = core A (buf), b = core B (right), as
+ *             int16-valued floats; F3 on each with the shared ramped
+ *             coefficient (C1; f3.ic1 core A's state, f3.ic2 core B's), the
+ *             one-pole LP / HP tilt of the L1 ladder step; then
+ *             L = m0 a + m1 b, R = m2 a + m3 b with the four gains ramped
+ *             (mx[], kat_stereoControl(); S103 P5: four, the no-collapse form
+ *             is not symmetric); SSAT16 stores, L into buf, R into right.
+ * Why:        S103 P4: one 2x2 gain carries the rotation, the width, CE1 and
+ *             the output scale. The P2 stage did the M/S width, the CE1 ramp
+ *             and two scales per side separately, so the rotation costs
+ *             nothing per sample here.
  */
 static __attribute__((noinline)) void kat_outRender(KatranVoice *v, int16_t *outL)
 {
 	KatSvf *const f3 = &v->f3;
 	const float hp = (f3->mL < 0.0f) ? 1.0f : 0.0f;
 	const float da = f3->da1;
+	const float s0 = v->mxStep[0], s1 = v->mxStep[1];
+	const float s2 = v->mxStep[2], s3 = v->mxStep[3];
 	float a = f3->a1;
-	float zl = f3->ic1, zr = f3->ic2;
-	const float wid = v->wid;
-	const float cegS = v->cegStep;
-	float ceg = v->ceg;
+	float za = f3->ic1, zb = f3->ic2;
+	float m0 = v->mx[0], m1 = v->mx[1], m2 = v->mx[2], m3 = v->mx[3];
 	uint32_t n;
 
 	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
-		const float inL = (float)outL[n] * (1.0f / 32768.0f);
-		const float inR = (float)v->right[n] * (1.0f / 32768.0f);
-		float yl, yr, m, s;
+		const float inA = (float)outL[n];
+		const float inB = (float)v->right[n];
+		float ya, yb;
 
 		/* L1: the one-pole LP / HP tilt, the same coefficient on both */
-		zl += a * (inL - zl);
-		zr += a * (inR - zr);
-		yl = zl + hp * (inL - 2.0f * zl);
-		yr = zr + hp * (inR - 2.0f * zr);
-		m = 0.5f * (yl + yr);
-		s = 0.5f * (yl - yr) * wid;
-		yl = (m + s) * ceg * KAT_OUT_NORM;
-		yr = (m - s) * ceg * KAT_OUT_NORM;
-		outL[n] = kat_sat16f(yl * KAT_OUT_SCALE);
-		v->right[n] = kat_sat16f(yr * KAT_OUT_SCALE);
-		ceg += cegS;
+		za += a * (inA - za);
+		zb += a * (inB - zb);
+		ya = za + hp * (inA - 2.0f * za);
+		yb = zb + hp * (inB - 2.0f * zb);
+		outL[n] = kat_sat16f(m0 * ya + m1 * yb);
+		v->right[n] = kat_sat16f(m2 * ya + m3 * yb);
+		m0 += s0;
+		m1 += s1;
+		m2 += s2;
+		m3 += s3;
 		a += da;
 	}
-	v->f3.ic1 = zl;
-	v->f3.ic2 = zr;
-	v->ceg = ceg;
+	v->f3.ic1 = za;
+	v->f3.ic2 = zb;
+	v->mx[0] = m0;
+	v->mx[1] = m1;
+	v->mx[2] = m2;
+	v->mx[3] = m3;
 }
 
 /*
  * The guard's peak on every 8th sample of one read block (S103 P1, P§3.4
  * item 3): a fast attack to min(1, 0.7 / peak), released by 1 % a block.
  *
- * S103 P2: `count` is the block's valid length: 32 for OSC B and core L's
- * OSC A, 16 for core R's (half-rate) OSC A. blkA is shared by the two
- * copies, so after core R's 16-sample render, samples 16..31 still hold
- * core L's copy; reading them would let core L's level set core R's guard.
+ * S103 P2: `count` is the block's valid length: 32 for OSC B and core A's
+ * OSC A, 16 for core B's (half-rate) OSC A. blkA is shared by the two
+ * copies, so after core B's 16-sample render, samples 16..31 still hold
+ * core A's copy; reading them would let core A's level set core B's guard.
  */
 static __attribute__((noinline)) void kat_guardUpdate(KatranVoice *v, const uint32_t c,
                                                       const int16_t *blk, const uint32_t count)
@@ -1086,9 +1233,38 @@ static __attribute__((noinline)) void kat_guardUpdate(KatranVoice *v, const uint
 	}
 }
 
-void Katran_initVoice(KatranVoice *voice, const uint8_t slot,
-                      int16_t *ringL, int16_t *ringR)
+/*
+ * The two cores' output gains for one set of targets (S103 P4).
+ *
+ * What:       from the ring switch rk (bLevel > 0: 1, else 0, the P1
+ *             crossfade's target), the ring depth bLvl = bLevel / 127, and the
+ *             VCA gains g1 (core B, AMP1) and g2 (core A, AMP2):
+ *               cA0 = (1 - rk + g2) 32767,   cA1 = rk bLvl 32767 / 32768;
+ *               cB0 = (1 - rk)(1 + g1) 32767, cB1 = rk bLvl (1 + g1) 32767 / 32768.
+ *             o[0..3] = cA0, cA1, cB0, cB1.
+ * Why:        the P2 loops computed r = t1 ((1 - rk) + rk bLvl B / 32768), then
+ *             (r + g2 t1) x 32767 on core A and r (1 + g1) x 32767 on core B,
+ *             every sample; the same output is t1 (c0 + c1 B) with these per-
+ *             block gains (KatranVoice.h, scale folding). Linear ramps of
+ *             these gains replace P2's linear ramps of rk, g1 and g2 (the
+ *             products differ inside one block by less than one ramp step).
+ */
+static void kat_outGains(const KatranVoice *v, const float g1, const float g2, float o[4])
 {
+	const float rk = (v->bLevel > 0u) ? 1.0f : 0.0f;
+	const float bLvl = (float)(v->bLevel & 127u) * (1.0f / 127.0f);
+	const float dS = KAT_OUT_SCALE * KAT_INV_32768;
+
+	o[0] = (1.0f - rk + g2) * KAT_OUT_SCALE;
+	o[1] = rk * bLvl * dS;
+	o[2] = (1.0f - rk) * (1.0f + g1) * KAT_OUT_SCALE;
+	o[3] = rk * bLvl * (1.0f + g1) * dS;
+}
+
+void Katran_initVoice(KatranVoice *voice, const uint8_t slot,
+                      int16_t *ringA, int16_t *ringB)
+{
+	float og[4];
 	const uint8_t typ = 2u;   /* init.kat: pwm */
 	const uint8_t wave = 2u;  /* init.kat: Rec */
 	uint32_t i;
@@ -1098,12 +1274,13 @@ void Katran_initVoice(KatranVoice *voice, const uint8_t slot,
 		return;
 	memset(voice, 0, sizeof(*voice));
 	voice->slot = slot;
-	voice->ring[0] = ringL;
-	voice->ring[1] = ringR;
-	if (ringL)
-		memset(ringL, 0, KAT_RING * sizeof(ringL[0]));
-	if (ringR)
-		memset(ringR, 0, KAT_RING * sizeof(ringR[0]));
+	/* S103 P4: core A's ring, core B's ring (they were ringL / ringR) */
+	voice->ring[0] = ringA;
+	voice->ring[1] = ringB;
+	if (ringA)
+		memset(ringA, 0, KAT_RING * sizeof(ringA[0]));
+	if (ringB)
+		memset(ringB, 0, KAT_RING * sizeof(ringB[0]));
 	fxbuf_arenaView(&voice->arena, &voice->arenaN);
 
 	/* the pitch anchor: typ pwm, Rec, coa 36 (32'), fin 63 */
@@ -1155,8 +1332,11 @@ void Katran_initVoice(KatranVoice *voice, const uint8_t slot,
 	voice->lowCut = 20u;
 	voice->outCut = 63u;
 	voice->spread = 63u;
-	voice->width = 64u;
+	/* S103 P5: wid is bipolar, stored 63 = 0: full spread, no collapse */
+	voice->width = 63u;
 	voice->pan = 63u;
+	/* S103 P4: kat_rotate 34, one turn in about 21 s (KAT_ROT_HZ_MIN law) */
+	voice->rotate = 34u;
 	voice->vol = 100.0f / 127.0f;
 	voice->note = MIDI_DEFAULT_TRIGGER_NOTE;
 	voice->wasRunning = seq_isRunning();
@@ -1175,7 +1355,6 @@ void Katran_initVoice(KatranVoice *voice, const uint8_t slot,
 	voice->dampK = katDampK[voice->damp_ & 127u];
 	voice->guard[0] = voice->guard[1] = voice->guard[2] = 1.0f;
 	voice->dcX[0] = voice->dcX[1] = voice->dcX[2] = 0.0f;
-	voice->dcY[0] = voice->dcY[1] = voice->dcY[2] = 0.0f;
 	voice->damp[0] = voice->damp[1] = voice->damp[2] = 0.0f;
 	voice->tGain = katDriveGain[voice->drive & 127u];
 	voice->tGain2 = voice->tGain;
@@ -1187,20 +1366,18 @@ void Katran_initVoice(KatranVoice *voice, const uint8_t slot,
 	    ? KAT_XFB_MAX * (float)(63u - voice->spread) * (1.0f / 63.0f) : 0.0f;
 	voice->fb = (float)(voice->feedback & 127u) * (1.0f / 127.0f) * KAT_FB_CLAMP;
 	voice->fbStep = 0.0f;
-	voice->rk = (voice->bLevel > 0u) ? 1.0f : 0.0f;
-	voice->rkStep = 0.0f;
-	voice->g1 = 0.0f;
-	voice->g2 = 0.0f;
-	voice->g1Step = 0.0f;
-	voice->g2Step = 0.0f;
-	voice->ceg = 1.0f;
-	voice->cegStep = 0.0f;
-	voice->wid = (float)(voice->width & 127u) * (1.0f / 64.0f);
+	/* S103 P4: the output gains start at the P2 values (the ring switch from
+	 * bLevel, the VCA gains 0; the first control ramps them) */
+	kat_outGains(voice, 0.0f, 0.0f, og);
+	voice->cA0 = og[0];
+	voice->cA1 = og[1];
+	voice->cB0 = og[2];
+	voice->cB1 = og[3];
+	voice->cA0Step = voice->cA1Step = voice->cB0Step = voice->cB1Step = 0.0f;
 	voice->f2K = katLowCutK[voice->lowCut & 127u];
 	voice->f2x[0] = voice->f2x[1] = 0.0f;
-	voice->f2y[0] = voice->f2y[1] = 0.0f;
-	/* S103 P2: core R's delay time is in half-rate samples (the same comb
-	 * pitch as core L's; kat_delayControl()), and its interpolation state
+	/* S103 P2: core B's delay time is in half-rate samples (the same comb
+	 * pitch as core A's; kat_delayControl()), and its interpolation state
 	 * starts at silence */
 	voice->tNow[0] = katTimeSamples[voice->time & 127u];
 	voice->tNow[1] = 0.5f * katTimeSamples[voice->time & 127u];
@@ -1211,7 +1388,7 @@ void Katran_initVoice(KatranVoice *voice, const uint8_t slot,
 	voice->syncPrev[0] = voice->syncPrev[1] = -1;
 	voice->hPrev = 0.0f;
 
-	/* S103 P2: core L's loop filter at the full rate, core R's at half rate
+	/* S103 P2: core A's loop filter at the full rate, core B's at half rate
 	 * (its prewarp and its 8.1 kHz ceiling, KAT_CUT_ST_MAX_H) */
 	kat_svfInit(&voice->f1[0], (float)(voice->loopCut & 127u) * (KAT_CUT_ST_MAX / 127.0f),
 	            (float)(voice->loopRes & 127u) * (1.0f / 127.0f), KAT_LT_LP,
@@ -1254,9 +1431,13 @@ void Katran_initVoice(KatranVoice *voice, const uint8_t slot,
 	voice->ce[0].stage = 1u;
 	voice->ce[1].level = 0.0f;
 	voice->ce[1].stage = 0u;
-	voice->ceg = 1.0f - (float)(voice->ce1Depth & 127u) * (1.0f / 127.0f)
-	           + (float)(voice->ce1Depth & 127u) * (1.0f / 127.0f) * voice->ce[0].level;
-	voice->cegStep = 0.0f;
+	/* S103 P4: the rotation starts with core A on the left (rotPh 0) and the
+	 * matrix at rest on its targets (CE1's gain included) */
+	voice->rotPh = 0.0f;
+	voice->rotJit = 0.0f;
+	kat_stereoTargets(voice, voice->mx);
+	for (i = 0u; i < 4u; i++)
+		voice->mxStep[i] = 0.0f;
 	voice->tGain = katDriveGain[voice->drive & 127u];
 	(void)typ;
 }
@@ -1270,7 +1451,7 @@ void Katran_initVoice(KatranVoice *voice, const uint8_t slot,
  *             kat_oscControl(); kat_delayControl(); F1: per core st =
  *             (tracked types: the loop pitch in semitones + frq' x 48;
  *             absolute: frq' x 115.7) + CE2 (dp2 bipolar) x 48 + cv x lfl x 12
- *             + (core L +, R -) spread x 12, res, type % 3 ->
+ *             + (core A +, B -) spread x 12, res, type % 3 ->
  *             kat_svfControl(); F2: f2K = katLowCutK[lct]; F3: one
  *             kat_svfControl() for c = (cut - 63) / 63: c < 0 LP at
  *             115.7 + c x 77 semitones, c > 0 HP at c x 80 semitones, c = 0 LP
@@ -1278,13 +1459,14 @@ void Katran_initVoice(KatranVoice *voice, const uint8_t slot,
  *             katDriveGain[drv], tTube = 0.25 drv' + 0.15 cv x lfl', tWet =
  *             wet', tGain2 = tGain; the feedback target fb = min(fbk' x 0.95 +
  *             0.2 x inv x lfl' + swell, KAT_FB_CLAMP) with xfb from spr below
- *             63, the sum clamped at 1.1; the ring crossfade target rk =
- *             (bLevel > 0); the VCA targets g1 = min(1, 0.67 (1 + v)) x
- *             clamp(0.42 + cv, 0, 1), g2 = min(1, 0.38 (1 - v)) x
- *             clamp(0.42 + inv, 0, 1), v = (vca - 63) / 63; the CE1 gain
- *             target 1 - dp1' + dp1' x CE1.level; wid = width / 64; the arena
- *             damp coefficient katDampK[dmp]. Every gain gets now/step for
- *             the per-sample ramp.
+ *             63, the sum clamped at 1.1; the VCA targets g1 (core B, AMP1)
+ *             = min(1, 0.67 (1 + v)) x clamp(0.42 + cv, 0, 1), g2 (core A,
+ *             AMP2) = min(1, 0.38 (1 - v)) x clamp(0.42 + inv, 0, 1), v =
+ *             (vca - 63) / 63, folded with the ring crossfade into the four
+ *             output gains (kat_outGains(), S103 P4); the stereo matrix and
+ *             the rotation (kat_stereoControl(), S103 P4: CE1's gain and the
+ *             width are in it); the arena damp coefficient katDampK[dmp].
+ *             Every gain gets now/step for the per-sample ramp.
  * Why:        every per-sample loop reads only ramps and coefficients; all
  *             laws are per block (constant CPU: no branch here changes what
  *             the loops cost).
@@ -1299,9 +1481,9 @@ void Katran_calcVoiceAsync(KatranVoice *voice)
 	const float sp = (voice->spread > 63u)
 	    ? ((float)(voice->spread - 63u) * (1.0f / 64.0f)) : 0.0f;
 	const float vcaN = ((float)(voice->vca & 127u) - 63.0f) * (1.0f / 63.0f);
-	const float dp1 = (float)(voice->ce1Depth & 127u) * (1.0f / 127.0f);
 	float loopSt[2];
-	float fbT, g1T, g2T, cegT;
+	float fbT, g1T, g2T;
+	float og[4];
 	uint32_t c;
 
 	kat_runControl(voice);
@@ -1324,7 +1506,7 @@ void Katran_calcVoiceAsync(KatranVoice *voice)
 			st = (float)(voice->loopCut & 127u) * (KAT_CUT_ST_MAX / 127.0f);
 		st += dp2 * 48.0f + voice->cv * lfl * 12.0f
 		    + ((c == 0u) ? sp : -sp) * KAT_SPREAD_F1_ST;
-		/* S103 P2: core L at the full rate (32-sample ramp), core R at half
+		/* S103 P2: core A at the full rate (32-sample ramp), core B at half
 		 * rate (its prewarp, its 8.1 kHz ceiling, a 16-sample ramp) */
 		kat_svfControl(&voice->f1[c], st,
 		               (float)(voice->loopRes & 127u) * (1.0f / 127.0f),
@@ -1376,40 +1558,44 @@ void Katran_calcVoiceAsync(KatranVoice *voice)
 	if (fbT + voice->xfb > KAT_FB_CLAMP_SUM)
 		fbT = fmaxf(0.0f, KAT_FB_CLAMP_SUM - voice->xfb);
 	voice->fbStep = (fbT - voice->fb) * (1.0f / (float)OUTPUT_DMA_SIZE);
-	voice->rkStep = (((voice->bLevel > 0u) ? 1.0f : 0.0f) - voice->rk)
-	              * (1.0f / (float)OUTPUT_DMA_SIZE);
 	g1T = fminf(1.0f, 0.67f * (1.0f + vcaN)) * kat_clamp01(0.42f + voice->cv);
 	g2T = fminf(1.0f, 0.38f * (1.0f - vcaN)) * kat_clamp01(0.42f + inv);
-	voice->g1Step = (g1T - voice->g1) * (1.0f / (float)OUTPUT_DMA_SIZE);
-	voice->g2Step = (g2T - voice->g2) * (1.0f / (float)OUTPUT_DMA_SIZE);
-	cegT = 1.0f - dp1 + dp1 * voice->ce[0].level;
-	voice->cegStep = (cegT - voice->ceg) * (1.0f / (float)OUTPUT_DMA_SIZE);
-	voice->wid = (float)(voice->width & 127u) * (1.0f / 64.0f);
+	/* S103 P4: the ring crossfade, the VCA pair and the output scale as the
+	 * two cores' output gains (kat_outGains()) */
+	kat_outGains(voice, g1T, g2T, og);
+	voice->cA0Step = (og[0] - voice->cA0) * (1.0f / (float)OUTPUT_DMA_SIZE);
+	voice->cA1Step = (og[1] - voice->cA1) * (1.0f / (float)OUTPUT_DMA_SIZE);
+	voice->cB0Step = (og[2] - voice->cB0) * (1.0f / (float)OUTPUT_DMA_SIZE);
+	voice->cB1Step = (og[3] - voice->cB1) * (1.0f / (float)OUTPUT_DMA_SIZE);
+	/* S103 P4: the rotation, the width and CE1's gain (the stereo matrix) */
+	kat_stereoControl(voice);
 	voice->dampK = katDampK[voice->damp_ & 127u];
 }
 
 /*
- * The block's audio (S103 P1; S103 P2: core L full rate, core R half rate).
+ * The block's audio (S103 P1; S103 P2: core A full rate, core B half rate).
  * Contract: KatranVoice.h.
  *
  * What:       no ring (a unit was not granted): memset buf and right, return.
  *             Otherwise, in order:
- *             1. kat_delayReadL() (32 samples into blkD[0]) and
- *                kat_delayReadH() (16 half-rate samples into blkD[1]): both
+ *             1. kat_delayReadA() (32 samples into blkD[0]) and
+ *                kat_delayReadB() (16 half-rate samples into blkD[1]): both
  *                before any ring write, so each core's cross-feedback can read
  *                the other's output;
  *             2. OSC B's loop for its form into blkB (full rate), its guard;
- *             3. core L: OSC A's full-rate copy (kat_a*L) into blkA, then
- *                kat_coreRenderL() into buf, then its guard (32 samples);
- *             4. core R: OSC A's half-rate copy (kat_a*H) into blkA[0..15],
- *                then kat_coreRenderH() into right[] (interpolated to the
- *                full rate), then its guard (16 samples);
+ *             3. core A: OSC A's full-rate copy (kat_a*CoreA) into blkA,
+ *                then kat_coreRenderA() into buf, then its guard (32 samples);
+ *             4. core B: OSC A's half-rate copy (kat_a*CoreB) into
+ *                blkA[0..15], then kat_coreRenderB() into right[]
+ *                (interpolated to the full rate), then its guard (16 samples);
  *             5. the shared ramps' ends; ringPrev from each core's last
- *                sample (blkD[0][31], blkD[1][15]); kat_outRender().
+ *                sample (blkD[0][31], blkD[1][15]); kat_outRender(), which
+ *                turns core A in buf and core B in right[] into L and R
+ *                (S103 P4, the stereo matrix).
  * Why:        the staged order of D§4; every loop runs every block
  *             (constant CPU); the form only picks which equal-cost loop.
- *             S103 P2: core R's loops are separate half-rate functions
- *             (KatranOsc.h, kat_coreRenderH()), not the full-rate ones with a
+ *             S103 P2: core B's loops are separate half-rate functions
+ *             (KatranOsc.h, kat_coreRenderB()), not the full-rate ones with a
  *             core index.
  */
 void Katran_calcVoiceSyncBlock(KatranVoice *voice, int16_t *buf, uint8_t size)
@@ -1431,8 +1617,8 @@ void Katran_calcVoiceSyncBlock(KatranVoice *voice, int16_t *buf, uint8_t size)
 		memset(voice->right, 0, sizeof(voice->right));
 		return;
 	}
-	kat_delayReadL(voice);
-	kat_delayReadH(voice);
+	kat_delayReadA(voice);
+	kat_delayReadB(voice);
 
 	if (bArena) {
 		kat_bArena(voice);
@@ -1445,41 +1631,43 @@ void Katran_calcVoiceSyncBlock(KatranVoice *voice, int16_t *buf, uint8_t size)
 	}
 	kat_guardUpdate(voice, 2u, voice->blkB, OUTPUT_DMA_SIZE);
 
-	/* core L: full rate */
+	/* core A: full rate (into buf, before the stereo matrix) */
 	if (aArena)
-		kat_aArenaL(voice, th);
+		kat_aArenaCoreA(voice, th);
 	else if (tableForm == KAT_FORM_WARP)
-		kat_aWarpL(voice, th);
+		kat_aWarpCoreA(voice, th);
 	else if (tableForm == KAT_FORM_PWMD)
-		kat_aPwmDL(voice, th, sign);
+		kat_aPwmDCoreA(voice, th, sign);
 	else
-		kat_aPlainL(voice, th);
-	kat_coreRenderL(voice, buf);
+		kat_aPlainCoreA(voice, th);
+	kat_coreRenderA(voice, buf);
 	kat_guardUpdate(voice, 0u, voice->blkA, OUTPUT_DMA_SIZE);
 
-	/* core R: half rate */
+	/* core B: half rate (into right[], before the stereo matrix) */
 	if (aArena)
-		kat_aArenaH(voice, th);
+		kat_aArenaCoreB(voice, th);
 	else if (tableForm == KAT_FORM_WARP)
-		kat_aWarpH(voice, th);
+		kat_aWarpCoreB(voice, th);
 	else if (tableForm == KAT_FORM_PWMD)
-		kat_aPwmDH(voice, th, sign);
+		kat_aPwmDCoreB(voice, th, sign);
 	else
-		kat_aPlainH(voice, th);
-	kat_coreRenderH(voice);
+		kat_aPlainCoreB(voice, th);
+	kat_coreRenderB(voice);
 	kat_guardUpdate(voice, 1u, voice->blkA, KAT_HALF_N);
 
 	/* the block's shared ramps reach their ends for the next block */
 	voice->gr += (float)OUTPUT_DMA_SIZE * voice->grStep;
 	voice->fb += (float)OUTPUT_DMA_SIZE * voice->fbStep;
-	voice->rk += (float)OUTPUT_DMA_SIZE * voice->rkStep;
-	voice->g1 += (float)OUTPUT_DMA_SIZE * voice->g1Step;
-	voice->g2 += (float)OUTPUT_DMA_SIZE * voice->g2Step;
+	/* S103 P4: the four output gains (they replace rk, g1, g2) */
+	voice->cA0 += (float)OUTPUT_DMA_SIZE * voice->cA0Step;
+	voice->cA1 += (float)OUTPUT_DMA_SIZE * voice->cA1Step;
+	voice->cB0 += (float)OUTPUT_DMA_SIZE * voice->cB0Step;
+	voice->cB1 += (float)OUTPUT_DMA_SIZE * voice->cB1Step;
 	if (voice->gr > 1.0f)
 		voice->gr = 1.0f;
 	if (voice->gr < 0.0f)
 		voice->gr = 0.0f;
-	/* S103 P2: core R's block is 16 half-rate samples; its last is [15] */
+	/* S103 P2: core B's block is 16 half-rate samples; its last is [15] */
 	voice->ringPrev = 0.5f * (fabsf((float)voice->blkD[0][OUTPUT_DMA_SIZE - 1u])
 	                        + fabsf((float)voice->blkD[1][KAT_HALF_N - 1u]))
 	                * (1.0f / 32768.0f);

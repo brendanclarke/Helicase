@@ -1,12 +1,13 @@
 /*
  * KatranParameters.h (S103 P1).
  *
- * What:       the registry-facing exports of KatranParameters.c: the 57
- *             descriptor rows, their count, the eight voice pages, the display
- *             label, the type flags and the inactive-cell test.
+ * What:       the registry-facing exports of KatranParameters.c: the 58
+ *             descriptor rows (S103 P4: kat_rotate appended at 57), their count,
+ *             the eight voice pages, the display label, the type flags and the
+ *             inactive-cell test.
  * Why:        InstrumentManager's instrument_registry[] imports them, as it
  *             imports the other engines' tables.
- * KATRAN_PARAM_DESCRIPTOR_COUNT 57: 21 platform rows + 36 Katran rows.
+ * KATRAN_PARAM_DESCRIPTOR_COUNT 58: 21 platform rows + 37 Katran rows.
  * KATRAN_PARAM_FX_FIRST          60: the first index reserved for the later
  *                                insert effect (fx_type, fx_rate, fx_depth,
  *                                fx_mix; P§9). The Basic table must end at or
@@ -28,7 +29,7 @@
 #include "InstrumentManager.h"
 #include "KatranVoice.h"
 
-#define KATRAN_PARAM_DESCRIPTOR_COUNT  57u
+#define KATRAN_PARAM_DESCRIPTOR_COUNT  58u
 #define KATRAN_PARAM_FX_FIRST          60u
 #define KATRAN_MENU_PAGE_COUNT         8u
 #define KATRAN_INSTRUMENT_TYPE_FLAGS   INSTRUMENT_FLAG_BASIC

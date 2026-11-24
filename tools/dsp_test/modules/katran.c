@@ -22,7 +22,8 @@
  *               KA-FADE  a renewed fade request stops the voice and, when
  *                        it lapses, gr returns to its run state;
  *               KA-SPR   spr 63 equal times, 127 +-12 %, 0 the max xfb;
- *               KA-VCA   vca 63 gives the patch's g1/g2;
+ *               KA-VCA   vca 63 gives the patch's g1/g2 (S103 P4: through the
+ *                        folded output gains cA0, cB1);
  *               KA-F3    the output LP passes 20 Hz..18 kHz within 1 dB;
  *               KA-QUIET the quiet counter follows gr;
  *               KA-BND   the worst settings stay finite and inside int16;
@@ -33,9 +34,22 @@
  *               KA-RANGE (S103 P2, bugs B2/B3) the PWM D sum is stored halved,
  *                        never wrapped; a full-scale arena step saturates
  *                        instead of wrapping to the opposite sign;
- *               KA-HALF  (S103 P2) core R's delay time is half of core L's
+ *               KA-HALF  (S103 P2) core B's delay time is half of core A's
  *                        (the same comb pitch), and its interpolated output's
- *                        odd samples equal its half-rate samples.
+ *                        odd samples equal its half-rate samples;
+ *               KA-FOLD  (S103 P4) the scale-folded core loops equal the P2
+ *                        arithmetic (normalised units, the unfolded gains) on
+ *                        both cores, ring writes and outputs; the folded
+ *                        output gains equal the P2 ring / VCA formula;
+ *               KA-ROT   (S103 P4; S103 P5 bipolar wid) the stereo matrix:
+ *                        rotPh 0 is L = core A, R = core B; rotPh 0.5 swaps
+ *                        them; wid 0 never collapses (orthogonal rows);
+ *                        wid -12 is the P4 pan law; wid -63 is mono; wid
+ *                        +64 widens without collapse; rot 0 holds the
+ *                        phase, rot 127 turns at 4 Hz; the output loop is
+ *                        L = m0 a + m1 b, R = m2 a + m3 b.
+ *             S103 P4: the cores are named A (full rate) and B (half rate);
+ *             they were L and R.
  * Why:        S103_P1_IMPLEMENTATION.md §9; the schedule's gates before the
  *             CPU checkpoint.
  * Inputs:     generated fragments (Makefile target katran).
@@ -108,12 +122,12 @@ void fxbuf_arenaView(const int16_t **base, uint32_t *samples)
 #define BLK OUTPUT_DMA_SIZE
 enum { G_BOOT, G_RUN1, G_RUN2, G_STOP, G_KICK, G_SILENT, G_CE, G_CYC, G_SYNC,
        G_ARENA, G_GUARD, G_FADE, G_SPR, G_VCA, G_F3, G_QUIET, G_BND,
-       G_DLY, G_RANGE, G_HALF, G_N };
+       G_DLY, G_RANGE, G_HALF, G_FOLD, G_ROT, G_N };
 static const char *g_name[G_N] = {
 	"KA-BOOT", "KA-RUN1", "KA-RUN2", "KA-STOP", "KA-KICK", "KA-SILENT",
 	"KA-CE", "KA-CYC", "KA-SYNC", "KA-ARENA", "KA-GUARD", "KA-FADE",
 	"KA-SPR", "KA-VCA", "KA-F3", "KA-QUIET", "KA-BND",
-	"KA-DLY", "KA-RANGE", "KA-HALF"
+	"KA-DLY", "KA-RANGE", "KA-HALF", "KA-FOLD", "KA-ROT"
 };
 static unsigned g_fail[G_N];
 static void fail(int g, const char *what, double a, double b)
@@ -129,8 +143,9 @@ static void expect(int g, int cond, const char *what, double a, double b)
 }
 
 static KatranVoice V;
-static int16_t ringL[KAT_RING];
-static int16_t ringR[KAT_RING];
+/* S103 P4: core A's and core B's rings (they were ringA / ringB) */
+static int16_t ringA[KAT_RING];
+static int16_t ringB[KAT_RING];
 static int16_t outL[BLK];
 
 static void arena_fill(int16_t v)
@@ -144,7 +159,7 @@ static void arena_fill(int16_t v)
 static void voice_init(void)
 {
 	arena_fill(0);
-	Katran_initVoice(&V, 0u, ringL, ringR);
+	Katran_initVoice(&V, 0u, ringA, ringB);
 }
 
 static void block(void)
@@ -446,7 +461,7 @@ static void test_fade(void)
 	expect(G_FADE, V.gr > 0.9f, "fade lapses and gr returns", V.gr, 1.0);
 }
 
-/* S103 P2: core R's delay time is in half-rate samples and ramps over 16
+/* S103 P2: core B's delay time is in half-rate samples and ramps over 16
  * of them; its full-rate equivalent is twice its block-end target. */
 static double target_of_h(float now, float step)
 {
@@ -466,10 +481,10 @@ static void test_spread_vca(void)
 	tl = target_of(V.tNow[0], V.tStep[0]);
 	tr = target_of_h(V.tNow[1], V.tStep[1]);
 	expect(G_SPR, fabs(tl - tr) < 1.0e-3, "spr 63 equal times", tl, tr);
-	/* KA-HALF: the same comb pitch, core R in half-rate samples */
+	/* KA-HALF: the same comb pitch, core B in half-rate samples */
 	expect(G_HALF, fabs(target_of(V.tNow[0], V.tStep[0])
 	                    - 2.0 * ((double)V.tNow[1] + 16.0 * (double)V.tStep[1])) < 1.0e-3,
-	       "core R time = core L time / 2", tl, tr);
+	       "core B time = core A time / 2", tl, tr);
 	voice_init();
 	V.spread = 127u;
 	V.tNow[0] = 700.0f;
@@ -491,9 +506,18 @@ static void test_spread_vca(void)
 	V.plfoLevel = 0u;
 	V.cv = 0.0f;
 	Katran_calcVoiceAsync(&V);
-	expect(G_VCA, fabs((double)(V.g1 + 32.0f * V.g1Step) - 0.67 * 0.42) < 1e-3 &&
-	             fabs((double)(V.g2 + 32.0f * V.g2Step) - 0.38 * 0.42) < 1e-3,
-	       "vca 63 g1/g2", V.g1 + 32.0 * V.g1Step, 0.67 * 0.42);
+	/* S103 P4: g2 (core A) and g1 (core B) are read back from the folded
+	 * output gains: with the ring on (bLevel 55, rk 1), cA0 = g2 x 32767 and
+	 * cB1 = bLvl (1 + g1) x 32767 / 32768 at the block's end */
+	{
+		const double s = 32767.0;
+		const double bl = 55.0 / 127.0;
+		const double g2 = target_of(V.cA0, V.cA0Step) / s;
+		const double g1 = target_of(V.cB1, V.cB1Step) / (bl * s / 32768.0) - 1.0;
+
+		expect(G_VCA, fabs(g1 - 0.67 * 0.42) < 1e-3 && fabs(g2 - 0.38 * 0.42) < 1e-3,
+		       "vca 63 g1/g2", g1, 0.67 * 0.42);
+	}
 }
 
 static double pole_gain(const float a, const double f)
@@ -546,7 +570,7 @@ static void test_bounds(void)
 	V.loopRes = 127u;
 	for (n = 0; n < 2000; n++) {
 		block();
-		if (!isfinite(V.gr) || !isfinite(V.ceg) || !isfinite(V.tNow[0]) ||
+		if (!isfinite(V.gr) || !isfinite(V.mx[0]) || !isfinite(V.mx[2]) || !isfinite(V.tNow[0]) ||
 		    !isfinite(V.fb) || !isfinite(V.ringPrev))
 			bad++;
 	}
@@ -562,7 +586,7 @@ static void test_bounds(void)
  *             fixed T with a fraction. Every sample must equal the linear
  *             interpolation at the true position (w + n - T) plus the dry tap,
  *             halved, within 2 LSB (the 15-bit fraction and the >> 1). Both
- *             cores: core L full rate (32 samples, dry tap 32), core R half
+ *             cores: core A full rate (32 samples, dry tap 32), core B half
  *             rate (16 samples, dry tap 16).
  */
 static void test_delay(void)
@@ -572,44 +596,44 @@ static void test_delay(void)
 
 	voice_init();
 	for (i = 0u; i < KAT_RING; i++) {
-		ringL[i] = (int16_t)((int32_t)((i * 7919u) % 20001u) - 10000);
-		ringR[i] = ringL[i];
+		ringA[i] = (int16_t)((int32_t)((i * 7919u) % 20001u) - 10000);
+		ringB[i] = ringA[i];
 	}
 	V.w[0] = 10u;
 	V.tNow[0] = 100.37f;
 	V.tStep[0] = 0.0f;
-	kat_delayReadL(&V);
+	kat_delayReadA(&V);
 	for (n = 0u; n < BLK; n++) {
 		const double p = (double)(10u + n) - 100.37 + (double)KAT_RING;
 		const uint32_t i0 = (uint32_t)floor(p);
 		const double fr = p - floor(p);
-		const double a = ringL[i0 & KAT_RING_MASK];
-		const double b = ringL[(i0 + 1u) & KAT_RING_MASK];
-		const double dry = ringL[(10u + n - KAT_TAP_DRY) & KAT_RING_MASK];
+		const double a = ringA[i0 & KAT_RING_MASK];
+		const double b = ringA[(i0 + 1u) & KAT_RING_MASK];
+		const double dry = ringA[(10u + n - KAT_TAP_DRY) & KAT_RING_MASK];
 		const double want = 0.5 * (a + (b - a) * fr + dry);
 
 		if (fabs((double)V.blkD[0][n] - want) > 2.0)
 			bad++;
 	}
-	expect(G_DLY, bad == 0, "core L fractional read (w < T)", bad, 0.0);
+	expect(G_DLY, bad == 0, "core A fractional read (w < T)", bad, 0.0);
 	bad = 0;
 	V.w[1] = 5u;
 	V.tNow[1] = 60.5f;
 	V.tStep[1] = 0.0f;
-	kat_delayReadH(&V);
+	kat_delayReadB(&V);
 	for (n = 0u; n < KAT_HALF_N; n++) {
 		const double p = (double)(5u + n) - 60.5 + (double)KAT_RING;
 		const uint32_t i0 = (uint32_t)floor(p);
 		const double fr = p - floor(p);
-		const double a = ringR[i0 & KAT_RING_MASK];
-		const double b = ringR[(i0 + 1u) & KAT_RING_MASK];
-		const double dry = ringR[(5u + n - KAT_TAP_DRY_H) & KAT_RING_MASK];
+		const double a = ringB[i0 & KAT_RING_MASK];
+		const double b = ringB[(i0 + 1u) & KAT_RING_MASK];
+		const double dry = ringB[(5u + n - KAT_TAP_DRY_H) & KAT_RING_MASK];
 		const double want = 0.5 * (a + (b - a) * fr + dry);
 
 		if (fabs((double)V.blkD[1][n] - want) > 2.0)
 			bad++;
 	}
-	expect(G_DLY, bad == 0, "core R fractional read (w < T)", bad, 0.0);
+	expect(G_DLY, bad == 0, "core B fractional read (w < T)", bad, 0.0);
 }
 
 /*
@@ -620,7 +644,7 @@ static void test_delay(void)
  *                halved int32 sum (LSB aside: it carries the wrap flag). The
  *                P1 form stored the unhalved sum as int16 and wrapped.
  *             2. A full-scale arena step (-32,767 -> +32,767) through core
- *                L's arena read with the damping open and the guard at 1: the
+ *                A's arena read with the damping open and the guard at 1: the
  *                DC block's output at the step is about +65,000, which must
  *                store as +32,767 (saturated), not wrap negative.
  */
@@ -666,7 +690,7 @@ static void test_range(void)
 	V.damp[0] = 0.0f;
 	V.dampK = 1.0f;
 	V.guard[0] = 1.0f;
-	kat_aArenaL(&V, 0x7FFFFFFF);   /* no sync resets */
+	kat_aArenaCoreA(&V, 0x7FFFFFFF);   /* no sync resets */
 	expect(G_RANGE, V.blkA[12] > 30000, "arena step saturates (not wraps)",
 	       V.blkA[12], 32767.0);
 }
@@ -675,7 +699,7 @@ static void test_range(void)
  * KA-HALF, the interpolation (S103 P2).
  *
  * What:       after the loops have filled (100 blocks, armed, run on), one
- *             block's core R render by itself: each even full-rate sample
+ *             block's core B render by itself: each even full-rate sample
  *             right[2k] (k >= 1) is the mean of its neighbours right[2k - 1]
  *             and right[2k + 1] (the half-rate samples o[k - 1], o[k]) within
  *             1.5 LSB, wherever neither neighbour is saturated.
@@ -693,11 +717,11 @@ static void test_half_interp(void)
 	for (n = 0; n < 100; n++)
 		block();
 	Katran_calcVoiceAsync(&V);
-	kat_delayReadL(&V);
-	kat_delayReadH(&V);
+	kat_delayReadA(&V);
+	kat_delayReadB(&V);
 	kat_bPwmD(&V, -1);
-	kat_aPwmDH(&V, 0x7FFFFFFF, -1);
-	kat_coreRenderH(&V);
+	kat_aPwmDCoreB(&V, 0x7FFFFFFF, -1);
+	kat_coreRenderB(&V);
 	for (k = 1; k < (int)KAT_HALF_N; k++) {
 		const int32_t lo = V.right[2 * k - 1];
 		const int32_t hi = V.right[2 * k + 1];
@@ -706,7 +730,318 @@ static void test_half_interp(void)
 		    fabs((double)V.right[2 * k] - 0.5 * (double)(lo + hi)) > 1.5)
 			bad++;
 	}
-	expect(G_HALF, bad == 0, "core R 2x interpolation", bad, 0.0);
+	expect(G_HALF, bad == 0, "core B 2x interpolation", bad, 0.0);
+}
+
+/*
+ * KA-FOLD (S103 P4): the scale-folded core loops against the P2 arithmetic.
+ *
+ * What:       after 100 blocks of a sounding drone (noise 60, so the noise
+ *             path is live), one block's control, delay reads, OSC B and the
+ *             core's OSC A copy; then a snapshot of the voice, the core's
+ *             render, and a reference in double that uses the P2 form: every
+ *             int16 load scaled by 1/32768, the unfolded gains (tGain,
+ *             tGain2, tExc, tNse, tWet, xfb, gr, fb), the same SVF, F2 and
+ *             ramps, the ring write x 32768, and the output t1 (o0 + o1 B)
+ *             (o0 / o1 are what part 2 checks). The noise is replayed from the
+ *             same host RNG state. Every ring write and output sample must
+ *             agree within 3 LSB (float against double, truncating stores).
+ *             Part 2: for a grid of g1, g2, bLevel (rk 0 and 1), t1 and B,
+ *             kat_outGains() gives t1 (cA0 + cA1 B) = (r + g2 t1) 32767 and
+ *             t1 (cB0 + cB1 B) = r (1 + g1) 32767, r = t1 ((1 - rk) + rk bLvl
+ *             B / 32768) (the P2 formulas), within 1e-3 LSB relative.
+ * Why:        the folding moves every scale into a per-block gain; a wrong
+ *             factor would change the loop gain or the level and nothing else
+ *             here would see it.
+ */
+static int fold_core(const uint32_t c)
+{
+	static KatranVoice S;
+	static int16_t outRef[BLK];
+	const int half = (c == 1u);
+	const uint32_t count = half ? KAT_HALF_N : BLK;
+	const double rs = half ? 2.0 : 1.0;
+	const uint32_t other = c ^ 1u;
+	uint32_t rng0, rngEnd, n;
+	double gr, fb, o0, o1, a1, a2, a3, ic1, ic2, f2z, hPrev, f2k;
+	int bad = 0;
+	int n2;
+
+	voice_init();
+	V.armed = 1u;
+	V.run = 127u;
+	V.noise = 60u;
+	V.gr = 1.0f;
+	host_running = 1u;
+	for (n2 = 0; n2 < 100; n2++)
+		block();
+	Katran_calcVoiceAsync(&V);
+	kat_delayReadA(&V);
+	kat_delayReadB(&V);
+	kat_bPwmD(&V, -1);
+	if (half)
+		kat_aPwmDCoreB(&V, 0x7FFFFFFF, -1);
+	else
+		kat_aPwmDCoreA(&V, 0x7FFFFFFF, -1);
+	S = V;
+	rng0 = host_rng;
+	if (half)
+		kat_coreRenderB(&V);
+	else
+		kat_coreRenderA(&V, outL);
+	rngEnd = host_rng;
+	host_rng = rng0;
+
+	gr = S.gr;
+	fb = S.fb;
+	o0 = half ? S.cB0 : S.cA0;
+	o1 = half ? S.cB1 : S.cA1;
+	a1 = S.f1[c].a1;
+	a2 = S.f1[c].a2;
+	a3 = S.f1[c].a3;
+	ic1 = S.f1[c].ic1;
+	ic2 = S.f1[c].ic2;
+	f2z = S.f2x[c];
+	hPrev = S.hPrev;
+	f2k = half ? (double)S.f2K * (2.0 - (double)S.f2K) : (double)S.f2K;
+	for (n = 0u; n < count; n++) {
+		const uint32_t bi = half ? (n << 1) : n;
+		const uint32_t oi = half ? (n << 1) : (n >> 1);
+		const double D = S.blkD[c][n] / 32768.0;
+		const double A = S.blkA[n] / 32768.0;
+		const double Bv = (double)S.blkB[bi];
+		const double Do = S.blkD[other][oi] / 32768.0;
+		const double nz = (double)GetRngValue() / 32768.0;
+		const double x = fmin(fmax(D * S.tGain, -KAT_CLIP), KAT_CLIP);
+		const double y = x - KAT_CUBIC * x * x * x + S.tTube * x * x;
+		const double t1 = KAT_TOR_LV1 * (S.tWet * y + (1.0 - S.tWet) * D);
+		const double e = S.tExc * ((1.0 - S.tNse) * A + S.tNse * nz);
+		const double x2 = fmin(fmax(S.tGain2 * e, -KAT_CLIP), KAT_CLIP);
+		const double t2 = KAT_TOR_LV2 * (x2 - KAT_CUBIC * x2 * x2 * x2);
+		const double xin = t1 + t2;
+		const double v3 = xin - ic2;
+		const double v1 = a1 * ic1 + a2 * v3;
+		const double v2 = ic2 + a2 * ic1 + a3 * v3;
+		const KatSvf *const f1 = &S.f1[c];
+		double yf, u, wr, o;
+		int32_t got, want;
+
+		ic1 = 2.0 * v1 - ic1;
+		ic2 = 2.0 * v2 - ic2;
+		yf = f1->mH * xin + f1->mB * v1 + f1->mL * v2;
+		u = yf - f2z;
+		f2z += f2k * (yf - f2z);
+		wr = gr * (u + S.xfb * Do + fb * D) * 32768.0;
+		want = (int32_t)fmin(fmax(wr, -32768.0), 32767.0);
+		got = V.ring[c][(S.w[c] + n) & KAT_RING_MASK];
+		if (abs(got - want) > 3)
+			bad++;
+		o = t1 * (o0 + o1 * Bv);
+		if (half) {
+			outRef[n << 1] = (int16_t)fmin(fmax(0.5 * (hPrev + o), -32768.0), 32767.0);
+			outRef[(n << 1) + 1u] = (int16_t)fmin(fmax(o, -32768.0), 32767.0);
+			hPrev = o;
+		} else {
+			outRef[n] = (int16_t)fmin(fmax(o, -32768.0), 32767.0);
+		}
+		gr += rs * S.grStep;
+		fb += rs * S.fbStep;
+		o0 += rs * (half ? S.cB0Step : S.cA0Step);
+		o1 += rs * (half ? S.cB1Step : S.cA1Step);
+		a1 += f1->da1;
+		a2 += f1->da2;
+		a3 += f1->da3;
+	}
+	host_rng = rngEnd;
+	for (n = 0u; n < BLK; n++) {
+		const int32_t got = half ? V.right[n] : outL[n];
+
+		if (abs(got - (int32_t)outRef[n]) > 3)
+			bad++;
+	}
+	return bad;
+}
+
+static void test_fold(void)
+{
+	static const float g[] = { 0.0f, 0.16f, 0.5f, 1.0f };
+	static const uint8_t bl[] = { 0u, 1u, 55u, 127u };
+	static const float t1s[] = { -0.9f, -0.1f, 0.3f, 1.2f };
+	static const float bs[] = { -32768.0f, -1000.0f, 0.0f, 12345.0f, 32767.0f };
+	int bad = 0;
+	unsigned i, j, k, m, q;
+
+	expect(G_FOLD, fold_core(0u) == 0, "core A folded loop = P2 arithmetic", 0.0, 0.0);
+	expect(G_FOLD, fold_core(1u) == 0, "core B folded loop = P2 arithmetic", 0.0, 0.0);
+	voice_init();
+	for (i = 0u; i < 4u; i++)
+		for (j = 0u; j < 4u; j++)
+			for (k = 0u; k < 4u; k++) {
+				float og[4];
+				const double rk = (bl[k] > 0u) ? 1.0 : 0.0;
+				const double bLvl = bl[k] / 127.0;
+
+				V.bLevel = bl[k];
+				kat_outGains(&V, g[i], g[j], og);
+				for (m = 0u; m < 4u; m++)
+					for (q = 0u; q < 5u; q++) {
+						const double t1 = t1s[m];
+						const double B = bs[q];
+						const double r = t1 * ((1.0 - rk) + rk * bLvl * B / 32768.0);
+						const double wantA = (r + g[j] * t1) * 32767.0;
+						const double wantB = r * (1.0 + g[i]) * 32767.0;
+						const double gotA = t1 * (og[0] + og[1] * B);
+						const double gotB = t1 * (og[2] + og[3] * B);
+
+						if (fabs(gotA - wantA) > 1e-3 * (1.0 + fabs(wantA)) ||
+						    fabs(gotB - wantB) > 1e-3 * (1.0 + fabs(wantB)))
+							bad++;
+					}
+			}
+	expect(G_FOLD, bad == 0, "output gains = P2 ring / VCA formula", bad, 0.0);
+}
+
+/*
+ * KA-ROT (S103 P4; S103 P5: the bipolar wid): the stereo matrix and the
+ * rotation.
+ *
+ * What:       with dp1 0, kat_stereoTargets() gives m[] = (L from a, L from
+ *             b, R from a, R from b) and g = KAT_OUT_NORM x 32767 / 32768;
+ *             wid as display d (stored d + 63):
+ *             1. rotPh 0, d 0: L = g a, R = g b (core A left, core B right);
+ *             2. rotPh 0.5, d 0: L = g b, R = -g a (swapped; A's polarity);
+ *             3. d 0, every phase (no collapse): the rows are orthogonal
+ *                (m0 m2 + m1 m3 = 0) and each has norm g; at rotPh 0.25 the
+ *                L/R correlation of equal uncorrelated cores is 0;
+ *             4. d -12, every phase: the S103 P4 pan law, L = gL a + gR b,
+ *                R = gR a + gL b (equal power), centred at rotPh 0.25;
+ *             5. d -6 (the blend): both rows keep norm g at every phase;
+ *                d -63: mono (L = R) at every phase;
+ *             6. d +64: still no collapse (L.R <= 0) and wider than d 0
+ *                (the side part doubled);
+ *             7. rot 0 holds rotPh over 1,000 blocks; rot 127 (chs 0)
+ *                advances it by 4 Hz x 32 / fs a block (1e-4 relative);
+ *             8. the output loop with F3 open: L = sat(m0 a + m1 b), R =
+ *                sat(m2 a + m3 b) within 1 LSB for fixed gains.
+ */
+static void stereo_at(float ph, int d, float m[4])
+{
+	V.rotPh = ph;
+	V.width = (uint8_t)(d + 63);
+	kat_stereoTargets(&V, m);
+}
+
+static void test_rot(void)
+{
+	const double g = KAT_OUT_NORM * 32767.0 / 32768.0;
+	const double h = g / sqrt(2.0);
+	float m[4];
+	int i, bad;
+
+	voice_init();
+	V.ce1Depth = 0u;
+	stereo_at(0.0f, 0, m);
+	expect(G_ROT, fabs(m[0] - g) < 1e-4 && fabs(m[1]) < 1e-4 && fabs(m[2]) < 1e-4 &&
+	             fabs(m[3] - g) < 1e-4, "rotPh 0: L = A, R = B", m[0], g);
+	stereo_at(0.5f, 0, m);
+	expect(G_ROT, fabs(m[0]) < 1e-4 && fabs(m[1] - g) < 1e-4 && fabs(m[2] + g) < 1e-4 &&
+	             fabs(m[3]) < 1e-4, "rotPh 0.5: L = B, R = -A", m[1], g);
+	stereo_at(0.25f, 0, m);
+	expect(G_ROT, fabs((double)m[0] * m[2] + (double)m[1] * m[3]) < 1e-6,
+	       "rotPh 0.25, wid 0: no collapse", m[0] * m[2] + m[1] * m[3], 0.0);
+	stereo_at(0.25f, -12, m);
+	expect(G_ROT, fabs(m[0] - h) < 1e-3 && fabs(m[1] - h) < 1e-3 && fabs(m[2] - h) < 1e-3 &&
+	             fabs(m[3] - h) < 1e-3, "rotPh 0.25, wid -12: centred (collapse)", m[2], h);
+	bad = 0;
+	for (i = 0; i < 1024; i++) {
+		const float ph = (float)i / 1024.0f;
+		double nl, nr, dot;
+
+		stereo_at(ph, 0, m);
+		nl = (double)m[0] * m[0] + (double)m[1] * m[1];
+		nr = (double)m[2] * m[2] + (double)m[3] * m[3];
+		dot = (double)m[0] * m[2] + (double)m[1] * m[3];
+		if (fabs(nl - g * g) > 1e-3 * g * g || fabs(nr - g * g) > 1e-3 * g * g ||
+		    fabs(dot) > 1e-3 * g * g)
+			bad++;
+		stereo_at(ph, -12, m);
+		if (fabs((double)m[0] - m[3]) > 1e-6 || fabs((double)m[1] - m[2]) > 1e-6 ||
+		    fabs((double)m[0] * m[0] + (double)m[1] * m[1] - g * g) > 1e-3 * g * g)
+			bad++;
+		/* the blend keeps both rows at full power (no silent R half-way) */
+		stereo_at(ph, -6, m);
+		if (fabs((double)m[0] * m[0] + (double)m[1] * m[1] - g * g) > 1e-3 * g * g ||
+		    fabs((double)m[2] * m[2] + (double)m[3] * m[3] - g * g) > 1e-3 * g * g)
+			bad++;
+		stereo_at(ph, -63, m);
+		if (fabs((double)m[0] - m[2]) > 1e-6 || fabs((double)m[1] - m[3]) > 1e-6)
+			bad++;
+		stereo_at(ph, 64, m);
+		dot = (double)m[0] * m[2] + (double)m[1] * m[3];
+		if (dot > 1e-6 * g * g)
+			bad++;
+	}
+	expect(G_ROT, bad == 0, "wid 0 orthogonal / -6 power / -12 pan law / -63 mono / +64 no collapse",
+	       bad, 0.0);
+	{
+		float w0[4], w64[4];
+
+		stereo_at(0.1f, 0, w0);
+		stereo_at(0.1f, 64, w64);
+		/* the side part (L - R) doubles, the mid part (L + R) stays */
+		expect(G_ROT, fabs((w64[0] - w64[2]) - 2.0 * (w0[0] - w0[2])) < 1e-4 &&
+		             fabs((w64[0] + w64[2]) - (w0[0] + w0[2])) < 1e-4,
+		       "wid +64 doubles the side", w64[0] - w64[2], 2.0 * (w0[0] - w0[2]));
+	}
+
+	voice_init();
+	V.rotate = 0u;
+	V.rotPh = 0.3f;
+	for (i = 0; i < 1000; i++)
+		Katran_calcVoiceAsync(&V);
+	expect(G_ROT, V.rotPh == 0.3f, "rot 0 holds", V.rotPh, 0.3);
+	voice_init();
+	V.rotate = 127u;
+	V.chaos = 0u;
+	V.rotPh = 0.1f;
+	Katran_calcVoiceAsync(&V);
+	{
+		const double want = 0.1 + 4.0 * 32.0 / 44108.07291666667;
+
+		expect(G_ROT, fabs((double)V.rotPh - want) < 1e-4 * want, "rot 127 rate",
+		       V.rotPh, want);
+	}
+
+	voice_init();
+	V.f3.a1 = 1.0f;
+	V.f3.da1 = 0.0f;
+	V.f3.mL = 1.0f;
+	V.mx[0] = 0.37f;
+	V.mx[1] = -0.21f;
+	V.mx[2] = 0.12f;
+	V.mx[3] = 0.44f;
+	for (i = 0; i < 4; i++)
+		V.mxStep[i] = 0.0f;
+	bad = 0;
+	for (i = 0; i < BLK; i++) {
+		outL[i] = (int16_t)(i * 1500 - 20000);
+		V.right[i] = (int16_t)(15000 - i * 900);
+	}
+	{
+		int16_t a[BLK], b[BLK];
+
+		memcpy(a, outL, sizeof(a));
+		memcpy(b, V.right, sizeof(b));
+		kat_outRender(&V, outL);
+		for (i = 0; i < BLK; i++) {
+			const double wl = 0.37 * a[i] - 0.21 * b[i];
+			const double wr = 0.12 * a[i] + 0.44 * b[i];
+
+			if (fabs(outL[i] - wl) > 1.0 || fabs(V.right[i] - wr) > 1.0)
+				bad++;
+		}
+	}
+	expect(G_ROT, bad == 0, "output matrix L = m0 a + m1 b, R = m2 a + m3 b", bad, 0.0);
 }
 
 int main(void)
@@ -730,6 +1065,8 @@ int main(void)
 	test_delay();
 	test_range();
 	test_half_interp();
+	test_fold();        /* S103 P4 */
+	test_rot();         /* S103 P4 */
 	/* S103 P2: every group counts (the P1 form listed the groups by hand) */
 	for (g = 0; g < G_N; g++) {
 		if (g_fail[g]) {

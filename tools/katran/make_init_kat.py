@@ -15,8 +15,10 @@ What:       reads the descriptor rows of Core/DSP/Instruments/Katran/
             127 (on), kik 40, CE1 90/63/0, CE2 100/63/63, chaos 20, the patch
             LFO 74/57/51, vca 63; OSC B 48/64/60/55, exc 50, nse 0, sth 60;
             drv 56, wet 57, tim 74, fbk 61, drf 0, dtk 0; F1 53/30/LP, lct 20,
-            cut 63; vol 100, pan 63, spr 63, wid 64; the LFO and velocity rows
-            off (the writer's own-slot token, the target selectors 255).
+            cut 63; vol 100, pan 63, spr 63, wid 63 (S103 P5: bipolar, 0 = full
+            spread with no collapse); the LFO and velocity rows
+            off (the writer's own-slot token, the target selectors 255);
+            S103 P4: rot 34 (the stereo rotation, last in table order).
             The Basic table has no fx_ key (the merge's rows are reserved but
             not built, P§9); --check fails if one appears.
 Why:        Instrument Load only lists files, and a slot's type only changes
@@ -65,12 +67,14 @@ INIT = {
     "kat_loop_cutoff": "53", "kat_loop_reso": "30", "kat_loop_type": "0",
     "kat_low_cut": "20", "kat_out_cut": "63",
     "instrument_vol": "100", "instrument_pan": "63",
-    "kat_spread": "63", "kat_width": "64",
+    "kat_spread": "63", "kat_width": "63",
     "lfo_rate": "0", "lfo_amount": "0", "lfo_amount_2": "0", "lfo_wave": "0",
     "lfo_retrigger_voice": "0", "lfo_polarity": "0", "lfo_sync": "0", "lfo_offset": "0",
     "velo_mod_amount": "0", "velo_mod_dest": "255",
     "lfo_target_voice": "self", "lfo_target_param": "255",
     "lfo_target_voice_2": "self", "lfo_target_param_2": "255",
+    # S103 P4: the stereo rotation, one turn in about 21 s (KatranVoice.c)
+    "kat_rotate": "34",
 }
 MARKER = "@advanced-rows"
 

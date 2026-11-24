@@ -14,8 +14,8 @@
  * Why:        the musically relevant levers only (the Q1 answer): 36 own
  *             rows, many of them combined (a base / offset split of one
  *             range), plus the platform's 21; the LFO page is the platform's,
- *             unchanged. 57 rows; 57..59 free; 60..63 reserved for the
- *             insert effect (P§9).
+ *             unchanged. 58 rows (S103 P4: kat_rotate appended at 57); 58..59
+ *             free; 60..63 reserved for the insert effect (P§9).
  * Not offered: srt (no SRR), osc1_run (free-running), chn, a gate, an amp
  *             ADSR (the chaos envelopes, P§3.3), the sub (P§6.2), every
  *             fixed value of P§8.3.
@@ -88,8 +88,9 @@ const uint8_t katran_instrument_type_flags = KATRAN_INSTRUMENT_TYPE_FLAGS;
  *             this order.
  * Why:        the plan's N-8 order; from here a later row is appended before
  *             KAT_PARAM_COUNT so every stored index stays (the standing
- *             append-only rule). 57..59 are free for additions found by ear;
- *             60..63 are the reserved effect rows.
+ *             append-only rule). 57 is kat_rotate (S103 P4, the first
+ *             addition found by ear); 58..59 are free; 60..63 are the
+ *             reserved effect rows.
  */
 typedef enum {
     KAT_PARAM_OSC1_PITCH_COARSE = 0u,
@@ -149,6 +150,7 @@ typedef enum {
     KAT_PARAM_LFO_TARGET_PARAM,
     KAT_PARAM_LFO_TARGET_VOICE_2,
     KAT_PARAM_LFO_TARGET_PARAM_2,
+    KAT_PARAM_ROTATE,             /* S103 P4: appended (the stereo rotation) */
     KAT_PARAM_COUNT
 } kat_param_index_t;
 
@@ -230,7 +232,10 @@ const ParamDescriptor katran_param_descriptors[] = {
     ROW("instrument_vol", CAT_VOICE, LONG_VOL, SHORT_VOL, DTYPE_0B127, MOD_0_127, vol, TYPE_FLT),
     ROW("instrument_pan", CAT_VOICE, LONG_PAN, SHORT_PAN, DTYPE_PM63, MOD_PM63, pan, TYPE_UINT8),
     ROW("kat_spread", CAT_VOICE, LONG_SPREAD, SHORT_SPR, DTYPE_PM63, MOD_PM63, spread, TYPE_UINT8),
-    ROW("kat_width", CAT_VOICE, LONG_WIDTH, SHORT_WID, DTYPE_0B127, MOD_0_127, width, TYPE_UINT8),
+    /* S103 P5: wid bipolar (stored 63 = 0, the one-pan rule's display):
+     * 0 full spread, no collapse; + wider; 0..-12 blends to the collapsing
+     * law; -12..-63 narrows to mono (KatranVoice.c kat_stereoTargets()) */
+    ROW("kat_width", CAT_VOICE, LONG_WIDTH, SHORT_WID, DTYPE_PM63, MOD_PM63, width, TYPE_UINT8),
     /* --- the LFO pair: the platform's rows (AlkalineParameters.c) --- */
     ROW_SPECIAL("lfo_rate", CAT_LFO, LONG_FREQ, SHORT_FREQ, DTYPE_0B127, MOD_0_127, lfo.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_LFO_RATE),
     ROW("lfo_amount", CAT_LFO, LONG_AMOUNT, SHORT_AM1, DTYPE_0B127, MOD_0_127, lfo.modTarget.amount, TYPE_FLT),
@@ -247,6 +252,16 @@ const ParamDescriptor katran_param_descriptors[] = {
     ROW_NOBIND("lfo_target_param", CAT_LFO, LONG_DEST_PARAM, SHORT_DS1, DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM),
     ROW_NOBIND("lfo_target_voice_2", CAT_LFO, LONG_DSTVOICE2, SHORT_VO2, DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE_2),
     ROW_NOBIND("lfo_target_param_2", CAT_LFO, LONG_DSTPARAM2, SHORT_DS2, DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM_2),
+    /*
+     * S103 P4: the stereo rotation of the two cores (KatranVoice.h
+     * KAT_ROT_*, KatranVoice.c kat_stereoControl()). 0 holds the rotation;
+     * 1..127 turn core A and core B (always opposite) round the field at
+     * 0.01 .. 4 Hz; chs jitters each turn. Appended after the last row so
+     * every stored index stays (append-only); shown on the mod page, cell 3.
+     * Labels reuse the Euklid's SHORT_ROTATION ("rot") / LONG_ROTATION
+     * under CAT_VOICE (another category, another page; no new label id).
+     */
+    ROW("kat_rotate", CAT_VOICE, LONG_ROTATION, SHORT_ROTATION, DTYPE_0B127, MOD_0_127, rotate, TYPE_UINT8),
 };
 
 const uint8_t katran_param_descriptor_count =
@@ -265,7 +280,7 @@ _Static_assert(sizeof(katran_param_descriptors) / sizeof(katran_param_descriptor
  * What:       eight SELECT pages of 16 cells (four-cell screens):
  *               0 osc     coa fin pos dtn | wav typ src dmp
  *               1 aeg     run kik cy1 sk1 | dp1 cy2 sk2 dp2
- *               2 mod     dst amt chs --- | frq mod dpt bal   (S103 P3 Tier B)
+ *               2 mod     dst amt chs rot | frq mod dpt bal   (S103 P3 Tier B; S103 P4 rot)
  *               3 fm      coa fin pos lvB | lvA noi snc ---   (S103 P3 Tier B)
  *               4 click   drv bln tim fbk | wow dtk --- --- | (fx dpt rte mix)  (S103 P3 Tier B)
  *               5 filter  frq res typ lct | cut --- --- ---
@@ -285,8 +300,9 @@ const instrument_menu_page_t katran_menu_pages[] = {
     {{ KAT_PARAM_RUN, KAT_PARAM_KICK, KAT_PARAM_CE1_CYCLE, KAT_PARAM_CE1_SKEW,
        KAT_PARAM_CE1_DEPTH, KAT_PARAM_CE2_CYCLE, KAT_PARAM_CE2_SKEW, KAT_PARAM_CE2_DEPTH,
        KAT_E, KAT_E, KAT_E, KAT_E, KAT_E, KAT_E, KAT_E, KAT_E }},
-    /* 2 MOD: velocity, chaos; then the patch LFO and the VCA balance */
-    {{ KAT_PARAM_VELO_MOD_DEST, KAT_PARAM_VELO_MOD_AMOUNT, KAT_PARAM_CHAOS, KAT_E,
+    /* 2 MOD: velocity, chaos, the rotation (S103 P4); then the patch LFO and
+     * the VCA balance */
+    {{ KAT_PARAM_VELO_MOD_DEST, KAT_PARAM_VELO_MOD_AMOUNT, KAT_PARAM_CHAOS, KAT_PARAM_ROTATE,
        KAT_PARAM_PLFO_RATE, KAT_PARAM_PLFO_MOD, KAT_PARAM_PLFO_LEVEL, KAT_PARAM_VCA,
        KAT_E, KAT_E, KAT_E, KAT_E, KAT_E, KAT_E, KAT_E, KAT_E }},
     /* 3 FM: OSC B and the ring; then the exciter */

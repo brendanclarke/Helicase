@@ -45,7 +45,7 @@ kat_out_cut=63
 instrument_vol=100
 instrument_pan=63
 kat_spread=63
-kat_width=64
+kat_width=63
 lfo_rate=0
 lfo_amount=0
 lfo_amount_2=0
@@ -60,6 +60,7 @@ lfo_target_voice=self
 lfo_target_param=255
 lfo_target_voice_2=self
 lfo_target_param_2=255
+kat_rotate=34
 
 [morph]
 osc1_pitch_coarse=36
@@ -101,7 +102,7 @@ kat_out_cut=63
 instrument_vol=100
 instrument_pan=63
 kat_spread=63
-kat_width=64
+kat_width=63
 lfo_rate=0
 lfo_amount=0
 lfo_amount_2=0
@@ -111,4 +112,5 @@ lfo_polarity=0
 lfo_sync=0
 lfo_offset=0
 velo_mod_amount=0
+kat_rotate=34
 

@@ -2149,10 +2149,12 @@ void instrumentManager_runtimeInit(void)
              * list.
              */
         {
-            int16_t *const ringL = instrumentManager_slotVoiceUnits(slot, 2u);
+            /* S103 P4: unit 0 is core A's ring, unit 1 core B's (the cores
+             * were named L and R) */
+            int16_t *const ringA = instrumentManager_slotVoiceUnits(slot, 2u);
 
             Katran_initVoice(instrumentManager_katranRuntime(slot), slot,
-                             ringL, fxbuf_voiceUnit(slot, 1u));
+                             ringA, fxbuf_voiceUnit(slot, 1u));
         }
             break;
         default:

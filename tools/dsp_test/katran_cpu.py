@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
 katran_cpu.py: the Katran's instructions per sample (S103 P1; S103 P2: the
-full-rate core L and the half-rate core R).
+full-rate core and the half-rate core; S103 P4: named core A and core B).
 
 What:       from the linked ELF (the tetrakt_cpu.py / colloid_cpu.py method):
               per-sample loops, each at its longest path, per full-rate
               output sample:
-                kat_delayReadL + kat_delayReadH / 2
-                + kat_coreRenderL + kat_coreRenderH / 2
+                kat_delayReadA + kat_delayReadB / 2
+                + kat_coreRenderA + kat_coreRenderB / 2
                 + kat_outRender
                 + the dearest OSC B form
-                + the dearest core L OSC A form (kat_a*L)
-                + the dearest core R OSC A form (kat_a*H) / 2;
+                + the dearest core A OSC A form (kat_a*CoreA)
+                + the dearest core B OSC A form (kat_a*CoreB) / 2;
               a half-rate loop runs 16 iterations for 32 output samples, so
               it counts half its per-iteration path.
               per-block paths / 32: Katran_calcVoiceAsync (straight path) +
@@ -19,10 +19,11 @@ What:       from the linked ELF (the tetrakt_cpu.py / colloid_cpu.py method):
               helpers it calls (kat_oscControl, kat_delayControl,
               kat_runControl, kat_plfoStep, kat_ceStep x2, kat_ceStart x2,
               kat_svfControl x2 (F1 only: F3 is inline since L1),
+              kat_stereoTargets (S103 P4),
               kat_guardUpdate x3 with its 4 + 4 + 2 loop iterations) + the
               entry/exit path of each loop function that runs in a block: the
               four delay/core/output functions, and of the forms only the
-              dearest entry of each set (one B, one A L, one A H run).
+              dearest entry of each set (one B, one A core A, one A core B run).
 Why:        the schedule's gate G-CPU1 and G-CPU2 (the arena form is never
             dearer than the PWM form it replaces). S103 P2: each loop function
             holds exactly one per-sample loop, so a count is one sample of one
@@ -45,9 +46,10 @@ import elf_looppath as E
 FRAMES = 32
 GATE = 380.0
 B_FORMS = ('kat_bPlain', 'kat_bPwmD', 'kat_bWarp', 'kat_bArena')
-AL_FORMS = ('kat_aPlainL', 'kat_aPwmDL', 'kat_aWarpL', 'kat_aArenaL')
-AH_FORMS = ('kat_aPlainH', 'kat_aPwmDH', 'kat_aWarpH', 'kat_aArenaH')
-CORE = ('kat_delayReadL', 'kat_delayReadH', 'kat_coreRenderL', 'kat_coreRenderH',
+# S103 P4: the cores are A (full rate) and B (half rate); formerly *L / *H
+AL_FORMS = ('kat_aPlainCoreA', 'kat_aPwmDCoreA', 'kat_aWarpCoreA', 'kat_aArenaCoreA')
+AH_FORMS = ('kat_aPlainCoreB', 'kat_aPwmDCoreB', 'kat_aWarpCoreB', 'kat_aArenaCoreB')
+CORE = ('kat_delayReadA', 'kat_delayReadB', 'kat_coreRenderA', 'kat_coreRenderB',
         'kat_outRender')
 PER_SAMPLE = CORE + B_FORMS + AL_FORMS + AH_FORMS
 
@@ -105,22 +107,25 @@ def main():
     b_max, al_max, ah_max = max(b[:3]), max(al[:3]), max(ah[:3])
     arena_ok = all(s[3] <= max(s[1], s[2]) for s in (b, al, ah))
 
-    per_sample = (longest(a.elf, 'kat_delayReadL')
-                  + longest(a.elf, 'kat_delayReadH') / 2.0
-                  + longest(a.elf, 'kat_coreRenderL')
-                  + longest(a.elf, 'kat_coreRenderH') / 2.0
+    per_sample = (longest(a.elf, 'kat_delayReadA')
+                  + longest(a.elf, 'kat_delayReadB') / 2.0
+                  + longest(a.elf, 'kat_coreRenderA')
+                  + longest(a.elf, 'kat_coreRenderB') / 2.0
                   + longest(a.elf, 'kat_outRender')
                   + b_max + al_max + ah_max / 2.0)
     blk = (B.block_path(a.elf, 'Katran_calcVoiceAsync')[0]
            + B.block_path(a.elf, 'Katran_calcVoiceSyncBlock')[0])
     # An out-of-line helper's straight path plus the iterations of its own
     # loop (elf_blockpath weights loop instructions 0): kat_oscControl walks
-    # three width entries a block; kat_guardUpdate 4 + 4 + 2 samples (B, A L,
-    # A H at 32, 32, 16 samples, every 8th).
+    # three width entries a block; kat_guardUpdate 4 + 4 + 2 samples (B, A core A,
+    # A core B at 32, 32, 16 samples, every 8th).
     for s, mult in (('kat_oscControl', 1), ('kat_delayControl', 1),
                     ('kat_runControl', 1), ('kat_plfoStep', 1),
                     ('kat_ceStep', 2), ('kat_ceStart', 2),
-                    ('kat_svfControl', 2), ('kat_guardUpdate', 3)):
+                    ('kat_svfControl', 2), ('kat_guardUpdate', 3),
+                    # S103 P4: the stereo matrix targets (out of line: the
+                    # init shares it), once a block from the async
+                    ('kat_stereoTargets', 1)):
         if present(a.elf, s):
             blk += mult * B.block_path(a.elf, s)[0]
             if s == 'kat_guardUpdate':
@@ -151,10 +156,10 @@ def main():
             fail = True
     print(f'katran: loops {per_sample:.1f} + per block {blk}/{FRAMES} = {total:.1f}{note}')
     print(f'  OSC B {b[0]}/{b[1]}/{b[2]}/{b[3]}  '
-          f'OSC A L {al[0]}/{al[1]}/{al[2]}/{al[3]}  '
-          f'OSC A H {ah[0]}/{ah[1]}/{ah[2]}/{ah[3]}  (plain/pwmD/warp/arena)')
-    print(f'  delay L/H {longest(a.elf, "kat_delayReadL")}/{longest(a.elf, "kat_delayReadH")}  '
-          f'core L/H {longest(a.elf, "kat_coreRenderL")}/{longest(a.elf, "kat_coreRenderH")}  '
+          f'OSC A core A {al[0]}/{al[1]}/{al[2]}/{al[3]}  '
+          f'OSC A core B {ah[0]}/{ah[1]}/{ah[2]}/{ah[3]}  (plain/pwmD/warp/arena)')
+    print(f'  delay A/B {longest(a.elf, "kat_delayReadA")}/{longest(a.elf, "kat_delayReadB")}  '
+          f'core A/B {longest(a.elf, "kat_coreRenderA")}/{longest(a.elf, "kat_coreRenderB")}  '
           f'out {longest(a.elf, "kat_outRender")}  (per iteration)')
     sys.exit(1 if fail else 0)
 
