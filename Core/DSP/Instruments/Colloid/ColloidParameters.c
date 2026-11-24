@@ -305,12 +305,19 @@ const ParamDescriptor colloid_param_descriptors[] = {
     ROW("col_spread", CAT_UNISON, LONG_SPREAD, SHORT_SPR, DTYPE_0B127, MOD_0_127, spread, TYPE_FLT),
     ROW("col_motion", CAT_UNISON, LONG_MOTION, SHORT_MOT, DTYPE_0B127, MOD_0_127, motion, TYPE_FLT),
     /* --- click: the filter ADSR (draft §4.2), its bipolar amount, and the
-     * filter drive (S095 P3 F10: moved here from the filter page) --- */
-    ROW("col_fenv_attack", CAT_FILT_EG, LONG_ATTACK, SHORT_FAT, DTYPE_0B127, MOD_0_127, fAttack, TYPE_UINT8),
-    ROW("col_fenv_decay", CAT_FILT_EG, LONG_DECAY, SHORT_FDE, DTYPE_0B127, MOD_0_127, fDecay, TYPE_UINT8),
-    ROW("col_fenv_sustain_level", CAT_FILT_EG, LONG_SUSTLVL, SHORT_FSL, DTYPE_0B127, MOD_0_127, fSustain, TYPE_FLT),
-    ROW("col_fenv_release", CAT_FILT_EG, LONG_RELEASE, SHORT_FRE, DTYPE_0B127, MOD_0_127, fRelease, TYPE_UINT8),
-    ROW("col_fenv_amount", CAT_FILT_EG, LONG_AMOUNT, SHORT_FAM, DTYPE_PM63, MOD_PM63, fAmount, TYPE_FLT),
+     * filter drive (S095 P3 F10: moved here from the filter page) ---
+     * S103 P3 D1-D5: the five cells read `atk dec slv rel amt` (the amp
+     * envelope's and velocity's ids; were `fat fde fsl fre fam`, removed).
+     * They sit alone on the click page, away from the amp envelope (aeg) and
+     * velocity (mod); the long view keeps them apart: "Filt EG Attack" etc.,
+     * against "Amp EG Attack" and "Velocity Amount". The pitch envelope
+     * (`pat pde psl pre`, aeg screen 2) stays distinct: same page as the amp
+     * envelope. */
+    ROW("col_fenv_attack", CAT_FILT_EG, LONG_ATTACK, SHORT_ATTACK, DTYPE_0B127, MOD_0_127, fAttack, TYPE_UINT8),
+    ROW("col_fenv_decay", CAT_FILT_EG, LONG_DECAY, SHORT_DECAY, DTYPE_0B127, MOD_0_127, fDecay, TYPE_UINT8),
+    ROW("col_fenv_sustain_level", CAT_FILT_EG, LONG_SUSTLVL, SHORT_SLV, DTYPE_0B127, MOD_0_127, fSustain, TYPE_FLT),
+    ROW("col_fenv_release", CAT_FILT_EG, LONG_RELEASE, SHORT_REL, DTYPE_0B127, MOD_0_127, fRelease, TYPE_UINT8),
+    ROW("col_fenv_amount", CAT_FILT_EG, LONG_AMOUNT, SHORT_FM_AMNT, DTYPE_PM63, MOD_PM63, fAmount, TYPE_FLT),
     ROW("col_drive", CAT_FILTER, LONG_DRIVE_WORD, SHORT_DRIVE, DTYPE_0B127, MOD_0_127, drive, TYPE_FLT),
     /* --- FILTER (S095 P3 F9): one filter, its route, the right offsets --- */
     ROW("col_cutoff", CAT_FILTER, LONG_CUTOFF, SHORT_FREQ, DTYPE_0B127, MOD_0_127, cut, TYPE_FLT),
@@ -402,9 +409,13 @@ const ParamDescriptor colloid_param_descriptors[] = {
      *   they are mono serial (InstrumentManager.c, the clx sync case).
      */
     ROW_SELECT_FIXED_SPECIAL("fx_type", CAT_EFFECT, LONG_TYPE, SHORT_FX, ONOFF_TAG_FX_TYPE, fxType, TYPE_UINT8, IM_SPECIAL_FX_TYPE),
-    ROW("fx_rate", CAT_EFFECT, LONG_RATE, SHORT_FXR, DTYPE_0B127, MOD_0_127, fxRate, TYPE_UINT8),
+    /* S103 P3 A1/A2: fx_rate and fx_mix use the shared SHORT_RTE ("rte")
+     * and SHORT_MIX ("mix") ids; the identical SHORT_FXR / SHORT_FXM were
+     * removed. The cells read exactly as before (col_route is `rte` too, on
+     * the filter page). */
+    ROW("fx_rate", CAT_EFFECT, LONG_RATE, SHORT_RTE, DTYPE_0B127, MOD_0_127, fxRate, TYPE_UINT8),
     ROW("fx_depth", CAT_EFFECT, LONG_DEPTH, SHORT_FXD, DTYPE_0B127_FX_DEPTH, MOD_0_127, fxDepth, TYPE_UINT8),
-    ROW("fx_mix", CAT_EFFECT, LONG_MIX, SHORT_FXM, DTYPE_0B127, MOD_0_127, fxMix, TYPE_UINT8),
+    ROW("fx_mix", CAT_EFFECT, LONG_MIX, SHORT_MIX, DTYPE_0B127, MOD_0_127, fxMix, TYPE_UINT8),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */

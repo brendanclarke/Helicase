@@ -1910,3 +1910,154 @@ the 19,620 Basic share.
    example one loop handling both cores with the shared work hoisted).
 2. No further feature work should be based on this engine until the
    gate is resolved.
+
+---
+
+## 16. Assessment of the implementation (2026-11-24, review of `0669d578`)
+
+**Scope:** a source review of commit `0669d578` ("katran implementation")
+against this schedule. Files read in full: `KatranVoice.c`, `KatranOsc.c`,
+the InstrumentManager diff, `KatranParameters.c` (rows, pages, asserts,
+`katranParameters_cellInactive()`), `katran_cpu.py`, the `baselines/s103/`
+records.
+
+**What could not be checked here:** there is no ARM toolchain or linked ELF
+on the review machine, so the per-loop counts in §15.2 are taken as
+recorded, not re-measured. Two questions about how they were counted are
+in §16.4.
+
+### 16.1 Verdict
+
+| Item | Finding |
+|---|---|
+| **The stop at the CPU gate** | **Correct.** 534.7 is far past the 395 stop line; L1 was the only pre-approved step, and it was applied |
+| **Integration (H-1, IM-1…IM-25, FB-1/2, ME-1…7, ST-1, MK-1)** | **Matches the schedule.** The IM-13 argument-order fix (claim into a local, then read ordinal 1) is in. IM-14's fade request, IM-22's duck exemption and IM-25's typ branch are as specified |
+| **Behaviour (run, kick, stop, boot, fade, CEs, cycle-start rows, sync)** | Matches §4 N-2 apart from the items in §16.2 |
+| **Deviations listed in §15.4** | All acceptable: the guard peaks in the sync, `out_cut` 63 as an exact pass, truncating stores, and the corrected `spr` ratio law |
+| **Bugs** | **Four found** (§16.2). Three of them produce wrong audio; none is caught by the current host laws |
+| **The CPU estimate** | **Wrong by ≈ 40 %** (376 estimated, 534.7 measured). The causes are in §16.3. After the code-level savings available without a feature change (§16.5), Katran is still ≈ 6–14 % **over** the Basic share, so **a design decision is needed (§16.6)** |
+
+### 16.2 Bugs (fix before any device run)
+
+| # | Where | Defect | Effect | Fix |
+|---|---|---|---|---|
+| **B1** | `KatranVoice.c:754–758`, `kat_delayRead()` | `idx = (w + n) − t` is negative whenever the write index is behind the delay time (for `w < T`: ≈ 87 % of the ring cycle at `tim` 127). `(int32_t)idx` truncates toward zero, so the integer part is the ceiling and `frac` lies in (−1, 0]: the read **extrapolates** from `ring[i0]` along the next sample's slope instead of interpolating between `i0 − 1` and `i0` | The timed tap is wrong by up to one sample's difference on most samples: added high-frequency error, overshoot past ±32,767 into the saturating store, and a pitch slightly off its law | Make the index positive before the conversion: `idx = (float)(w + n + KAT_RING) − t` (t ≤ 2,040 < 2,048, so idx > 0). §16.5 O1 replaces the read with a Q16 form, which fixes it as well |
+| **B2** | `KatranOsc.c:126` (`kat_bPwmD`), `:228` (`kat_aPwmD`) | `kat_read(row, ph) + sign × kat_read(row, q)` reaches ±65,534 and is stored as `(int16_t)` (OSC B also through `& 0xFFFFFFFE`) without saturation or a halving. It **wraps** | Under `typ` pwm (the `init.kat` setting) the exciter and the ring modulator wrap: hard discontinuities whenever the two reads add past full scale (Saw form often; Rec form near narrow widths) | Halve the sum (`>> 1`) before the int16 store. The Colloid has no wrap here because it keeps the same sum in int32 buses (`ColloidOsc.c:416–419`) and scales later. Then apply the width level table (the "PWM D level" item below) |
+| **B3** | `KatranOsc.c:291` (`kat_aArena`), `:176` (`kat_bArena`) | the conditioned arena value (`kat_cond()`, DC block then damping, × guard) is stored with a bare `(int16_t)` cast. The DC block's high-pass of a full-scale step overshoots to ≈ 2× before the guard (which acts a block later) catches it | Wraps on garbage and stale-state reads, the form's most common input | Saturate: `kat_sat16(s0)`, and for B `kat_sat16(s) & ~1` |
+| **B4** | `kat_runControl()`, `KatranVoice.c:435–437` | the K1 re-arm adds `KAT_REARM_STEP` (0.15) to `gr` with no ceiling; `grStep` is computed from the unclamped value and only the sync's end-of-block clamp (`:1285`) pulls `gr` back to 1 | During a re-arm from `gr` > 0.85 the per-sample ramp exceeds 1 for one block: the loop gain goes above unity briefly on every kick into a sounding drone | `newGr = fminf(newGr, 1.0f)` before `grStep` |
+
+**Smaller items (not bugs, for the same fix pass):**
+- **Two RNG reads a sample.** `kat_coreRender()` calls `kat_rngRead()` once
+  per core (`:819`). The plan specified one read split into L/R halves
+  (P1 §1.4 "noise 4"). Each read is a peripheral load (AHB2, the RNG data
+  register), slower than a memory load, and with no DRDY wait the two cores
+  often read the same word. See O2 for a zero-RAM fix.
+- **The PWM D level.** The Colloid scales the two-read form by the width's
+  level table (`oscPwmLevelRecQ14` / `SawQ14`). Katran does not, so the
+  exciter and ring depth change level as `pos` sweeps. Apply it per block
+  (one multiply in the loop, or fold it into `exc` / `bLvl`).
+- **Host laws.** None of §9's laws exercises the fractional delay or the
+  oscillators' output range, which is why B1–B3 passed. Add **KA-DLY** (a
+  sine through the delay at a non-integer T, compared with the analytic
+  value over a whole ring cycle, `w < T` included) and **KA-RANGE** (every
+  oscillator form and the arena form at full level: no sample changes sign
+  against its unclipped value). Add a break build for each.
+
+### 16.3 Why the estimate was wrong
+
+Measured (§15.2) against the §1.4 estimate, instructions a sample:
+
+| Part | Est. | Measured | Main causes (from the source) |
+|---|---:|---:|---|
+| L1 delay reads | 30 | 53 | float index arithmetic per sample (int→float, subtract, truncate, fraction), three int16→float conversions, the float lerp, a saturating float→int store |
+| OSC B (dearest) | 31 | 30 | as estimated |
+| OSC A ×2 (dearest) | 74 | 106 | the sync test reads `blkB` and `blkD` through `v->` and writes `v->syncPrev[c]` every sample; the row switch is a branch, not a select |
+| Core ×2 | 126 | 222 | four int16→float conversions with a scale each; two `kat_sat16f()` (convert + two-sided clamp) per core; the per-sample `(c == 0u) ?` output select; five gain ramps + three coefficient ramps; the second RNG read |
+| Output (after L1) | 55 | 47 | as estimated (L1 saved 14.1, not 30: the SVF it replaced cost less than estimated) |
+| **Loops** | **320** | **469** | |
+| Per block | 56 | 65.7 | close |
+| **Total** | **376** | **534.7** | |
+
+The estimate priced the arithmetic and missed the **format traffic**: every
+stage boundary is an int16 block, so each stage pays a load, a conversion and
+a scale on the way in, and a scale, conversion and clamp on the way out. The
+Colloid keeps its buses in int32/float, so its measured per-loop costs, which
+the estimate borrowed, do not include this traffic.
+
+### 16.4 Two questions about the measurement
+
+| # | Question | Why it matters | How to settle |
+|---|---|---|---|
+| M1 | Is `kat_delayRead`'s 53 **one core's** sample or both cores'? The function is an outer loop over two cores around the per-sample loop; `katran_cpu.py` adds `longest(kat_delayRead)` once | If 53 is one core's inner loop, the true per-sample cost is 106, and the total is ≈ 588, not 534.7 | `elf_loopdump.py --sym kat_delayRead`: one inner loop body = one core-sample. If so, multiply by 2 in `katran_cpu.py` |
+| M2 | Did `-Ofast` unroll any per-sample loop by 2 (one body = two samples)? | An unrolled body's count is two samples' worth; adding it as one sample doubles that part | the same loop dump: check the induction step (`n += 2`) |
+
+Also note `katran_cpu.py`'s per-block sum:
+- it adds the block entries of all eight oscillator functions, though only
+  three calls run in a block (one B, two A);
+- it counts `kat_svfControl` × 3, though F3 no longer calls it after L1.
+
+Both over-count, by ≈ 3–4 a sample together. Fix the script so the record
+is exact before the next decision.
+
+### 16.5 Savings available without a feature change (est., from the measured counts)
+
+| # | Change | Where | Saves (est.) |
+|---|---|---|---:|
+| O1 | **Fixed-point delay read:** T in Q16 (`uint32_t`), index = `((w + n + KAT_RING) << 16) − Tq`, `i = idx >> 16 & mask`, `frac = idx & 0xFFFF`, integer lerp `a + (((b − a) × frac) >> 16)`, `(a_t + dry) >> 1` store. All integer, no conversion; **fixes B1** | `kat_delayRead()` | 20–25 |
+| O2 | **One RNG read a sample:** core L reads the 32-bit RNG word, uses the low 16 bits and stores the high 16 bits in `right[n]`; core R reads its noise from `right[n]` before it overwrites `right[n]` with its output (same index, read first). Zero RAM | `kat_coreRender()` | 4 + one peripheral stall |
+| O3 | **Two specialised core loops** (an `always_inline` body with a constant core index, called from two `noinline` wrappers): no per-sample `(c == 0u)` select, and each core ramps only its own VCA gain | `kat_coreRender()` | 8 |
+| O4 | **Conversion and saturation:** `__SSAT(x, 16)` for every int16 store (one instruction instead of the two-sided compare); the D, A, B and output scales folded into the per-block gains (`tg`, `exc`, `bLvl`, `xfb`, `fb`, the output) so the loads are `vcvt` only | core, out, delay | 20–28 |
+| O5 | **Loop state in registers:** `syncPrev`, the DC/damp states, `blkD[c]` / `blkB` base pointers as locals in the oscillator loops, written back once at the end; the row switch as a select | `KatranOsc.c` (A and arena loops) | 16–22 |
+| O6 | `katran_cpu.py` per-block fixes (§16.4) | the record | 3–4 |
+| | **Total** | | **≈ 70–90** |
+
+**After O1–O6:** ≈ 445–465 instructions a sample, i.e. **21.1k–22.8k cycles a
+block** at 1.485–1.53. That is still **8–16 % over the 19,620 Basic share**,
+and 13–23 % over the 18.6k ceiling. Under M1 it would be ≈ 50 higher.
+
+A device probe alone (§15.5 option a) cannot close this. Even at a CPI of
+1.3, below anything measured in this tree, 445 instructions is 18.5k:
+inside the share, but with no margin, before M1 is settled.
+
+### 16.6 The decision this needs from you
+
+All figures are est., from the measured counts after O1–O6 (≈ 455 centre).
+Cycles at 1.485–1.53.
+
+| Option | Change | Instructions a sample | Cycles a block | Against Basic 19,620 | Sound cost |
+|---|---|---:|---:|---|---|
+| **K1** | **Single core** (K-D1 reversed): one TORCIDO / F1 / F2 / delay loop, one OSC A. Stereo from the delay's two taps at L/R times (`spr`), the VCA pair's asymmetry, and the width. Saves the second core (≈ 95), the second OSC A (≈ 45), half the delay reads (≈ 15), one F1 control and one delay control (≈ 5) | ≈ 295 | ≈ 14.0–14.5k | **26–29 % under**: room to restore the sub (+12) and the F3 SVF (+15) and still be ≈ 20 % under | the two cores no longer re-clock independently; the stereo becomes tap spread rather than two chaotic loops |
+| **K2** | **Dual core, one shared OSC A** (reset by either core's delay crossing), the 32-sample tap and the noise exciter removed | ≈ 390 | ≈ 18.5–19.1k | 2.7–5.7 % under: **outside** the 5–10 % band, no margin | the exciters no longer beat against each other (`dtn` keeps only a frame/width spread); no dry-tap resonance (K-D5); no noise |
+| **K3** | **Dual core at half rate** in the loop: TORCIDO, F1, F2 and the ring write at 22 kHz; the oscillators and delay reads at the same rate; the output stage at full rate with a 2× interpolator | ≈ 270–300 | ≈ 12.8–14.7k | 25–35 % under | the loop's bandwidth stops at 11 kHz (darker, less aliasing from the drive); the shortest comb 2.9 ms instead of 0.73 ms; the largest code change |
+| **K4** | **Advanced class** for the dual core (as is after O1–O6) | ≈ 455 | ≈ 21.6–22.3k | over Basic; ≈ 0–2 % **over** the Advanced share (21,803) | none, but at most two per Scene, and no room left for the later insert effect. **Not viable as is** |
+
+**Recommendation: K1, single core.**
+- It is the only option that lands inside your 5–10 % band with margin after
+  estimates this far off. K2 has no margin, and K4 does not fit even
+  Advanced.
+- It keeps every row, page and behaviour of the plan.
+- It frees enough to restore the sub-oscillator and the resonant output
+  filter.
+- The stereo moves from "two loops" to "one loop, two taps": still the
+  patch's asymmetric L/R (the VCA pair), plus the delay spread and width.
+
+K3 is the alternative if keeping two independent loops matters more than
+the loop's top octave. It is a larger change, and its cost needs its own
+spike before it is relied on.
+
+### 16.7 Next steps (in order)
+
+1. **Fix B1–B4**, and add KA-DLY, KA-RANGE and their break builds (§16.2).
+   These are needed whatever you decide.
+2. **Settle M1/M2** with `elf_loopdump.py`, and correct `katran_cpu.py`
+   (§16.4).
+3. **Apply O1–O5** and re-measure. This is the honest baseline for the
+   decision, and O1 also closes B1.
+4. **Your decision on §16.6** (K1 recommended). Then revise this schedule's
+   §1, §4 N-1/N-2/N-4, §9 and §10 for the chosen form before more code.
+5. Only then the device probe (G-CPU4), to calibrate the CPI for this kind
+   of loop.
+
+**Not yet applied:** the short-label merges of `S103_P2_SHORT_NAMES_MERGE.md`
+(Tier B reuses for Katran's labels) are still pending your decision; the
+code uses the 21 new labels as scheduled.

@@ -188,26 +188,37 @@ const ParamDescriptor katran_param_descriptors[] = {
     ROW("kat_ce2_cycle", CAT_ENVELOPE, LONG_CYCLE, SHORT_CY2, DTYPE_0B127, MOD_0_127, ce2Cycle, TYPE_UINT8),
     ROW("kat_ce2_skew", CAT_ENVELOPE, LONG_SKEW, SHORT_SK2, DTYPE_0B127, MOD_0_127, ce2Skew, TYPE_UINT8),
     ROW("kat_ce2_depth", CAT_ENVELOPE, LONG_DEPTH, SHORT_DP2, DTYPE_PM63, MOD_PM63, ce2Depth, TYPE_UINT8),
+    /*
+     * S103 P3 Tier B (S103_P3_SHORT_NAMES_MERGE.md §3): ten rows reuse an
+     * existing short label instead of a Katran-only one:
+     *   kat_plfo_rate frq, kat_plfo_mod mod, kat_plfo_level dpt, kat_vca bal
+     *   (mod page); kat_b_level lvB, kat_level_a lvA, kat_noise noi,
+     *   kat_sync snc (fm page); kat_wet bln, kat_drift wow (click page).
+     * Each still differs from every other Katran row with the same short
+     * name in category or long name, so the single-parameter view tells
+     * them apart, and none repeats on its own page. Display only: keys,
+     * indices and storage are unchanged.
+     */
     /* --- mod: velocity, chaos, the patch LFO, the VCA pair --- */
     ROW("kat_chaos", CAT_ENVELOPE, LONG_CHAOS, SHORT_CHS, DTYPE_0B127, MOD_0_127, chaos, TYPE_UINT8),
-    ROW("kat_plfo_rate", CAT_MOD_OSC, LONG_RATE, SHORT_LFR, DTYPE_0B127, MOD_0_127, plfoRate, TYPE_UINT8),
-    ROW("kat_plfo_mod", CAT_MOD_OSC, LONG_SELFMOD, SHORT_LFM, DTYPE_0B127, MOD_0_127, plfoMod, TYPE_UINT8),
-    ROW("kat_plfo_level", CAT_MOD_OSC, LONG_LEVEL, SHORT_LFL, DTYPE_0B127, MOD_0_127, plfoLevel, TYPE_UINT8),
-    ROW("kat_vca", CAT_VOICE, LONG_VCABAL, SHORT_VCA, DTYPE_PM63, MOD_PM63, vca, TYPE_UINT8),
+    ROW("kat_plfo_rate", CAT_MOD_OSC, LONG_RATE, SHORT_FREQ, DTYPE_0B127, MOD_0_127, plfoRate, TYPE_UINT8),
+    ROW("kat_plfo_mod", CAT_MOD_OSC, LONG_SELFMOD, SHORT_MOD, DTYPE_0B127, MOD_0_127, plfoMod, TYPE_UINT8),
+    ROW("kat_plfo_level", CAT_MOD_OSC, LONG_LEVEL, SHORT_FXD, DTYPE_0B127, MOD_0_127, plfoLevel, TYPE_UINT8),
+    ROW("kat_vca", CAT_VOICE, LONG_VCABAL, SHORT_BAL, DTYPE_PM63, MOD_PM63, vca, TYPE_UINT8),
     /* --- fm: OSC B and the ring, then the exciter --- */
     ROW("kat_b_coarse", CAT_FM, LONG_COARSE, SHORT_COARSE, DTYPE_0B127, MOD_0_127, bCoarse, TYPE_UINT8),
     ROW("kat_b_fine", CAT_FM, LONG_FINE, SHORT_FINE, DTYPE_PM63, MOD_PM63, bFine, TYPE_UINT8),
     ROW("kat_b_pos", CAT_FM, LONG_POSITION, SHORT_POS, DTYPE_0B127, MOD_0_127, bPos, TYPE_UINT8),
-    ROW("kat_b_level", CAT_FM, LONG_LEVEL, SHORT_LVL, DTYPE_0B127, MOD_0_127, bLevel, TYPE_UINT8),
-    ROW("kat_level_a", CAT_OSC, LONG_EXCITER, SHORT_EXC, DTYPE_0B127, MOD_0_127, levelA, TYPE_UINT8),
-    ROW("kat_noise", CAT_NOISE, LONG_NOISEMIX, SHORT_NSE, DTYPE_0B127, MOD_0_127, noise, TYPE_UINT8),
-    ROW("kat_sync", CAT_OSC, LONG_SYNCTHR, SHORT_STH, DTYPE_0B127, MOD_0_127, sync, TYPE_UINT8),
+    ROW("kat_b_level", CAT_FM, LONG_LEVEL, SHORT_LVB, DTYPE_0B127, MOD_0_127, bLevel, TYPE_UINT8),
+    ROW("kat_level_a", CAT_OSC, LONG_EXCITER, SHORT_LVA, DTYPE_0B127, MOD_0_127, levelA, TYPE_UINT8),
+    ROW("kat_noise", CAT_NOISE, LONG_NOISEMIX, SHORT_NOISE, DTYPE_0B127, MOD_0_127, noise, TYPE_UINT8),
+    ROW("kat_sync", CAT_OSC, LONG_SYNCTHR, SHORT_SYNC, DTYPE_0B127, MOD_0_127, sync, TYPE_UINT8),
     /* --- click: the loop (TORCIDO and the delay) --- */
     ROW("kat_drive", CAT_DELAY, LONG_DRIVE_WORD, SHORT_DRIVE, DTYPE_0B127, MOD_0_127, drive, TYPE_UINT8),
-    ROW("kat_wet", CAT_DELAY, LONG_WET, SHORT_WET, DTYPE_0B127, MOD_0_127, wet, TYPE_UINT8),
+    ROW("kat_wet", CAT_DELAY, LONG_WET, SHORT_BLN, DTYPE_0B127, MOD_0_127, wet, TYPE_UINT8),
     ROW("kat_time", CAT_DELAY, LONG_TIME, SHORT_MICROTIMING, DTYPE_0B127, MOD_0_127, time, TYPE_UINT8),
     ROW("kat_feedback", CAT_DELAY, LONG_FEEDBACK, SHORT_FBK, DTYPE_0B127, MOD_0_127, feedback, TYPE_UINT8),
-    ROW("kat_drift", CAT_DELAY, LONG_DRIFT, SHORT_DRF, DTYPE_0B127, MOD_0_127, drift_, TYPE_UINT8),
+    ROW("kat_drift", CAT_DELAY, LONG_DRIFT, SHORT_WOW, DTYPE_0B127, MOD_0_127, drift_, TYPE_UINT8),
     ROW("kat_track", CAT_DELAY, LONG_TRACK, SHORT_DTK, DTYPE_0B127, MOD_0_127, track, TYPE_UINT8),
     /* --- filter: F1, F2, F3 --- */
     ROW("kat_loop_cutoff", CAT_FILTER, LONG_CUTOFF, SHORT_FREQ, DTYPE_0B127, MOD_0_127, loopCut, TYPE_UINT8),
@@ -254,9 +265,9 @@ _Static_assert(sizeof(katran_param_descriptors) / sizeof(katran_param_descriptor
  * What:       eight SELECT pages of 16 cells (four-cell screens):
  *               0 osc     coa fin pos dtn | wav typ src dmp
  *               1 aeg     run kik cy1 sk1 | dp1 cy2 sk2 dp2
- *               2 mod     dst amt chs --- | lfr lfm lfl vca
- *               3 fm      coa fin pos lvl | exc nse sth ---
- *               4 click   drv wet tim fbk | drf dtk --- --- | (fx dpt rte mix)
+ *               2 mod     dst amt chs --- | frq mod dpt bal   (S103 P3 Tier B)
+ *               3 fm      coa fin pos lvB | lvA noi snc ---   (S103 P3 Tier B)
+ *               4 click   drv bln tim fbk | wow dtk --- --- | (fx dpt rte mix)  (S103 P3 Tier B)
  *               5 filter  frq res typ lct | cut --- --- ---
  *               6 LFO     the platform layout (the Colloid's), unchanged
  *               7 mix     vol pan spr wid

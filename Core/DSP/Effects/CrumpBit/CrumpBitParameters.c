@@ -176,7 +176,10 @@ const effect_param_descriptor_t crumpBit_descriptors[] = {
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     EFFECT_ROW("crump_grain_density", CAT_GRAIN, LONG_DENSITY, SHORT_DEN, DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
-    EFFECT_ROW("crump_grain_length", CAT_GRAIN, LONG_LENGTH, SHORT_LNG, DTYPE_PM63,
+    /* S103 P3 C2: the grain length's cell reads `len` (SHORT_LENGTH, the
+     * pattern length's label; was `lng`, SHORT_LNG, removed). Its long name
+     * was already "Length"; the long view reads "Grain Length". */
+    EFFECT_ROW("crump_grain_length", CAT_GRAIN, LONG_LENGTH, SHORT_LENGTH, DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 127u, 127u),
     EFFECT_ROW("crump_grain_width", CAT_GRAIN, LONG_WIDTH, SHORT_WID, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),

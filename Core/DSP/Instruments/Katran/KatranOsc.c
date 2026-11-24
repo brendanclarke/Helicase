@@ -1,5 +1,7 @@
 /*
- * KatranOsc.c - Katran's oscillator loops (S103 P1).
+ * KatranOsc.c - Katran's oscillator loops (S103 P1; S103 P2: the full-rate /
+ * half-rate core pair, the PWM-sum and arena-store fixes, loop state in
+ * registers).
  * Contract: KatranOsc.h. Placement: flash (no ITCM section; P§2.3).
  */
 #include "KatranOsc.h"
@@ -36,65 +38,80 @@ static inline __attribute__((always_inline)) int32_t kat_read(const int16_t *row
 }
 
 /*
- * The arena read form's conditioning (S103 P1, P§3.4).
+ * A saturating int16 store value (S103 P2, bug B3).
+ *
+ * What:       x clamped to -32,768..32,767: one SSAT on the device, the
+ *             two-sided compare on the host.
+ * Why:        the arena form's conditioned value can leave the int16 range
+ *             (the DC block's high-pass of a full-scale step overshoots to
+ *             about 2x before the guard, a block later, catches it). A bare
+ *             (int16_t) cast wrapped it to the opposite sign; this clips it.
+ *             Inline asm, so the loop needs no CMSIS header (the host build
+ *             has none).
+ */
+static inline __attribute__((always_inline)) int16_t kat_osat16(const int32_t x)
+{
+#if defined(__ARM_ARCH_7EM__)
+	int32_t r;
+
+	__asm__("ssat %0, #16, %1" : "=r"(r) : "r"(x));
+	return (int16_t)r;
+#else
+	return (int16_t)((x > 32767) ? 32767 : ((x < -32768) ? -32768 : x));
+#endif
+}
+
+/*
+ * The arena read form's conditioning, one step (S103 P1; S103 P2: the state
+ * in registers).
  *
  * What:       one arena sample x (an int16 read as it is) -> the DC block
  *             (one-pole high-pass at ~10 Hz: z += KAT_DC_K (x - z),
- *             y = x - z) -> the damping one-pole (damp += dampK (y - damp))
- *             -> the guard gain. The states live in the voice (dcX/dcY,
- *             damp, guard), one set per read block (A L, A R, B).
+ *             y = x - z) -> the damping one-pole (d += dampK (y - d)) -> the
+ *             guard gain. *z and *d are the caller's register copies of the
+ *             voice's dcX / damp for this read block.
  * Why:        always on in this form (constant cost): a full-scale read of
  *             float state or power-up garbage must not walk away with the
- *             loop's DC or pin it at full scale.
- * Inputs:     v, c (0 A L, 1 A R, 2 B), x.
- * Outputs:    the conditioned value, as an int32.
+ *             loop's DC or pin it at full scale. S103 P2: the loops keep z and
+ *             d in locals and write them back once a block. The P1 form read
+ *             and wrote four voice members per sample through the voice
+ *             pointer (and dcY, which nothing reads).
+ * Outputs:    the conditioned value as an int32 (the caller saturates).
+ */
+static inline __attribute__((always_inline)) int32_t kat_condStep(float *z, float *d,
+                                                                  const float dampK,
+                                                                  const float guard,
+                                                                  const int32_t x)
+{
+	const float xf = (float)x;
+	float y;
+
+	*z += KAT_DC_K * (xf - *z);
+	y = xf - *z;
+	*d += dampK * (y - *d);
+	return (int32_t)(*d * guard);
+}
+
+/*
+ * The same step on a voice's own state (S103 P1 kat_cond(), kept for the host
+ * law KA-ARENA, modules/katran.c).
  */
 static inline __attribute__((always_inline)) int32_t kat_cond(KatranVoice *v, uint32_t c,
                                                               const int32_t x)
 {
-	const float xf = (float)x;
-	float z = v->dcX[c];
-	float y;
-	float d;
-
-	z += KAT_DC_K * (xf - z);
-	v->dcX[c] = z;
-	y = xf - z;
-	v->dcY[c] = y;
-	d = v->damp[c] + v->dampK * (y - v->damp[c]);
-	v->damp[c] = d;
-	d *= v->guard[c];
-	return (int32_t)d;
+	return kat_condStep(&v->dcX[c], &v->damp[c], v->dampK, v->guard[c], x);
 }
 
 /* The sync test's weight: one wrap sample is +P x 32767 (P§3.4/L3). */
 #define KAT_SYNC_WRAP ((int32_t)(KAT_SYNC_P * 32767.0f))
 
-/* A is reset when the sum crosses th upward. cur is this sample's test; the
- * previous sample's test is carried in v->syncPrev[c]. */
-static inline __attribute__((always_inline)) uint32_t kat_aReset(KatranVoice *v, const uint32_t c,
-                                                                 const uint32_t n,
-                                                                 const int32_t th,
-                                                                 uint32_t *ph,
-                                                                 const int16_t **row)
-{
-	const int32_t s = (int32_t)(v->blkB[n] & 1) * KAT_SYNC_WRAP + (int32_t)v->blkD[c][n];
-	const int32_t cur = (s > th);
-	const uint32_t reset = (uint32_t)(cur && v->syncPrev[c] == 0);
-
-	v->syncPrev[c] = cur;
-	if (reset) {
-		*ph = 0u;
-		*row = v->rowANext[c];
-	}
-	return reset;
-}
-
 /* OSC B plain: the shared wav / wavetable form into blkB. */
 void kat_bPlain(KatranVoice *v)
 {
 	const uint32_t inc = v->incB;
+	const int16_t *const rowNext = v->rowBNext;
 	const int16_t *row = v->rowB;
+	int16_t *const out = v->blkB;
 	uint32_t ph = v->phB;
 	uint32_t n;
 
@@ -103,35 +120,45 @@ void kat_bPlain(KatranVoice *v)
 		const uint32_t np = ph + inc;
 		const uint32_t wrap = (uint32_t)(np < ph);
 
-		v->blkB[n] = (int16_t)((s & (int32_t)0xFFFFFFFEu) | (int32_t)wrap);
+		out[n] = (int16_t)((s & (int32_t)0xFFFFFFFEu) | (int32_t)wrap);
 		ph = np;
-		if (wrap)
-			row = v->rowBNext;
+		row = wrap ? rowNext : row;
 	}
 	v->phB = ph;
 	v->rowB = row;
 }
 
-/* OSC B, the two-read pulse (the Colloid's col_pwmPair form for one copy). */
+/*
+ * OSC B, the two-read pulse (the Colloid's col_pwmPair form for one copy).
+ *
+ * S103 P2, bug B2: the two reads' sum is halved before the int16 store.
+ * The sum reaches +-65,534 (two full-scale saw reads added for Saw, or one
+ * minus the other for Rec), and the P1 form stored it as (int16_t), so it
+ * wrapped to the opposite sign whenever the reads added past full scale. The
+ * Colloid has no wrap because it keeps the same sum in int32 buses
+ * (ColloidOsc.c col_pwmPairStore()). Halving keeps the waveform's shape; the
+ * level it costs (-6 dB) is the exciter's and the ring's, both set by rows.
+ */
 void kat_bPwmD(KatranVoice *v, const int32_t sign)
 {
 	const uint32_t inc = v->incB;
 	const uint32_t j = inc - (uint32_t)(((int32_t)v->pwD[2] - (int32_t)v->pwD0[2]) * 131072);
+	const int16_t *const rowNext = v->rowBNext;
 	const int16_t *row = v->rowB;
+	int16_t *const out = v->blkB;
 	uint32_t ph = v->phB;
 	uint32_t q = ph - ((uint32_t)v->pwD0[2] << 22);
 	uint32_t n;
 
 	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
-		const int32_t s = kat_read(row, ph) + sign * kat_read(row, q);
+		const int32_t s = (kat_read(row, ph) + sign * kat_read(row, q)) >> 1;
 		const uint32_t np = ph + inc;
 		const uint32_t wrap = (uint32_t)(np < ph);
 
-		v->blkB[n] = (int16_t)((s & (int32_t)0xFFFFFFFEu) | (int32_t)wrap);
+		out[n] = (int16_t)((s & (int32_t)0xFFFFFFFEu) | (int32_t)wrap);
 		ph = np;
 		q += j;
-		if (wrap)
-			row = v->rowBNext;
+		row = wrap ? rowNext : row;
 	}
 	v->phB = ph;
 	v->rowB = row;
@@ -146,7 +173,9 @@ void kat_bWarp(KatranVoice *v)
 	const uint32_t ra = oscPwmTriRa[k];
 	const uint32_t rb = oscPwmTriRb[k];
 	const uint32_t inc = v->incB;
+	const int16_t *const rowNext = v->rowBNext;
 	const int16_t *row = v->rowB;
+	int16_t *const out = v->blkB;
 	uint32_t ph = v->phB;
 	uint32_t n;
 
@@ -155,145 +184,188 @@ void kat_bWarp(KatranVoice *v)
 		const uint32_t np = ph + inc;
 		const uint32_t wrap = (uint32_t)(np < ph);
 
-		v->blkB[n] = (int16_t)((s & (int32_t)0xFFFFFFFEu) | (int32_t)wrap);
+		out[n] = (int16_t)((s & (int32_t)0xFFFFFFFEu) | (int32_t)wrap);
 		ph = np;
-		if (wrap)
-			row = v->rowBNext;
+		row = wrap ? rowNext : row;
 	}
 	v->phB = ph;
 	v->rowB = row;
 }
 
-/* OSC B, the arena window read (no interpolation). */
+/*
+ * OSC B, the arena window read (no interpolation).
+ *
+ * S103 P2: bug B3 (the conditioned value is saturated before the store; it
+ * wrapped before) and the conditioning state in registers (kat_condStep()).
+ */
 void kat_bArena(KatranVoice *v)
 {
 	const uint32_t inc = v->incB;
+	const int16_t *const rowNext = v->rowBNext;
 	const int16_t *row = v->rowB;
+	int16_t *const out = v->blkB;
+	const float dampK = v->dampK;
+	const float guard = v->guard[2];
+	float z = v->dcX[2];
+	float d = v->damp[2];
 	uint32_t ph = v->phB;
 	uint32_t n;
 
 	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
-		const int32_t s = kat_cond(v, 2u, row[ph >> 22]);
+		const int32_t s = kat_osat16(kat_condStep(&z, &d, dampK, guard, row[ph >> 22]));
 		const uint32_t np = ph + inc;
 		const uint32_t wrap = (uint32_t)(np < ph);
 
-		v->blkB[n] = (int16_t)((s & (int32_t)0xFFFFFFFEu) | (int32_t)wrap);
+		out[n] = (int16_t)((s & (int32_t)0xFFFFFFFEu) | (int32_t)wrap);
 		ph = np;
-		if (wrap)
-			row = v->rowBNext;
+		row = wrap ? rowNext : row;
 	}
 	v->phB = ph;
 	v->rowB = row;
+	v->dcX[2] = z;
+	v->damp[2] = d;
 }
 
-/* OSC A plain, one copy (c 0 L, 1 R): the shared form into blkA, with the
- * hard sync from the core's delay output and OSC B's wrap. */
-void kat_aPlain(KatranVoice *v, const uint32_t c, const int32_t th)
+/*
+ * One copy of OSC A, one block (S103 P2: the shared body of the eight *L / *H
+ * loops).
+ *
+ * What:       per sample n of `count` (32 full rate, 16 half rate):
+ *             1. the hard sync: st = P x wrap + D[n], where wrap is OSC B's
+ *                wrap bit at the same time (full rate: blkB[n]; half rate:
+ *                the OR over blkB[2n] and blkB[2n + 1], so no wrap of the
+ *                full-rate OSC B is missed) and D the core's own delay output
+ *                (blkD[c][n]); an upward crossing of th (cur = st > th, the
+ *                previous sample's test 0) resets the phase to 0 and takes
+ *                rowNext (the cycle start, K-D10);
+ *             2. the read for `form`: PLAIN (the interpolated row), PWMD (the
+ *                two-read pulse, halved: bug B2), WARP (the warped triangle),
+ *                ARENA (the uninterpolated arena read through the
+ *                conditioning, saturated: bug B3);
+ *             3. the phase step; a natural wrap also takes rowNext.
+ *             The half-rate copy steps its phase by 2 x incA[1] (so its pitch
+ *             matches the full-rate copy's law), and the PWM D second phase
+ *             glides over 16 samples instead of 32 (j = inc - dW x 2^22 /
+ *             count, which lands q exactly on the block's end width).
+ * Why:        S103 P2: core R runs at half rate. One body for both rates and
+ *             all four forms keeps the forms identical between the cores;
+ *             `form` and `half` are constants in each wrapper, so the compiler
+ *             removes the other forms and rates (constant CPU per wrapper).
+ *             The sync state, the conditioning state and the block pointers
+ *             live in locals and are written back once (the P1 loops read and
+ *             wrote them through the voice pointer every sample).
+ *             Also (S103 P2): on a sync reset the PWM D second phase q moves
+ *             with the first (q -= ph before ph = 0), so the pulse keeps its
+ *             width across the reset; the P1 form left q behind until the next
+ *             block.
+ * Inputs:     v, c (0 = core L, 1 = core R), th, sign (PWMD), form, half.
+ * Outputs:    blkA[0..count-1]; phA[c], rowA[c], syncPrev[c]; under ARENA
+ *             dcX[c], damp[c].
+ */
+static inline __attribute__((always_inline)) void kat_aBody(KatranVoice *v, const uint32_t c,
+                                                            const int32_t th, const int32_t sign,
+                                                            const uint32_t form, const uint32_t half)
 {
-	const uint32_t inc = v->incA[c];
+	const uint32_t count = half ? (OUTPUT_DMA_SIZE / 2u) : OUTPUT_DMA_SIZE;
+	const uint32_t inc = half ? (v->incA[c] << 1) : v->incA[c];
+	const int16_t *const dSelf = v->blkD[c];
+	const int16_t *const blkB = v->blkB;
+	int16_t *const out = v->blkA;
+	const int16_t *const rowNext = v->rowANext[c];
 	const int16_t *row = v->rowA[c];
 	uint32_t ph = v->phA[c];
-	uint32_t n;
-
-	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
-		int32_t s;
-		uint32_t np;
-
-		(void)kat_aReset(v, c, n, th, &ph, &row);
-		s = kat_read(row, ph);
-		v->blkA[n] = (int16_t)s;
-		np = ph + inc;
-		if (np < ph)
-			row = v->rowANext[c];
-		ph = np;
-	}
-	v->phA[c] = ph;
-	v->rowA[c] = row;
-}
-
-/* OSC A, the two-read pulse, one copy. */
-void kat_aPwmD(KatranVoice *v, const uint32_t c, const int32_t th, const int32_t sign)
-{
-	const uint32_t inc = v->incA[c];
-	const uint32_t j = inc - (uint32_t)(((int32_t)v->pwD[c] - (int32_t)v->pwD0[c]) * 131072);
-	const int16_t *row = v->rowA[c];
-	uint32_t ph = v->phA[c];
+	int32_t prev = v->syncPrev[c];
+	/* the PWM D second read: width glide over this block (see What) */
+	const int32_t dW = (int32_t)v->pwD[c] - (int32_t)v->pwD0[c];
+	const uint32_t j = inc - (uint32_t)(dW * (int32_t)((1u << 22) / count));
 	uint32_t q = ph - ((uint32_t)v->pwD0[c] << 22);
-	uint32_t n;
-
-	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
-		uint32_t np;
-
-		(void)kat_aReset(v, c, n, th, &ph, &row);
-		v->blkA[n] = (int16_t)(kat_read(row, ph) + sign * kat_read(row, q));
-		np = ph + inc;
-		q += j;
-		if (np < ph)
-			row = v->rowANext[c];
-		ph = np;
-	}
-	v->phA[c] = ph;
-	v->rowA[c] = row;
-}
-
-/* OSC A, the warped triangle, one copy. */
-void kat_aWarp(KatranVoice *v, const uint32_t c, const int32_t th)
-{
+	/* the warp's parameters (from the slewed width index) */
 	const uint32_t k = v->pwPos[c] & 127u;
 	const uint32_t wPh = oscPwmTriW[k];
 	const uint32_t ra = oscPwmTriRa[k];
 	const uint32_t rb = oscPwmTriRb[k];
-	const uint32_t inc = v->incA[c];
-	const int16_t *row = v->rowA[c];
-	uint32_t ph = v->phA[c];
+	/* the arena conditioning, in registers */
+	const float dampK = v->dampK;
+	const float guard = v->guard[c];
+	float z = v->dcX[c];
+	float d = v->damp[c];
 	uint32_t n;
 
-	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
+	for (n = 0u; n < count; n++) {
+		const int32_t wrapB = half ? (int32_t)((blkB[n << 1] | blkB[(n << 1) + 1u]) & 1)
+		                           : (int32_t)(blkB[n] & 1);
+		const int32_t st = wrapB * KAT_SYNC_WRAP + (int32_t)dSelf[n];
+		const int32_t cur = (st > th);
+		int32_t s;
 		uint32_t np;
 
-		(void)kat_aReset(v, c, n, th, &ph, &row);
-		v->blkA[n] = (int16_t)kat_read(row, osc_pwmWarp(ph, wPh, ra, rb));
+		if (cur && prev == 0) {
+			q -= ph;          /* keep the pulse width across the reset */
+			ph = 0u;
+			row = rowNext;
+		}
+		prev = cur;
+		if (form == KAT_FORM_PWMD)
+			s = (kat_read(row, ph) + sign * kat_read(row, q)) >> 1;
+		else if (form == KAT_FORM_WARP)
+			s = kat_read(row, osc_pwmWarp(ph, wPh, ra, rb));
+		else if (form == KAT_FORM_ARENA)
+			s = kat_osat16(kat_condStep(&z, &d, dampK, guard, row[ph >> 22]));
+		else
+			s = kat_read(row, ph);
+		out[n] = (int16_t)s;
 		np = ph + inc;
-		if (np < ph)
-			row = v->rowANext[c];
+		row = (np < ph) ? rowNext : row;
 		ph = np;
+		q += j;
 	}
 	v->phA[c] = ph;
 	v->rowA[c] = row;
+	v->syncPrev[c] = prev;
+	if (form == KAT_FORM_ARENA) {
+		v->dcX[c] = z;
+		v->damp[c] = d;
+	}
 }
 
-/* OSC A, the arena window read, one copy. */
-void kat_aArena(KatranVoice *v, const uint32_t c, const int32_t th)
+/* OSC A, core L (full rate): one wrapper per form. Contract: KatranOsc.h. */
+void kat_aPlainL(KatranVoice *v, const int32_t th)
 {
-	const uint32_t inc = v->incA[c];
-	const int16_t *row = v->rowA[c];
-	uint32_t ph = v->phA[c];
-	uint32_t n;
+	kat_aBody(v, 0u, th, 1, KAT_FORM_PLAIN, 0u);
+}
 
-	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
-		int32_t s0;
-		uint32_t np;
+void kat_aPwmDL(KatranVoice *v, const int32_t th, const int32_t sign)
+{
+	kat_aBody(v, 0u, th, sign, KAT_FORM_PWMD, 0u);
+}
 
-		/* the sync test reads this block's D and B, then the read (at the
-		 * reset phase if the test fired) goes through the conditioning */
-		{
-			const int32_t st = (int32_t)(v->blkB[n] & 1) * KAT_SYNC_WRAP
-			                 + (int32_t)v->blkD[c][n];
-			const int32_t cur = (st > th);
+void kat_aWarpL(KatranVoice *v, const int32_t th)
+{
+	kat_aBody(v, 0u, th, 1, KAT_FORM_WARP, 0u);
+}
 
-			if (cur && v->syncPrev[c] == 0) {
-				ph = 0u;
-				row = v->rowANext[c];
-			}
-			v->syncPrev[c] = cur;
-		}
-		s0 = kat_cond(v, c, row[ph >> 22]);
-		v->blkA[n] = (int16_t)s0;
-		np = ph + inc;
-		if (np < ph)
-			row = v->rowANext[c];
-		ph = np;
-	}
-	v->phA[c] = ph;
-	v->rowA[c] = row;
+void kat_aArenaL(KatranVoice *v, const int32_t th)
+{
+	kat_aBody(v, 0u, th, 1, KAT_FORM_ARENA, 0u);
+}
+
+/* OSC A, core R (half rate): one wrapper per form. Contract: KatranOsc.h. */
+void kat_aPlainH(KatranVoice *v, const int32_t th)
+{
+	kat_aBody(v, 1u, th, 1, KAT_FORM_PLAIN, 1u);
+}
+
+void kat_aPwmDH(KatranVoice *v, const int32_t th, const int32_t sign)
+{
+	kat_aBody(v, 1u, th, sign, KAT_FORM_PWMD, 1u);
+}
+
+void kat_aWarpH(KatranVoice *v, const int32_t th)
+{
+	kat_aBody(v, 1u, th, 1, KAT_FORM_WARP, 1u);
+}
+
+void kat_aArenaH(KatranVoice *v, const int32_t th)
+{
+	kat_aBody(v, 1u, th, 1, KAT_FORM_ARENA, 1u);
 }

@@ -25,7 +25,17 @@
  *               KA-VCA   vca 63 gives the patch's g1/g2;
  *               KA-F3    the output LP passes 20 Hz..18 kHz within 1 dB;
  *               KA-QUIET the quiet counter follows gr;
- *               KA-BND   the worst settings stay finite and inside int16.
+ *               KA-BND   the worst settings stay finite and inside int16;
+ *               KA-DLY   (S103 P2, bug B1) the fractional delay read equals
+ *                        linear interpolation at the true position, on both
+ *                        cores (full and half rate), with the write index
+ *                        behind the delay time (the case B1 got wrong);
+ *               KA-RANGE (S103 P2, bugs B2/B3) the PWM D sum is stored halved,
+ *                        never wrapped; a full-scale arena step saturates
+ *                        instead of wrapping to the opposite sign;
+ *               KA-HALF  (S103 P2) core R's delay time is half of core L's
+ *                        (the same comb pitch), and its interpolated output's
+ *                        odd samples equal its half-rate samples.
  * Why:        S103_P1_IMPLEMENTATION.md §9; the schedule's gates before the
  *             CPU checkpoint.
  * Inputs:     generated fragments (Makefile target katran).
@@ -97,11 +107,13 @@ void fxbuf_arenaView(const int16_t **base, uint32_t *samples)
 
 #define BLK OUTPUT_DMA_SIZE
 enum { G_BOOT, G_RUN1, G_RUN2, G_STOP, G_KICK, G_SILENT, G_CE, G_CYC, G_SYNC,
-       G_ARENA, G_GUARD, G_FADE, G_SPR, G_VCA, G_F3, G_QUIET, G_BND, G_N };
+       G_ARENA, G_GUARD, G_FADE, G_SPR, G_VCA, G_F3, G_QUIET, G_BND,
+       G_DLY, G_RANGE, G_HALF, G_N };
 static const char *g_name[G_N] = {
 	"KA-BOOT", "KA-RUN1", "KA-RUN2", "KA-STOP", "KA-KICK", "KA-SILENT",
 	"KA-CE", "KA-CYC", "KA-SYNC", "KA-ARENA", "KA-GUARD", "KA-FADE",
-	"KA-SPR", "KA-VCA", "KA-F3", "KA-QUIET", "KA-BND"
+	"KA-SPR", "KA-VCA", "KA-F3", "KA-QUIET", "KA-BND",
+	"KA-DLY", "KA-RANGE", "KA-HALF"
 };
 static unsigned g_fail[G_N];
 static void fail(int g, const char *what, double a, double b)
@@ -410,7 +422,7 @@ static void test_guard(void)
 	voice_init();
 	for (i = 0; i < BLK; i++)
 		blk[i] = 32767;
-	kat_guardUpdate(&V, 0u, blk);
+	kat_guardUpdate(&V, 0u, blk, BLK);   /* S103 P2: the block's valid length */
 	expect(G_GUARD, V.guard[0] <= 0.7001f, "guard target", V.guard[0], 0.7);
 }
 
@@ -434,24 +446,37 @@ static void test_fade(void)
 	expect(G_FADE, V.gr > 0.9f, "fade lapses and gr returns", V.gr, 1.0);
 }
 
+/* S103 P2: core R's delay time is in half-rate samples and ramps over 16
+ * of them; its full-rate equivalent is twice its block-end target. */
+static double target_of_h(float now, float step)
+{
+	return 2.0 * ((double)now + (double)KAT_HALF_N * (double)step);
+}
+
 static void test_spread_vca(void)
 {
 	double tl, tr;
 
 	voice_init();
 	V.spread = 63u;
-	V.tNow[0] = V.tNow[1] = 700.0f;
+	V.tNow[0] = 700.0f;
+	V.tNow[1] = 350.0f;
 	V.drift[0] = V.drift[1] = 0.0f;
 	Katran_calcVoiceAsync(&V);
 	tl = target_of(V.tNow[0], V.tStep[0]);
-	tr = target_of(V.tNow[1], V.tStep[1]);
+	tr = target_of_h(V.tNow[1], V.tStep[1]);
 	expect(G_SPR, fabs(tl - tr) < 1.0e-3, "spr 63 equal times", tl, tr);
+	/* KA-HALF: the same comb pitch, core R in half-rate samples */
+	expect(G_HALF, fabs(target_of(V.tNow[0], V.tStep[0])
+	                    - 2.0 * ((double)V.tNow[1] + 16.0 * (double)V.tStep[1])) < 1.0e-3,
+	       "core R time = core L time / 2", tl, tr);
 	voice_init();
 	V.spread = 127u;
-	V.tNow[0] = V.tNow[1] = 700.0f;
+	V.tNow[0] = 700.0f;
+	V.tNow[1] = 350.0f;
 	Katran_calcVoiceAsync(&V);
 	tl = target_of(V.tNow[0], V.tStep[0]);
-	tr = target_of(V.tNow[1], V.tStep[1]);
+	tr = target_of_h(V.tNow[1], V.tStep[1]);
 	expect(G_SPR, fabs(tl / tr - (1.0 + KAT_SPREAD_TIME) / (1.0 - KAT_SPREAD_TIME)) < 0.01,
 	       "spr 127 spread", tl / tr,
 	       (1.0 + KAT_SPREAD_TIME) / (1.0 - KAT_SPREAD_TIME));
@@ -528,9 +553,166 @@ static void test_bounds(void)
 	expect(G_BND, bad == 0, "non-finite state", bad, 0.0);
 }
 
+/*
+ * KA-DLY (S103 P2, bug B1): the fractional delay read.
+ *
+ * What:       a non-linear ring (so extrapolation and interpolation differ),
+ *             the write index behind the delay time (w = 10 < T: the case the
+ *             P1 float read got wrong, its truncation toward zero), and a
+ *             fixed T with a fraction. Every sample must equal the linear
+ *             interpolation at the true position (w + n - T) plus the dry tap,
+ *             halved, within 2 LSB (the 15-bit fraction and the >> 1). Both
+ *             cores: core L full rate (32 samples, dry tap 32), core R half
+ *             rate (16 samples, dry tap 16).
+ */
+static void test_delay(void)
+{
+	uint32_t i, n;
+	int bad = 0;
+
+	voice_init();
+	for (i = 0u; i < KAT_RING; i++) {
+		ringL[i] = (int16_t)((int32_t)((i * 7919u) % 20001u) - 10000);
+		ringR[i] = ringL[i];
+	}
+	V.w[0] = 10u;
+	V.tNow[0] = 100.37f;
+	V.tStep[0] = 0.0f;
+	kat_delayReadL(&V);
+	for (n = 0u; n < BLK; n++) {
+		const double p = (double)(10u + n) - 100.37 + (double)KAT_RING;
+		const uint32_t i0 = (uint32_t)floor(p);
+		const double fr = p - floor(p);
+		const double a = ringL[i0 & KAT_RING_MASK];
+		const double b = ringL[(i0 + 1u) & KAT_RING_MASK];
+		const double dry = ringL[(10u + n - KAT_TAP_DRY) & KAT_RING_MASK];
+		const double want = 0.5 * (a + (b - a) * fr + dry);
+
+		if (fabs((double)V.blkD[0][n] - want) > 2.0)
+			bad++;
+	}
+	expect(G_DLY, bad == 0, "core L fractional read (w < T)", bad, 0.0);
+	bad = 0;
+	V.w[1] = 5u;
+	V.tNow[1] = 60.5f;
+	V.tStep[1] = 0.0f;
+	kat_delayReadH(&V);
+	for (n = 0u; n < KAT_HALF_N; n++) {
+		const double p = (double)(5u + n) - 60.5 + (double)KAT_RING;
+		const uint32_t i0 = (uint32_t)floor(p);
+		const double fr = p - floor(p);
+		const double a = ringR[i0 & KAT_RING_MASK];
+		const double b = ringR[(i0 + 1u) & KAT_RING_MASK];
+		const double dry = ringR[(5u + n - KAT_TAP_DRY_H) & KAT_RING_MASK];
+		const double want = 0.5 * (a + (b - a) * fr + dry);
+
+		if (fabs((double)V.blkD[1][n] - want) > 2.0)
+			bad++;
+	}
+	expect(G_DLY, bad == 0, "core R fractional read (w < T)", bad, 0.0);
+}
+
+/*
+ * KA-RANGE (S103 P2, bugs B2 and B3).
+ *
+ * What:       1. OSC B's PWM D (Saw form, the sum of two saw reads) over 50
+ *                blocks of moving width: every stored sample equals the
+ *                halved int32 sum (LSB aside: it carries the wrap flag). The
+ *                P1 form stored the unhalved sum as int16 and wrapped.
+ *             2. A full-scale arena step (-32,767 -> +32,767) through core
+ *                L's arena read with the damping open and the guard at 1: the
+ *                DC block's output at the step is about +65,000, which must
+ *                store as +32,767 (saturated), not wrap negative.
+ */
+static void test_range(void)
+{
+	int n, blkn;
+	int bad = 0;
+
+	voice_init();
+	V.osc.oscType = OSC_TYPE_PWM;
+	V.osc.waveform = OSC_PWM_SAW;
+	for (blkn = 0; blkn < 50; blkn++) {
+		uint32_t ph, q, j, inc;
+		const int16_t *row;
+
+		V.bPos = (uint8_t)((blkn * 5) & 127);
+		Katran_calcVoiceAsync(&V);
+		V.rowB = V.rowBNext;   /* one row for the whole block */
+		inc = V.incB;
+		ph = V.phB;
+		row = V.rowB;
+		j = inc - (uint32_t)(((int32_t)V.pwD[2] - (int32_t)V.pwD0[2]) * 131072);
+		q = ph - ((uint32_t)V.pwD0[2] << 22);
+		kat_bPwmD(&V, 1);
+		for (n = 0; n < BLK; n++) {
+			const int32_t want = (kat_read(row, ph) + kat_read(row, q)) >> 1;
+
+			if (((int32_t)V.blkB[n] & ~1) != (want & ~1))
+				bad++;
+			ph += inc;
+			q += j;
+		}
+	}
+	expect(G_RANGE, bad == 0, "PWM D sum stored halved (no wrap)", bad, 0.0);
+
+	voice_init();
+	for (n = 0; n < (int)ARENA_N; n++)
+		arena[n] = (int16_t)((n < 512) ? -32767 : 32767);
+	V.rowA[0] = V.rowANext[0] = arena;
+	V.incA[0] = 1u << 22;          /* one arena sample a sample */
+	V.phA[0] = 500u << 22;         /* the step at n = 12 */
+	V.dcX[0] = -32767.0f;          /* the DC block settled on the low level */
+	V.damp[0] = 0.0f;
+	V.dampK = 1.0f;
+	V.guard[0] = 1.0f;
+	kat_aArenaL(&V, 0x7FFFFFFF);   /* no sync resets */
+	expect(G_RANGE, V.blkA[12] > 30000, "arena step saturates (not wraps)",
+	       V.blkA[12], 32767.0);
+}
+
+/*
+ * KA-HALF, the interpolation (S103 P2).
+ *
+ * What:       after the loops have filled (100 blocks, armed, run on), one
+ *             block's core R render by itself: each even full-rate sample
+ *             right[2k] (k >= 1) is the mean of its neighbours right[2k - 1]
+ *             and right[2k + 1] (the half-rate samples o[k - 1], o[k]) within
+ *             1.5 LSB, wherever neither neighbour is saturated.
+ */
+static void test_half_interp(void)
+{
+	int n, k;
+	int bad = 0;
+
+	voice_init();
+	V.armed = 1u;
+	V.run = 127u;
+	V.gr = 1.0f;
+	host_running = 1u;
+	for (n = 0; n < 100; n++)
+		block();
+	Katran_calcVoiceAsync(&V);
+	kat_delayReadL(&V);
+	kat_delayReadH(&V);
+	kat_bPwmD(&V, -1);
+	kat_aPwmDH(&V, 0x7FFFFFFF, -1);
+	kat_coreRenderH(&V);
+	for (k = 1; k < (int)KAT_HALF_N; k++) {
+		const int32_t lo = V.right[2 * k - 1];
+		const int32_t hi = V.right[2 * k + 1];
+
+		if (lo > -32767 && lo < 32767 && hi > -32767 && hi < 32767 &&
+		    fabs((double)V.right[2 * k] - 0.5 * (double)(lo + hi)) > 1.5)
+			bad++;
+	}
+	expect(G_HALF, bad == 0, "core R 2x interpolation", bad, 0.0);
+}
+
 int main(void)
 {
 	int g;
+	int any = 0;
 
 	test_boot();
 	test_run();
@@ -545,18 +727,16 @@ int main(void)
 	test_spread_vca();
 	test_f3();
 	test_bounds();
+	test_delay();
+	test_range();
+	test_half_interp();
+	/* S103 P2: every group counts (the P1 form listed the groups by hand) */
 	for (g = 0; g < G_N; g++) {
-		if (g_fail[g])
+		if (g_fail[g]) {
 			printf("  %s failures: %u\n", g_name[g], g_fail[g]);
+			any = 1;
+		}
 	}
-	printf("katran: %s\n", (g_fail[G_BOOT] || g_fail[G_RUN1] || g_fail[G_RUN2] ||
-	       g_fail[G_STOP] || g_fail[G_KICK] || g_fail[G_SILENT] || g_fail[G_CE] ||
-	       g_fail[G_CYC] || g_fail[G_SYNC] || g_fail[G_ARENA] || g_fail[G_GUARD] ||
-	       g_fail[G_FADE] || g_fail[G_SPR] || g_fail[G_VCA] || g_fail[G_F3] ||
-	       g_fail[G_QUIET] || g_fail[G_BND]) ? "FAILED" : "all laws pass");
-	return (g_fail[G_BOOT] || g_fail[G_RUN1] || g_fail[G_RUN2] || g_fail[G_STOP] ||
-	        g_fail[G_KICK] || g_fail[G_SILENT] || g_fail[G_CE] || g_fail[G_CYC] ||
-	        g_fail[G_SYNC] || g_fail[G_ARENA] || g_fail[G_GUARD] || g_fail[G_FADE] ||
-	        g_fail[G_SPR] || g_fail[G_VCA] || g_fail[G_F3] || g_fail[G_QUIET] ||
-	        g_fail[G_BND]) ? 1 : 0;
+	printf("katran: %s\n", any ? "FAILED" : "all laws pass");
+	return any;
 }

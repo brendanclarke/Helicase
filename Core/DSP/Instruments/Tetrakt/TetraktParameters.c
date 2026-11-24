@@ -198,10 +198,15 @@ const ParamDescriptor tetrakt_param_descriptors[] = {
     ROW("tkt_space_b", CAT_SAMPLE, LONG_SPACE, SHORT_SPB, DTYPE_0B127, MOD_0_127, layer[1].space, TYPE_UINT8),
     ROW("tkt_space_c", CAT_SAMPLE, LONG_SPACE, SHORT_SPC, DTYPE_0B127, MOD_0_127, layer[2].space, TYPE_UINT8),
     ROW("tkt_space_d", CAT_SAMPLE, LONG_SPACE, SHORT_SPD, DTYPE_0B127, MOD_0_127, layer[3].space, TYPE_UINT8),
-    ROW("tkt_space_time", CAT_SPACE, LONG_TIME, SHORT_STM, DTYPE_0B127, MOD_0_127, spaceTime, TYPE_UINT8),
-    ROW("tkt_space_feedback", CAT_SPACE, LONG_FEEDBACK, SHORT_SFB, DTYPE_0B127, MOD_0_127, spaceFeedback, TYPE_UINT8),
-    ROW("tkt_space_detune", CAT_SPACE, LONG_DETUNE, SHORT_SDT, DTYPE_0B127, MOD_0_127, spaceDetune, TYPE_UINT8),
-    ROW("tkt_space_tone", CAT_SPACE, LONG_TONE, SHORT_STO, DTYPE_0B127, MOD_0_127, spaceTone, TYPE_UINT8),
+    /* S103 P3 C3-C6: the space stage's four cells read `tim fbk dtn ton`
+     * (the ids the Spc chain, the Space delays and the Colloid use; were
+     * `stm sfb sdt sto`, removed). The category keeps them apart in the
+     * long view ("Space Time" ...); the layer tones tnA..tnD are on another
+     * page. */
+    ROW("tkt_space_time", CAT_SPACE, LONG_TIME, SHORT_MICROTIMING, DTYPE_0B127, MOD_0_127, spaceTime, TYPE_UINT8),
+    ROW("tkt_space_feedback", CAT_SPACE, LONG_FEEDBACK, SHORT_FBK, DTYPE_0B127, MOD_0_127, spaceFeedback, TYPE_UINT8),
+    ROW("tkt_space_detune", CAT_SPACE, LONG_DETUNE, SHORT_DTN, DTYPE_0B127, MOD_0_127, spaceDetune, TYPE_UINT8),
+    ROW("tkt_space_tone", CAT_SPACE, LONG_TONE, SHORT_TON, DTYPE_0B127, MOD_0_127, spaceTone, TYPE_UINT8),
     /* --- FILTER: tone, tone envelope --- */
     ROW("tkt_tone_a", CAT_SAMPLE, LONG_TONE, SHORT_TNA, DTYPE_PM63, MOD_PM63, layer[0].tone, TYPE_UINT8),
     ROW("tkt_tone_b", CAT_SAMPLE, LONG_TONE, SHORT_TNB, DTYPE_PM63, MOD_PM63, layer[1].tone, TYPE_UINT8),

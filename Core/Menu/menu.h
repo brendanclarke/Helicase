@@ -294,7 +294,7 @@ enum longNamesEnum {
 
 enum shortNamesEnum {
     SHORT_EMPTY, SHORT_COARSE, SHORT_FINE, SHORT_ATTACK, SHORT_DECAY,
-    SHORT_EG2, SHORT_MOD, SHORT_FM_AMNT, SHORT_FREQ, SHORT_DRIVE,
+    SHORT_MOD, SHORT_FM_AMNT, SHORT_FREQ, SHORT_DRIVE,
     SHORT_VOL, SHORT_PAN, SHORT_NOISE, SHORT_REPEAT, SHORT_MIX,
     SHORT_FIL_RESO, SHORT_FIL_TYPE,
     SHORT_MOD_OSC1_FREQ, SHORT_MOD_OSC2_FREQ,
@@ -302,10 +302,10 @@ enum shortNamesEnum {
     SHORT_WAVE, SHORT_DEST, SHORT_SYNC, SHORT_RETRIGGER, SHORT_OFFSET,
     SHORT_VOICE, SHORT_SLOPE, SHORT_DECAY1, SHORT_DECAY2,
     SHORT_EQ_GAIN, SHORT_EQ_FREQ,
-    SHORT_ROLL, SHORT_MORPH, SHORT_NOTE, SHORT_PROBABILITY,
+    SHORT_MORPH, SHORT_NOTE, SHORT_PROBABILITY,
     SHORT_STEP, SHORT_LENGTH, SHORT_ROTATION,
     SHORT_BPM, SHORT_CHANNEL, SHORT_OUT, SHORT_EFFECT_MORPH, SHORT_NXT,
-    SHORT_MODE, SHORT_VELOCITY, SHORT_FETCH, SHORT_FOLLOW, SHORT_QUANT,
+    SHORT_VELOCITY, SHORT_FETCH, SHORT_FOLLOW, SHORT_QUANT,
     SHORT_TRACK, SHORT_VALUE, SHORT_SHUFFLE, SHORT_SCREEN_SAVER,
     SHORT_X, SHORT_Y, SHORT_FLUX, SHORT_MIDI, SHORT_MIDI_ROUTING,
     SHORT_MIDI_FILT_TX, SHORT_MIDI_FILT_RX,
@@ -342,8 +342,11 @@ enum shortNamesEnum {
     SHORT_VO2, SHORT_DS2, SHORT_POS, SHORT_CHN, SHORT_TUN, SHORT_SLD,
     SHORT_CUT, SHORT_ENV, SHORT_ACC, SHORT_TON, SHORT_PSP, SHORT_SLV,
     SHORT_REL, SHORT_SUS, SHORT_SLW, SHORT_IN1, SHORT_IN2, SHORT_IN3,
-    SHORT_DTN, SHORT_SPR, SHORT_MOT, SHORT_FAT, SHORT_FDE, SHORT_FSL,
-    SHORT_FRE, SHORT_FAM, SHORT_RTE, SHORT_FRO, SHORT_REO, SHORT_ENO,
+    SHORT_DTN, SHORT_SPR, SHORT_MOT,
+    /* S103 P3 D1-D5: SHORT_FAT FDE FSL FRE FAM removed; the Colloid's filter
+     * envelope rows use atk dec slv rel amt (another page from the amp
+     * envelope; the long view reads "Filt EG ...") */
+    SHORT_RTE, SHORT_FRO, SHORT_REO, SHORT_ENO,
     SHORT_DRO, SHORT_PAT, SHORT_PDE, SHORT_PSL, SHORT_PRE, SHORT_PAM,
     SHORT_NLV, SHORT_NTO, SHORT_NWD, SHORT_NPN, SHORT_SMA, SHORT_SMB,
     SHORT_SMC, SHORT_SMD, SHORT_TUA, SHORT_TUB, SHORT_TUC, SHORT_TUD,
@@ -351,27 +354,46 @@ enum shortNamesEnum {
     SHORT_DYC, SHORT_DYD, SHORT_PNA, SHORT_PNB, SHORT_PNC, SHORT_PND,
     SHORT_LON, SHORT_DRA, SHORT_DRB, SHORT_DRC, SHORT_DRD, SHORT_SRA,
     SHORT_SRB, SHORT_SRC, SHORT_SRD, SHORT_SPA, SHORT_SPB, SHORT_SPC,
-    SHORT_SPD, SHORT_STM, SHORT_SFB, SHORT_SDT, SHORT_STO, SHORT_TNA,
+    /* S103 P3 C3-C6: SHORT_STM SFB SDT STO removed; the Tetrakt's space rows
+     * use tim fbk dtn ton, as the Spc chain and the Space delays do */
+    SHORT_SPD, SHORT_TNA,
     SHORT_TNB, SHORT_TNC, SHORT_TND, SHORT_TEA, SHORT_TEB, SHORT_TEC,
     SHORT_TED, SHORT_WID, SHORT_BOF, SHORT_BIV, SHORT_FBK, SHORT_SUB,
-    SHORT_SPN, SHORT_AUX, SHORT_P2, SHORT_P3, SHORT_DEN, SHORT_LNG,
+    /* S103 P3 C2: SHORT_LNG removed; the CrumpBit grain length uses len */
+    SHORT_SPN, SHORT_AUX, SHORT_P2, SHORT_P3, SHORT_DEN,
     SHORT_BAL, SHORT_DMP, SHORT_XFB, SHORT_DEG, SHORT_WOW, SHORT_HLD,
     /*
      * S100 P2: SHORT_STR ("str") is the former SHORT_HED ("hed"), renamed
      * in place for the Space types' stereo-field row (see LONG_STEREO).
      */
-    SHORT_REV, SHORT_STR, SHORT_DCK, SHORT_SIZ, SHORT_DCY, SHORT_DIF,
+    /* S103 P3 C1: SHORT_DCY removed; the Space reverb/echo decay uses dec */
+    SHORT_REV, SHORT_STR, SHORT_DCK, SHORT_SIZ, SHORT_DIF,
     SHORT_LSH, SHORT_LSF, SHORT_HSH, SHORT_HSF, SHORT_FRZ, SHORT_SHM,
     SHORT_INT, SHORT_E_TO_R, SHORT_BLN,
     /* S099 P1: the chorus rows; S099 P2: the effect's fx rte dpt mix (were
      * cho crt cdp cmx; csr, cbw, cdv and cwd removed) */
-    SHORT_FX, SHORT_FXR, SHORT_FXD, SHORT_FXM,
-    /* S103 P1: the Katran rows; run, tim, dmp, dtn, spr, wid, fbk, drv, frq,
-     * res, typ, cut, pos, coa, fin reuse existing ids */
+    /*
+     * S103 P3 (S103_P3_SHORT_NAMES_MERGE.md Tier A): the effect's rate and
+     * mix cells use the shared SHORT_RTE ("rte") and SHORT_MIX ("mix") ids;
+     * the identical SHORT_FXR and SHORT_FXM entries were removed. Also
+     * removed: SHORT_EG2 (unused), SHORT_ROLL (= SHORT_ROLL_RATE, "rol"),
+     * SHORT_MODE (= SHORT_MOD, "mod"). Labels are compile-time ids with no
+     * stored data, so the later ids renumber with no effect; MenuLabels.c
+     * removes the same strings at the same positions (its static assert
+     * holds the two lists to one length).
+     */
+    SHORT_FX, SHORT_FXD,
+    /*
+     * S103 P1 / S103 P3 Tier B: the Katran's own labels. Ten planned labels
+     * reuse existing ids instead (the long view tells them apart: category
+     * and long name differ): kat_noise noi, kat_drift wow, kat_wet bln,
+     * kat_level_a lvA, kat_b_level lvB, kat_sync snc, kat_vca bal,
+     * kat_plfo_rate frq, kat_plfo_mod mod, kat_plfo_level dpt. run, tim,
+     * dmp, dtn, spr, wid, fbk, drv, frq, res, typ, cut, pos, coa and fin
+     * were existing ids from the start. 11 new ids remain.
+     */
     SHORT_KIK, SHORT_CY1, SHORT_SK1, SHORT_DP1, SHORT_CY2, SHORT_SK2,
-    SHORT_DP2, SHORT_CHS, SHORT_LFR, SHORT_LFM, SHORT_LFL, SHORT_VCA,
-    SHORT_EXC, SHORT_NSE, SHORT_STH, SHORT_SRCE, SHORT_WET, SHORT_DRF,
-    SHORT_DTK, SHORT_LCT, SHORT_LVL,
+    SHORT_DP2, SHORT_CHS, SHORT_SRCE, SHORT_DTK, SHORT_LCT,
     SHORT_LABEL_COUNT
 };
 

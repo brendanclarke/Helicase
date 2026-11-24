@@ -12,6 +12,10 @@
  *             Then F3 (one coefficient set for L and R), the width, and the
  *             chaos envelope CE1 on the level. Stereo: buf receives L, the
  *             voice's right[] R (instrumentManager_slotRight()).
+ *             S103 P2: core L (the L output) runs at the full rate; core R
+ *             (the R output) at half rate, its output interpolated 2x into
+ *             right[] (KAT_HALF_N below; S103_P2_KATRAN_DUAL_FULL-HALF_
+ *             IMPLEMENTATION.md).
  * Why:        S103_KATRAN_NOISE_SYNTH.md revision 3; S103_P1_IMPLEMENTATION.md.
  *             The graph runs every block whatever the note state (constant
  *             CPU); triggers do not restart anything, they kick the loop.
@@ -40,6 +44,25 @@
 #define KAT_RING_MASK       (KAT_RING - 1u)
 /* The dry tap: one block back (K-D5, the delay's second read). */
 #define KAT_TAP_DRY         32u
+/*
+ * The half-rate core (S103 P2, S103_P2_KATRAN_DUAL_FULL-HALF_IMPLEMENTATION.md).
+ *
+ * What:       core L runs at the full rate (32 samples a block); core R at
+ *             half rate (KAT_HALF_N = 16 samples a block at fs / 2). Core R's
+ *             ring, delay time (tNow[1], tStep[1]), dry tap (KAT_TAP_DRY_H,
+ *             one half-rate block back) and loop filter run in half-rate
+ *             samples; its output is interpolated to the full rate into
+ *             right[]. Its delay time is pitch-matched: tNow[1] = tNow[0]'s
+ *             law / 2, so the same tim gives the same comb pitch on both
+ *             cores (spr and drift still separate them).
+ * Why:        the two full-rate cores measured 534.7 instructions a sample
+ *             (S103_P1_IMPLEMENTATION.md §15); a half-rate second core keeps
+ *             two independent loops for about half the second core's cost
+ *             (your decision, 2026-11-24). Core R's loop band stops at 11 kHz.
+ */
+#define KAT_HALF_N          (OUTPUT_DMA_SIZE / 2u)
+#define KAT_TAP_DRY_H       16u
+#define KAT_TIME_MIN_H      16.0f
 /* The tim law's ends in samples (KatranTables.c katTimeSamples[]). The top
  * plus spread and drift stays inside the 2,048 ring (C3). */
 #define KAT_TIME_MIN        32.0f
@@ -151,7 +174,7 @@ typedef struct KatranVoiceStruct
 	uint16_t pwD[3], pwD0[3];     /* PWM D form: width at block end / start (A L, A R, B) */
 	uint8_t  pwPos[3], pwPos0[3]; /* PWM width index, slewed (warp form) */
 	float    dcX[3], dcY[3], damp[3], guard[3], dampK;   /* arena conditioning */
-	float    tNow[2], tStep[2], drift[2], driftTgt[2];   /* delay times (samples) */
+	float    tNow[2], tStep[2], drift[2], driftTgt[2];   /* delay times: [0] full-rate samples, [1] half-rate samples (S103 P2) */
 	KatSvf   f1[2];               /* loop filters */
 	float    f2x[2], f2y[2], f2K; /* loop low-cuts */
 	KatSvf   f3;                  /* output filter: shared coefficients, L states */
@@ -170,6 +193,14 @@ typedef struct KatranVoiceStruct
 	float    vol;                 /* instrument_vol (the mixer reads it) */
 	uint32_t w[2];                /* each ring's write index */
 	int32_t  syncPrev[2];         /* each core's last sync-test value */
+	/*
+	 * S103 P2: core R's last half-rate output sample (the full-rate value
+	 * before the R VCA scale), carried across blocks for the 2x linear
+	 * interpolation into right[]: right[2k] = (hPrev + o[k]) / 2,
+	 * right[2k + 1] = o[k]. RAM: 4 B inside the slot reserve (the 1,200 B
+	 * static assert in InstrumentManager.c still gates the size).
+	 */
+	float    hPrev;
 	/* --- row bytes (KatranParameters.c binds them; converted in the async) --- */
 	uint8_t  spreadA, source, damp_, run, kick, ce1Cycle, ce1Skew, ce1Depth,
 	         ce2Cycle, ce2Skew, ce2Depth, chaos, plfoRate, plfoMod, plfoLevel,

@@ -14,13 +14,13 @@
 #include "MenuText.h"
 
 const char shortNames[][4] = {
-    {""}, {"coa"},{"fin"},{"atk"},{"dec"},{"eg2"},{"mod"},{"amt"},
+    {""}, {"coa"},{"fin"},{"atk"},{"dec"},{"mod"},{"amt"},
     {"frq"},{"drv"},{"vol"},{"pan"},{"noi"},{"rpt"},{"mix"},
     {"res"},{"typ"},{"f1"},{"f2"},{"g1"},{"g2"},{"wav"},{"dst"},
     {"snc"},{"rtg"},{"ofs"},{"voi"},{"slp"},{"d1"},{"d2"},
     {"eqg"},{"eqf"},
-    {"rol"},{"mrp"},{"nte"},{"prb"},{"stp"},{"len"},{"rot"},
-    {"bpm"},{"ch"},{"out"},{"fxm"},{"nxt"},{"mod"},{"vel"},
+    {"mrp"},{"nte"},{"prb"},{"stp"},{"len"},{"rot"},
+    {"bpm"},{"ch"},{"out"},{"fxm"},{"nxt"},{"vel"},
     /* TEXT_AUTOMATION_TRACK reused as the S081 rtk recording-track cell. */
     {"fch"},{"flw"},{"qnt"},{"rtk"},{"val"},{"shu"},{"ssv"},
     {"x"},{"y"},{"flx"},{"mid"},{"mrt"},{"txf"},{"rxf"},
@@ -64,25 +64,31 @@ const char shortNames[][4] = {
     {"srt"},{"am1"},{"am2"},{"pol"},{"vo1"},{"ds1"},{"vo2"},{"ds2"},{"pos"},
     {"chn"},{"tun"},{"sld"},{"cut"},{"env"},{"acc"},{"ton"},{"psp"},{"slv"},
     {"rel"},{"sus"},{"slw"},{"in1"},{"in2"},{"in3"},{"dtn"},{"spr"},{"mot"},
-    {"fat"},{"fde"},{"fsl"},{"fre"},{"fam"},{"rte"},{"fro"},{"reo"},{"eno"},
+    {"rte"},{"fro"},{"reo"},{"eno"},
     {"dro"},{"pat"},{"pde"},{"psl"},{"pre"},{"pam"},{"nlv"},{"nto"},{"nwd"},
     {"npn"},{"smA"},{"smB"},{"smC"},{"smD"},{"tuA"},{"tuB"},{"tuC"},{"tuD"},
     {"lvA"},{"lvB"},{"lvC"},{"lvD"},{"dyA"},{"dyB"},{"dyC"},{"dyD"},{"pnA"},
     {"pnB"},{"pnC"},{"pnD"},{"lon"},{"drA"},{"drB"},{"drC"},{"drD"},{"srA"},
-    {"srB"},{"srC"},{"srD"},{"spA"},{"spB"},{"spC"},{"spD"},{"stm"},{"sfb"},
-    {"sdt"},{"sto"},{"tnA"},{"tnB"},{"tnC"},{"tnD"},{"teA"},{"teB"},{"teC"},
+    {"srB"},{"srC"},{"srD"},{"spA"},{"spB"},{"spC"},{"spD"},
+    {"tnA"},{"tnB"},{"tnC"},{"tnD"},{"teA"},{"teB"},{"teC"},
     {"teD"},{"wid"},{"bof"},{"biv"},{"fbk"},{"sub"},{"spn"},{"aux"},{"p2"},
-    {"p3"},{"den"},{"lng"},{"bal"},{"dmp"},{"xfb"},{"deg"},{"wow"},{"hld"},
+    {"p3"},{"den"},{"bal"},{"dmp"},{"xfb"},{"deg"},{"wow"},{"hld"},
     /* S100 P2: "str" (SHORT_STR) replaces "hed" in place (menu.h). */
-    {"rev"},{"str"},{"dck"},{"siz"},{"dcy"},{"dif"},{"lsh"},{"lsf"},{"hsh"},
+    {"rev"},{"str"},{"dck"},{"siz"},{"dif"},{"lsh"},{"lsf"},{"hsh"},
     {"hsf"},{"frz"},{"shm"},{"int"},{"e>r"},{"bln"},
     /* S099 P1: the chorus rows; S099 P2: fx rte dpt mix (the effect's; csr,
      * cbw, cdv and cwd removed) */
-    {"fx "},{"rte"},{"dpt"},{"mix"},
-    /* S103 P1: the Katran rows (menu.h SHORT_KIK .. SHORT_LVL) */
-    {"kik"},{"cy1"},{"sk1"},{"dp1"},{"cy2"},{"sk2"},{"dp2"},{"chs"},{"lfr"},
-    {"lfm"},{"lfl"},{"vca"},{"exc"},{"nse"},{"sth"},{"src"},{"wet"},{"drf"},
-    {"dtk"},{"lct"},{"lvl"},
+    /* S103 P3 Tier A: "rte" and "mix" of the effect rows removed here (they
+     * use the identical SHORT_RTE / SHORT_MIX entries above), as were "eg2"
+     * (unused), the first "rol" and the second "mod"; Tiers C/D removed
+     * "dcy" "lng" "stm" "sfb" "sdt" "sto" and "fat" "fde" "fsl" "fre" "fam"
+     * (their rows use dec len tim fbk dtn ton / atk dec slv rel amt). Each
+     * string left the table at the position its id left menu.h's enum. */
+    {"fx "},{"dpt"},
+    /* S103 P1 / P3 Tier B: the Katran's 11 own labels (menu.h SHORT_KIK ..
+     * SHORT_LCT); its other rows reuse existing labels */
+    {"kik"},{"cy1"},{"sk1"},{"dp1"},{"cy2"},{"sk2"},{"dp2"},{"chs"},
+    {"src"},{"dtk"},{"lct"},
 };
 
 /*

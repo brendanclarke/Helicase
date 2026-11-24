@@ -1,12 +1,14 @@
 /*
  * KatranOsc.h - Katran's oscillator loops (S103 P1).
  *
- * What:       eight loops, each one block (32 samples):
+ * What:       twelve loops (S103 P2: OSC A in a full-rate and a half-rate
+ *             set, see below), each one block (32 samples, 16 at half rate):
  *               kat_bPlain / kat_bPwmD / kat_bWarp / kat_bArena  OSC B into
  *                 blkB; each sample's LSB is 1 on the sample where the phase
  *                 wrapped (the carry of p + inc), and on that sample the row
  *                 switches to rowNext (K-D10);
- *               kat_aPlain / kat_aPwmD / kat_aWarp / kat_aArena  one copy of
+ *               kat_aPlain / kat_aPwmD / kat_aWarp / kat_aArena, each as *L
+ *                 (core L, full rate) and *H (core R, half rate): one copy of
  *                 OSC A into blkA, with the hard sync: per sample
  *                 s = P x wrap(B[n]) x 32767 + D[n]; a reset when s crosses
  *                 the threshold upward (cur = s > th; reset = cur & !prev):
@@ -45,11 +47,29 @@ void kat_bPwmD(KatranVoice *v, int32_t sign);       /* -1 Rec, +1 Saw */
 void kat_bWarp(KatranVoice *v);
 void kat_bArena(KatranVoice *v);
 
-/* One copy of OSC A, one block into blkA (c 0 = L, 1 = R; th the sync
- * threshold). */
-void kat_aPlain(KatranVoice *v, uint32_t c, int32_t th);
-void kat_aPwmD(KatranVoice *v, uint32_t c, int32_t th, int32_t sign);
-void kat_aWarp(KatranVoice *v, uint32_t c, int32_t th);
-void kat_aArena(KatranVoice *v, uint32_t c, int32_t th);
+/*
+ * One copy of OSC A, one block into blkA (S103 P2: full + half rate).
+ *
+ * What:       the *L loops render core L's copy at the full rate (32 samples,
+ *             its sync from blkD[0][n] and blkB[n]); the *H loops render core
+ *             R's copy at half rate (16 samples, phase step 2 x incA[1], its
+ *             sync from blkD[1][k] and the OR of OSC B's wrap bits over the
+ *             two full-rate samples blkB[2k], blkB[2k + 1]). th is the sync
+ *             threshold; sign the PWM D form's -1 Rec / +1 Saw.
+ * Why:        core R runs at half rate (S103_P2_KATRAN_DUAL_FULL-HALF_
+ *             IMPLEMENTATION.md §2). One noinline function per form and rate
+ *             keeps each a fixed cost that katran_cpu.py can count by name;
+ *             all eight share one always_inline body (KatranOsc.c), so the
+ *             two rates cannot drift apart.
+ * Accessors:  Katran_calcVoiceSyncBlock().
+ */
+void kat_aPlainL(KatranVoice *v, int32_t th);
+void kat_aPwmDL(KatranVoice *v, int32_t th, int32_t sign);
+void kat_aWarpL(KatranVoice *v, int32_t th);
+void kat_aArenaL(KatranVoice *v, int32_t th);
+void kat_aPlainH(KatranVoice *v, int32_t th);
+void kat_aPwmDH(KatranVoice *v, int32_t th, int32_t sign);
+void kat_aWarpH(KatranVoice *v, int32_t th);
+void kat_aArenaH(KatranVoice *v, int32_t th);
 
 #endif /* KATRANOSC_H_ */

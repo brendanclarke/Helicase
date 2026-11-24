@@ -120,7 +120,10 @@ const effect_param_descriptor_t space_reverbDescriptors[] = {
                      127u, EFFECT_PARAM_FLAG_BUFFER_DEPENDENT),
     EFFECT_ROW("rvb_size", CAT_REVERB, LONG_SIZE, SHORT_SIZ, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 96u, 127u),
-    EFFECT_ROW("rvb_decay", CAT_REVERB, LONG_DECAY, SHORT_DCY, DTYPE_0B127,
+    /* S103 P3 C1: the reverb (and the echo's plate) decay reads `dec`
+     * (SHORT_DECAY, the envelopes' decay label; was `dcy`, SHORT_DCY,
+     * removed). The long view still reads "Reverb Decay" / "Plate Decay". */
+    EFFECT_ROW("rvb_decay", CAT_REVERB, LONG_DECAY, SHORT_DECAY, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
     EFFECT_ROW("rvb_diffusion", CAT_REVERB, LONG_DIFFUSN, SHORT_DIF, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 96u, 127u),
@@ -201,7 +204,8 @@ const effect_param_descriptor_t space_echoDescriptors[] = {
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
     EFFECT_ROW("ech_blend", CAT_ECHO, LONG_BLEND, SHORT_BLN, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 48u, 127u),
-    EFFECT_ROW("ech_decay", CAT_PLATE, LONG_DECAY, SHORT_DCY, DTYPE_0B127,
+    /* S103 P3 C1: `dec`, as rvb_decay above */
+    EFFECT_ROW("ech_decay", CAT_PLATE, LONG_DECAY, SHORT_DECAY, DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 48u, 127u),
     EFFECT_ROW("ech_low_shelf", CAT_PLATE, LONG_LOWSHELF, SHORT_LSH, DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),

@@ -1194,6 +1194,10 @@ tetrakt_tables:
 #             and a seeded RNG, and runs laws KA-BOOT .. KA-BND.
 #             katran_tables checks KatranTables.c against its generator;
 #             katran_cpu_check prints the linked counts (katran_cpu.py).
+#             S103 P2: katran also runs two break builds: katran_break_dly
+#             drops the delay read's fraction (law KA-DLY must fail) and
+#             katran_break_pwm stores the PWM D sum unhalved, the bug B2 form
+#             (law KA-RANGE must fail).
 # Accessors:  make -C tools/dsp_test katran | katran_tables | katran_cpu_check.
 KAT := $(ROOT)/Core/DSP/Instruments/Katran
 katran: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c $(GEN)/oscPwmTables.host.h \
@@ -1214,6 +1218,25 @@ katran: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c $(GEN)/oscPwmTables.ho
 	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) -DWAVETABLE_ROW_POINTS=1024u \
 	  modules/katran.c -o build/katran -lm
 	./build/katran
+	mkdir -p build/break_kat_dly build/break_kat_pwm
+	sed 's/(int32_t)((pos >> 1) \& 0x7FFFu)/0/' \
+	  $(GEN)/KatranVoice.host.c > build/break_kat_dly/KatranVoice.host.c
+	@grep -q 'const int32_t fr = 0;' build/break_kat_dly/KatranVoice.host.c || \
+	  { echo "katran_break_dly: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_kat_dly $(HOSTFLAGS) $(OSC_HOST_INC) -DWAVETABLE_ROW_POINTS=1024u \
+	  modules/katran.c -o build/katran_break_dly -lm
+	@if ./build/katran_break_dly >/dev/null 2>&1; then \
+	  echo "katran_break_dly: FAILED (a read without its fraction not caught)"; exit 1; \
+	else echo "katran_break_dly: caught (law KA-DLY fails as expected)"; fi
+	sed 's/sign \* kat_read(row, q)) >> 1;/sign * kat_read(row, q));/g' \
+	  $(GEN)/KatranOsc.host.c > build/break_kat_pwm/KatranOsc.host.c
+	@! grep -q 'kat_read(row, q)) >> 1;' build/break_kat_pwm/KatranOsc.host.c || \
+	  { echo "katran_break_pwm: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_kat_pwm $(HOSTFLAGS) $(OSC_HOST_INC) -DWAVETABLE_ROW_POINTS=1024u \
+	  modules/katran.c -o build/katran_break_pwm -lm
+	@if ./build/katran_break_pwm >/dev/null 2>&1; then \
+	  echo "katran_break_pwm: FAILED (an unhalved PWM D sum not caught)"; exit 1; \
+	else echo "katran_break_pwm: caught (law KA-RANGE fails as expected)"; fi
 
 katran_tables:
 	cd $(ROOT) && python3 tools/katran/gen_kat_tables.py --check

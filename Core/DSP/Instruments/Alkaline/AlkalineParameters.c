@@ -321,9 +321,12 @@ const ParamDescriptor alkaline_param_descriptors[] = {
      *   vcaDrive) and the width follows dpt (BBD_ALK_WIDTH(), BbdChorus.h).
      */
     ROW_SELECT_FIXED_SPECIAL("fx_type", CAT_EFFECT, LONG_TYPE, SHORT_FX, ONOFF_TAG_FX_TYPE, fxType, TYPE_UINT8, IM_SPECIAL_FX_TYPE),
-    ROW("fx_rate", CAT_EFFECT, LONG_RATE, SHORT_FXR, DTYPE_0B127, MOD_0_127, fxRate, TYPE_UINT8),
+    /* S103 P3 A1/A2: fx_rate and fx_mix use the shared SHORT_RTE ("rte")
+     * and SHORT_MIX ("mix") ids; the identical SHORT_FXR / SHORT_FXM were
+     * removed. The cells read exactly as before. */
+    ROW("fx_rate", CAT_EFFECT, LONG_RATE, SHORT_RTE, DTYPE_0B127, MOD_0_127, fxRate, TYPE_UINT8),
     ROW("fx_depth", CAT_EFFECT, LONG_DEPTH, SHORT_FXD, DTYPE_0B127_FX_DEPTH, MOD_0_127, fxDepth, TYPE_UINT8),
-    ROW("fx_mix", CAT_EFFECT, LONG_MIX, SHORT_FXM, DTYPE_0B127, MOD_0_127, fxMix, TYPE_UINT8),
+    ROW("fx_mix", CAT_EFFECT, LONG_MIX, SHORT_MIX, DTYPE_0B127, MOD_0_127, fxMix, TYPE_UINT8),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
