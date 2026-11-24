@@ -61,12 +61,13 @@ OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
         elf_p4_snapshot elf_p4_check seq_steplen lfo lfo_rate_table alk_post_tables \
         elf_s099_snapshot elf_s099_check \
         space space_cpu_check colloid colloid_tables colloid_cpu_check \
-        tetrakt tetrakt_tables tetrakt_cpu_check \
+        tetrakt tetrakt_tables tetrakt_cpu_check katran katran_tables katran_cpu_check \
         distortion dist_makeup_table scene_identity chorus chorus_tables voice_space
 all: oscillator modulation voice_control sequencer seq_steplen instrument_manager samples \
      sampleoptimize run_modes special_tags stock_tables voicefold fold_tables pwm_tables \
      crumpbit crumpbit_tables alkaline alkaline_tables alk_post_tables lfo lfo_rate_table \
      space colloid colloid_tables distortion dist_makeup_table tetrakt tetrakt_tables \
+     katran katran_tables \
      buscomp scene_identity chorus chorus_tables voice_space
 
 # S101 P3: the Spc chain's spatializer and the Cymbal/HiHat LP (voiceSpace.c),
@@ -528,6 +529,8 @@ special_tags:
 	cd $(ROOT) && python3 tools/alkaline/make_init_alk.py --check
 	cd $(ROOT) && python3 tools/colloid/make_init_col.py --check
 	cd $(ROOT) && python3 tools/tetrakt/make_init_tkt.py --check
+	cd $(ROOT) && python3 tools/katran/make_init_kat.py --check
+	cd $(ROOT) && python3 tools/katran/gen_kat_tables.py --check
 
 stock_tables: stock_rows
 	cd $(ROOT) && python3 tools/plots/gen_stock_tables.py --check
@@ -1181,6 +1184,42 @@ tetrakt: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c $(GEN)/oscPwmTables.h
 
 tetrakt_tables:
 	cd $(ROOT) && python3 tools/tetrakt/gen_tkt_tables.py --check
+
+# ---------------------------------------------------------------------------
+# S103 P1: the Katran.
+#
+# What:       katran builds modules/katran.c on the real KatranVoice.c,
+#             KatranOsc.c and KatranTables.c (extracted), the real stock
+#             tables, the real PWM width and warp tables, a synthetic arena
+#             and a seeded RNG, and runs laws KA-BOOT .. KA-BND.
+#             katran_tables checks KatranTables.c against its generator;
+#             katran_cpu_check prints the linked counts (katran_cpu.py).
+# Accessors:  make -C tools/dsp_test katran | katran_tables | katran_cpu_check.
+KAT := $(ROOT)/Core/DSP/Instruments/Katran
+katran: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c $(GEN)/oscPwmTables.host.h \
+	$(GEN)/oscPwmTables.host.c $(GEN)/oscPwmWarp.host.h | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/Alkaline/AlkalineControl.h --body \
+	  --out $(GEN)/AlkalineControl.host.h
+	$(EX) --src $(KAT)/KatranTables.h --body --out $(GEN)/KatranTables.host.h
+	$(EX) --src $(KAT)/KatranTables.c --body --out $(GEN)/KatranTables.host.c
+	$(EX) --src $(KAT)/KatranOsc.h --body --out $(GEN)/KatranOsc.host.h
+	$(EX) --src $(KAT)/KatranOsc.c --body --out $(GEN)/KatranOsc.host.c
+	$(EX) --src $(KAT)/KatranVoice.h --body --out $(GEN)/KatranVoice.host.h
+	$(EX) --src $(KAT)/KatranVoice.c --body --out $(GEN)/KatranVoice.host.c
+	for t in sine_table sawTable triTable recTable; do \
+	  src=$(STOCK_FULL); [ $$t = sine_table ] && src=$(ROOT)/Core/DSPAudio/wavetable.c; \
+	  $(EX) --src $$src --object $$t --out $(GEN)/kat_$$t.raw.c && \
+	  sed "s/const int16_t $$t/int16_t $$t/" $(GEN)/kat_$$t.raw.c > $(GEN)/kat_$$t.c || exit 1; \
+	done
+	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) -DWAVETABLE_ROW_POINTS=1024u \
+	  modules/katran.c -o build/katran -lm
+	./build/katran
+
+katran_tables:
+	cd $(ROOT) && python3 tools/katran/gen_kat_tables.py --check
+
+katran_cpu_check:
+	python3 katran_cpu.py --elf $(FW_ELF) $(if $(KAT_BASE),--baseline $(KAT_BASE))
 
 # S096 P2 F6: the bus compressor's sidechain duck (law BC-SC), and a break
 # build whose duck always lands in one block (it must fail BC-SC).

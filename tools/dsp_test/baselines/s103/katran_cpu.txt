@@ -1,0 +1,2 @@
+katran: loops 469 + per block 2102/32 = 534.7  OVER the 380 gate
+  OSC B 20/30/26/23  OSC A 38/53/47/38

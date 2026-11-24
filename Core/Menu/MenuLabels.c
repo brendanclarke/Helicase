@@ -79,6 +79,10 @@ const char shortNames[][4] = {
     /* S099 P1: the chorus rows; S099 P2: fx rte dpt mix (the effect's; csr,
      * cbw, cdv and cwd removed) */
     {"fx "},{"rte"},{"dpt"},{"mix"},
+    /* S103 P1: the Katran rows (menu.h SHORT_KIK .. SHORT_LVL) */
+    {"kik"},{"cy1"},{"sk1"},{"dp1"},{"cy2"},{"sk2"},{"dp2"},{"chs"},{"lfr"},
+    {"lfm"},{"lfl"},{"vca"},{"exc"},{"nse"},{"sth"},{"src"},{"wet"},{"drf"},
+    {"dtk"},{"lct"},{"lvl"},
 };
 
 /*
@@ -183,6 +187,10 @@ const char longNames[][10] = {
     {"Freeze"},{"Interval"},{"GateBlom"},{"EchoRvb"},{"Blend"},
     /* S099 P1: the chorus rows */
     {"Depth"},{"Source"},
+    /* S103 P1: the Katran rows (menu.h LONG_RUN .. LONG_OUTFILT) */
+    {"Run"},{"Kick"},{"Cycle"},{"Skew"},{"Chaos"},{"SelfMod"},{"VCA Bal"},
+    {"Exciter"},{"NoiseMix"},{"SyncThr"},{"Wet"},{"Drift"},{"Tracking"},
+    {"Low Cut"},{"OutFilt"},
 };
 
 _Static_assert(sizeof(shortNames) / sizeof(shortNames[0]) == SHORT_LABEL_COUNT,

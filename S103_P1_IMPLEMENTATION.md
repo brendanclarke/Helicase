@@ -1832,3 +1832,81 @@ From D§1.3 and P§8; every key present (a missing key loads 0).
 | R5 | The arena read is loud in ways the host model misses (real arena contents) | the guard (KA-GUARD); `src` off in `init.kat`; device step 2 |
 | R6 | A Colloid change creeps in through shared code | nothing in the Colloid's files changes; Katran restates `col_svfControl()` and the PWM reads; Colloid host laws in Step 6 |
 | R7 | `instrumentManager_ampEnvelopeQuiet()` gains a side effect (the fade request) | documented in IM-14; its only callers are the two deferred-apply workers (checked: `presetManager.c:2218`, `:2380`) |
+
+---
+
+## 15. Session implementation note (2026-11-24) - STOPPED AT THE CPU GATE
+
+**Status: the code is implemented and builds; the host laws pass; G-CPU1
+fails and the plan's stop rule is reached. No device run was made.**
+
+### 15.1 What landed
+
+- New engine: Core/DSP/Instruments/Katran/ (KatranVoice.h/.c,
+  KatranOsc.h/.c, KatranTables.h/.c, KatranParameters.h/.c), with the
+  plan's comment blocks beside every declaration and definition.
+- Integration: InstrumentManager.h/.c (all IM-1..IM-25), FxBuffer.h/.c
+  (fxbuf_arenaView()), menu.h, MenuLabels.c, MenuText.h, menu.c,
+  storageTypes.h, Makefile (include path, SRCS, DSP_SRCS, three
+  -Ofast -fno-lto rules).
+- Tools: tools/katran/gen_kat_tables.py and make_init_kat.py;
+  SD_CARD/Instrument/Katran/init.kat; tools/dsp_test/modules/katran.c,
+  katran_cpu.py, Makefile targets; check_special_tags.py KAT;
+  decode_devlogs.py type 9; baselines/s103/.
+
+### 15.2 Gates measured
+
+| Gate | Result |
+|---|---|
+| Build (make all && make img) | passes |
+| check_special_tags.py | 488 rows, 0 mismatches |
+| make -C tools/dsp_test special_tags | passes (every init file, Katran tables) |
+| tools/dsp_test/modules/katran.c | all laws pass (KA-BOOT .. KA-BND) |
+| Colloid and Tetrakt host modules | unchanged, pass |
+| elf_s099_check | 15/15 exact |
+| elf_p4_check | the same 17 missing / 5 renamed loops as the pre-Katran base image (pre-existing baseline drift, not caused here) |
+| G-CPU3 (mixer hot loops) | **0 grew**, 1 shrank, 40 equal |
+| link_budget.py | 694,472 / 753,664 B, 59,192 B headroom; ITCM 15,424 B unchanged |
+| G-RAM1 (sizeof KatranVoice <= 1,200) | passes the static assert |
+| **G-CPU1** | **FAIL: loops 469 + per block 2,102/32 = 534.7 (gate 380)** |
+
+Per-loop counts on the linked image (elf_looppath.py --cond-heads
+--in-range): delayRead 53, coreRender 111 (x2), outRender 47, OSC B
+20/30/26/23 (plain/pwmD/warp/arena), OSC A 38/53/47/38.
+
+At the schedule's 1.52 cycles per instruction, 534.7 instructions a
+sample is about 26.0k cycles a block against the 18.6k device gate and
+the 19,620 Basic share.
+
+### 15.3 The ladder
+
+- L1 (pre-approved) was applied: F3 is now a one-pole LP/HP tilt per
+  side with one coefficient set, and out_cut 63 is an exact pass-through.
+  It saved 14.1 a sample (548.8 -> 534.7), not the estimated 30.
+- The result is past the plan's 395 stop line even after L1. The only
+  further steps in the schedule are L2 (drop the noise exciter, the
+  32-sample tap, or a core), which the plan says must come back to you.
+
+### 15.4 Implementation deviations, for review
+
+- The arena guard peaks are updated in the sync block, after each read
+  loop, rather than in the async: blkA is shared by the two cores, so the
+  async cannot see both copies' last block.
+- out_cut 63 is an exact pass (the L1 form); the plan's "LP fully open"
+  could not pass 18 kHz within 1 dB through a 15.96 kHz 2-pole.
+- The delay, kick, chaos, patch-LFO and oscillator controls that are
+  small enough were inlined by -Ofast; katran_cpu.py adds only the
+  out-of-line helpers that survive (and their internal loop iterations).
+- Float-to-int stores truncate (kat_sat16f), as the Colloid does; lrintf
+  was an out-of-line call in every per-sample loop.
+- The host law for spr 127 expects the correct ratio
+  (1 + 0.12) / (1 - 0.12); the plan's text wrote 1 + 2 x 0.12.
+
+### 15.5 What is needed next
+
+1. **Your decision on the CPU.** Options: (a) accept a device probe first
+   (the 1.52 CPI is the Tetrakt's; this loop is FP-dense and the real
+   CPI may be lower), (b) authorize L2 cuts, or (c) a design change (for
+   example one loop handling both cores with the shared work hoisted).
+2. No further feature work should be based on this engine until the
+   gate is resolved.

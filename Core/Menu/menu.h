@@ -285,6 +285,10 @@ enum longNamesEnum {
     LONG_BLEND,
     /* S099 P1: the chorus rows (Depth, Source) */
     LONG_DEPTH, LONG_SOURCE,
+    /* S103 P1: the Katran rows (MenuLabels.c, same order) */
+    LONG_RUN, LONG_KICK, LONG_CYCLE, LONG_SKEW, LONG_CHAOS, LONG_SELFMOD,
+    LONG_VCABAL, LONG_EXCITER, LONG_NOISEMIX, LONG_SYNCTHR, LONG_WET,
+    LONG_DRIFT, LONG_TRACK, LONG_LOWCUT, LONG_OUTFILT,
     LONG_LABEL_COUNT
 };
 
@@ -362,6 +366,12 @@ enum shortNamesEnum {
     /* S099 P1: the chorus rows; S099 P2: the effect's fx rte dpt mix (were
      * cho crt cdp cmx; csr, cbw, cdv and cwd removed) */
     SHORT_FX, SHORT_FXR, SHORT_FXD, SHORT_FXM,
+    /* S103 P1: the Katran rows; run, tim, dmp, dtn, spr, wid, fbk, drv, frq,
+     * res, typ, cut, pos, coa, fin reuse existing ids */
+    SHORT_KIK, SHORT_CY1, SHORT_SK1, SHORT_DP1, SHORT_CY2, SHORT_SK2,
+    SHORT_DP2, SHORT_CHS, SHORT_LFR, SHORT_LFM, SHORT_LFL, SHORT_VCA,
+    SHORT_EXC, SHORT_NSE, SHORT_STH, SHORT_SRCE, SHORT_WET, SHORT_DRF,
+    SHORT_DTK, SHORT_LCT, SHORT_LVL,
     SHORT_LABEL_COUNT
 };
 

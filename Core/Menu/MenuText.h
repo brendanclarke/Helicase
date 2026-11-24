@@ -297,9 +297,10 @@ static const char alkPwmWaveNames[][4] = {
  *             ONOFF_TAG_COL_TYPE 8 (the Colloid's osc1_type, colTypeNames).
  *             The rows' dtype byte is DTYPE_ON_OFF | (tag << 4). Tags 1-3
  *             stay (osc1_run, voice_chain, the Alkaline typ), tag 7 is the
- *             Tetrakt's layers; 4 and 9-15 are free (S095 P3 removed P2's
- *             int (4) and pmd (7) lists; 5 was fmd's and now names the
- *             route; 8 was free until S096 P3).
+ *             Tetrakt's layers, 9 the effect type, 4 and 10 the Katran's
+ *             (S103 P1); 11-15 are free (S095 P3 removed P2's int (4) and
+ *             pmd (7) lists; 5 was fmd's and now names the route; 8 was free
+ *             until S096 P3).
  * Why:        every DTYPE_MENU id is taken (S078); menu.c resolves the name
  *             table per tag in menu_onoffTagNames(), so display, clamp,
  *             automation range and the step-edit line follow the count.
@@ -399,8 +400,8 @@ static const char tktLayerNames[][4] = {
  * is the fx row's; tag 10, the chorus's csr, was removed with the row).
  *
  * What:       ONOFF_TAG_FX_TYPE 9 (fx, fxTypeNames). The row's dtype byte is
- *             DTYPE_ON_OFF | (tag << 4). Tags 1-3, 5-8 stay; 4 and 10-15 are
- *             free.
+ *             DTYPE_ON_OFF | (tag << 4). Tags 1-3, 5-8 stay; 9 is this row,
+ *             4 and 10 are the Katran's (S103 P1); 11-15 are free.
  * Why:        every DTYPE_MENU id is taken (S078); menu_onoffTagNames()
  *             resolves the table per tag, so display, clamp, automation range
  *             and the step-edit line follow the count.
@@ -423,6 +424,31 @@ static const char fxTypeNames[][4] = {
 };
 static const char fxDepthNames[][4] = {
     {3}, {"I  "},{"II "},{"1+2"},
+};
+
+/*
+ * The Katran's selectors (S103 P1).
+ *
+ * What:       ONOFF_TAG_KAT_SOURCE 4 (src, katSourceNames: off, A, B, AB: the
+ *             oscillators that read the arena, KAT_SRC_*);
+ *             ONOFF_TAG_KAT_LOOP_TYPE 10 (the loop filter's typ,
+ *             katLoopTypeNames: LP BP HP, then the same tracking the loop's
+ *             pitch: LPt BPt HPt, KAT_LT_*). The rows' dtype byte is
+ *             DTYPE_ON_OFF | (tag << 4). Tags 4 and 10 were free.
+ * Why:        every DTYPE_MENU id is taken (S078); menu_onoffTagNames()
+ *             resolves the list per tag, so display, clamp, automation range
+ *             and the step-edit line follow the count. The Katran's typ reuses
+ *             ONOFF_TAG_ALK_TYPE (alkTypeNames: wav wtb pwm).
+ * Accessors:  KatranParameters.c; menu.c menu_onoffTagNames().
+ * Affiliates: KAT_SRC_COUNT, KAT_LT_COUNT (KatranVoice.h): asserted in menu.c.
+ */
+#define ONOFF_TAG_KAT_SOURCE       4u
+#define ONOFF_TAG_KAT_LOOP_TYPE    10u
+static const char katSourceNames[][4] = {
+    {4}, {"off"},{"A  "},{"B  "},{"AB "},
+};
+static const char katLoopTypeNames[][4] = {
+    {6}, {"LP "},{"BP "},{"HP "},{"LPt"},{"BPt"},{"HPt"},
 };
 /*
  * Wavefolder type names: the wav cell under WFd (S089 P2).

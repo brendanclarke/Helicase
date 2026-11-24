@@ -39,6 +39,7 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/DSP/Instruments/Alkaline \
           -ICore/DSP/Instruments/Colloid \
           -ICore/DSP/Instruments/Tetrakt \
+          -ICore/DSP/Instruments/Katran \
           -ICore/DSP/Instruments/Chorus \
           -ICore/DSP/Effects \
           -ICore/DSP/Effects/CrumpBit \
@@ -121,6 +122,7 @@ SRCS = \
   Core/DSP/Instruments/Alkaline/AlkalineParameters.c \
   Core/DSP/Instruments/Colloid/ColloidParameters.c \
   Core/DSP/Instruments/Tetrakt/TetraktParameters.c \
+  Core/DSP/Instruments/Katran/KatranParameters.c \
   Core/DSP/Effects/FxBuffer.c \
   Core/DSP/Effects/EffectsManager.c \
   Core/DSP/Effects/CrumpBit/CrumpBitParameters.c \
@@ -168,6 +170,9 @@ DSP_SRCS = \
   Core/DSP/Instruments/Colloid/ColloidVoice.c \
   Core/DSP/Instruments/Tetrakt/TetraktTables.c \
   Core/DSP/Instruments/Tetrakt/TetraktVoice.c \
+  Core/DSP/Instruments/Katran/KatranOsc.c \
+  Core/DSP/Instruments/Katran/KatranTables.c \
+  Core/DSP/Instruments/Katran/KatranVoice.c \
   Core/DSP/Instruments/Cymbal/CymbalVoice.c \
   Core/DSPAudio/Decay.c \
   Core/DSPAudio/DiodeLadder.c \
@@ -402,6 +407,22 @@ $(BUILD)/Core/DSP/Instruments/Tetrakt/TetraktVoice.o: Core/DSP/Instruments/Tetra
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 $(BUILD)/Core/DSP/Instruments/Tetrakt/TetraktTables.o: Core/DSP/Instruments/Tetrakt/TetraktTables.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+
+# S103 P1: the Katran engine, its oscillator loops and its tables are DSP:
+# -Ofast like the Tetrakt, and -fno-lto for the same reason (outside the LTO
+# unit the Katran cannot shift LTO's partitioning of the mixer or the other
+# engines' loops; gate G-CPU3). Its entry points are noinline calls from
+# InstrumentManager. KatranParameters.c stays in SRCS (-O2), as the other
+# tables. Flash only: no ITCM section.
+$(BUILD)/Core/DSP/Instruments/Katran/KatranVoice.o: Core/DSP/Instruments/Katran/KatranVoice.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+$(BUILD)/Core/DSP/Instruments/Katran/KatranOsc.o: Core/DSP/Instruments/Katran/KatranOsc.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
+$(BUILD)/Core/DSP/Instruments/Katran/KatranTables.o: Core/DSP/Instruments/Katran/KatranTables.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@ -fno-lto
 

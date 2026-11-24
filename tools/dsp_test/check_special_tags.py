@@ -46,6 +46,10 @@ TABLES = {
     # then the effect's four rows; S099 P2 removed cbw cdv cwd); fx_type is
     # IM_SPECIAL_FX_TYPE.
     'ALX': 'Core/DSP/Instruments/Alkaline/AlkalineParameters.c',
+    # S103 P1: the Katran. The osc1_* rows are Drum twins (coa/fin
+    # PITCH_COARSE/FINE | OSC1, typ OSC_TYPE | OSC1, wav and pos NONE); the
+    # LFO rows their twins; every kat_* key and vol/pan classify as NONE.
+    'KAT': 'Core/DSP/Instruments/Katran/KatranParameters.c',
 }
 ENUM = 'Core/DSP/Instruments/InstrumentManager.h'
 REGISTRY = 'Core/DSP/Instruments/InstrumentManager.c'

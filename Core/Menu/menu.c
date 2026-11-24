@@ -68,6 +68,7 @@
 #include "ColloidVoice.h"      /* S095 P2: COL_WAVE_COUNT, the COL_* counts (the name asserts) */
 #include "BbdChorus.h"         /* S099 P2: BBD_DPT_VAR (the dpt names and their assert) */
 #include "TetraktVoice.h"      /* S096 P1: TKT_LAYER_MASK_COUNT (the name assert) */
+#include "KatranVoice.h"       /* S103 P1: KAT_SRC_COUNT, KAT_LT_COUNT (the name asserts) */
 #include "transientGenerator.h"   /* S087 P3: transient list with user one-shots */
 #include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* (name asserts) */
 #include <string.h>
@@ -12610,10 +12611,14 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
      * Sin (colWaveNames); S099 P1: under pwm its own list Tri, Saw, Rec,
      * R-S (colPwmWaveNames, the branch below; §15.10: no Sin; S099 P2: no
      * REx); under wtb the shared
-     * catalogue branch (wNN, the table name).
+     * catalogue branch (wNN, the table name). S103 P1: a Katran slot's osc1
+     * under wav lists the same four (the Katran plays the Colloid's
+     * band-limited rows); under pwm the shared Tri/Saw/Rec branch below names
+     * it.
      */
     if (isOsc1 && type == OSC_TYPE_WAV &&
-        instrumentManager_runtimeEngine(cell->slot) == INSTRUMENT_TYPE_COL) {
+        (instrumentManager_runtimeEngine(cell->slot) == INSTRUMENT_TYPE_COL ||
+         instrumentManager_runtimeEngine(cell->slot) == INSTRUMENT_TYPE_KAT)) {
         if (value < COL_WAVE_COUNT) {
             memcpy(nameDst, colWaveNames[value + 1u], 3u);
             memcpy(codeDst, colWaveNames[value + 1u], 3u);
@@ -12948,6 +12953,8 @@ static const char (*menu_onoffTagNames(uint8_t tag))[4]
     case ONOFF_TAG_COL_TYPE:       return colTypeNames;      /* S096 P3 */
     case ONOFF_TAG_TKT_LAYERS:     return tktLayerNames;      /* S096 P1 */
     case ONOFF_TAG_FX_TYPE:        return fxTypeNames;        /* S099 P1/P2 */
+    case ONOFF_TAG_KAT_SOURCE:     return katSourceNames;     /* S103 P1 */
+    case ONOFF_TAG_KAT_LOOP_TYPE:  return katLoopTypeNames;   /* S103 P1 */
     default:                    return oscRunNames;
     }
 }
@@ -13128,6 +13135,11 @@ _Static_assert((sizeof(colTypeNames) / sizeof(colTypeNames[0])) - 1u == COL_TYP_
 /* S096 P1: the layer-switch names list every 4-bit mask (TetraktVoice.h). */
 _Static_assert((sizeof(tktLayerNames) / sizeof(tktLayerNames[0])) - 1u == TKT_LAYER_MASK_COUNT,
                "tktLayerNames must list the 16 layer sets");
+/* S103 P1: the Katran lists name every value (KatranVoice.h). */
+_Static_assert((sizeof(katSourceNames) / sizeof(katSourceNames[0])) - 1u == KAT_SRC_COUNT,
+               "katSourceNames must list off, A, B and AB");
+_Static_assert((sizeof(katLoopTypeNames) / sizeof(katLoopTypeNames[0])) - 1u == KAT_LT_COUNT,
+               "katLoopTypeNames must list the six loop filter types");
 /* S099 P1: the chorus lists name every stored value (BbdChorus.h). */
 _Static_assert((sizeof(fxTypeNames) / sizeof(fxTypeNames[0])) - 1u == ADV_FX_COUNT,
                "fxTypeNames must list off and chr (ADV_FX_*)");

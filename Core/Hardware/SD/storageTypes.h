@@ -144,6 +144,7 @@ typedef instrument_type_t storage_instrument_type_t;
 #define STORAGE_INSTRUMENT_TKT     INSTRUMENT_TYPE_TKT   /* S096 P1 */
 #define STORAGE_INSTRUMENT_CLX     INSTRUMENT_TYPE_CLX   /* S099 P1 */
 #define STORAGE_INSTRUMENT_ALX     INSTRUMENT_TYPE_ALX   /* S099 P1 */
+#define STORAGE_INSTRUMENT_KAT     INSTRUMENT_TYPE_KAT   /* S103 P1 */
 #define STORAGE_INSTRUMENT_UNKNOWN INSTRUMENT_TYPE_UNKNOWN
 
 /* Incremental parse state for kitset.kcg.

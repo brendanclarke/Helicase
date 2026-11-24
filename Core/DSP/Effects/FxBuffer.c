@@ -269,6 +269,15 @@ uint32_t fxbuf_arenaBytes(void)
     return fxbuf_state.bytes;
 }
 
+/* A read-only view of the whole arena (S103 P1). Contract: FxBuffer.h. */
+void fxbuf_arenaView(const int16_t **base, uint32_t *samples)
+{
+    if (base)
+        *base = (const int16_t *)(const void *)fxbuf_state.base;
+    if (samples)
+        *samples = fxbuf_state.bytes / 2u;
+}
+
 /*
  * Return the current contiguous Effect share.
  *

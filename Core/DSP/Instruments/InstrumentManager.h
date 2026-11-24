@@ -139,6 +139,18 @@ typedef enum {
      * Why:        appended, as clx; menu_instrumentLoadIndex[] +2 B .bss.
      */
     INSTRUMENT_TYPE_ALX,
+    /*
+     * S103 P1: Katran, the drone / noise synth (token "kat"), before UNKNOWN.
+     *
+     * What:       value 9; UNKNOWN moves from 9 to 10. Its own engine
+     *             (KatranVoice, a union member of its own); Basic.
+     * Why:        appended (the standing rule): no stored value changes
+     *             meaning; menu_instrumentLoadIndex[] (menu.c: +2 B .bss,
+     *             signed off) and every type >= UNKNOWN guard follow; a
+     *             .hcnames header written before the addition is a leading
+     *             part of the new list and is accepted.
+     */
+    INSTRUMENT_TYPE_KAT,
     INSTRUMENT_TYPE_UNKNOWN
 } instrument_type_t;
 

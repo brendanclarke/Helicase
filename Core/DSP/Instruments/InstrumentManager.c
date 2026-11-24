@@ -6,6 +6,7 @@
 #include "AlkalineParameters.h"   /* S093 P4: registry row */
 #include "ColloidParameters.h"    /* S095 P2: registry row, the inactive-cell test */
 #include "TetraktParameters.h"    /* S096 P1: registry row, the velocity groups */
+#include "KatranParameters.h"     /* S103 P1: registry row */
 #include "SceneData.h"
 #include "SceneModTargets.h"
 #include "presetManager.h"
@@ -18,6 +19,7 @@
 #include "AlkalineVoice.h"        /* S093 P4: the runtime member and its entry points */
 #include "ColloidVoice.h"         /* S095 P2: the runtime member and its entry points */
 #include "TetraktVoice.h"         /* S096 P1: the runtime member and its entry points */
+#include "KatranVoice.h"          /* S103 P1: the runtime member and its entry points */
 #include "BbdChorus.h"            /* S099 P1: the Advanced types' chorus (unit, control, render) */
 #include "FxBuffer.h"             /* S096 P1: the voice unit (claim, release, borrow) */
 #include "sequencer.h"            /* S093 P4: seq_trackStepSamples() (read-only) for the
@@ -131,6 +133,17 @@ static const instrument_registry_entry_t instrument_registry[] = {
       ALKALINE_ADV_INSTRUMENT_TYPE_FLAGS,
       alkaline_param_descriptors, ALKALINE_ADV_PARAM_DESCRIPTOR_COUNT,
       alkaline_adv_menu_pages, ALKALINE_MENU_PAGE_COUNT },
+    /*
+     * S103 P1: Katran. Token/extension "kat"/".kat"; directory
+     * /Instrument/Katran (6 characters; SD_CARD/Instrument/Katran in the card
+     * image with init.kat; filesystem.c creates the folder on a first boot
+     * that lacks it, from this row). Basic: may take any slot.
+     */
+    [INSTRUMENT_TYPE_KAT] =
+    { INSTRUMENT_TYPE_KAT, "kat", katran_instrument_display_label, ".kat", "Katran",
+      KATRAN_INSTRUMENT_TYPE_FLAGS,
+      katran_param_descriptors, KATRAN_PARAM_DESCRIPTOR_COUNT,
+      katran_menu_pages, KATRAN_MENU_PAGE_COUNT },
 };
 
 #define INSTRUMENT_REGISTRY_COUNT \
@@ -164,6 +177,7 @@ static const uint8_t instrument_engine_of[INSTRUMENT_TYPE_UNKNOWN + 1u] = {
     [INSTRUMENT_TYPE_TKT] = INSTRUMENT_TYPE_TKT,
     [INSTRUMENT_TYPE_CLX] = INSTRUMENT_TYPE_COL,
     [INSTRUMENT_TYPE_ALX] = INSTRUMENT_TYPE_ALK,
+    [INSTRUMENT_TYPE_KAT] = INSTRUMENT_TYPE_KAT,   /* S103 P1: its own engine */
     [INSTRUMENT_TYPE_UNKNOWN] = INSTRUMENT_TYPE_UNKNOWN,
 };
 
@@ -289,7 +303,7 @@ static instrument_type_t runtime_slot_type[INSTRUMENT_SLOT_COUNT];
  * It was 2 x sizeof(DrumVoice), so the drum-family VoiceSpace (80 B) would
  * have grown every slot by 160 B (+960 B SRAM1). Pinned, runtime_slots stays
  * 7,584 B and each engine's _Static_assert below holds it to the reserve
- * (Drum 712 B, Tetrakt 1,080 B, Colloid 1,224 B).
+ * (Drum 712 B, Tetrakt 1,080 B, Colloid 1,224 B; S103 P1: Katran <= 1,200 B).
  */
 #define INSTRUMENT_RUNTIME_SLOT_BYTES 1264u
 typedef union {
@@ -300,6 +314,7 @@ typedef union {
     AlkalineVoice alkaline;   /* S093 P4: 540 B at r6 (measured); slot reserve 1,264 B */
     ColloidVoice colloid;     /* S095 P3: 1,112 B; S099 P1: 1,224 B (measured); slot reserve 1,264 B */
     TetraktVoice tetrakt;     /* S096 P1: ≈ 1,090 B (est.; asserted below); slot reserve 1,264 B */
+    KatranVoice katran;       /* S103 P1: ≈ 1,104 B (est.; asserted <= 1,200 below); slot reserve 1,264 B */
     uint8_t reserved[INSTRUMENT_RUNTIME_SLOT_BYTES];
 } InstrumentRuntimeSlot;
 static InstrumentRuntimeSlot runtime_slots[INSTRUMENT_SLOT_COUNT];
@@ -346,6 +361,13 @@ _Static_assert(sizeof(TetraktVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES,
                "TetraktVoice exceeds tagged slot reserve");
 _Static_assert(TKT_LINE_SAMPLES == FXBUF_VOICE_UNIT_SAMPLES,
                "the Tetrakt line is one voice unit");
+/* S103 P1: the Katran voice fits the tagged slot with the plan's margin
+ * (S103 P1 §2.1: <= 1,200 B of the 1,264 B reserve, K-D8), and each core's
+ * ring fits one voice unit. */
+_Static_assert(sizeof(KatranVoice) <= 1200u,
+               "KatranVoice exceeds its 1,200 B target (S103 P1 §2.1)");
+_Static_assert(KAT_RING <= FXBUF_VOICE_UNIT_SAMPLES,
+               "a Katran ring is one voice unit");
 _Static_assert(sizeof(InstrumentRuntimeSlot) == INSTRUMENT_RUNTIME_SLOT_BYTES,
                "Tagged slot reserve changed through alignment or member size");
 
@@ -532,9 +554,22 @@ static TetraktVoice *instrumentManager_tetraktRuntime(uint8_t slot)
 }
 
 /*
+ * The slot's Katran runtime (S103 P1).
+ *
+ * What:       the tagged union member for slot, or NULL out of range. Like
+ *             the other accessors it does not check the slot's type: every
+ *             caller switches on instrumentManager_slotType() first.
+ */
+static KatranVoice *instrumentManager_katranRuntime(uint8_t slot)
+{
+    return (slot < INSTRUMENT_SLOT_COUNT) ? &runtime_slots[slot].katran : 0;
+}
+
+/*
  * The voice units a slot's incoming image needs (S096 P1 SD11; S099 P1).
  *
- * What:       1 for a Tetrakt (its line); S099 P1: 1 for an Advanced type
+ * What:       1 for a Tetrakt (its line); S103 P1: 2 for a Katran (one ring
+ *             per core); S099 P1: 1 for an Advanced type
  *             whose stored chorus_type (the Normal image, where selectors live)
  *             is not off (its chorus); 0 for every other type and an empty
  *             slot.
@@ -576,6 +611,13 @@ static uint8_t instrumentManager_unitsWanted(const kit_instrument_slot_t *incomi
     case INSTRUMENT_TYPE_ALX:
         return (uint8_t)(incoming->parameter_images.instrument_parameters[ALK_IDX_FX_TYPE]
                          != ADV_FX_OFF);
+    /*
+     * S103 P1: a Katran owns two units, one 2,048-sample ring per core
+     * (P§7.2); the per-slot cap is 2 (FXBUF_VOICE_UNITS_PER_SLOT), so six
+     * Katrans use the whole pool of 12.
+     */
+    case INSTRUMENT_TYPE_KAT:
+        return 2u;
     default:
         return 0u;
     }
@@ -595,9 +637,10 @@ static uint8_t instrumentManager_unitsWanted(const kit_instrument_slot_t *incomi
  *             follows its chorus_type row (Q-8), also at type assignment here
  *             and then at every fx write (instrumentManager_chorusBind()).
  *             With six Tetrakts, or four plus two Advanced choruses, six of
- *             the twelve units are owned.
- * Inputs:     slot, wanted (0 or 1).
- * Outputs:    the unit's samples or NULL.
+ *             the twelve units are owned. Six Katrans own all twelve.
+ * Inputs:     slot, wanted (0..2; S103 P1: 2 for a Katran).
+ * Outputs:    the first unit's samples or NULL; a second unit is
+ *             fxbuf_voiceUnit(slot, 1).
  * Accessors:  instrumentManager_runtimeInit(),
  *             instrumentManager_resetRuntimeSlotFromScene().
  */
@@ -628,6 +671,9 @@ static void instrumentManager_slotRightUpdate(uint8_t slot)
         break;
     case INSTRUMENT_TYPE_TKT:
         right = runtime_slots[slot].tetrakt.right;
+        break;
+    case INSTRUMENT_TYPE_KAT:   /* S103 P1: always stereo (L buf, R right[]) */
+        right = runtime_slots[slot].katran.right;
         break;
     case INSTRUMENT_TYPE_ALX:
         right = runtime_slots[slot].alkaline.choUnit ? runtime_slots[slot].alkaline.right : 0;
@@ -1276,6 +1322,14 @@ static uint8_t instrumentManager_waveDomainMax(uint8_t slot,
                 if (osc->oscType == OSC_TYPE_PWM)
                     return (uint8_t)(COL_PWM_WAVE_COUNT - 1u);
             }
+            /* S103 P1: a Katran slot lists the Colloid's band-limited wav
+             * list (Saw Rec Tri Sin, COL_WAVE_COUNT) under wav; under pwm the
+             * platform's three (Tri Saw Rec, osc_userCount(OSC_TYPE_PWM)
+             * below, no R-S: the chop pair is not built for Katran); under
+             * wtb the installed tables (below). */
+            if (osc && instrumentManager_slotType(slot) == INSTRUMENT_TYPE_KAT &&
+                osc->oscType == OSC_TYPE_WAV)
+                return (uint8_t)(COL_WAVE_COUNT - 1u);
 
             const uint8_t count = osc ? osc_userCount(osc->oscType)
                                       : (uint8_t)OSC_SAMPLE_START;
@@ -1938,6 +1992,7 @@ void *instrumentManager_runtimeInstance(uint8_t slot)
     case INSTRUMENT_TYPE_COL: return instrumentManager_colloidRuntime(slot);   /* S095 P2 */
     case INSTRUMENT_TYPE_CLX: return instrumentManager_colloidRuntime(slot);   /* S099 P1 */
     case INSTRUMENT_TYPE_TKT: return instrumentManager_tetraktRuntime(slot);   /* S096 P1 */
+    case INSTRUMENT_TYPE_KAT: return instrumentManager_katranRuntime(slot);    /* S103 P1 */
     default: return 0;
     }
 }
@@ -1967,6 +2022,9 @@ static Lfo *instrumentManager_runtimeLfo(uint8_t slot)
         return voice ? &voice->lfo : 0; }
     case INSTRUMENT_TYPE_TKT: {   /* S096 P1: the Tetrakt voice owns its LFO like every engine */
         TetraktVoice *voice = instrumentManager_tetraktRuntime(slot);
+        return voice ? &voice->lfo : 0; }
+    case INSTRUMENT_TYPE_KAT: {   /* S103 P1: the Katran voice owns its LFO like every engine */
+        KatranVoice *voice = instrumentManager_katranRuntime(slot);
         return voice ? &voice->lfo : 0; }
     default:
         return 0;
@@ -2080,6 +2138,23 @@ void instrumentManager_runtimeInit(void)
             Tetrakt_initVoice(instrumentManager_tetraktRuntime(slot), slot,
                               instrumentManager_slotVoiceUnits(slot, 1u));
             break;
+        case INSTRUMENT_TYPE_KAT:
+            /*
+             * S103 P1: the boot claim of the Katran's two units
+             * (fxbuf_init() ran first in main.c; the Effect reads the share
+             * when its type starts, so nothing is notified here, the
+             * Tetrakt's rule). The claim runs first, into a local: C leaves
+             * the order of a call's argument evaluations unspecified, so the
+             * second unit (ordinal 1) must not be read in the same argument
+             * list.
+             */
+        {
+            int16_t *const ringL = instrumentManager_slotVoiceUnits(slot, 2u);
+
+            Katran_initVoice(instrumentManager_katranRuntime(slot), slot,
+                             ringL, fxbuf_voiceUnit(slot, 1u));
+        }
+            break;
         default:
             break;
         }
@@ -2125,6 +2200,26 @@ uint8_t instrumentManager_ampEnvelopeQuiet(uint8_t slot)
     if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_TKT) {
         const TetraktVoice *voice = instrumentManager_tetraktRuntime(slot);
         return voice ? Tetrakt_isQuiet(voice) : 1u;
+    }
+    /*
+     * S103 P1 (Q9): a Katran is quiet once its run gain has been 0 for more
+     * than one ring (Katran_isQuiet()). It never goes quiet on its own while
+     * run is on, so this query also asks it to fade: the only callers are
+     * the deferred Scene/Kit apply workers (presetManager.c:2218, :2380),
+     * which poll exactly while an apply waits for this slot. The request
+     * lapses after KAT_FADE_HOLD blocks without a poll (a cancelled apply),
+     * and the voice returns to its run state. The force path (1,000 passes,
+     * DRUMSET_APPLY_FORCE_TICKS) is far longer than the ~20 ms fade.
+     */
+    if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_KAT) {
+        KatranVoice *voice = instrumentManager_katranRuntime(slot);
+
+        if (!voice)
+            return 1u;
+        if (Katran_isQuiet(voice))
+            return 1u;
+        Katran_requestFade(voice);
+        return 0u;
     }
     /*
      * S095 P2: the Colloid has no SlopeEg2 either; it is quiet when its amp
@@ -2396,6 +2491,10 @@ void instrumentManager_resetRuntimeSlotFromScene(uint8_t slot,
 
         if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_TKT)
             Tetrakt_initVoice(instrumentManager_tetraktRuntime(slot), slot, line);
+        /* S103 P1: the Katran's second unit is ordinal 1 of the same claim */
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_KAT)
+            Katran_initVoice(instrumentManager_katranRuntime(slot), slot, line,
+                             fxbuf_voiceUnit(slot, 1u));
     }
     switch (instrumentManager_slotType(slot)) {
     case INSTRUMENT_TYPE_DRM:
@@ -2591,6 +2690,9 @@ uint8_t instrumentManager_runtimePan(uint8_t slot)
     case INSTRUMENT_TYPE_TKT: {   /* S096 P1: the voice pan, the L-R balance (plan §2) */
         TetraktVoice *voice = instrumentManager_tetraktRuntime(slot);
         return voice ? voice->pan : 64u; }
+    case INSTRUMENT_TYPE_KAT: {   /* S103 P1: the mixer's per-slot pan */
+        KatranVoice *voice = instrumentManager_katranRuntime(slot);
+        return voice ? voice->pan : 64u; }
     default:
         return 64u;
     }
@@ -2630,6 +2732,9 @@ float instrumentManager_runtimeVolume(uint8_t slot)
         return voice ? voice->vol : 0.0f; }
     case INSTRUMENT_TYPE_TKT: {   /* S096 P1 */
         TetraktVoice *voice = instrumentManager_tetraktRuntime(slot);
+        return voice ? voice->vol : 0.0f; }
+    case INSTRUMENT_TYPE_KAT: {   /* S103 P1 */
+        KatranVoice *voice = instrumentManager_katranRuntime(slot);
         return voice ? voice->vol : 0.0f; }
     default:
         return 0.0f;
@@ -2913,6 +3018,9 @@ void instrumentManager_calcSlotAsync(uint8_t slot)
     case INSTRUMENT_TYPE_TKT:   /* S096 P1: control rate; the audio loops are the sync block */
         Tetrakt_calcVoiceAsync(instrumentManager_tetraktRuntime(slot));
         break;
+    case INSTRUMENT_TYPE_KAT:   /* S103 P1: control rate; the audio loops are the sync block */
+        Katran_calcVoiceAsync(instrumentManager_katranRuntime(slot));
+        break;
     default:
         break;
     }
@@ -3019,6 +3127,20 @@ void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
          */
         Tetrakt_calcVoiceSyncBlock(instrumentManager_tetraktRuntime(slot), buf, size);
         break;
+    case INSTRUMENT_TYPE_KAT:
+        /*
+         * S103 P1: Katran_calcVoiceAsync() (control: run, kick, the patch
+         * LFO, the chaos envelopes, the oscillators' rows and increments, the
+         * delay times, the filters' coefficient ramps) and
+         * Katran_calcVoiceSyncBlock() (the delay reads, OSC B, per core OSC A
+         * and the core loop, then the output stage). buf receives the left
+         * block; the right block stays in the voice (instrumentManager_
+         * slotRight()). Both are noinline and the object is -fno-lto
+         * (KatranVoice.h; Makefile), so the mixer's loops do not move
+         * (S101 P3 §4; gate G-CPU3).
+         */
+        Katran_calcVoiceSyncBlock(instrumentManager_katranRuntime(slot), buf, size);
+        break;
     default:
         memset(buf, 0, size * sizeof(buf[0]));
         break;
@@ -3077,6 +3199,14 @@ uint8_t instrumentManager_cellInactive(uint8_t slot, const ParamDescriptor *desc
         const AlkalineVoice *alk = instrumentManager_alkalineRuntime(slot);
 
         return alk ? alkalineParameters_cellInactive(alk, descriptor) : 0u;
+    }
+    /* S103 P1: Katran's dimmed cells (katranParameters_cellInactive(): dmp
+     * while src is off; pos under wav when src does not read the arena with
+     * that oscillator) */
+    if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_KAT) {
+        const KatranVoice *kat = instrumentManager_katranRuntime(slot);
+
+        return kat ? katranParameters_cellInactive(kat, descriptor) : 0u;
     }
     if (!descriptor ||
         instrumentManager_typeEngine(instrumentManager_slotType(slot)) != INSTRUMENT_TYPE_COL)
@@ -3251,6 +3381,18 @@ void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
                             note, velocity,
                             layers ? layers : instrumentManager_tetraktRuntime(slot)->layerOn);
         break;
+    case INSTRUMENT_TYPE_KAT:
+        /*
+         * S103 P1: a trigger kicks the loop (P§3.2): Katran_triggerVoice()
+         * re-arms the run gain, bursts the exciters and swells the feedback;
+         * nothing restarts. The platform part (LFO retrigger, velocity nodes)
+         * runs inside it for the slot. No step length: Katran has no gate.
+         * Track 7 plays slot 5 as an ordinary kick (the slot-5 alternate
+         * decay above finds no amp_envelope_decay row).
+         */
+        Katran_triggerVoice(instrumentManager_katranRuntime(slot), slot,
+                            velocity, note);
+        break;
     default:
         break;
     }
@@ -3280,6 +3422,14 @@ void instrumentManager_requestGateDuck(uint8_t trigger_track)
         instrumentManager_gateRelease[slot] = 1u;
         return;
     }
+    /*
+     * S103 P1: a Katran ignores the roll fill boundary's duck. The duck
+     * holds the slot's gate fade at 0 until the next trigger (S079 P2 fix
+     * 4), which would silence a drone between steps. Katran has no note to
+     * end; a roll window's end leaves the loop as it is.
+     */
+    if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_KAT)
+        return;
     instrumentManager_gateDuck[slot] = 1u;
 }
 
@@ -3502,6 +3652,11 @@ static OscInfo *instrumentManager_osc(uint8_t slot, const char *key)
         if (!voice) return 0;
         if (strncmp(key, "osc1_", 5) == 0) return &voice->osc;
     }
+    if (type == INSTRUMENT_TYPE_KAT) {   /* S103 P1: OSC A's OscInfo is the osc1_* anchor */
+        KatranVoice *voice = instrumentManager_katranRuntime(slot);
+        if (!voice) return 0;
+        if (strncmp(key, "osc1_", 5) == 0) return &voice->osc;
+    }
     return 0;
 }
 
@@ -3557,6 +3712,11 @@ static OscInfo *instrumentManager_oscBySelector(uint8_t slot, uint8_t selector)
     case INSTRUMENT_TYPE_CLX:   /* S099 P1 */
     case INSTRUMENT_TYPE_COL: {   /* S095 P2 */
         ColloidVoice *voice = instrumentManager_colloidRuntime(slot);
+        if (!voice) return 0;
+        if (selector == IM_SPECIAL_OSC1) return &voice->osc;
+        return 0; }
+    case INSTRUMENT_TYPE_KAT: {   /* S103 P1: the osc1_* writers (coarse, fine, typ) */
+        KatranVoice *voice = instrumentManager_katranRuntime(slot);
         if (!voice) return 0;
         if (selector == IM_SPECIAL_OSC1) return &voice->osc;
         return 0; }
@@ -5255,6 +5415,12 @@ static uint8_t instrumentManager_writeSpecialRuntime(
 
             if (!col) return 0u;
             Colloid_setOscType(col, byteValue);
+        } else if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_KAT) {
+            /* S103 P1: the Katran's typ (wav / wtb / pwm, alkTypeNames) */
+            KatranVoice *kat = instrumentManager_katranRuntime(slot);
+
+            if (!kat) return 0u;
+            Katran_setOscType(kat, byteValue);
         } else {
             osc_setType(osc, byteValue);
         }

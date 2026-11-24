@@ -61,6 +61,13 @@
  * describes how the arena was being used when the previous owner exited, so
  * the next owner can adopt or dispose of the contents.
  *
+ * S103 P1: an Instrument may READ (never write) any arena byte through
+ * fxbuf_arenaView(): the Katran's arena read form plays the arena as a raw
+ * oscillator (S103_KATRAN_NOISE_SYNTH.md §3.4). Reads are foreground-render
+ * only, between share changes by construction, so no locking is needed; the
+ * contents are whatever the owners left (stale audio, float state, 8-bit
+ * lines, power-up garbage), by design.
+ *
  * Context: foreground only (main loop, including Preset/Scene/Instrument
  * transactions and boot). Never call from an ISR. Not reentrant. Audio render
  * also runs in the foreground, so no locking is needed; share changes happen
@@ -263,6 +270,20 @@ void fxbuf_init(void);
  * their own geometry.
  */
 uint32_t fxbuf_arenaBytes(void);
+
+/*
+ * A read-only view of the whole arena (S103 P1).
+ *
+ * What:       *base = the arena's first byte as int16 samples, *samples =
+ *             fxbuf_arenaBytes() / 2. Both outputs are link-time constants.
+ * Why:        the Katran's arena read form (P§3.4) reads anywhere in the
+ *             arena; geometry stays FxBuffer's (Effect types still use
+ *             fxbuf_effectShare()). const: a reader can never write audio it
+ *             does not own.
+ * Inputs:     non-NULL base, samples.  Context: foreground.
+ * Accessors:  Katran_initVoice().
+ */
+void fxbuf_arenaView(const int16_t **base, uint32_t *samples);
 
 /*
  * Return the current contiguous Effect share.
