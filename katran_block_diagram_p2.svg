@@ -1,0 +1,582 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2420" height="1080" viewBox="0 0 2420 1080" font-family="Helvetica, Arial, sans-serif">
+<defs>
+<marker id="a2e7d32" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2e7d32"/></marker>
+<marker id="a00897b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#00897b"/></marker>
+<marker id="aef6c00" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#ef6c00"/></marker>
+<marker id="ac62828" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#c62828"/></marker>
+<marker id="a6d4c41" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#6d4c41"/></marker>
+<marker id="a1e88e5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#1e88e5"/></marker>
+<marker id="a283593" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#283593"/></marker>
+<marker id="a8e24aa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#8e24aa"/></marker>
+<marker id="a616161" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#616161"/></marker>
+<marker id="ad81b60" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#d81b60"/></marker>
+<marker id="a111111" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#111111"/></marker>
+<marker id="a1565c0" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#1565c0"/></marker>
+<marker id="a6a1b9a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#6a1b9a"/></marker>
+<marker id="a0277bd" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#0277bd"/></marker>
+<marker id="a555555" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#555555"/></marker>
+</defs>
+<rect width="2420" height="1080" fill="#fafafa"/>
+<text x="20" y="30" font-size="21" font-weight="bold" fill="#1d1d1f" text-anchor="start">Katran — page 2: modules and modulation cables (S103 P5 tree)</text>
+<text x="20" y="50" font-size="11.5" font-weight="normal" fill="#444" text-anchor="start">Cores collapsed to their essential modules. Internal modulators are their own modules; each has one coloured bus, dropped onto labelled input jacks (○). Platform LFO / velocity not shown. Amounts: the cable list (right).</text>
+<rect x="40" y="120" width="290" height="95" rx="8" fill="#ffffff" stroke="#6a1b9a" stroke-width="2"/>
+<rect x="40" y="120" width="290" height="22" rx="8" fill="#6a1b9a"/>
+<rect x="40" y="132" width="290" height="10" fill="#6a1b9a"/>
+<text x="48" y="136" font-size="12.5" font-weight="bold" fill="#fff" text-anchor="start">BUFFER READ  (src, dmp)</text>
+<text x="48" y="158" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start">DTCM FxBuffer arena, raw int16, 1,024-smp</text>
+<text x="48" y="172.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start">window; position = the osc&#x27;s pos, speed =</text>
+<text x="48" y="187.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start">its pitch; DC block → dmp LP → guard 0.7</text>
+<rect x="40" y="228" width="290" height="55" rx="8" fill="#ffffff" stroke="#555555" stroke-width="2"/>
+<rect x="40" y="228" width="290" height="22" rx="8" fill="#555555"/>
+<rect x="40" y="240" width="290" height="10" fill="#555555"/>
+<text x="48" y="244" font-size="12.5" font-weight="bold" fill="#fff" text-anchor="start">NOISE  (hardware RNG)</text>
+<text x="48" y="266" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start">one value per sample (core B: per half-rate)</text>
+<rect x="40" y="296" width="290" height="112" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+<rect x="40" y="296" width="290" height="22" rx="8" fill="#111111"/>
+<rect x="40" y="308" width="290" height="10" fill="#111111"/>
+<text x="48" y="312" font-size="12.5" font-weight="bold" fill="#fff" text-anchor="start">OSC 1 — exciter  (copies 1a, 1b)</text>
+<text x="48" y="334" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start">pitch: note + coa + fin; 1a / 1b ∓dtn detune</text>
+<text x="48" y="348.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start">form: typ / wav / pos (shared) — or buffer</text>
+<text x="48" y="363.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start">1a → core A (full rate) · 1b → core B (half)</text>
+<text x="48" y="377.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start">hard sync in: Osc 2 wrap + own core&#x27;s D &gt; snc</text>
+<rect x="40" y="420" width="290" height="80" rx="8" fill="#ffffff" stroke="#1565c0" stroke-width="2"/>
+<rect x="40" y="420" width="290" height="22" rx="8" fill="#1565c0"/>
+<rect x="40" y="432" width="290" height="10" fill="#1565c0"/>
+<text x="48" y="436" font-size="12.5" font-weight="bold" fill="#fff" text-anchor="start">OSC 2 — ring modulator (one, shared)</text>
+<text x="48" y="458" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start">pitch: Osc 1&#x27;s + coa(2) + fin(2)</text>
+<text x="48" y="472.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start">form: shared typ / wav, own pos(2)</text>
+<polyline points="40,170 26,170 26,340 40,340" fill="none" stroke="#6a1b9a" stroke-width="1.8" stroke-dasharray="3,3" marker-end="url(#a6a1b9a)"/>
+<polyline points="26,340 26,460 40,460" fill="none" stroke="#6a1b9a" stroke-width="1.8" stroke-dasharray="3,3" marker-end="url(#a6a1b9a)"/>
+<text x="22" y="255" font-size="10" font-weight="bold" fill="#6a1b9a" text-anchor="end">src</text>
+<polyline points="290,420 290,408" fill="none" stroke="#0277bd" stroke-width="1.4" stroke-dasharray="4,3" marker-end="url(#a0277bd)"/>
+<text x="170" y="416" font-size="9.5" font-weight="bold" fill="#0277bd" text-anchor="start">Osc 2 wrap → Osc 1 sync</text>
+<circle cx="110" cy="500" r="5.5" fill="#fff" stroke="#2e7d32" stroke-width="2"/>
+<text x="110" y="491" font-size="9.5" font-weight="bold" fill="#2e7d32" text-anchor="middle">pos</text>
+<circle cx="170" cy="500" r="5.5" fill="#fff" stroke="#2e7d32" stroke-width="2"/>
+<text x="170" y="491" font-size="9.5" font-weight="bold" fill="#2e7d32" text-anchor="middle">pitch</text>
+<circle cx="260" cy="500" r="5.5" fill="#1e88e5" stroke="#1e88e5" stroke-width="2"/>
+<text x="260" y="491" font-size="9.5" font-weight="bold" fill="#1e88e5" text-anchor="middle">pitch▾</text>
+<rect x="470" y="120" width="430" height="380" rx="10" fill="#ffffff" stroke="#777" stroke-width="2" stroke-dasharray="8,4"/>
+<text x="480" y="140" font-size="14" font-weight="bold" fill="#1d1d1f" text-anchor="start">CORE A</text>
+<text x="480" y="154" font-size="9.5" font-weight="normal" fill="#555" text-anchor="start">full rate (32 smp / block)</text>
+<circle cx="520" cy="120" r="5.5" fill="#fff" stroke="#111111" stroke-width="2"/>
+<text x="520" y="111" font-size="9.5" font-weight="bold" fill="#111111" text-anchor="middle">Osc 1a</text>
+<circle cx="582" cy="120" r="5.5" fill="#fff" stroke="#555555" stroke-width="2"/>
+<text x="582" y="111" font-size="9.5" font-weight="bold" fill="#555555" text-anchor="middle">noise</text>
+<circle cx="670" cy="120" r="5.5" fill="#fff" stroke="#1565c0" stroke-width="2"/>
+<text x="670" y="111" font-size="9.5" font-weight="bold" fill="#1565c0" text-anchor="middle">Osc 2</text>
+<rect x="620" y="165" width="100" height="45" rx="5" fill="#e3f2fd" stroke="#1565c0" stroke-width="1.4"/>
+<text x="670.0" y="184.5" font-size="11" font-weight="bold" fill="#1565c0" text-anchor="middle">RING</text>
+<text x="670.0" y="198.5" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">t1 × Osc 2 (lvB)</text>
+<rect x="750" y="165" width="100" height="45" rx="5" fill="#e3f2fd" stroke="#1565c0" stroke-width="1.4"/>
+<text x="800.0" y="184.5" font-size="11" font-weight="bold" fill="#1565c0" text-anchor="middle">AMP2</text>
+<text x="800.0" y="198.5" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">+ g2·t1 (bal)</text>
+<polyline points="670,126 670,165" fill="none" stroke="#1565c0" stroke-width="1.6" marker-end="url(#a1565c0)"/>
+<polyline points="720,187 750,187" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<polyline points="850,187 894,187" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<circle cx="894" cy="187" r="5.5" fill="#111111" stroke="#111111" stroke-width="2"/>
+<text x="870" y="224" font-size="10" font-weight="bold" fill="#1d1d1f" text-anchor="middle">out</text>
+<rect x="490" y="250" width="105" height="50" rx="5" fill="#f3f3f3" stroke="#555" stroke-width="1.4"/>
+<text x="542.5" y="272.0" font-size="11" font-weight="bold" fill="#555" text-anchor="middle">EXCITER MIX</text>
+<text x="542.5" y="286.0" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">lvA level · noi mix</text>
+<rect x="620" y="250" width="100" height="50" rx="5" fill="#fff8e6" stroke="#ef6c00" stroke-width="1.4"/>
+<text x="670.0" y="272.0" font-size="11" font-weight="bold" fill="#ef6c00" text-anchor="middle">TORCIDO 2</text>
+<text x="670.0" y="286.0" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">clip (drv)</text>
+<polyline points="520,126 520,250" fill="none" stroke="#111111" stroke-width="1.6" marker-end="url(#a111111)"/>
+<polyline points="582,126 582,250" fill="none" stroke="#555555" stroke-width="1.3" stroke-dasharray="3,3" marker-end="url(#a555555)"/>
+<polyline points="595,275 620,275" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<rect x="490" y="335" width="105" height="50" rx="5" fill="#fde7ef" stroke="#ad1457" stroke-width="1.4"/>
+<text x="542.5" y="357.0" font-size="11" font-weight="bold" fill="#ad1457" text-anchor="middle">DELAY</text>
+<text x="542.5" y="371.0" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">tim (0.7–41 ms)</text>
+<rect x="620" y="335" width="100" height="50" rx="5" fill="#fff8e6" stroke="#ef6c00" stroke-width="1.4"/>
+<text x="670.0" y="357.0" font-size="11" font-weight="bold" fill="#ef6c00" text-anchor="middle">TORCIDO 1</text>
+<text x="670.0" y="371.0" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">drv tube bln</text>
+<circle cx="750" cy="360" r="11" fill="#fff" stroke="#111" stroke-width="1.4"/>
+<text x="750" y="365" font-size="14" font-weight="bold" fill="#1d1d1f" text-anchor="middle">+</text>
+<rect x="775" y="335" width="55" height="50" rx="5" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.4"/>
+<text x="802.5" y="357.0" font-size="11" font-weight="bold" fill="#2e7d32" text-anchor="middle">F1</text>
+<text x="802.5" y="371.0" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">frq res</text>
+<rect x="838" y="335" width="50" height="50" rx="5" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.4"/>
+<text x="863.0" y="357.0" font-size="11" font-weight="bold" fill="#2e7d32" text-anchor="middle">F2</text>
+<text x="863.0" y="371.0" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">lct</text>
+<polyline points="595,360 620,360" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<polyline points="720,360 739,360" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<polyline points="720,275 750,275 750,349" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<polyline points="761,360 775,360" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<polyline points="830,360 838,360" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<rect x="620" y="415" width="268" height="42" rx="5" fill="#f0f0f0" stroke="#333" stroke-width="1.4"/>
+<text x="754.0" y="433.0" font-size="11" font-weight="bold" fill="#333" text-anchor="middle">LOOP WRITE</text>
+<text x="754.0" y="447.0" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">gr × (u + fb·D + xfb·D_other) → delay</text>
+<polyline points="863,385 863,415" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<polyline points="620,436 542,436 542,385" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<text x="490" y="420" font-size="10" font-weight="bold" fill="#ad1457" text-anchor="start">loop</text>
+<polyline points="720,348 732,348 732,232 708,232 708,210" fill="none" stroke="#111111" stroke-width="1.4" marker-end="url(#a111111)"/>
+<polyline points="732,232 770,232 770,210" fill="none" stroke="#111111" stroke-width="1.4" marker-end="url(#a111111)"/>
+<text x="736" y="245" font-size="9.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">t1</text>
+<text x="480" y="482" font-size="9.5" font-weight="normal" fill="#0277bd" text-anchor="start">D → own Osc 1 copy&#x27;s sync (snc); D → other core (xfb)</text>
+<circle cx="500" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="500" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">T</text>
+<circle cx="555" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="555" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">F1</text>
+<circle cx="610" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="610" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">tube</text>
+<circle cx="665" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="665" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">fb</text>
+<circle cx="720" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="720" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">exc/nse</text>
+<circle cx="775" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="775" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">gr</text>
+<circle cx="830" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="830" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">VCA</text>
+<circle cx="880" cy="500" r="5.5" fill="#333" stroke="#333" stroke-width="2"/>
+<text x="880" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">D▾</text>
+<rect x="940" y="120" width="430" height="380" rx="10" fill="#ffffff" stroke="#777" stroke-width="2" stroke-dasharray="8,4"/>
+<text x="950" y="140" font-size="14" font-weight="bold" fill="#1d1d1f" text-anchor="start">CORE B</text>
+<text x="950" y="154" font-size="9.5" font-weight="normal" fill="#555" text-anchor="start">half rate (16 smp / block, fs/2)</text>
+<circle cx="990" cy="120" r="5.5" fill="#fff" stroke="#111111" stroke-width="2"/>
+<text x="990" y="111" font-size="9.5" font-weight="bold" fill="#111111" text-anchor="middle">Osc 1b</text>
+<circle cx="1052" cy="120" r="5.5" fill="#fff" stroke="#555555" stroke-width="2"/>
+<text x="1052" y="111" font-size="9.5" font-weight="bold" fill="#555555" text-anchor="middle">noise</text>
+<circle cx="1140" cy="120" r="5.5" fill="#fff" stroke="#1565c0" stroke-width="2"/>
+<text x="1140" y="111" font-size="9.5" font-weight="bold" fill="#1565c0" text-anchor="middle">Osc 2</text>
+<rect x="1090" y="165" width="100" height="45" rx="5" fill="#e3f2fd" stroke="#1565c0" stroke-width="1.4"/>
+<text x="1140.0" y="184.5" font-size="11" font-weight="bold" fill="#1565c0" text-anchor="middle">RING</text>
+<text x="1140.0" y="198.5" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">t1 × Osc 2 (lvB)</text>
+<rect x="1220" y="165" width="100" height="45" rx="5" fill="#e3f2fd" stroke="#1565c0" stroke-width="1.4"/>
+<text x="1270.0" y="184.5" font-size="11" font-weight="bold" fill="#1565c0" text-anchor="middle">AMP1</text>
+<text x="1270.0" y="198.5" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">× (1 + g1) (bal)</text>
+<polyline points="1140,126 1140,165" fill="none" stroke="#1565c0" stroke-width="1.6" marker-end="url(#a1565c0)"/>
+<polyline points="1190,187 1220,187" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<polyline points="1320,187 1364,187" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<circle cx="1364" cy="187" r="5.5" fill="#111111" stroke="#111111" stroke-width="2"/>
+<text x="1340" y="224" font-size="10" font-weight="bold" fill="#1d1d1f" text-anchor="middle">out</text>
+<rect x="960" y="250" width="105" height="50" rx="5" fill="#f3f3f3" stroke="#555" stroke-width="1.4"/>
+<text x="1012.5" y="272.0" font-size="11" font-weight="bold" fill="#555" text-anchor="middle">EXCITER MIX</text>
+<text x="1012.5" y="286.0" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">lvA level · noi mix</text>
+<rect x="1090" y="250" width="100" height="50" rx="5" fill="#fff8e6" stroke="#ef6c00" stroke-width="1.4"/>
+<text x="1140.0" y="272.0" font-size="11" font-weight="bold" fill="#ef6c00" text-anchor="middle">TORCIDO 2</text>
+<text x="1140.0" y="286.0" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">clip (drv)</text>
+<polyline points="990,126 990,250" fill="none" stroke="#111111" stroke-width="1.6" marker-end="url(#a111111)"/>
+<polyline points="1052,126 1052,250" fill="none" stroke="#555555" stroke-width="1.3" stroke-dasharray="3,3" marker-end="url(#a555555)"/>
+<polyline points="1065,275 1090,275" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<rect x="960" y="335" width="105" height="50" rx="5" fill="#fde7ef" stroke="#ad1457" stroke-width="1.4"/>
+<text x="1012.5" y="357.0" font-size="11" font-weight="bold" fill="#ad1457" text-anchor="middle">DELAY</text>
+<text x="1012.5" y="371.0" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">tim (0.7–41 ms)</text>
+<rect x="1090" y="335" width="100" height="50" rx="5" fill="#fff8e6" stroke="#ef6c00" stroke-width="1.4"/>
+<text x="1140.0" y="357.0" font-size="11" font-weight="bold" fill="#ef6c00" text-anchor="middle">TORCIDO 1</text>
+<text x="1140.0" y="371.0" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">drv tube bln</text>
+<circle cx="1220" cy="360" r="11" fill="#fff" stroke="#111" stroke-width="1.4"/>
+<text x="1220" y="365" font-size="14" font-weight="bold" fill="#1d1d1f" text-anchor="middle">+</text>
+<rect x="1245" y="335" width="55" height="50" rx="5" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.4"/>
+<text x="1272.5" y="357.0" font-size="11" font-weight="bold" fill="#2e7d32" text-anchor="middle">F1</text>
+<text x="1272.5" y="371.0" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">frq res</text>
+<rect x="1308" y="335" width="50" height="50" rx="5" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.4"/>
+<text x="1333.0" y="357.0" font-size="11" font-weight="bold" fill="#2e7d32" text-anchor="middle">F2</text>
+<text x="1333.0" y="371.0" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">lct</text>
+<polyline points="1065,360 1090,360" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<polyline points="1190,360 1209,360" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<polyline points="1190,275 1220,275 1220,349" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<polyline points="1231,360 1245,360" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<polyline points="1300,360 1308,360" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<rect x="1090" y="415" width="268" height="42" rx="5" fill="#f0f0f0" stroke="#333" stroke-width="1.4"/>
+<text x="1224.0" y="433.0" font-size="11" font-weight="bold" fill="#333" text-anchor="middle">LOOP WRITE</text>
+<text x="1224.0" y="447.0" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">gr × (u + fb·D + xfb·D_other) → delay</text>
+<polyline points="1333,385 1333,415" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<polyline points="1090,436 1012,436 1012,385" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<text x="960" y="420" font-size="10" font-weight="bold" fill="#ad1457" text-anchor="start">loop</text>
+<polyline points="1190,348 1202,348 1202,232 1178,232 1178,210" fill="none" stroke="#111111" stroke-width="1.4" marker-end="url(#a111111)"/>
+<polyline points="1202,232 1240,232 1240,210" fill="none" stroke="#111111" stroke-width="1.4" marker-end="url(#a111111)"/>
+<text x="1206" y="245" font-size="9.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">t1</text>
+<text x="950" y="482" font-size="9.5" font-weight="normal" fill="#0277bd" text-anchor="start">D → own Osc 1 copy&#x27;s sync (snc); D → other core (xfb)</text>
+<circle cx="970" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="970" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">T</text>
+<circle cx="1025" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="1025" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">F1</text>
+<circle cx="1080" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="1080" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">tube</text>
+<circle cx="1135" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="1135" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">fb</text>
+<circle cx="1190" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="1190" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">exc/nse</text>
+<circle cx="1245" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="1245" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">gr</text>
+<circle cx="1300" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="1300" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">VCA</text>
+<circle cx="1350" cy="500" r="5.5" fill="#333" stroke="#333" stroke-width="2"/>
+<text x="1350" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">D▾</text>
+<polyline points="900,360 940,360" fill="none" stroke="#0277bd" stroke-width="1.4" stroke-dasharray="4,3" marker-end="url(#a0277bd)"/>
+<polyline points="940,372 900,372" fill="none" stroke="#0277bd" stroke-width="1.4" stroke-dasharray="4,3" marker-end="url(#a0277bd)"/>
+<text x="920" y="352" font-size="9.5" font-weight="bold" fill="#0277bd" text-anchor="middle">xfb</text>
+<text x="920" y="392" font-size="9.5" font-weight="bold" fill="#0277bd" text-anchor="middle">spr&lt;63</text>
+<rect x="1440" y="120" width="260" height="380" rx="8" fill="#ffffff" stroke="#37474f" stroke-width="2"/>
+<rect x="1440" y="120" width="260" height="22" rx="8" fill="#37474f"/>
+<rect x="1440" y="132" width="260" height="10" fill="#37474f"/>
+<text x="1448" y="136" font-size="12.5" font-weight="bold" fill="#fff" text-anchor="start">OUTPUT</text>
+<text x="1448" y="158" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start"></text>
+<text x="1448" y="172.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start"></text>
+<text x="1448" y="187.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start"></text>
+<text x="1448" y="201.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start"></text>
+<text x="1448" y="216.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start"></text>
+<text x="1448" y="230.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start"></text>
+<text x="1448" y="245.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start"></text>
+<text x="1448" y="259.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start"></text>
+<text x="1448" y="274.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start"></text>
+<text x="1448" y="288.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start"></text>
+<text x="1448" y="303.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start"></text>
+<text x="1448" y="317.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start"></text>
+<text x="1448" y="332.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start"></text>
+<text x="1448" y="346.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start"></text>
+<text x="1448" y="361.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start">to the mixer: vol, pan (system)</text>
+<rect x="1470" y="175" width="200" height="50" rx="5" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.4"/>
+<text x="1570.0" y="197.0" font-size="11" font-weight="bold" fill="#2e7d32" text-anchor="middle">F3 TILT (per core)</text>
+<text x="1570.0" y="211.0" font-size="9.5" font-weight="normal" fill="#444" text-anchor="middle">cut: LP ← 63 → HP</text>
+<rect x="1470" y="260" width="200" height="90" rx="5" fill="#e3f2fd" stroke="#1565c0" stroke-width="1.4"/>
+<text x="1570.0" y="305.0" font-size="11" font-weight="bold" fill="#1565c0" text-anchor="middle"></text>
+<text x="1570" y="290" font-size="11" font-weight="bold" fill="#1565c0" text-anchor="middle">STEREO MATRIX</text>
+<text x="1570" y="326" font-size="10" font-weight="normal" fill="#1d1d1f" text-anchor="middle">rotate (rot) · width (wid)</text>
+<text x="1570" y="341" font-size="10" font-weight="normal" fill="#1d1d1f" text-anchor="middle">level × CE1 · norm 0.5</text>
+<polyline points="1570,225 1570,260" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<polyline points="1670,300 1694,300" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#a111)"/>
+<text x="1696" y="296" font-size="11" font-weight="bold" fill="#1d1d1f" text-anchor="start">L</text>
+<text x="1696" y="312" font-size="11" font-weight="bold" fill="#1d1d1f" text-anchor="start">R</text>
+<circle cx="1480" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="1480" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">F3</text>
+<circle cx="1570" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="1570" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">level</text>
+<circle cx="1655" cy="500" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="1655" y="491" font-size="9.5" font-weight="bold" fill="#333" text-anchor="middle">rot</text>
+<polyline points="894,187 912,187 912,72 1500,72 1500,175" fill="none" stroke="#111111" stroke-width="1.8" marker-end="url(#a111111)"/>
+<text x="1506" y="166" font-size="11" font-weight="bold" fill="#1d1d1f" text-anchor="start">a</text>
+<polyline points="1364,187 1470,187" fill="none" stroke="#111111" stroke-width="1.8" marker-end="url(#a111111)"/>
+<text x="1458" y="182" font-size="11" font-weight="bold" fill="#1d1d1f" text-anchor="start">b</text>
+<polyline points="330,255 350,255 350,80 582,80 582,114" fill="none" stroke="#555555" stroke-width="1.3" stroke-dasharray="3,3" marker-end="url(#a555555)"/>
+<polyline points="582,80 1052,80 1052,114" fill="none" stroke="#555555" stroke-width="1.3" stroke-dasharray="3,3" marker-end="url(#a555555)"/>
+<polyline points="330,340 372,340 372,96 520,96 520,114" fill="none" stroke="#111111" stroke-width="1.6" marker-end="url(#a111111)"/>
+<text x="376" y="335" font-size="10" font-weight="bold" fill="#1d1d1f" text-anchor="start">1a</text>
+<polyline points="330,380 394,380 394,88 990,88 990,114" fill="none" stroke="#111111" stroke-width="1.6" stroke-dasharray="6,3" marker-end="url(#a111111)"/>
+<text x="398" y="375" font-size="10" font-weight="bold" fill="#1d1d1f" text-anchor="start">1b</text>
+<polyline points="330,460 416,460 416,104 670,104 670,114" fill="none" stroke="#1565c0" stroke-width="1.8" marker-end="url(#a1565c0)"/>
+<polyline points="670,104 1140,104 1140,114" fill="none" stroke="#1565c0" stroke-width="1.8" marker-end="url(#a1565c0)"/>
+<rect x="40" y="730" width="168" height="150" rx="8" fill="#ffffff" stroke="#2e7d32" stroke-width="2"/>
+<rect x="40" y="730" width="168" height="22" rx="8" fill="#2e7d32"/>
+<rect x="40" y="742" width="168" height="10" fill="#2e7d32"/>
+<text x="48" y="746" font-size="12.5" font-weight="bold" fill="#fff" text-anchor="start">PATCH LFO</text>
+<text x="48" y="768" font-size="10" font-weight="normal" fill="#333" text-anchor="start">rate frq · self-mod mod</text>
+<text x="48" y="782" font-size="10" font-weight="normal" fill="#333" text-anchor="start">depth dpt (cv, inv = −cv)</text>
+<text x="48" y="796" font-size="10" font-weight="normal" fill="#333" text-anchor="start">sine, warped by mod·inv</text>
+<text x="48" y="810" font-size="10" font-weight="normal" fill="#333" text-anchor="start">rate ← loop level, chaos</text>
+<circle cx="124.0" cy="730" r="5.5" fill="#2e7d32" stroke="#2e7d32" stroke-width="2"/>
+<rect x="226" y="730" width="168" height="150" rx="8" fill="#ffffff" stroke="#616161" stroke-width="2"/>
+<rect x="226" y="730" width="168" height="22" rx="8" fill="#616161"/>
+<rect x="226" y="742" width="168" height="10" fill="#616161"/>
+<text x="234" y="746" font-size="12.5" font-weight="bold" fill="#fff" text-anchor="start">LOOP LEVEL</text>
+<text x="234" y="768" font-size="10" font-weight="normal" fill="#333" text-anchor="start">envelope follower:</text>
+<text x="234" y="782" font-size="10" font-weight="normal" fill="#333" text-anchor="start">mean |D| of both cores,</text>
+<text x="234" y="796" font-size="10" font-weight="normal" fill="#333" text-anchor="start">last sample each block</text>
+<text x="234" y="810" font-size="10" font-weight="normal" fill="#333" text-anchor="start">(no row)</text>
+<rect x="412" y="730" width="168" height="150" rx="8" fill="#ffffff" stroke="#283593" stroke-width="2"/>
+<rect x="412" y="730" width="168" height="22" rx="8" fill="#283593"/>
+<rect x="412" y="742" width="168" height="10" fill="#283593"/>
+<text x="420" y="746" font-size="12.5" font-weight="bold" fill="#fff" text-anchor="start">CE1</text>
+<text x="420" y="768" font-size="10" font-weight="normal" fill="#333" text-anchor="start">cycling rise / fall</text>
+<text x="420" y="782" font-size="10" font-weight="normal" fill="#333" text-anchor="start">cycle cy1 · skew sk1</text>
+<text x="420" y="796" font-size="10" font-weight="normal" fill="#333" text-anchor="start">depth dp1</text>
+<text x="420" y="810" font-size="10" font-weight="normal" fill="#333" text-anchor="start">free-running</text>
+<circle cx="496.0" cy="730" r="5.5" fill="#283593" stroke="#283593" stroke-width="2"/>
+<rect x="598" y="730" width="168" height="150" rx="8" fill="#ffffff" stroke="#00897b" stroke-width="2"/>
+<rect x="598" y="730" width="168" height="22" rx="8" fill="#00897b"/>
+<rect x="598" y="742" width="168" height="10" fill="#00897b"/>
+<text x="606" y="746" font-size="12.5" font-weight="bold" fill="#fff" text-anchor="start">CE2</text>
+<text x="606" y="768" font-size="10" font-weight="normal" fill="#333" text-anchor="start">cycling rise / fall</text>
+<text x="606" y="782" font-size="10" font-weight="normal" fill="#333" text-anchor="start">cycle cy2 · skew sk2</text>
+<text x="606" y="796" font-size="10" font-weight="normal" fill="#333" text-anchor="start">depth dp2 (bipolar)</text>
+<text x="606" y="810" font-size="10" font-weight="normal" fill="#333" text-anchor="start">free-running</text>
+<circle cx="682.0" cy="730" r="5.5" fill="#00897b" stroke="#00897b" stroke-width="2"/>
+<rect x="784" y="730" width="168" height="150" rx="8" fill="#ffffff" stroke="#ef6c00" stroke-width="2"/>
+<rect x="784" y="730" width="168" height="22" rx="8" fill="#ef6c00"/>
+<rect x="784" y="742" width="168" height="10" fill="#ef6c00"/>
+<text x="792" y="746" font-size="12.5" font-weight="bold" fill="#fff" text-anchor="start">KICK ENV</text>
+<text x="792" y="768" font-size="10" font-weight="normal" fill="#333" text-anchor="start">kE = velocity at a</text>
+<text x="792" y="782" font-size="10" font-weight="normal" fill="#333" text-anchor="start">trigger, −60 dB in 80 ms</text>
+<text x="792" y="796" font-size="10" font-weight="normal" fill="#333" text-anchor="start">amount kik:</text>
+<text x="792" y="810" font-size="10" font-weight="normal" fill="#333" text-anchor="start">burst (0–63), + swell</text>
+<circle cx="868.0" cy="730" r="5.5" fill="#ef6c00" stroke="#ef6c00" stroke-width="2"/>
+<rect x="970" y="730" width="168" height="150" rx="8" fill="#ffffff" stroke="#c62828" stroke-width="2"/>
+<rect x="970" y="730" width="168" height="22" rx="8" fill="#c62828"/>
+<rect x="970" y="742" width="168" height="10" fill="#c62828"/>
+<text x="978" y="746" font-size="12.5" font-weight="bold" fill="#fff" text-anchor="start">RUN GAIN</text>
+<text x="978" y="768" font-size="10" font-weight="normal" fill="#333" text-anchor="start">gr: run 127 = on;</text>
+<text x="978" y="782" font-size="10" font-weight="normal" fill="#333" text-anchor="start">0–126 decay 0.25–60 s</text>
+<text x="978" y="796" font-size="10" font-weight="normal" fill="#333" text-anchor="start">re-armed by a kick;</text>
+<text x="978" y="810" font-size="10" font-weight="normal" fill="#333" text-anchor="start">Stop → 60 s decay</text>
+<circle cx="1054.0" cy="730" r="5.5" fill="#c62828" stroke="#c62828" stroke-width="2"/>
+<rect x="1156" y="730" width="168" height="150" rx="8" fill="#ffffff" stroke="#6d4c41" stroke-width="2"/>
+<rect x="1156" y="730" width="168" height="22" rx="8" fill="#6d4c41"/>
+<rect x="1156" y="742" width="168" height="10" fill="#6d4c41"/>
+<text x="1164" y="746" font-size="12.5" font-weight="bold" fill="#fff" text-anchor="start">DELAY DRIFT</text>
+<text x="1164" y="768" font-size="10" font-weight="normal" fill="#333" text-anchor="start">random walk per core</text>
+<text x="1164" y="782" font-size="10" font-weight="normal" fill="#333" text-anchor="start">±1.5 % × wow,</text>
+<text x="1164" y="796" font-size="10" font-weight="normal" fill="#333" text-anchor="start">new target / 16 blocks</text>
+<text x="1164" y="810" font-size="10" font-weight="normal" fill="#333" text-anchor="start">slewed</text>
+<circle cx="1240.0" cy="730" r="5.5" fill="#6d4c41" stroke="#6d4c41" stroke-width="2"/>
+<rect x="1342" y="730" width="168" height="150" rx="8" fill="#ffffff" stroke="#8e24aa" stroke-width="2"/>
+<rect x="1342" y="730" width="168" height="22" rx="8" fill="#8e24aa"/>
+<rect x="1342" y="742" width="168" height="10" fill="#8e24aa"/>
+<text x="1350" y="746" font-size="12.5" font-weight="bold" fill="#fff" text-anchor="start">ROTATION LFO</text>
+<text x="1350" y="768" font-size="10" font-weight="normal" fill="#333" text-anchor="start">phase ramp</text>
+<text x="1350" y="782" font-size="10" font-weight="normal" fill="#333" text-anchor="start">rot 0 hold; 0.01–4 Hz</text>
+<text x="1350" y="796" font-size="10" font-weight="normal" fill="#333" text-anchor="start">core A / B opposite</text>
+<text x="1350" y="810" font-size="10" font-weight="normal" fill="#333" text-anchor="start">jittered by chaos</text>
+<circle cx="1426.0" cy="730" r="5.5" fill="#8e24aa" stroke="#8e24aa" stroke-width="2"/>
+<rect x="1528" y="730" width="168" height="150" rx="8" fill="#ffffff" stroke="#d81b60" stroke-width="2"/>
+<rect x="1528" y="730" width="168" height="22" rx="8" fill="#d81b60"/>
+<rect x="1528" y="742" width="168" height="10" fill="#d81b60"/>
+<text x="1536" y="746" font-size="12.5" font-weight="bold" fill="#fff" text-anchor="start">CHAOS</text>
+<text x="1536" y="768" font-size="10" font-weight="normal" fill="#333" text-anchor="start">random draws (chs)</text>
+<text x="1536" y="782" font-size="10" font-weight="normal" fill="#333" text-anchor="start">per cycle / per turn</text>
+<text x="1536" y="796" font-size="10" font-weight="normal" fill="#333" text-anchor="start">and loop-coupled</text>
+<text x="1536" y="810" font-size="10" font-weight="normal" fill="#333" text-anchor="start">rise (&gt; 64)</text>
+<polyline points="105,525 1295,525" fill="none" stroke="#2e7d32" stroke-width="2.2"/>
+<polyline points="124.0,730 124.0,525" fill="none" stroke="#2e7d32" stroke-width="2.2"/>
+<polyline points="105,525 105,506" fill="none" stroke="#2e7d32" stroke-width="1.8" marker-end="url(#a2e7d32)"/>
+<polyline points="170,525 170,506" fill="none" stroke="#2e7d32" stroke-width="1.8" marker-end="url(#a2e7d32)"/>
+<polyline points="550,525 550,506" fill="none" stroke="#2e7d32" stroke-width="1.8" marker-end="url(#a2e7d32)"/>
+<polyline points="605,525 605,506" fill="none" stroke="#2e7d32" stroke-width="1.8" marker-end="url(#a2e7d32)"/>
+<polyline points="660,525 660,506" fill="none" stroke="#2e7d32" stroke-width="1.8" marker-end="url(#a2e7d32)"/>
+<polyline points="825,525 825,506" fill="none" stroke="#2e7d32" stroke-width="1.8" marker-end="url(#a2e7d32)"/>
+<polyline points="1020,525 1020,506" fill="none" stroke="#2e7d32" stroke-width="1.8" marker-end="url(#a2e7d32)"/>
+<polyline points="1075,525 1075,506" fill="none" stroke="#2e7d32" stroke-width="1.8" marker-end="url(#a2e7d32)"/>
+<polyline points="1130,525 1130,506" fill="none" stroke="#2e7d32" stroke-width="1.8" marker-end="url(#a2e7d32)"/>
+<polyline points="1295,525 1295,506" fill="none" stroke="#2e7d32" stroke-width="1.8" marker-end="url(#a2e7d32)"/>
+<polyline points="560,545 1480,545" fill="none" stroke="#00897b" stroke-width="2.2"/>
+<polyline points="682.0,730 682.0,545" fill="none" stroke="#00897b" stroke-width="2.2"/>
+<polyline points="560,545 560,506" fill="none" stroke="#00897b" stroke-width="1.8" marker-end="url(#a00897b)"/>
+<polyline points="1030,545 1030,506" fill="none" stroke="#00897b" stroke-width="1.8" marker-end="url(#a00897b)"/>
+<polyline points="1480,545 1480,506" fill="none" stroke="#00897b" stroke-width="1.8" marker-end="url(#a00897b)"/>
+<polyline points="670,565 1190,565" fill="none" stroke="#ef6c00" stroke-width="2.2"/>
+<polyline points="868.0,730 868.0,565" fill="none" stroke="#ef6c00" stroke-width="2.2"/>
+<polyline points="670,565 670,506" fill="none" stroke="#ef6c00" stroke-width="1.8" marker-end="url(#aef6c00)"/>
+<polyline points="720,565 720,506" fill="none" stroke="#ef6c00" stroke-width="1.8" marker-end="url(#aef6c00)"/>
+<polyline points="1140,565 1140,506" fill="none" stroke="#ef6c00" stroke-width="1.8" marker-end="url(#aef6c00)"/>
+<polyline points="1190,565 1190,506" fill="none" stroke="#ef6c00" stroke-width="1.8" marker-end="url(#aef6c00)"/>
+<polyline points="775,585 1245,585" fill="none" stroke="#c62828" stroke-width="2.2"/>
+<polyline points="1054.0,730 1054.0,585" fill="none" stroke="#c62828" stroke-width="2.2"/>
+<polyline points="775,585 775,506" fill="none" stroke="#c62828" stroke-width="1.8" marker-end="url(#ac62828)"/>
+<polyline points="1245,585 1245,506" fill="none" stroke="#c62828" stroke-width="1.8" marker-end="url(#ac62828)"/>
+<polyline points="495,605 1240.0,605" fill="none" stroke="#6d4c41" stroke-width="2.2"/>
+<polyline points="1240.0,730 1240.0,605" fill="none" stroke="#6d4c41" stroke-width="2.2"/>
+<polyline points="495,605 495,506" fill="none" stroke="#6d4c41" stroke-width="1.8" marker-end="url(#a6d4c41)"/>
+<polyline points="965,605 965,506" fill="none" stroke="#6d4c41" stroke-width="1.8" marker-end="url(#a6d4c41)"/>
+<polyline points="260,506 260,625 975,625" fill="none" stroke="#1e88e5" stroke-width="2.2"/>
+<polyline points="505,625 505,506" fill="none" stroke="#1e88e5" stroke-width="1.8" marker-end="url(#a1e88e5)"/>
+<polyline points="975,625 975,506" fill="none" stroke="#1e88e5" stroke-width="1.8" marker-end="url(#a1e88e5)"/>
+<text x="270" y="621" font-size="10" font-weight="bold" fill="#1e88e5" text-anchor="start">dtk</text>
+<polyline points="496.0,645 1570,645" fill="none" stroke="#283593" stroke-width="2.2"/>
+<polyline points="496.0,730 496.0,645" fill="none" stroke="#283593" stroke-width="2.2"/>
+<polyline points="1570,645 1570,506" fill="none" stroke="#283593" stroke-width="1.8" marker-end="url(#a283593)"/>
+<polyline points="1426.0,665 1655,665" fill="none" stroke="#8e24aa" stroke-width="2.2"/>
+<polyline points="1426.0,730 1426.0,665" fill="none" stroke="#8e24aa" stroke-width="2.2"/>
+<polyline points="1655,665 1655,506" fill="none" stroke="#8e24aa" stroke-width="1.8" marker-end="url(#a8e24aa)"/>
+<polyline points="880,506 880,690 1350,690" fill="none" stroke="#616161" stroke-width="2.2"/>
+<polyline points="1350,506 1350,690" fill="none" stroke="#616161" stroke-width="2.2"/>
+<polyline points="880,690 310.0,690 310.0,724" fill="none" stroke="#616161" stroke-width="2.2" marker-end="url(#a616161)"/>
+<circle cx="310.0" cy="730" r="5.5" fill="#fff" stroke="#616161" stroke-width="2"/>
+<circle cx="94.0" cy="880" r="5.5" fill="#fff" stroke="#616161" stroke-width="2"/>
+<circle cx="466.0" cy="880" r="5.5" fill="#fff" stroke="#616161" stroke-width="2"/>
+<circle cx="652.0" cy="880" r="5.5" fill="#fff" stroke="#616161" stroke-width="2"/>
+<circle cx="154.0" cy="880" r="5.5" fill="#fff" stroke="#d81b60" stroke-width="2"/>
+<circle cx="526.0" cy="880" r="5.5" fill="#fff" stroke="#d81b60" stroke-width="2"/>
+<circle cx="712.0" cy="880" r="5.5" fill="#fff" stroke="#d81b60" stroke-width="2"/>
+<circle cx="1426.0" cy="880" r="5.5" fill="#fff" stroke="#d81b60" stroke-width="2"/>
+<circle cx="310.0" cy="880" r="5.5" fill="#616161" stroke="#616161" stroke-width="2"/>
+<circle cx="1612.0" cy="880" r="5.5" fill="#d81b60" stroke="#d81b60" stroke-width="2"/>
+<polyline points="310.0,886 310.0,902 652.0,902" fill="none" stroke="#616161" stroke-width="2"/>
+<polyline points="94.0,902 310.0,902" fill="none" stroke="#616161" stroke-width="2"/>
+<polyline points="94.0,902 94.0,887" fill="none" stroke="#616161" stroke-width="1.6" marker-end="url(#a616161)"/>
+<polyline points="466.0,902 466.0,887" fill="none" stroke="#616161" stroke-width="1.6" marker-end="url(#a616161)"/>
+<polyline points="652.0,902 652.0,887" fill="none" stroke="#616161" stroke-width="1.6" marker-end="url(#a616161)"/>
+<text x="316.0" y="916" font-size="9.5" font-weight="bold" fill="#616161" text-anchor="start">level → LFO rate (×mod), CE rise (chs &gt; 64)</text>
+<polyline points="1612.0,886 1612.0,932 154.0,932" fill="none" stroke="#d81b60" stroke-width="2"/>
+<polyline points="154.0,932 154.0,887" fill="none" stroke="#d81b60" stroke-width="1.6" marker-end="url(#ad81b60)"/>
+<polyline points="526.0,932 526.0,887" fill="none" stroke="#d81b60" stroke-width="1.6" marker-end="url(#ad81b60)"/>
+<polyline points="712.0,932 712.0,887" fill="none" stroke="#d81b60" stroke-width="1.6" marker-end="url(#ad81b60)"/>
+<polyline points="1426.0,932 1426.0,887" fill="none" stroke="#d81b60" stroke-width="1.6" marker-end="url(#ad81b60)"/>
+<text x="722.0" y="946" font-size="9.5" font-weight="bold" fill="#d81b60" text-anchor="start">chaos → LFO rate jitter, CE1 / CE2 cycle + peak, rotation rate</text>
+<rect x="784.0" y="965" width="168" height="48" rx="8" fill="#ffffff" stroke="#455a64" stroke-width="2"/>
+<rect x="784.0" y="965" width="168" height="22" rx="8" fill="#455a64"/>
+<rect x="784.0" y="977" width="168" height="10" fill="#455a64"/>
+<text x="792.0" y="981" font-size="12.5" font-weight="bold" fill="#fff" text-anchor="start">TRIGGER</text>
+<text x="792.0" y="1003" font-size="9.5" font-weight="normal" fill="#333" text-anchor="start">step · pad · MIDI · chromatic</text>
+<rect x="970.0" y="965" width="168" height="48" rx="8" fill="#ffffff" stroke="#455a64" stroke-width="2"/>
+<rect x="970.0" y="965" width="168" height="22" rx="8" fill="#455a64"/>
+<rect x="970.0" y="977" width="168" height="10" fill="#455a64"/>
+<text x="978.0" y="981" font-size="12.5" font-weight="bold" fill="#fff" text-anchor="start">TRANSPORT</text>
+<text x="978.0" y="1003" font-size="9.5" font-weight="normal" fill="#333" text-anchor="start">start re-arms · stop decays</text>
+<polyline points="868.0,965 868.0,886" fill="none" stroke="#555555" stroke-width="1.6" marker-end="url(#a555555)"/>
+<polyline points="908.0,965 908.0,955 1014.0,955 1014.0,886" fill="none" stroke="#555555" stroke-width="1.6" marker-end="url(#a555555)"/>
+<polyline points="1054.0,965 1054.0,886" fill="none" stroke="#555555" stroke-width="1.6" marker-end="url(#a555555)"/>
+<text x="784.0" y="1029" font-size="9.5" font-weight="normal" fill="#555" text-anchor="start">the trigger also sets the note (OSC pitch)</text>
+<text x="1760" y="92" font-size="14" font-weight="bold" fill="#1d1d1f" text-anchor="start">Cable list — internal modulation (amount = the code&#x27;s law)</text>
+<text x="1782" y="118" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">from</text>
+<text x="1890" y="118" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">to</text>
+<text x="2050" y="118" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">amount</text>
+<text x="2308" y="118" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">row</text>
+<rect x="1760" y="128" width="14" height="12" rx="3" fill="#2e7d32"/>
+<text x="1782" y="138" font-size="10.5" font-weight="bold" fill="#2e7d32" text-anchor="start">PATCH LFO</text>
+<text x="1890" y="138" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">Osc 2 pos</text>
+<text x="2050" y="138" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">+ cv·lfl·24 steps</text>
+<text x="2308" y="138" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">dpt *</text>
+<rect x="1760" y="147" width="14" height="12" rx="3" fill="#2e7d32"/>
+<text x="1782" y="157" font-size="10.5" font-weight="bold" fill="#2e7d32" text-anchor="start"></text>
+<text x="1890" y="157" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">Osc 2 pitch</text>
+<text x="2050" y="157" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">+ cv·lfl·0.3 semitone</text>
+<text x="2308" y="157" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">dpt *</text>
+<rect x="1760" y="166" width="14" height="12" rx="3" fill="#2e7d32"/>
+<text x="1782" y="176" font-size="10.5" font-weight="bold" fill="#2e7d32" text-anchor="start"></text>
+<text x="1890" y="176" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">F1 cutoff (A, B)</text>
+<text x="2050" y="176" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">+ cv·lfl·12 semitones</text>
+<text x="2308" y="176" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">dpt *</text>
+<rect x="1760" y="185" width="14" height="12" rx="3" fill="#2e7d32"/>
+<text x="1782" y="195" font-size="10.5" font-weight="bold" fill="#2e7d32" text-anchor="start"></text>
+<text x="1890" y="195" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">TORCIDO tube (A, B)</text>
+<text x="2050" y="195" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">+ 0.15·cv·lfl</text>
+<text x="2308" y="195" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">dpt *</text>
+<rect x="1760" y="204" width="14" height="12" rx="3" fill="#2e7d32"/>
+<text x="1782" y="214" font-size="10.5" font-weight="bold" fill="#2e7d32" text-anchor="start"></text>
+<text x="1890" y="214" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">feedback (A, B)</text>
+<text x="2050" y="214" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">+ 0.2·inv·lfl</text>
+<text x="2308" y="214" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">dpt *</text>
+<rect x="1760" y="223" width="14" height="12" rx="3" fill="#2e7d32"/>
+<text x="1782" y="233" font-size="10.5" font-weight="bold" fill="#2e7d32" text-anchor="start"></text>
+<text x="1890" y="233" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">VCA A (AMP2) / B (AMP1)</text>
+<text x="2050" y="233" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">offset 0.42 + inv / 0.42 + cv</text>
+<text x="2308" y="233" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">dpt</text>
+<rect x="1760" y="242" width="14" height="12" rx="3" fill="#2e7d32"/>
+<text x="1782" y="252" font-size="10.5" font-weight="bold" fill="#2e7d32" text-anchor="start"></text>
+<text x="1890" y="252" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">its own rate, shape</text>
+<text x="2050" y="252" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">× 2^(mod·inv), warp 0.45·mod·inv</text>
+<text x="2308" y="252" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">mod</text>
+<rect x="1760" y="261" width="14" height="12" rx="3" fill="#283593"/>
+<text x="1782" y="271" font-size="10.5" font-weight="bold" fill="#283593" text-anchor="start">CE1</text>
+<text x="1890" y="271" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">output level</text>
+<text x="2050" y="271" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">1 − dp1 + dp1·CE1</text>
+<text x="2308" y="271" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">dp1</text>
+<rect x="1760" y="280" width="14" height="12" rx="3" fill="#00897b"/>
+<text x="1782" y="290" font-size="10.5" font-weight="bold" fill="#00897b" text-anchor="start">CE2</text>
+<text x="1890" y="290" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">F1 cutoff (A, B)</text>
+<text x="2050" y="290" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">± 48 semitones × dp2</text>
+<text x="2308" y="290" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">dp2</text>
+<rect x="1760" y="299" width="14" height="12" rx="3" fill="#00897b"/>
+<text x="1782" y="309" font-size="10.5" font-weight="bold" fill="#00897b" text-anchor="start"></text>
+<text x="1890" y="309" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">F3 tilt</text>
+<text x="2050" y="309" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">± 24 semitones × dp2</text>
+<text x="2308" y="309" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">dp2</text>
+<rect x="1760" y="318" width="14" height="12" rx="3" fill="#ef6c00"/>
+<text x="1782" y="328" font-size="10.5" font-weight="bold" fill="#ef6c00" text-anchor="start">KICK ENV</text>
+<text x="1890" y="328" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">exciter level (A, B)</text>
+<text x="2050" y="328" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">+ burst·kE·0.8</text>
+<text x="2308" y="328" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">kik</text>
+<rect x="1760" y="337" width="14" height="12" rx="3" fill="#ef6c00"/>
+<text x="1782" y="347" font-size="10.5" font-weight="bold" fill="#ef6c00" text-anchor="start"></text>
+<text x="1890" y="347" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">noise mix (A, B)</text>
+<text x="2050" y="347" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">+ burst·kE·0.5</text>
+<text x="2308" y="347" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">kik</text>
+<rect x="1760" y="356" width="14" height="12" rx="3" fill="#ef6c00"/>
+<text x="1782" y="366" font-size="10.5" font-weight="bold" fill="#ef6c00" text-anchor="start"></text>
+<text x="1890" y="366" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">feedback (A, B)</text>
+<text x="2050" y="366" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">+ swell·kE·0.3 (kik &gt; 63)</text>
+<text x="2308" y="366" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">kik</text>
+<rect x="1760" y="375" width="14" height="12" rx="3" fill="#c62828"/>
+<text x="1782" y="385" font-size="10.5" font-weight="bold" fill="#c62828" text-anchor="start">RUN GAIN</text>
+<text x="1890" y="385" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">loop write (A, B)</text>
+<text x="2050" y="385" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">× gr (0..1)</text>
+<text x="2308" y="385" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">run</text>
+<rect x="1760" y="394" width="14" height="12" rx="3" fill="#6d4c41"/>
+<text x="1782" y="404" font-size="10.5" font-weight="bold" fill="#6d4c41" text-anchor="start">DELAY DRIFT</text>
+<text x="1890" y="404" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">delay time (A, B)</text>
+<text x="2050" y="404" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">× (1 + d), |d| ≤ 1.5 %·wow</text>
+<text x="2308" y="404" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">wow</text>
+<rect x="1760" y="413" width="14" height="12" rx="3" fill="#1e88e5"/>
+<text x="1782" y="423" font-size="10.5" font-weight="bold" fill="#1e88e5" text-anchor="start">Osc 2 pitch</text>
+<text x="1890" y="423" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">delay time (A, B)</text>
+<text x="2050" y="423" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">× 2^(−dtk&#x27; · Osc 2 offset in oct)</text>
+<text x="2308" y="423" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">dtk</text>
+<rect x="1760" y="432" width="14" height="12" rx="3" fill="#8e24aa"/>
+<text x="1782" y="442" font-size="10.5" font-weight="bold" fill="#8e24aa" text-anchor="start">ROTATION LFO</text>
+<text x="1890" y="442" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">stereo matrix</text>
+<text x="2050" y="442" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">pan A = −cos 2πφ, B opposite</text>
+<text x="2308" y="442" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">rot</text>
+<rect x="1760" y="451" width="14" height="12" rx="3" fill="#616161"/>
+<text x="1782" y="461" font-size="10.5" font-weight="bold" fill="#616161" text-anchor="start">LOOP LEVEL</text>
+<text x="1890" y="461" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">patch LFO rate</text>
+<text x="2050" y="461" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">× 2^(mod&#x27; · 1.5 · level)</text>
+<text x="2308" y="461" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">mod</text>
+<rect x="1760" y="470" width="14" height="12" rx="3" fill="#616161"/>
+<text x="1782" y="480" font-size="10.5" font-weight="bold" fill="#616161" text-anchor="start"></text>
+<text x="1890" y="480" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">CE1 / CE2 rise</text>
+<text x="2050" y="480" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">× (1 + 2(chs&#x27; − .5)·min(1, 4·level))</text>
+<text x="2308" y="480" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">chs &gt; 64</text>
+<rect x="1760" y="489" width="14" height="12" rx="3" fill="#d81b60"/>
+<text x="1782" y="499" font-size="10.5" font-weight="bold" fill="#d81b60" text-anchor="start">CHAOS</text>
+<text x="1890" y="499" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">CE1 / CE2 cycle, peak</text>
+<text x="2050" y="499" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">× 2^(±chs&#x27;), − chs&#x27;·|r|/2</text>
+<text x="2308" y="499" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">chs</text>
+<rect x="1760" y="508" width="14" height="12" rx="3" fill="#d81b60"/>
+<text x="1782" y="518" font-size="10.5" font-weight="bold" fill="#d81b60" text-anchor="start"></text>
+<text x="1890" y="518" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">patch LFO rate</text>
+<text x="2050" y="518" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">± 0.1·chs&#x27; octave per cycle</text>
+<text x="2308" y="518" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">chs</text>
+<rect x="1760" y="527" width="14" height="12" rx="3" fill="#d81b60"/>
+<text x="1782" y="537" font-size="10.5" font-weight="bold" fill="#d81b60" text-anchor="start"></text>
+<text x="1890" y="537" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">rotation rate</text>
+<text x="2050" y="537" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">± 0.5·chs&#x27; octave per turn</text>
+<text x="2308" y="537" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">chs</text>
+<rect x="1760" y="546" width="14" height="12" rx="3" fill="#0277bd"/>
+<text x="1782" y="556" font-size="10.5" font-weight="bold" fill="#0277bd" text-anchor="start">Osc 2 wrap</text>
+<text x="1890" y="556" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">Osc 1a, 1b sync</text>
+<text x="2050" y="556" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">+ 0.5 FS into the test</text>
+<text x="2308" y="556" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">(fixed)</text>
+<rect x="1760" y="565" width="14" height="12" rx="3" fill="#0277bd"/>
+<text x="1782" y="575" font-size="10.5" font-weight="bold" fill="#0277bd" text-anchor="start">core A / B D</text>
+<text x="1890" y="575" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">own copy 1a / 1b sync</text>
+<text x="2050" y="575" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">reset when D + wrap &gt; snc·258</text>
+<text x="2308" y="575" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">snc</text>
+<rect x="1760" y="584" width="14" height="12" rx="3" fill="#0277bd"/>
+<text x="1782" y="594" font-size="10.5" font-weight="bold" fill="#0277bd" text-anchor="start">core A ↔ B</text>
+<text x="1890" y="594" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">the other core&#x27;s write</text>
+<text x="2050" y="594" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">+ xfb·D, xfb = 0.6·(63−spr)/63</text>
+<text x="2308" y="594" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">spr &lt; 63</text>
+<rect x="1760" y="603" width="14" height="12" rx="3" fill="#555555"/>
+<text x="1782" y="613" font-size="10.5" font-weight="bold" fill="#555555" text-anchor="start">TRIGGER</text>
+<text x="1890" y="613" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">kick env, run gain, note</text>
+<text x="2050" y="613" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">kE = velocity; gr re-armed</text>
+<text x="2308" y="613" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">—</text>
+<rect x="1760" y="622" width="14" height="12" rx="3" fill="#555555"/>
+<text x="1782" y="632" font-size="10.5" font-weight="bold" fill="#555555" text-anchor="start">TRANSPORT</text>
+<text x="1890" y="632" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">run gain</text>
+<text x="2050" y="632" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">start re-arms; stop: 60 s decay</text>
+<text x="2308" y="632" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start">—</text>
+<text x="1760" y="659" font-size="10.5" font-weight="bold" fill="#c62828" text-anchor="start">* dpt (lfl) is applied twice on these five: cv = shape × lfl, then × lfl again (depth ∝ lfl²).</text>
+<text x="1760" y="677" font-size="10.5" font-weight="normal" fill="#555" text-anchor="start">System modulation not drawn: the platform LFO (lfo_*, 2 destinations, any row) and</text>
+<text x="1760" y="693" font-size="10.5" font-weight="normal" fill="#555" text-anchor="start">velocity (dst / amt, one row; velocity also sets kE).</text>
+<rect x="1760" y="713" width="640" height="150" rx="6" fill="#fffde7" stroke="#f9a825" stroke-width="1.6"/>
+<text x="1770" y="733" font-size="12.5" font-weight="bold" fill="#795548" text-anchor="start">How the two cores relate</text>
+<text x="1770" y="753" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">Direct audio coupling: only xfb (each core&#x27;s D into the other&#x27;s loop write), and only when</text>
+<text x="1770" y="770" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">spr &lt; 63 (0.6 at spr 0). At spr ≥ 63 — init.kat is 63 — the cores do not exchange audio.</text>
+<text x="1770" y="787" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">Shared: Osc 2 (one ring modulator for both), every internal modulator, and the loop-level</text>
+<text x="1770" y="804" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">follower (averages both cores; drives the LFO rate and the CE rise): indirect, control-rate.</text>
+<text x="1770" y="821" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">Osc 1a / 1b: one oscillator&#x27;s two copies (core A / core B), detuned by dtn; each is synced</text>
+<text x="1770" y="838" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">only by its own core. Code names: OSC A = Osc 1, OSC B = Osc 2 (KatranOsc.c, KatranVoice.c).</text>
+<polyline points="1760,1040 1800,1040" fill="none" stroke="#111111" stroke-width="1.8" marker-end="url(#a111111)"/>
+<text x="1806" y="1044" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">audio</text>
+<polyline points="1860,1040 1900,1040" fill="none" stroke="#1565c0" stroke-width="1.8" marker-end="url(#a1565c0)"/>
+<text x="1906" y="1044" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">Osc 2 (ring)</text>
+<polyline points="2000,1040 2040,1040" fill="none" stroke="#6a1b9a" stroke-width="1.8" stroke-dasharray="3,3" marker-end="url(#a6a1b9a)"/>
+<text x="2046" y="1044" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">buffer</text>
+<polyline points="2100,1040 2140,1040" fill="none" stroke="#0277bd" stroke-width="1.4" stroke-dasharray="4,3" marker-end="url(#a0277bd)"/>
+<text x="2146" y="1044" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">sync / coupling</text>
+<circle cx="2260" cy="1040" r="5.5" fill="#fff" stroke="#333" stroke-width="2"/>
+<text x="2272" y="1044" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">input jack</text>
+<circle cx="2350" cy="1040" r="5.5" fill="#333" stroke="#333" stroke-width="2"/>
+<text x="2360" y="1044" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start">output</text>
+</svg>
