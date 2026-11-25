@@ -1,0 +1,138 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="900" viewBox="0 0 1400 900">
+<defs>
+ <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#263746"/></marker>
+ <marker id="f" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#d66b32"/></marker>
+ <marker id="c" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#a34c91"/></marker>
+ <style>
+ text{font-family:Arial,sans-serif;fill:#17212b}.heading{font-size:29px;font-weight:bold}.sub{font-size:15px;fill:#5b6874}
+ .box{fill:#f7f9fb;stroke:#354657;stroke-width:2;rx:13}.ctl{fill:#fff7fc;stroke:#a34c91;stroke-width:2;rx:12}.outbox{fill:#eff8f3;stroke:#34815f;stroke-width:2;rx:12}
+ .name{font-size:19px;font-weight:bold;text-anchor:middle}.detail{font-size:13px;fill:#526170;text-anchor:middle}
+ .audio{fill:none;stroke:#263746;stroke-width:3;marker-end:url(#a);stroke-linecap:round;stroke-linejoin:round}
+ .feedback{fill:none;stroke:#d66b32;stroke-width:3.5;marker-end:url(#f);stroke-linecap:round;stroke-linejoin:round}
+ .cv{fill:none;stroke:#a34c91;stroke-width:2.4;stroke-dasharray:8 6;marker-end:url(#c);stroke-linecap:round;stroke-linejoin:round}
+ .lab{font-size:12px;font-weight:bold;fill:#40505e}.pink{fill:#a34c91}.orange{fill:#c65c27}
+ </style>
+</defs>
+<rect width="1400" height="900" fill="#fff"/>
+<text x="55" y="52" class="heading">TORCIDO source patch</text>
+<text x="55" y="78" class="sub">Katran reference · original AIRA Modular patch routing · simplified block diagram</text>
+
+<!-- Module blocks -->
+<rect class="box" x="65" y="145" width="230" height="112"/>
+<text class="name" x="180" y="179">SQR OSCILLATOR</text>
+<text class="detail" x="180" y="205">OUT · SYNC OUT</text>
+<text class="detail" x="180" y="229">PITCH · FINE · COLOUR</text>
+
+<rect class="box" x="65" y="365" width="230" height="112"/>
+<text class="name" x="180" y="399">SAW OSCILLATOR</text>
+<text class="detail" x="180" y="425">OUT · SYNC IN</text>
+<text class="detail" x="180" y="449">PITCH · COLOUR</text>
+
+<rect class="box" x="440" y="245" width="270" height="180"/>
+<text class="name" x="575" y="280">TORCIDO</text>
+<text class="detail" x="575" y="310">IN 1 · feedback / loop</text>
+<text class="detail" x="575" y="334">IN 2 · saw exciter</text>
+<path d="M465 350H685" stroke="#d8dee5" stroke-width="1.5"/>
+<text class="detail" x="575" y="375">OUT 1 · loop signal</text>
+<text class="detail" x="575" y="399">OUT 2 · exciter mix</text>
+
+<rect class="box" x="845" y="145" width="230" height="125"/>
+<text class="name" x="960" y="180">SHORT DELAY</text>
+<text class="detail" x="960" y="208">IN · OUT</text>
+<text class="detail" x="960" y="235">TIME · FEEDBACK · DRY/WET</text>
+
+<rect class="box" x="845" y="385" width="230" height="125"/>
+<text class="name" x="960" y="420">RING MOD</text>
+<text class="detail" x="960" y="448">CARRIER IN · MOD IN</text>
+<text class="detail" x="960" y="476">OUT · ON/OFF</text>
+
+<rect class="box" x="1150" y="145" width="190" height="112"/>
+<text class="name" x="1245" y="180">AMP 1</text>
+<text class="detail" x="1245" y="207">IN: ring output</text>
+<text class="detail" x="1245" y="231">OUT → Output 2</text>
+
+<rect class="box" x="1150" y="385" width="190" height="112"/>
+<text class="name" x="1245" y="420">AMP 2</text>
+<text class="detail" x="1245" y="447">IN: TORCIDO out 1</text>
+<text class="detail" x="1245" y="471">OUT → Output 1</text>
+
+<rect class="box" x="845" y="655" width="230" height="112"/>
+<text class="name" x="960" y="690">PATCH LFO</text>
+<text class="detail" x="960" y="718">CV · INV · MOD IN</text>
+<text class="detail" x="960" y="742">rate modulation / self-mod</text>
+
+<rect class="outbox" x="1150" y="655" width="190" height="112"/>
+<text class="name" x="1245" y="690">OUTPUTS</text>
+<text class="detail" x="1245" y="720">OUT 1 · OUT 2</text>
+<text class="detail" x="1245" y="744">stereo pair</text>
+
+<!-- Audio: oscillator and main loop -->
+<path class="audio" d="M180 257V320H330V421H440"/>
+<text class="lab" x="315" y="307">SQR sync → SAW sync</text>
+<path class="audio" d="M295 421H365V385H440"/>
+<text class="lab" x="345" y="408">SAW → IN 2</text>
+
+<!-- Square output to ring modulator -->
+<path class="audio" d="M295 190H790V475H845"/>
+<text class="lab" x="545" y="180">SQR OUT → MOD IN</text>
+
+<!-- TORCIDO outputs and delay -->
+<path class="audio" d="M710 399H775V225H845"/>
+<text class="lab" x="780" y="245">OUT 2 → DELAY IN</text>
+<path class="feedback" d="M845 245H800V300H745V310H710"/>
+<text class="lab orange" x="780" y="290">DELAY OUT → IN 1</text>
+<!-- delay resets saw -->
+<path class="feedback" d="M845 245H820V555H325V445H295"/>
+<text class="lab orange" x="490" y="546">DELAY OUT → SAW SYNC IN</text>
+
+<!-- TORCIDO out1 to ring carrier and AMP2 -->
+<path class="audio" d="M710 375H790V450H845"/>
+<text class="lab" x="790" y="435">OUT 1 → CARRIER</text>
+<path class="audio" d="M710 375H1110V450H1150"/>
+<text class="lab" x="1000" y="365">OUT 1 → AMP 2 IN</text>
+
+<!-- Ring out to AMP1 and outputs -->
+<path class="audio" d="M1075 450H1110V207H1150"/>
+<text class="lab" x="1090" y="190">RING OUT → AMP 1</text>
+<path class="audio" d="M1075 450H1125V710H1150"/>
+<text class="lab" x="1085" y="620">RING OUT → OUT 1 + OUT 2</text>
+<!-- Amp outputs -->
+<path class="audio" d="M1245 257V610H1295V655"/>
+<path class="audio" d="M1245 497V655"/>
+
+<!-- LFO control connections -->
+<path class="cv" d="M845 680H810V115H1245V145"/>
+<text class="lab pink" x="835" y="105">CV → AMP 1 offset</text>
+<path class="cv" d="M845 710H800V285H710"/>
+<text class="lab pink" x="720" y="276">CV → TORCIDO tone / tube warm</text>
+<path class="cv" d="M845 735H780V135H295V165"/>
+<text class="lab pink" x="420" y="126">CV → SQR colour</text>
+<path class="cv" d="M1075 690H1120V440H1150"/>
+<text class="lab pink" x="1090" y="535">INV → AMP 2 offset</text>
+<path class="cv" d="M1075 715H1100V280H1075"/>
+<text class="lab pink" x="1080" y="300">INV → delay feedback</text>
+<path class="cv" d="M845 755H765V535H295V230"/>
+<text class="lab pink" x="470" y="530">INV → SQR fine</text>
+<path class="cv" d="M1075 750H1095V790H960V767"/>
+<text class="lab pink" x="1080" y="815">INV → LFO mod in</text>
+
+<!-- Ring audio also modulates the patch LFO -->
+<path class="audio" d="M1075 480H1090V610H820V735H845"/>
+<text class="lab" x="875" y="600">RING OUT → LFO MOD IN</text>
+
+<!-- GRF strip -->
+<rect class="ctl" x="55" y="625" width="690" height="155"/>
+<text x="80" y="657" class="name" text-anchor="start">GRF CV INPUTS</text>
+<text class="detail" x="80" y="690" text-anchor="start">GRF 1 → SAW pitch</text>
+<text class="detail" x="80" y="716" text-anchor="start">GRF 2 → SQR pitch + delay time</text>
+<text class="detail" x="80" y="742" text-anchor="start">GRF 3 → TORCIDO tone</text>
+<text class="detail" x="395" y="690" text-anchor="start">GRF 4 → TORCIDO dry/wet</text>
+<text class="detail" x="395" y="716" text-anchor="start">GRF 5 → SAW colour</text>
+<text class="detail" x="395" y="742" text-anchor="start">GRF 6 → Ring Mod on/off</text>
+
+<!-- Legend and notes -->
+<path d="M65 830H120" class="audio"/><text class="detail" x="135" y="835" text-anchor="start">Audio signal</text>
+<path d="M280 830H335" class="feedback"/><text class="detail" x="350" y="835" text-anchor="start">Feedback / reset</text>
+<path d="M520 830H575" class="cv"/><text class="detail" x="590" y="835" text-anchor="start">CV / modulation</text>
+<text x="65" y="875" class="sub">The saw is the loop exciter and is not routed directly to the outputs. Delay output re-enters TORCIDO IN 1 and resets the saw.</text>
+</svg>

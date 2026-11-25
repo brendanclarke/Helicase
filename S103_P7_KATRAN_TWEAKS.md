@@ -1,4 +1,4 @@
-# S103 P7 — Katran: control-rate coupling between the two cores (plan)
+# S103 P7 — Katran: coupling the two cores, and the ring → LFO path (plan)
 
 **Date:** 2026-11-25. **Branch:** `dev-ph7-alkaline` (the S103 P5 Katran;
 S103 P6 did not touch it). **Status:** plan, **pinned**. No source was
@@ -6,11 +6,17 @@ changed. It waits for your review of how Katran is presented to the user (the
 parameter reorganisation): **how these features become parameters is not
 decided here** (§8).
 
-**Your request (2026-11-25):** write up the four ways of inter-modulating
-the two cores through their internal modulation states (not audio: `spr`
-covers audio). All four if they fit; otherwise in your order of preference:
-**1 cross-level coupling, 4 cross-sync, 3 kick ping-pong, 2 anti-phase
-modulation**.
+**Your requests (2026-11-25):**
+- write up the four ways of inter-modulating the two cores through their
+  internal modulation states (not audio: `spr` covers audio). All four if
+  they fit; otherwise in your order of preference: **1 cross-level coupling,
+  4 cross-sync, 3 kick ping-pong, 2 anti-phase modulation**;
+- **feature 5** (added the same day): the patch fed RING OUT into its LFO's
+  MOD IN at audio rate. Katran's equivalent is block-rate and measures
+  another signal (§6A). Two potential implementations: **5a** measure the
+  right signal, **5b** a direct audio-rate AM path into the VCAs.
+- "The engine still sounds fantastic as-is … let's see what we can do later
+  on": every feature here is optional, and off reproduces today's sound.
 
 **Labels:**
 - **Code:** read from the tree, with a file and line.
@@ -42,8 +48,10 @@ No step here edits `MEMORY.md` or `knowledge_files/` (§12).
 | **3** | **Kick ping-pong** | A trigger kicks one core, not both: alternate, or core A then core B one loop-time later | per block | +0.3 | yes |
 | **2** | **Anti-phase modulation** | Core B takes the shared modulators (patch LFO, CE2) inverted, so one core opens as the other closes | per block | +0.3 | yes |
 | | **All four** | | | **+7.7 .. +9.7 → ≈ 374–376** | **under 380 by est.** (§7) |
+| **5a** | **Ring → LFO: the right measure** | The patch LFO's rate (and the CE rise) follow the **level of the cores' outputs over the block**, not one delay-output sample | per block | +1 | yes |
+| **5b** | **Ring → VCA: direct audio-rate AM** | The ring signal itself modulates the VCA gains every sample, recovering the audio-rate part of the patch's AMP CV | **per sample** | +3 .. +6 | **not with all four** (§7) |
 
-**Common to all:**
+**Common to all five:**
 - **Off is exact:** every feature's "off" state reproduces today's output
   bit for bit (laws §9), so nothing changes until a parameter exposes it.
 - **One shared groundwork step:** per-core feedback, tube and kick state (§2).
@@ -67,6 +75,9 @@ No step here edits `MEMORY.md` or `knowledge_files/` (§12).
 | **Osc 1 increments:** `incA[0]` (1a), `incA[1]` (1b) | `:646–647` | per copy already |
 | **The sync test:** `st = wrapB·KAT_SYNC_WRAP + dSelf[n]`, dSelf = the core's own `blkD[c]` | `KatranOsc.c:272`, `:298` | own core only |
 | **Both delay reads run before either core renders** (`kat_delayReadA()` / `B()` first) | `KatranVoice.c:1620` | so each core's D for this block is available to the other |
+| **The patch LFO:** one phase step and one `cv` per block | `kat_plfoStep()` `:410`, `:424` | shared |
+| **The VCA:** each core's output `o = t1 · (o0 + o1·B)`, the ring, the VCA and the output scale folded into two ramped gains (S103 P4); B loaded as `Bv` | `:977`, `:998` | per core |
+| Core outputs land in `buf` (core A) and `right[]` (core B) before the stereo matrix | `:1655`, `:1674` | per core |
 | **CPU now:** loops 295.0 + per block 2,290/32 = **366.6** | `katran_cpu.py` on the S103 P5 image | gate 380 |
 
 ---
@@ -236,6 +247,97 @@ are now: 0 per sample.
 
 ---
 
+## 6A. Feature 5 — the ring → LFO path
+
+### 6A.1 What the patch does, and what Katran does
+
+- **The patch:** RING OUT is patched into the LFO's MOD IN, so the ring
+  signal FMs the LFO's rate **at audio rate**. The LFO's CV and inverted
+  outputs then carry audio-rate sidebands into all eight destinations. The
+  most audible part is the AMP1 / AMP2 offsets: audio-rate amplitude
+  modulation of the outputs.
+- **Katran today:**
+  - **the signal** is `ringPrev`, the mean |D| of **one** delay-output
+    sample per core per block (`:1671`). It is not the ring output, and one
+    sample is a noisy level.
+  - **the rate:** the LFO runs once per block (`:410`); its `cv` is one
+    value per block.
+  - **the destinations** ramp (the VCAs, the feedback), slew (F1, 0.28 a
+    block) or hold (the tube) that value.
+  - **nothing above ≈ 690 Hz** (half the block rate) reaches any
+    destination, and in practice much less.
+
+### 6A.2 Option 5a — measure the right signal (per block)
+
+- **The measure:** after both cores render and before the stereo matrix
+  (between `:1655` and `:1674`), take the peak of |buf[n]| (core A) and
+  |right[n]| (core B) over every 4th sample, ÷ 32,768.
+  - Those blocks hold each core's ring, through its VCA: the patch's
+    outputs, of which the ring is the main part.
+  - The level is the meaningful block-rate equivalent of an audio-rate FM
+    input. A raw bipolar sample at 1.38 kHz would be sampled noise.
+- **The follower:** the same as feature 1's (§3.1: ≈ 10 ms attack,
+  ≈ 100 ms release), one shared value (the mean of the two cores) for the
+  LFO.
+- **Use:** in place of `ringPrev` in the LFO rate (`:423`) and, optionally,
+  the CE rise (`:380`).
+- **Off is today:** a source switch (internal control value, §8) selects
+  `ringPrev` (today, bit-identical) or the new level. **The switch is
+  required**, because a smoother, correct measure changes the sound.
+- **Shared with feature 1:** if both are built, one measuring pass serves
+  both. Feature 1 could follow the same outputs instead of D (a choice for
+  Q2).
+- **Cost (est.):** 12 reads and a compare a block, plus the follower:
+  ≈ 40 a block, **+1.2 a sample**; ≈ +0.2 if feature 1's measure is shared.
+- **RAM:** +4 B (the shared level) and 1 B (the source).
+
+### 6A.3 Option 5b — direct audio-rate AM into the VCAs (per sample)
+
+**The law** (per sample, in `kat_coreBody()`, after `o` at `:998`):
+
+| Core | Today | With 5b |
+|---|---|---|
+| A (AMP2: + g2·loop) | o = r + g2·t1 | o = r + (g2 + kAM·m[n])·t1 |
+| B (AMP1: ring × (1 + g1)) | o = r·(1 + g1) | o = r·(1 + g1 + kAM·m[n]) |
+
+The modulator m[n] has two candidates:
+- **(i) the ring itself:** m = r[n]. Closest to the patch's chain (ring →
+  LFO → AMP). r must be separated from the folded gains:
+  `r = t1·(rk0 + rk1·B)` (two operations), then the AM term (two).
+- **(ii) Osc 2 alone:** m = B[n]. Already loaded as `Bv` (`:977`); only the
+  AM term (two operations). It AMs the outputs at Osc 2's rate, a cleaner
+  "ring-rate tremolo".
+
+**Bounds and identity:**
+- kAM ≤ 0.5, so with |m| ≲ 0.7 the VCA gain stays near its 0.42 offset
+  range and never strongly inverts. No per-sample clamp (it would cost two).
+- **kAM = 0 is bit-identical:** `fma(0, …, o)` returns o exactly. Law PC-0.
+- **One value per voice, per block (no ramp):** a step change of kAM at a
+  block edge is a small AM step. Add a ramp (+1 a sample) only if listening
+  hears it.
+
+**Cost (est., per sample):**
+
+| Variant | Core A | Core B (half rate) | Total |
+|---|---:|---:|---:|
+| (i) m = r | +4 | +2 | **+6** |
+| (ii) m = B | +2 | +1 | **+3** |
+
+Both before any register-pressure effect in `kat_coreBody()`; the linked
+count decides.
+
+RAM: +1 B (kAM), +1 B (the variant, if both are kept).
+
+**Not taken: a per-sample patch LFO (option 3 of the discussion).** The
+LFO's phase and sine read every sample, FM'd by r, fed per sample to the
+VCAs, the feedback, the tube and Osc 2's phase increment.
+- **Cost:** ≈ +20 to +25 a sample, over the gate with anything else.
+- **Limit:** F1 would stay block-rate (a per-sample cutoff is a `tan()` a
+  sample).
+- Recorded for a later CPU budget, not planned.
+
+---
+
 ## 7. CPU and RAM fit
 
 | Item | Instructions a sample (est.) |
@@ -247,10 +349,19 @@ are now: 0 per sample.
 | 3 kick ping-pong | + 0.3 |
 | 2 anti-phase | + 0.3 |
 | **All four** | **≈ 374.3 – 376.3** |
+| 5a the right measure | + 1.2 (≈ + 0.2 shared with feature 1) |
+| 5b audio-rate AM | + 3 (m = B) .. + 6 (m = r) |
+| **All five (5a + 5b)** | **≈ 377.5 – 383.5** |
 | Gate | 380 |
 
 - **Margin:** **3.7–5.7 under the gate by estimate.** That is thin, and only
   the linked count decides.
+- **Feature 5 against the four:**
+  - 5a fits with all four;
+  - 5b does not fit with all four at the m = r variant;
+  - at the m = B variant it is at the gate.
+  - **5b's priority against features 1–4 is not set** (Q5). Feature 4's
+    fallback (§4.3) frees 4–6 a sample, which pays for 5b exactly.
 - **The drop ladder, if the count exceeds 380:**
   1. cross-sync's fallback (§4.3: 0 per sample, no "both");
   2. feature 1 without the pitch nudge (−1);
@@ -267,10 +378,11 @@ are now: 0 per sample.
 | Followers | 8 |
 | Sync masks | 2 |
 | Ping-pong state | 2 |
+| Feature 5 (level, source, kAM, variant) | 7 |
 | Alignment | ≈ 4 |
-| **Total** | **≈ 44** |
+| **Total** | **≈ 51** |
 
-  1,100 → ≈ 1,144 B (gate 1,200).
+  1,100 → ≈ 1,151 B (gate 1,200).
 
 ---
 
@@ -287,6 +399,8 @@ reorganise it; only then decide the parameters.
 | 4 cross-sync | mode per copy (own / other / both), or one mode for both | own |
 | 3 kick ping-pong | mode (both / alternate / echo / random) | both |
 | 2 anti-phase | φ ∈ [0, 1] | 0 |
+| 5a the right measure | the level source (today's `ringPrev` / the core outputs) | today's |
+| 5b audio-rate AM | kAM ∈ [0, 0.5]; the modulator (ring / Osc 2) if both are kept | kAM = 0 |
 
 - **Implementation (when scheduled):** each value is a byte in
   `KatranVoice` with a documented law, read in the async, so any later row,
@@ -307,14 +421,16 @@ reorganise it; only then decide the parameters.
 
 | Law | What |
 |---|---|
-| **PC-0** | All four off (x 0, own, both, φ 0) with G applied: output, both rings and every state **bit-identical** to the S103 P5 voice over 2,000 blocks (a frozen copy of the P5 render, the CO-MONO1 method of S103 P6) |
+| **PC-0** | All five off (x 0, own, both, φ 0, today's level source, kAM 0) with G applied: output, both rings and every state **bit-identical** to the S103 P5 voice over 2,000 blocks (a frozen copy of the P5 render, the CO-MONO1 method of S103 P6) |
 | PC-LVL | The follower: a step to a full-scale D reaches 63 % in ≈ 10 ms, falls in ≈ 100 ms; a silent core stays 0 |
 | PC-RIV | Rivalry x = −1, core A loud, core B quiet: core B's feedback target ≤ 0.2 × its own; never above it at any x < 0 |
 | PC-SYM | Sympathy x = +1: core B's feedback target equals its x = 0 value exactly (never raised); F1_B up by 24·d_B; 1b's increment × 2^(d_B·0.25) |
 | PC-SYNC | Mode other: copy 1a resets on core B's D crossing, never on its own; both: on either; own: exactly today's resets (KA-SYNC's case) |
 | PC-PP | Alternate: two triggers kick A then B; echo: core B's burst starts T_A/32 blocks after core A's; both: today |
 | PC-PHASE | φ = 1: core B's F1 LFO and CE2 terms are the negatives of core A's; φ = 0: equal |
-| PC-BND | All four at their extremes with `fbk` 127, `drv` 127, `res` 127 over 4,000 blocks: finite, bounded, the feedback clamps hold per core |
+| PC-RLV | 5a: a steady tone in both cores gives a level within 5 % of its peak over the block; the source "today" gives `ringPrev` exactly |
+| PC-AM | 5b: kAM = 0 is bit-identical; at kAM > 0 with a constant m the output equals the S103 P5 output with the VCA gain shifted by kAM·m (within float rounding); at full kAM no output exceeds int16 beyond the existing saturation |
+| PC-BND | All five at their extremes with `fbk` 127, `drv` 127, `res` 127 over 4,000 blocks: finite, bounded, the feedback clamps hold per core |
 | Break builds | `katran_break_riv` (rivalry raising feedback) must fail PC-RIV; `katran_break_xsync` (the other core's D read at the wrong index) must fail PC-SYNC |
 
 ---
@@ -328,6 +444,7 @@ reorganise it; only then decide the parameters.
 | 2 | Feature 1 (followers, law) | PC-LVL, PC-RIV, PC-SYM; a host render by ear |
 | 3 | Feature 4 (masks) | PC-SYNC; the linked count (the fallback if needed) |
 | 4 | Features 3 and 2 | PC-PP, PC-PHASE |
+| 4A | Feature 5: 5a, then 5b (the variant by ear) | PC-RLV, PC-AM; the linked count |
 | 5 | PC-BND, break builds; the image; the mixer hot-loop diff; the size assert | all |
 | 6 | Device: the `p` probe (≤ 18.6k); listening | yours |
 
@@ -342,6 +459,8 @@ reorganise it; only then decide the parameters.
 | R3 | Rivalry at block rate buzzes on fast loops | The follower's 10 / 100 ms smoothing; the feedback ramp is per sample (unchanged) |
 | R4 | Feature 1 needs the followers that would better feed the LFO and CE too, and switching them changes today's sound | Kept separate until you decide (Q2) |
 | R5 | Cross-sync makes the sound depend on both cores' levels; `snc` was tuned for one core | Shared threshold for now; per-mode thresholds only if listening asks for them |
+| R6 | 5a's smoother level changes the patch LFO's character (today's one-sample `ringPrev` is noisy, which may be part of the sound) | The source switch keeps today's as an option; decide by ear |
+| R7 | 5b's AM at high kAM with loud rings reaches the saturating store (hard clipping at the output) | kAM ≤ 0.5; PC-AM's bound; a ramp or a soft clip only if listening asks |
 
 ---
 
@@ -353,6 +472,7 @@ reorganise it; only then decide the parameters.
 | Q2 | Should the patch LFO and the CE rise move to the new per-core followers (smoother, a sound change), or keep `ringPrev`? | Decide by ear in step 2; keep `ringPrev` until then |
 | Q3 | Ping-pong: also split the run gain per core (a kicked core re-arms alone)? | No at first: a shared gr keeps the drone's on / off one control |
 | Q4 | Cross-sync mode per copy, or one for both? | One for both, unless the reorganisation has room |
+| Q5 | Feature 5's priority against 1–4 (5b does not fit with all four), and 5b's modulator (ring r or Osc 2 B) | 5a with feature 1 (they share the measure); 5b by ear against feature 4, since 4's fallback pays for 5b |
 
 **Statements this would make out of date (for you to log, when
 implemented):**
