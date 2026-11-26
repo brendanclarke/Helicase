@@ -1595,40 +1595,42 @@ uint8_t preset_setVoiceFaderSetting(uint8_t scene_index, uint8_t slot,
     return 1u;
 }
 
-uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,
-                                              instrument_image_select_t image,
-                                              uint8_t value,
-                                              uint8_t record_automation)
+uint8_t preset_setSlot6Track7Decay(uint8_t scene_index, uint8_t layer,
+                                   instrument_image_select_t image,
+                                   uint8_t value,
+                                   uint8_t record_automation)
 {
     (void)record_automation;
 
     /*
-     * Retain the generated non-Choke track-7 decay endpoint.
+     * Retain one generated track-7 decay endpoint (S104 P1: one layer).
      *
-     * Inputs: Scene index, endpoint image selector, 0..127 value, and the
-     * normal automation-recording flag used by Menu edits. Output: the
+     * Inputs: Scene index, layer (0 = generic / Tetrakt A, 1..3 = Tetrakt
+     * B..D), endpoint image selector, 0..127 value, and the normal
+     * automation-recording flag used by Menu edits. Output: the
      * generated Kit setting is updated in SceneData. This function exists
      * beside descriptor setters because the generated value has no descriptor
      * index and must never be saved into an instrument file. Future Scene mod
      * target work can extend this boundary with runtime apply/automation
      * capture without teaching Menu the kit_settings_t layout.
      */
-    if (!scene_get(scene_index))
+    if (!scene_get(scene_index) || layer >= SCENE_TRACK7_DECAY_LAYERS)
         return 0u;
     if (value > 127u)
         value = 127u;
     if (image == INSTRUMENT_IMAGE_MORPH)
-        scene_setSlot6Track7MorphAmpEnvelopeDecay(scene_index, value);
+        scene_setSlot6Track7MorphDecay(scene_index, layer, value);
     else
-        scene_setSlot6Track7AmpEnvelopeDecay(scene_index, value);
+        scene_setSlot6Track7Decay(scene_index, layer, value);
     /*
      * S076 Rule A: a non-automation retained write supersedes any active
-     * step decay override. The generated track-7 trigger path reads the
+     * that layer's step decay override (S104 P1). The generated track-7
+     * trigger path reads the
      * step override first when active; clearing it makes the next trigger
      * use the retained Kit value (or the LFO layer, if one is active).
      * Input: active Scene guard. Output:
-     * instrumentManager_clearSlot6Track7StepDecayOverride() sets
-     * slot6_track7_decay_step_active = 0.
+     * instrumentManager_clearSlot6Track7StepDecayLayer() clears the layer's
+     * bit in slot6_track7_decay_step_active.
      * Callers (upstream): menu_cellCommitValue() Kit setting branch,
      * InstrumentManager type-change normalization. Affiliate:
      * instrumentManager_setSlot6Track7StepDecayOverride() (the automation
@@ -1636,7 +1638,7 @@ uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,
      * consumer).
      */
     if (scene_index == scene_getActiveIndex())
-        instrumentManager_clearSlot6Track7StepDecayOverride();
+        instrumentManager_clearSlot6Track7StepDecayLayer(layer);
     return 1u;
 }
 
@@ -2531,6 +2533,7 @@ static uint8_t preset_commitStagedKitNormalToMorph(void)
 {
     const kit_t *source = filesystem_loadedKit();
     uint8_t scene_index;
+    uint8_t layer;
     uint8_t active_queued = 0u;
 
     /*
@@ -2603,7 +2606,8 @@ static uint8_t preset_commitStagedKitNormalToMorph(void)
              * destination Morph endpoint through SceneData's named setter.
              *
              * Inputs: a selected Scene, matching slot-6 types, and the bounded
-             * staged normal decay value. Output: the generated Morph-decay byte
+             * staged normal decay values. Output: the generated Morph-decay
+             * bytes (S104 P1: one per layer)
              * changes only when different and then offers
              * AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_MORPH_DECAY to its existing dirty
              * map. Why: this endpoint is a Kit setting rather than an
@@ -2614,9 +2618,11 @@ static uint8_t preset_commitStagedKitNormalToMorph(void)
              * scene_setSlot6Track7MorphAmpEnvelopeDecay(),
              * scene_storeKitParameterByte(), and presetMorph_requestVoice().
              */
-            scene_setSlot6Track7MorphAmpEnvelopeDecay(
-                scene_index,
-                source->settings.slot6_track7_amp_envelope_decay);
+            /* S104 P1: every layer's Normal value becomes its Morph endpoint. */
+            for (layer = 0u; layer < SCENE_TRACK7_DECAY_LAYERS; layer++)
+                scene_setSlot6Track7MorphDecay(
+                    scene_index, layer,
+                    source->settings.slot6_track7_decay[layer]);
             if (scene_index == scene_getActiveIndex()) {
                 presetMorph_requestVoice(scene_index, 5u);
                 active_queued = 1u;
@@ -2831,6 +2837,14 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
         bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
                                             (uint16_t)(1u << target_scene_index)));
         scene->kit.instruments[slot] = *staged;
+        /*
+         * S104 P1 (user Q24b): an Instrument Load into slot 6 carries no
+         * track-7 decays, so they take the new instrument's own track-6
+         * decays (scene_seedResidentTrack7Decays(): Tetrakt A..D, or the
+         * generic amp_envelope_decay), AutoSave-marked through the setters.
+         */
+        if (slot == INSTRUMENT_SLOT_COUNT - 1u)
+            scene_seedResidentTrack7Decays(target_scene_index);
         /*
          * S075: an Instrument copied from another slot keeps "self" LFO
          * targets pointing at itself. Kit Save writes `self` for a selector
@@ -3529,6 +3543,8 @@ static uint16_t preset_backgroundTrackChunks(uint8_t src_scene, uint8_t track)
  *  - bus_comp: read live from the active Scene by BusCompressor.c;
  *  - pattern_change_bar/pattern_next;
  *  - morph_interpolation[]: derived, see preset_instrumentImageMatches().
+ * The track-7 decay fields are per-layer arrays since S104 P1, compared and
+ * copied whole.
  * Affiliates: the copy and match functions below.
  */
 #define PRESET_TRACK_REGION_FIELDS(X) \
@@ -3542,15 +3558,15 @@ static uint16_t preset_backgroundTrackChunks(uint8_t src_scene, uint8_t track)
     X(voice_morph_amount) X(audio_out) X(fx_send_amount) X(fx_send_morph) \
     X(fader_setting)
 #define PRESET_SLOT6_KIT_FIELDS(X) \
-    X(slot6_track7_amp_envelope_decay) \
-    X(slot6_track7_morph_amp_envelope_decay)
+    X(slot6_track7_decay) \
+    X(slot6_track7_morph_decay)
 
 _Static_assert(sizeof(scene_settings_t) == 75u,
                "scene_settings_t changed: classify the new field in the S098 "
                "field lists (presetManager.c), then update 75");
-_Static_assert(sizeof(kit_settings_t) == 2u,
+_Static_assert(sizeof(kit_settings_t) == 8u,
                "kit_settings_t changed: classify the new field in the S098 "
-               "field lists (presetManager.c), then update 2");
+               "field lists (presetManager.c), then update 8");
 _Static_assert(sizeof(pat_scene_region_t) ==
                (PAT_STEPS_PER_SCENE * 2u) + (PAT_STACK_SIZE * 32u) +
                512u + 32u,
@@ -3687,7 +3703,8 @@ static uint8_t preset_slotMatches(uint8_t slot, uint8_t scene_a,
 #undef PM_MATCH_SLOT_SETTING
     if (slot == INSTRUMENT_SLOT_COUNT - 1u) {
 #define PM_MATCH_SLOT6_KIT(f) \
-        if (sa->kit.settings.f != sb->kit.settings.f) return 0u;
+        if (memcmp(sa->kit.settings.f, sb->kit.settings.f, \
+                   sizeof(sa->kit.settings.f)) != 0) return 0u;
         PRESET_SLOT6_KIT_FIELDS(PM_MATCH_SLOT6_KIT)
 #undef PM_MATCH_SLOT6_KIT
     }
@@ -4084,7 +4101,8 @@ static void preset_copyBackgroundSlot(uint8_t dst_slot, uint8_t src_scene,
     PRESET_SLOT_SETTINGS_FIELDS(PM_COPY_SLOT_SETTING)
 #undef PM_COPY_SLOT_SETTING
     if (dst_slot == INSTRUMENT_SLOT_COUNT - 1u) {
-#define PM_COPY_SLOT6_KIT(f) dst->kit.settings.f = src->kit.settings.f;
+#define PM_COPY_SLOT6_KIT(f) \
+        memcpy(dst->kit.settings.f, src->kit.settings.f, sizeof(dst->kit.settings.f));
         PRESET_SLOT6_KIT_FIELDS(PM_COPY_SLOT6_KIT)
 #undef PM_COPY_SLOT6_KIT
     }

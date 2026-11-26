@@ -58,12 +58,12 @@ OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
         instrument_manager samples sampleoptimize run_modes special_tags \
         stock_tables voicefold fold_tables pwm_tables crumpbit crumpbit_tables \
         crumpbit_elf_check crumpbit_cpu_check alkaline alkaline_tables \
-        elf_p4_snapshot elf_p4_check seq_steplen lfo lfo_rate_table alk_post_tables \
+        elf_p4_snapshot elf_p4_check seq_steplen seq_conditions seq_tempo lfo lfo_rate_table alk_post_tables \
         elf_s099_snapshot elf_s099_check \
         space space_cpu_check colloid colloid_tables colloid_cpu_check \
         tetrakt tetrakt_tables tetrakt_cpu_check katran katran_tables katran_cpu_check \
         distortion dist_makeup_table scene_identity chorus chorus_tables voice_space
-all: oscillator modulation voice_control sequencer seq_steplen instrument_manager samples \
+all: oscillator modulation voice_control sequencer seq_steplen seq_conditions seq_tempo instrument_manager samples \
      sampleoptimize run_modes special_tags stock_tables voicefold fold_tables pwm_tables \
      crumpbit crumpbit_tables alkaline alkaline_tables alk_post_tables lfo lfo_rate_table \
      space colloid colloid_tables distortion dist_makeup_table tetrakt tetrakt_tables \
@@ -287,11 +287,20 @@ lfo: | $(GEN)
 	$(EX) --src $(ROOT)/Core/DSPAudio/lfo.h --macro LFO_SR --out $(GEN)/lfo_sr.inc
 	$(EX) --src $(ROOT)/Core/DSPAudio/lfo.h --macro LFO_SINE --macro LFO_TRI \
 	  --macro LFO_SAW_UP --macro LFO_SAW_DOWN --macro LFO_REC --macro LFO_NOISE \
-	  --macro LFO_EXP_UP --macro LFO_EXP_DOWN --out $(GEN)/lfo_waves.inc
+	  --macro LFO_EXP_UP --macro LFO_EXP_DOWN \
+	  --macro LFO_OS_FIRST --macro LFO_OS_SINE --macro LFO_OS_TRI \
+	  --macro LFO_OS_SAW_UP --macro LFO_OS_SAW_DOWN --macro LFO_OS_REC \
+	  --macro LFO_OS_NOISE --macro LFO_OS_EXP_UP --macro LFO_OS_EXP_DOWN \
+	  --macro LFO_WAVE_COUNT --macro LFO_OS_RUN \
+	  --macro LFO_OS_PRE --macro LFO_OS_DONE \
+	  --out $(GEN)/lfo_waves.inc
 	$(EX) --src $(ROOT)/Core/DSPAudio/lfoRateTable.c --object lfoRateHz \
 	  --out $(GEN)/lfo_rate_table.c
-	$(EX) --src $(ROOT)/Core/DSPAudio/lfo.c --func lfo_calc --func lfo_calcPhaseInc \
-	  --func lfo_setFreq --func lfo_setSync --func lfo_stepBlock --out $(GEN)/lfo_funcs.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/lfo.c \
+	  --func lfo_osWrap \
+	  --func lfo_calc --func lfo_calcPhaseInc \
+	  --func lfo_setFreq --func lfo_setSync --func lfo_stepBlock \
+	  --func lfo_retriggerPhase --out $(GEN)/lfo_funcs.c
 	$(HOSTCC) $(HOSTFLAGS) -I$(GEN) modules/lfo.c -o build/lfo -lm
 	./build/lfo
 	mkdir -p build/break_lfo1 build/break_lfo2
@@ -301,8 +310,10 @@ lfo: | $(GEN)
 	@if ./build/lfo_break1 >/dev/null 2>&1; then \
 	  echo "lfo_break1: FAILED (a store-only sync writer not caught)"; exit 1; \
 	else echo "lfo_break1: caught (law LF1 fails as expected)"; fi
-	sed 's/lfo->sync ? 1.0f : lfo->modNodeValue/lfo->modNodeValue/' \
+	sed 's/= lfo->sync ? lfo->phaseInc/= 0 ? lfo->phaseInc/' \
 	  $(GEN)/lfo_funcs.c > build/break_lfo2/lfo_funcs.c
+	grep -q '= 0 ? lfo->phaseInc' build/break_lfo2/lfo_funcs.c || \
+	  { echo "lfo_break2: sed did not apply"; exit 1; }
 	$(HOSTCC) -Ibuild/break_lfo2 $(HOSTFLAGS) -I$(GEN) modules/lfo.c -o build/lfo_break2 -lm
 	@if ./build/lfo_break2 >/dev/null 2>&1; then \
 	  echo "lfo_break2: FAILED (a synced LFO following the overlay not caught)"; exit 1; \
@@ -316,6 +327,17 @@ lfo: | $(GEN)
 	@if ./build/lfo_break3 >/dev/null 2>&1; then \
 	  echo "lfo_break3: FAILED (a stepBlock that does not step not caught)"; exit 1; \
 	else echo "lfo_break3: caught (law LF6 fails as expected)"; fi
+	# S104 P1: a one-shot whose RUN wrap does not enter DONE must fail LF-OS1.
+	mkdir -p build/break_lfo4
+	sed 's|^		lfo->osState = LFO_OS_DONE; \\$$|		; \\|' \
+	  $(GEN)/lfo_funcs.c > build/break_lfo4/lfo_funcs.c
+	@! grep -q 'lfo->osState = LFO_OS_DONE; \\$$' build/break_lfo4/lfo_funcs.c || \
+	  { echo "lfo_break4: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_lfo4 $(HOSTFLAGS) -I$(GEN) modules/lfo.c \
+	  -o build/lfo_break4 -lm
+	@if ./build/lfo_break4 >/dev/null 2>&1; then \
+	  echo "lfo_break4: FAILED (a one-shot that never ends was not caught)"; exit 1; \
+	else echo "lfo_break4: caught (LF-OS1 fails as expected)"; fi
 
 lfo_rate_table:
 	cd $(ROOT) && python3 tools/plots/gen_lfo_rate_table.py --check
@@ -360,6 +382,9 @@ sequencer: | $(GEN)
 	$(EX) --src $(ROOT)/Core/Sequencer/sequencer.c \
 	  --func seq_lenStart --func seq_rollClearTrack --func seq_processRollTicks \
 	  --out $(GEN)/sequencer_len.c
+	$(EX) --src $(ROOT)/Core/Sequencer/sequencer.c \
+	  --func seq_restoreAutomatedParameters \
+	  --out $(GEN)/sequencer_restore.c
 	$(HOSTCC) $(HOSTFLAGS) modules/sequencer.c $(ROOT)/Core/Sequencer/StepScale.c \
 	  -o build/sequencer -lm
 	./build/sequencer
@@ -371,6 +396,17 @@ sequencer: | $(GEN)
 	@if ./build/sequencer_break >/dev/null 2>&1; then \
 	  echo "sequencer_break: FAILED (the cursor-start break was not caught)"; \
 	  exit 1; else echo "sequencer_break: caught (law 2 fails as expected)"; fi
+	# S104 P1: no track mask on a T7 restore must fail SQ-T7R.
+	mkdir -p build/break_seq_t7
+	sed 's/mask = seq_automation_dirty\[slot\] \& ~t6Keep;/mask = seq_automation_dirty[slot];/' \
+	  $(GEN)/sequencer_restore.c > build/break_seq_t7/sequencer_restore.c
+	@! grep -q 'seq_automation_dirty\[slot\] \& ~t6Keep' build/break_seq_t7/sequencer_restore.c || \
+	  { echo "sequencer_break_t7: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_seq_t7 -I$(GEN) $(HOSTFLAGS) modules/sequencer.c \
+	  $(ROOT)/Core/Sequencer/StepScale.c -o build/sequencer_break_t7 -lm
+	@if ./build/sequencer_break_t7 >/dev/null 2>&1; then \
+	  echo "sequencer_break_t7: FAILED (the T7 restore mask was not caught)"; \
+	  exit 1; else echo "sequencer_break_t7: caught (SQ-T7R fails as expected)"; fi
 
 # S093 P4: law AL-T. seq_trackStepSamples() against the real step-scale table
 # and a double-precision reference. Break: the tick product in 32 bits (it
@@ -391,6 +427,47 @@ seq_steplen: | $(GEN)
 	@if ./build/seq_steplen_break >/dev/null 2>&1; then \
 	  echo "seq_steplen_break: FAILED (the 32-bit product was not caught)"; \
 	  exit 1; else echo "seq_steplen_break: caught (AL-T fails as expected)"; fi
+
+# S104 P1: step conditions 1:- / !1- and the renumbered list; the repeat
+# counter's wrap. Break: the old 255 -> 0 wrap must fail law SC-WRAP.
+seq_conditions: | $(GEN)
+	$(EX) --src $(ROOT)/Core/Sequencer/sequencer.c \
+	  --func seq_repeatCountNext --func seq_conditionRepeatPasses \
+	  --func seq_conditionEval --func seq_rampConditionPredict \
+	  --out $(GEN)/seq_conditions_funcs.c
+	$(HOSTCC) $(HOSTFLAGS) -I$(GEN) modules/seq_conditions.c -o build/seq_conditions -lm
+	./build/seq_conditions
+	mkdir -p build/break_seqcond
+	sed 's/return (uint8_t)((c == 255u) ? 4u : (c + 1u));/return (uint8_t)(c + 1u);/' \
+	  $(GEN)/seq_conditions_funcs.c > build/break_seqcond/seq_conditions_funcs.c
+	@grep -q 'return (uint8_t)(c + 1u);' build/break_seqcond/seq_conditions_funcs.c || \
+	  { echo "seq_conditions_break: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_seqcond $(HOSTFLAGS) modules/seq_conditions.c \
+	  -o build/seq_conditions_break -lm
+	@if ./build/seq_conditions_break >/dev/null 2>&1; then \
+	  echo "seq_conditions_break: FAILED (the 255 -> 0 wrap was not caught)"; \
+	  exit 1; else echo "seq_conditions_break: caught (SC-WRAP fails as expected)"; fi
+
+# S104 P1: tempo in 1/100 BPM (laws in modules/seq_tempo.c). Break: the
+# integer 60000 / bpm period must fail TP-PERIOD at 133.00.
+seq_tempo: | $(GEN)
+	$(EX) --src $(ROOT)/Core/Sequencer/sequencer.c \
+	  --func seq_calcDeltaT --func seq_updateTempoEff \
+	  --func seq_setTempoCenti --func seq_getTempoCenti \
+	  --func seq_setTempoNudge --func seq_getTempoNudge \
+	  --func seq_getBpm --out $(GEN)/seq_tempo_funcs.c
+	$(HOSTCC) $(HOSTFLAGS) -I$(GEN) modules/seq_tempo.c -o build/seq_tempo -lm
+	./build/seq_tempo
+	mkdir -p build/break_tempo
+	sed 's|(60000.0f / bpm)|(float)(60000u / (uint32_t)bpm)|' \
+	  $(GEN)/seq_tempo_funcs.c > build/break_tempo/seq_tempo_funcs.c
+	@grep -q '(float)(60000u / (uint32_t)bpm)' build/break_tempo/seq_tempo_funcs.c || \
+	  { echo "seq_tempo_break: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tempo $(HOSTFLAGS) modules/seq_tempo.c \
+	  -o build/seq_tempo_break -lm
+	@if ./build/seq_tempo_break >/dev/null 2>&1; then \
+	  echo "seq_tempo_break: FAILED (the integer period was not caught)"; \
+	  exit 1; else echo "seq_tempo_break: caught (TP-PERIOD fails as expected)"; fi
 
 # S098 P1: Scene switch identity (laws in modules/scene_identity.c). Break:
 # comparing whole address entries (pool offsets included) must fail law 1.
@@ -1204,6 +1281,52 @@ tetrakt: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c $(GEN)/oscPwmTables.h
 	@if ./build/tetrakt_break_a2q 2>&1 | grep -Eq 'TK-A2Q +failures: [1-9]'; then \
 	  echo "tetrakt_break_a2q: caught (law TK-A2Q fails as expected)"; \
 	else echo "tetrakt_break_a2q: FAILED (a held envelope not caught)"; exit 1; fi
+	# S104 P1: no T6-pre-emption on a shared layer must fail TK-T7.
+	mkdir -p build/break_tkt_t7
+	sed '/if (altDecay \&\& (L->pflags \& TKT_PF_PEND) \&\&/,/continue;/ s/continue;/;/' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_t7/TetraktVoice.host.c
+	@if cmp -s $(GEN)/TetraktVoice.host.c build/break_tkt_t7/TetraktVoice.host.c; then \
+	  echo "tetrakt_break_t7: sed did not apply"; exit 1; fi
+	$(HOSTCC) -Ibuild/break_tkt_t7 $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_t7 -lm
+	@if ./build/tetrakt_break_t7 2>&1 | grep -Eq 'TK-T7 +failures: [1-9]'; then \
+	  echo "tetrakt_break_t7: caught (law TK-T7 fails as expected)"; \
+	else echo "tetrakt_break_t7: FAILED (T6 not pre-empting T7 not caught)"; exit 1; fi
+	# S104 P1: no seam select must fail TK-LOOP's form-A check.
+	mkdir -p build/break_tkt_seam
+	sed 's/(form == TKT_FORM_A \&\& idx + 1u == le) ? ls : idx + 1u/idx + 1u/' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_seam/TetraktVoice.host.c
+	@! grep -q 'TKT_FORM_A && idx + 1u == le' build/break_tkt_seam/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_seam: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_seam $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_seam -lm
+	@if ./build/tetrakt_break_seam 2>&1 | grep -Eq 'TK-LOOP +failures: [1-9]'; then \
+	  echo "tetrakt_break_seam: caught (law TK-LOOP fails as expected)"; \
+	else echo "tetrakt_break_seam: FAILED (a missing seam select not caught)"; exit 1; fi
+	# S104 P1: never predicting a seam must fail TK-LOOP too (S104 P1
+	# assessment: the prediction is the seamPh compare).
+	mkdir -p build/break_tkt_predict
+	sed 's/L->osc.phase >= L->seamPh/L->osc.phase >= 0xFFFFFFFFu/' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_predict/TetraktVoice.host.c
+	@grep -q 'L->osc.phase >= 0xFFFFFFFFu' build/break_tkt_predict/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_predict: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_predict $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_predict -lm
+	@if ./build/tetrakt_break_predict 2>&1 | grep -Eq 'TK-LOOP +failures: [1-9]'; then \
+	  echo "tetrakt_break_predict: caught (law TK-LOOP fails as expected)"; \
+	else echo "tetrakt_break_predict: FAILED (no seam prediction not caught)"; exit 1; fi
+	# S104 P1 assessment: claiming a slot in a restart block must fail
+	# TK-LOOP's restart-block check.
+	mkdir -p build/break_tkt_restart
+	sed 's/if (seamMask != 0u \&\& !anyStart)/if (seamMask != 0u)/' \
+	  $(GEN)/TetraktVoice.host.c > build/break_tkt_restart/TetraktVoice.host.c
+	@! grep -q 'seamMask != 0u && !anyStart' build/break_tkt_restart/TetraktVoice.host.c || \
+	  { echo "tetrakt_break_restart: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_tkt_restart $(HOSTFLAGS) $(OSC_HOST_INC) modules/tetrakt.c \
+	  $(CAT_HOST_SRC) -o build/tetrakt_break_restart -lm
+	@if ./build/tetrakt_break_restart 2>&1 | grep -Eq 'TK-LOOP +failures: [1-9]'; then \
+	  echo "tetrakt_break_restart: caught (law TK-LOOP fails as expected)"; \
+	else echo "tetrakt_break_restart: FAILED (a claim in a restart block not caught)"; exit 1; fi
 
 tetrakt_tables:
 	cd $(ROOT) && python3 tools/tetrakt/gen_tkt_tables.py --check

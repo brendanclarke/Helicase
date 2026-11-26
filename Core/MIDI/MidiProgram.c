@@ -33,6 +33,18 @@ uint8_t midiProgram_programChange(uint8_t channel, uint8_t program)
 
 	if (program > 15u || !bank_sceneAvailable(program))
 		return 0u;
+	/*
+	 * S104 P1, Omni: a program change on O assigns only the selected track
+	 * to the Scene, as a PC on that track's own channel would.
+	 */
+	{
+		const uint8_t omni = midiIn_omniTrack(channel);
+
+		if (omni != 0xFFu) {
+			seq_assignTracksToScene((uint8_t)(1u << omni), program);
+			return 1u;
+		}
+	}
 	/* G wins when a channel is both G and a voice channel (3.7). */
 	if (global != 0u && channel == global) {
 		menu_perfModeSceneChangeFrom(program, MIDI_ORIGIN_MIDI);
@@ -51,6 +63,9 @@ uint8_t midiProgram_bankChange(uint8_t channel, uint8_t value)
 {
 	uint8_t global = midiIn_globalChannel();
 
+	/* S104 P1: a Bank change belongs to G only; on O it is not consumed. */
+	if (midiIn_omniTrack(channel) != 0xFFu)
+		return 0u;
 	if (global == 0u || channel != global || value > 127u)
 		return 0u;
 	/*

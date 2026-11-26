@@ -679,6 +679,7 @@ static uint8_t ccCopy_runInstrument(const cc_job_t *job)
     instrument_type_t type = ccCopy_slotType(src->scene, s_slot);
     uint32_t mask;
     uint8_t m;
+    uint8_t layer;
 
     if (run->phase == 2u) {
         if (!ccSvc_namesReady())
@@ -716,10 +717,13 @@ static uint8_t ccCopy_runInstrument(const cc_job_t *job)
             continue;
         if (s_slot == INSTRUMENT_SLOT_COUNT - 1u &&
             d_slot == INSTRUMENT_SLOT_COUNT - 1u && m != src->scene) {
-            scene_setSlot6Track7AmpEnvelopeDecay(
-                m, scene_getSlot6Track7AmpEnvelopeDecay(src->scene));
-            scene_setSlot6Track7MorphAmpEnvelopeDecay(
-                m, scene_getSlot6Track7MorphAmpEnvelopeDecay(src->scene));
+            /* S104 P1: every track-7 layer, both endpoints. */
+            for (layer = 0u; layer < SCENE_TRACK7_DECAY_LAYERS; layer++) {
+                scene_setSlot6Track7Decay(
+                    m, layer, scene_getSlot6Track7Decay(src->scene, layer));
+                scene_setSlot6Track7MorphDecay(
+                    m, layer, scene_getSlot6Track7MorphDecay(src->scene, layer));
+            }
         }
     }
     ccTrace(AUTOSAVE_TRACE_CC_EVT_FANOUT,
@@ -1053,7 +1057,7 @@ static uint8_t ccCopy_runFxSteps(const cc_job_t *job)
  *             preset_copySlotNormalToMorph(), preset_setVoiceFxSendMorph(),
  *             scene_getVoiceFxSendAmount(),
  *             scene_setSlot6Track7MorphAmpEnvelopeDecay(),
- *             scene_getSlot6Track7AmpEnvelopeDecay(), preset_rebuildMorph().
+ *             scene_getSlot6Track7Decay(), preset_rebuildMorph().
  * Affiliates: ccCopy_runInstrument() (fan-out copy model),
  *             ccClear_runResetMorphTrack() (analogous reset).
  */
@@ -1065,6 +1069,7 @@ static uint8_t ccCopy_runMorphTrack(const cc_job_t *job)
     uint32_t mask;
     uint8_t active = scene_getActiveIndex();
     uint8_t m;
+    uint8_t layer;
 
     if (!src)
         return CC_RUN_DROP;
@@ -1105,8 +1110,9 @@ static uint8_t ccCopy_runMorphTrack(const cc_job_t *job)
         }
         if (s_slot == INSTRUMENT_SLOT_COUNT - 1u &&
             d_slot == INSTRUMENT_SLOT_COUNT - 1u)
-            scene_setSlot6Track7MorphAmpEnvelopeDecay(
-                m, scene_getSlot6Track7AmpEnvelopeDecay(src->scene));
+            for (layer = 0u; layer < SCENE_TRACK7_DECAY_LAYERS; layer++)
+                scene_setSlot6Track7MorphDecay(
+                    m, layer, scene_getSlot6Track7Decay(src->scene, layer));
         ccSvc_nameContentChanged(
             filesystem_identityRow(FS_ROW_INSTRUMENT, m, d_slot));
     }
@@ -1157,7 +1163,7 @@ static uint8_t ccCopy_runMorphTrack(const cc_job_t *job)
  *             preset_copySlotNormalToMorph(), preset_setVoiceFxSendMorph(),
  *             scene_getVoiceFxSendAmount(),
  *             scene_setSlot6Track7MorphAmpEnvelopeDecay(),
- *             scene_getSlot6Track7AmpEnvelopeDecay(), scene_effectConst(),
+ *             scene_getSlot6Track7Decay(), scene_effectConst(),
  *             effects_paramMorphable(), scene_effectRecordForWholeCommit(),
  *             scene_finishEffectWholeCommit(), effects_activateScene(),
  *             preset_rebuildMorph().
@@ -1172,6 +1178,7 @@ static uint8_t ccCopy_runSceneMorph(const cc_job_t *job)
     uint8_t active = scene_getActiveIndex();
     const effect_record_t *src_fx;
     uint8_t m;
+    uint8_t layer;
 
     if (!src)
         return CC_RUN_DROP;
@@ -1191,8 +1198,9 @@ static uint8_t ccCopy_runSceneMorph(const cc_job_t *job)
             ccSvc_nameContentChanged(
                 filesystem_identityRow(FS_ROW_INSTRUMENT, m, slot));
         }
-        scene_setSlot6Track7MorphAmpEnvelopeDecay(
-            m, scene_getSlot6Track7AmpEnvelopeDecay(src->scene));
+        for (layer = 0u; layer < SCENE_TRACK7_DECAY_LAYERS; layer++)
+            scene_setSlot6Track7MorphDecay(
+                m, layer, scene_getSlot6Track7Decay(src->scene, layer));
         /*
          * Effect: copy the source Normal cells onto this member's Morph
          * cells only when the two Effect types match; a different type

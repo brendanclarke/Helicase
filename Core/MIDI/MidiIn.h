@@ -44,6 +44,13 @@
 ** tracks following G change channel. Caller: menu_parseGlobalParam(). */
 void    midiIn_setGlobalChannel(uint8_t channel);
 uint8_t midiIn_globalChannel(void);
+/* S104 P1, MIDI Omni channel O (0 off, 1..16). Setter: menu_parseGlobalParam()
+** (releases the notes held on the old O). midiIn_omniTrack(channel): the
+** selected track 0..6 when `channel` is O, else 0xFF; every channel consumer
+** asks it first (contract in MidiIn.c). */
+void    midiIn_setOmniChannel(uint8_t channel);
+uint8_t midiIn_omniChannel(void);
+uint8_t midiIn_omniTrack(uint8_t channel);
 /* Menu: RXF (isTx 0) or TXF (isTx 1) as the 4-bit N R C P mask. */
 void    midiIn_setFilter(uint8_t isTx, uint8_t value);
 /* 1 when the RXF (or TXF) mask has `bit` (MIDI_FILTER_*). */

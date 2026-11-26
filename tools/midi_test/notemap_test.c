@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "MidiNoteMap.h"
+#include "omni_map.c"   /* S104 P1: the real midiNotes_omniMap() */
 
 static unsigned failures;
 
@@ -300,10 +301,64 @@ static void randomised(void)
 	}
 }
 
+/*
+ * NM-OMNI (S104 P1): the Omni one-track map of midiNotes_omniMap().
+ *
+ * What: with O = 5 and the selected track T3 (index 2), every note on O maps
+ * to T3 only, as if T3 were alone on its own channel; G and every other
+ * track's assignment are ignored (G equal to O included: no stripe). An
+ * unassigned T3 gets internal 63 + n (clamped 127); a rooted T3 (48) gets 63
+ * at note 48; a wide (Tetrakt) T3 gets sub n mod 4 and 63 + n / 4.
+ * Why: the Omni contract depends on this map throwing G's stripe away.
+ * The Makefile break build removes `map->global = 0u;`, which lets the G
+ * stripe take note 5 and fails this law.
+ */
+static void omni(void)
+{
+	midiNoteMap_settings_t s;
+	unsigned n;
+
+	/* Unassigned selected track, other tracks assigned elsewhere. */
+	base(&s, 5u);
+	s.channel[0] = 3u;
+	s.note[0] = 40u;
+	s.channel[6] = 9u;
+	midiNotes_omniMap(&s, 2u, 5u);
+	CHECK(s.global == 0u, "NM-OMNI: G must be off in the one-track map");
+	for (n = 0u; n < 128u; n++)
+		expect(&s, 5u, (uint8_t)n, 2,
+		       (int)((63u + n > 127u) ? 127u : 63u + n));
+	expect(&s, 5u, 0u, 2, 63);
+	expect(&s, 6u, 0u, -1, 0);
+
+	/* A root: the note at the root is internal 63. */
+	base(&s, 5u);
+	s.note[2] = 48u;
+	midiNotes_omniMap(&s, 2u, 5u);
+	expect(&s, 5u, 48u, 2, 63);
+	expect(&s, 5u, 49u, 2, 64);
+
+	/* Wide (Tetrakt): four notes a pitch. */
+	base(&s, 5u);
+	s.wide = (uint8_t)(1u << 2);
+	midiNotes_omniMap(&s, 2u, 5u);
+	for (n = 0u; n < 128u; n++)
+		expect_sub(&s, 5u, (uint8_t)n, 2, (int)(63u + n / 4u),
+		           (int)(n % 4u));
+
+	/* O equal to G: still no stripe. */
+	base(&s, 5u);
+	s.channel[1] = 5u;
+	s.note[1] = 60u;
+	midiNotes_omniMap(&s, 2u, 5u);
+	expect(&s, 5u, 5u, 2, 68);
+}
+
 int main(void)
 {
 	examples();
 	wide();
+	omni();
 	randomised();
 	printf("%s (%u failures)\n", failures ? "FAIL" : "PASS", failures);
 	return failures ? 1 : 0;

@@ -2878,6 +2878,7 @@ static void filesystem_resetGlobalsToDefaults(void)
     uint16_t globals_len = (uint16_t)(NUM_PARAMS - PAR_BEGINNING_OF_GLOBALS);
     memset(parameter_values + PAR_BEGINNING_OF_GLOBALS, 0, globals_len);
     parameter_values[PAR_BPM] = 120u;
+    parameter_values[PAR_BPM_FINE] = 0u;   /* S104 P1: 120.00 BPM */
     parameter_values[PAR_OSC_WAVE_INTERP] = 0u;
     /*
      * S080 E11/F6: defaults for the new persistent globals. Overlay defaults
@@ -2905,6 +2906,12 @@ static void filesystem_sanitizeLoadedGlobals(void)
     /* S083: 0 = G off is valid; out of range falls back to 1. */
     if (ch > 16u)
         parameter_values[PAR_MIDI_CHAN_GLOBAL] = 1u;
+    /* S104 P1: Omni 0..16; anything else is off. */
+    if (parameter_values[PAR_MIDI_CHAN_OMNI] > 16u)
+        parameter_values[PAR_MIDI_CHAN_OMNI] = 0u;
+    /* S104 P1: hundredths 0..99. */
+    if (parameter_values[PAR_BPM_FINE] > 99u)
+        parameter_values[PAR_BPM_FINE] = 0u;
     /*
      * S080 P2 Defect 15: qac has nine values (0..8). A hand-edited or corrupt
      * settings.cfg must not leave an out-of-range action that the menu cannot
@@ -2999,6 +3006,7 @@ static void filesystem_applyStaleGlobalsFallback(const uint8_t *src, uint16_t sr
     parameter_values[PAR_EXT_SYNC] = SEQ_EXT_SYNC_AUTO;
     parameter_values[PAR_BAR_RESET_MODE] = 0u;
     parameter_values[PAR_MIDI_CHAN_GLOBAL] = 1u;
+    parameter_values[PAR_MIDI_CHAN_OMNI] = 0u;   /* S104 P1: Omni off */
     parameter_values[PAR_OSC_WAVE_INTERP] = 1u;
     filesystem_sanitizeLoadedGlobals();
 }
@@ -3015,9 +3023,11 @@ static void filesystem_resetSettingsToDefaults(void)
      * root machine settings.
      */
     parameter_values[PAR_BPM] = 120u;
+    parameter_values[PAR_BPM_FINE] = 0u;   /* S104 P1: 120.00 BPM */
     parameter_values[PAR_EXT_SYNC] = SEQ_EXT_SYNC_AUTO;
     parameter_values[PAR_QUANTISATION] = 0u;
     parameter_values[PAR_MIDI_CHAN_GLOBAL] = 1u;
+    parameter_values[PAR_MIDI_CHAN_OMNI] = 0u;   /* S104 P1: Omni off */
     parameter_values[PAR_MIDI_FILT_TX] = 0u;
     parameter_values[PAR_MIDI_FILT_RX] = 0u;
     parameter_values[PAR_MIDI_ROUTING] = 0u;
@@ -3108,6 +3118,9 @@ static uint8_t filesystem_settingsParamForKey(const char *key,
     ** unlisted byte, the roll treats an invalid one as off). */
     else if (strcmp(key, "perf_vel_lt") == 0) *param = PAR_PERF_VEL_LT;
     else if (strcmp(key, "perf_vel_rt") == 0) *param = PAR_PERF_VEL_RT;
+    /* S104 P1: the MIDI Omni channel and the BPM hundredths. */
+    else if (strcmp(key, "midi_chan_omni") == 0) *param = PAR_MIDI_CHAN_OMNI;
+    else if (strcmp(key, "bpm_fine") == 0) *param = PAR_BPM_FINE;
     /* S080 F6: scene queue / change division globals. */
     else if (strcmp(key, "scd") == 0) *param = PAR_SCENE_CHANGE_DIV;
     else if (strcmp(key, "qcd") == 0) *param = PAR_SCENE_QUEUE_DIV;
@@ -13000,6 +13013,11 @@ static void filesystem_loadKitDirectory_tick(void)
              * filesystem_loadedKit(), because Preset must preserve destination
              * slot identity and copy only same-type morphable endpoint values.
              */
+            /* S104 P1: track-7 decays the kitset did not carry take slot 6's
+             * track-6 values (scene_seedTrack7Decays()); this also serves
+             * KitMrp, which reads op_staged_kit through
+             * filesystem_loadedKit(). */
+            scene_seedTrack7Decays(&op_staged_kit, op_kitset.seen_t7_mask);
             if (current_op == FS_INTERNAL_OP_LOAD_KIT) {
                 uint8_t identity_slot;
 
@@ -18493,6 +18511,9 @@ static uint8_t filesystem_commitSceneStage(void)
      * Affiliates: pat_sceneRegionMut(), Scene Pattern phases, and the later
      * Pattern transactional redesign.
      */
+    /* S104 P1: as for a Kit Load. */
+    scene_seedTrack7Decays(&fs_stage_workspace.scene_stage.kit,
+                           op_kitset.seen_t7_mask);
     for (scene_index = 0u;
          scene_index < SCENE_COUNT && scene_index < 16u;
          scene_index++) {
@@ -19289,22 +19310,31 @@ static uint8_t filesystem_nextSettingsLine(char *dst, uint16_t cap,
         return filesystem_formatAssignmentU16Line(
             dst, cap, "perf_vel_rt", parameter_values[PAR_PERF_VEL_RT]);
     case 26u:
+        /* S104 P1: the BPM's hundredths (0..99; DJ mode, the tap tempo). */
+        return filesystem_formatAssignmentU16Line(
+            dst, cap, "bpm_fine", parameter_values[PAR_BPM_FINE]);
+    case 27u:
+        /* S104 P1: the MIDI Omni channel (0 off, 1..16). */
+        return filesystem_formatAssignmentU16Line(
+            dst, cap, "midi_chan_omni", parameter_values[PAR_MIDI_CHAN_OMNI]);
+    case 28u:
         /*
          * Self-checking terminator for format expansion.
          *
-         * What: emits "lines=26\n" as the final line, where 26 is the count
-         * of preceding data lines (cases 0u..25u: 17 original + 4 overlay
+         * What: emits "lines=28\n" as the final line, where 28 is the count
+         * of preceding data lines (cases 0u..27u: 17 original + 4 overlay
          * (S080 E10) + 3 scene globals (S080 F5, P2 Defect 5) + 2 overlay
-         * roll rhythms (S083 follow-up; 24 before)). Why: gives
-         * consumers a cheap completeness signal that distinguishes a genuine
-         * end-of-file from a clean-but-early EOF after a crash. Adding a
-         * settings key requires incrementing both its own case and this
-         * declared count. The boot recovery prelude validates this count; the
-         * normal load path ignores it as an unknown key. MIDI Learn rows are
-         * not settings lines: they live in midilrn.cfg (S083 §16). Affiliates:
-         * §6 of S057_SETTINGS_WRITE_SAFE.md.
+         * roll rhythms (S083 follow-up) + bpm_fine and midi_chan_omni
+         * (S104 P1; 26 before)). Why: gives consumers a cheap completeness
+         * signal that distinguishes a genuine end-of-file from a
+         * clean-but-early EOF after a crash. Adding a settings key requires
+         * incrementing both its own case and this declared count. The boot
+         * recovery prelude validates this count against the file's own line
+         * count; the normal load path ignores it as an unknown key. MIDI
+         * Learn rows are not settings lines: they live in midilrn.cfg (S083
+         * §16). Affiliates: §6 of S057_SETTINGS_WRITE_SAFE.md.
          */
-        return filesystem_formatAssignmentU16Line(dst, cap, "lines", 26u);
+        return filesystem_formatAssignmentU16Line(dst, cap, "lines", 28u);
     default:
         return 0u;
     }
@@ -19360,30 +19390,29 @@ static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap,
                                             "format=helicase.kitset\n");
     if (index == 1u)
         return filesystem_formatLiteralLine(dst, cap, "version=1\n");
-    if (index == 2u)
+    /*
+     * The eight track-7 decay lines (S104 P1: lines 2..9, bit = index - 2 =
+     * 2 x layer + image, the storageTypes.c key table). A Morph save
+     * (KitMrp) writes each layer's endpoints interpolated at slot 6's voice
+     * Morph amount, as the single pair was before.
+     */
+    if (index >= 2u && index < 10u) {
+        const uint8_t bit = (uint8_t)(index - 2u);
+        const uint8_t layer = (uint8_t)(bit / 2u);
+        const uint8_t base = kit->settings.slot6_track7_decay[layer];
+        const uint8_t morph = kit->settings.slot6_track7_morph_decay[layer];
+        uint8_t v = (bit & 1u) ? morph : base;
+
+        if (op_kit_save_mode == STORAGE_INSTRUMENT_SAVE_MORPH &&
+            op_kit_save_source_scene < SCENE_COUNT)
+            v = filesystem_interpolateMorphEndpoint(
+                base, morph,
+                source_scene ? source_scene->settings.voice_morph_amount[5u]
+                             : 0u);
         return filesystem_formatAssignmentU16Line(
-            dst, cap, "slot6_track7_amp_envelope_decay",
-            (op_kit_save_mode == STORAGE_INSTRUMENT_SAVE_MORPH &&
-             op_kit_save_source_scene < SCENE_COUNT)
-                ? filesystem_interpolateMorphEndpoint(
-                      kit->settings.slot6_track7_amp_envelope_decay,
-                      kit->settings.slot6_track7_morph_amp_envelope_decay,
-                      source_scene
-                          ? source_scene->settings.voice_morph_amount[5u]
-                          : 0u)
-                : kit->settings.slot6_track7_amp_envelope_decay);
-    if (index == 3u)
-        return filesystem_formatAssignmentU16Line(
-            dst, cap, "slot6_track7_morph_amp_envelope_decay",
-            (op_kit_save_mode == STORAGE_INSTRUMENT_SAVE_MORPH)
-                ? filesystem_interpolateMorphEndpoint(
-                      kit->settings.slot6_track7_amp_envelope_decay,
-                      kit->settings.slot6_track7_morph_amp_envelope_decay,
-                      source_scene
-                          ? source_scene->settings.voice_morph_amount[5u]
-                          : 0u)
-                : kit->settings.slot6_track7_morph_amp_envelope_decay);
-    if (index == 4u)
+            dst, cap, storage_kitsetTrack7KeyName(bit), v);
+    }
+    if (index == 10u)
         return filesystem_formatLiteralLine(dst, cap, "\n");
 
     /*
@@ -19393,7 +19422,7 @@ static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap,
      * increasing line index onto the source instrument slot; the modulus picks
      * the field inside that four-line slot block.
      */
-    index = (uint16_t)(index - 5u);
+    index = (uint16_t)(index - 11u);
     slot = (uint8_t)(index / 4u);
     field = (uint8_t)(index % 4u);
     if (slot >= STORAGE_KIT_SLOT_COUNT)
@@ -32357,6 +32386,7 @@ static uint8_t filesystem_bootReaderNarrowLoadKit(
         FS_BOOT_FAIL(7u, 1u);
         return 0u;
     }
+    scene_seedTrack7Decays(&op_staged_kit, op_kitset.seen_t7_mask);   /* S104 P1 */
     scene->kit = op_staged_kit;
     return 1u;
 }

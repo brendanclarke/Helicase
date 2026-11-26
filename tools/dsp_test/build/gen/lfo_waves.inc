@@ -14,3 +14,29 @@
 #define LFO_EXP_UP		0x06
 
 #define LFO_EXP_DOWN	0x07
+
+#define LFO_OS_FIRST	0x08
+
+#define LFO_OS_SINE		0x08
+
+#define LFO_OS_TRI		0x09
+
+#define LFO_OS_SAW_UP	0x0A
+
+#define LFO_OS_SAW_DOWN	0x0B
+
+#define LFO_OS_REC		0x0C
+
+#define LFO_OS_NOISE	0x0D
+
+#define LFO_OS_EXP_UP	0x0E
+
+#define LFO_OS_EXP_DOWN	0x0F
+
+#define LFO_WAVE_COUNT	16u
+
+#define LFO_OS_RUN		0u
+
+#define LFO_OS_PRE		32u
+
+#define LFO_OS_DONE		64u

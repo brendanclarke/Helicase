@@ -95,6 +95,38 @@ void seq_drainPendingAutomationTo(uint8_t limit)
                     uint8_t slot = instrumentParam_slot(target);
 
                     /*
+                     * Track-7 decay locks on a Tetrakt (S104 P1).
+                     *
+                     * What: an entry owned by track 7 whose target is one of
+                     * slot 6's four Tetrakt decay rows (tkt_decay_a..d) sets
+                     * that layer's track-7 step override
+                     * (instrumentManager_setSlot6Track7StepDecayOverride())
+                     * and is consumed: the row (track 6's decay) is not
+                     * written, not marked held, and starts no ramp. Why: on a
+                     * Tetrakt, track 7 plays the longer decays and its decay
+                     * automation must move them only (user, S104 P1); the
+                     * value is taken at the track-7 trigger (fixed per note),
+                     * so a ramp has nothing to move. Placed before the R12
+                     * test: a VOICE6 edit of a track-6 decay must not suppress
+                     * track 7's lock. Inputs: owner_track, owner_scene,
+                     * target, value. Outputs: the override; cleared at track
+                     * 7's next trigger restore. Affiliates:
+                     * instrumentManager_track7DecayLayer(),
+                     * seq_restoreAutomatedParameters().
+                     */
+                    if (owner_track == INSTRUMENT_SLOT_COUNT) {
+                        const uint8_t t7Layer =
+                            instrumentManager_track7DecayLayer(owner_scene, target);
+
+                        if (t7Layer < SCENE_TRACK7_DECAY_LAYERS) {
+                            instrumentManager_setSlot6Track7StepDecayOverride(
+                                t7Layer, value);
+                            i++;
+                            continue;
+                        }
+                    }
+
+                    /*
                      * Skip overridden parameters in the drain (S081 §5.1, R12).
                      *
                      * What: for each Instrument-parameter entry, check

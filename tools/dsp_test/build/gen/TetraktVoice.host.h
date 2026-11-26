@@ -114,6 +114,20 @@ typedef struct {
 	uint8_t  stage;
 	uint8_t  pendSample;
 	uint8_t  pendVel;
+	/*
+	 * Track-7 decay state (S104 P1), in the three padding bytes after
+	 * pendVel (offsets 85..87, measured; sizeof(TktLayer) unchanged).
+	 * decayAlt: the decay a note started by track 7 plays; pendDecayAlt:
+	 * the pending track-7 trigger's decay; pflags: TKT_PF_PEND (a trigger is
+	 * waiting for this layer's START latch), TKT_PF_PEND_ALT (that trigger
+	 * is track 7's), TKT_PF_ALT (the playing note is track 7's), and the
+	 * loop read form (TKT_PF_FORM_*, S104 P1 loops). Written by
+	 * Tetrakt_triggerVoice() and tkt_layerControl()'s START latch; read by the
+	 * decay control and the post-loop dispatch.
+	 */
+	uint8_t  decayAlt;
+	uint8_t  pendDecayAlt;
+	uint8_t  pflags;
 	float    env, envLast, velo;
 	/*
 	 * S101 P2 A2q (S101_P2_REDUCTIONS.md §A.3 A2q; S101_P2_IMPLEMENTATION.md
@@ -130,7 +144,52 @@ typedef struct {
 	float    gL, gR, gS;
 	float    srrRate, srrCnt, srrHold;
 	float    bindGain;          /* the bound sample's gain (S096 P1 §19) */
+	/*
+	 * Loop points of a looped (SLP) bind (S104 P1), in Q19.12 phase:
+	 * loopStartPh = loop_start << 12 and loopEndPh = loop_end << 12
+	 * (loop_end exclusive; the whole sample without a `smpl` chunk,
+	 * SampleInstall.c), written at every bind (tkt_bindLayer()); 0 for a
+	 * one-shot bind. Why: the async's seam prediction and the sync render's
+	 * seam forms read them every block of a looped layer; caching them here
+	 * keeps catalogue lookups out of both (and out of the sync render's
+	 * register allocation). RAM: 8 B a layer, 32 B a voice, inside the
+	 * 1,264 B slot reserve (TetraktVoice 1,080 -> 1,112 B; asserted at
+	 * InstrumentManager.c:360). No new allocation (S101 P2 A2q precedent).
+	 */
+	uint32_t loopStartPh, loopEndPh;
+	/*
+	 * Seam threshold (S104 P1 assessment): the first block-start
+	 * phase from which this block's reads can reach the last loop frame,
+	 * loopEndPh - 4,096 - 32 x phaseInc (0 when the loop is shorter than one
+	 * block's reach: every block is a seam block); 0xFFFFFFFF for a one-shot
+	 * (never a seam). Written by tkt_layerControl() after the bind and the
+	 * step, the only places either changes; the async's seam prediction is
+	 * then one load and compare per layer instead of a multiply-add.
+	 * RAM: 4 B a layer, 16 B a voice, inside the 1,264 B slot reserve
+	 * (TetraktVoice 1,112 -> 1,128 B; asserted at InstrumentManager.c:360).
+	 */
+	uint32_t seamPh;
 } TktLayer;
+
+#define TKT_PF_PEND       0x01u
+#define TKT_PF_PEND_ALT   0x02u
+#define TKT_PF_ALT        0x04u
+/* S104 P1 assessment: the pending trigger's row value names a looped
+ * sample; Tetrakt_triggerVoice() maps the value, the START latch only copies. */
+#define TKT_PF_PEND_SLP   0x20u
+
+/* S104 P1: the post-loop form of this block (Tetrakt_calcVoiceAsync()). */
+#define TKT_PF_FORM_SHIFT 3u
+#define TKT_PF_FORM_MASK  0x18u
+#define TKT_FORM_PLAIN    0u   /* no seam this block: the one-shot loop */
+#define TKT_FORM_A        1u   /* seam, interpolation slot held: exact */
+#define TKT_FORM_B        2u   /* seam, no slot: early wrap */
+
+/* The host build's OscInfo differs, so the firmware layout is the one pinned. */
+#if !defined(TKT_HOST)
+_Static_assert(sizeof(TktLayer) == 216u,
+               "S104 P1: 204 B + the two loop points + the seam threshold");
+#endif
 
 /*
  * The voice (S096 P1).
@@ -176,7 +235,9 @@ typedef struct TetraktVoiceStruct
  * Tetrakt_triggerVoice()     LFO retrigger, the platform velocity node;
  *                            arms the layers set in layerOn, or in `layers`
  *                            when it is nonzero for this trigger only
- *                            (S096 P3) (main loop, sequencer).
+ *                            (S096 P3) (main loop, sequencer); altDecay is
+ *                            track 7's four decays, NULL for track 6
+ *                            (S104 P1).
  * Tetrakt_calcVoiceAsync()   the block's control work (render context).
  * Tetrakt_calcVoiceSyncBlock() the block's audio: left into buf, right into
  *                            voice->right (render context).
@@ -188,7 +249,8 @@ typedef struct TetraktVoiceStruct
 void Tetrakt_initVoice(TetraktVoice *voice, uint8_t slot, int16_t *line)
 	__attribute__((noinline, noclone));
 void Tetrakt_triggerVoice(TetraktVoice *voice, uint8_t source_slot,
-                          uint8_t velocity, uint8_t note, uint8_t layers);
+                          uint8_t velocity, uint8_t note, uint8_t layers,
+                          const uint8_t *altDecay);
 void Tetrakt_calcVoiceAsync(TetraktVoice *voice) __attribute__((noinline));
 void Tetrakt_calcVoiceSyncBlock(TetraktVoice *voice, int16_t *buf, uint8_t size)
 	__attribute__((noinline));

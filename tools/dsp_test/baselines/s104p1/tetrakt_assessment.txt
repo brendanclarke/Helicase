@@ -1,0 +1,6 @@
+tetrakt: loops 293.5 + per block 3085/32 = 389.9
+  spaceOut frame 64, segment 57 x 4; binds 4 x START
+  S101 P2 A2q steady (one layer control a block, no START): loops 293.5 + per block 1341/32 = 335.4
+  S104 P1 seam block (one control, four slot claims, no START): loops 293.5 + per block 1527/32 = 341.2
+  S104 P1 seam A premium per held slot: 3.2 (pool charge 45)
+  gate: the larger, 389.9 / 390 (callees included)

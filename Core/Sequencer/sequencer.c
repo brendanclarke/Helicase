@@ -282,18 +282,40 @@ static volatile uint8_t seq_trackShuffleRoll[NUM_TRACKS];
 static volatile uint8_t seq_trackShuffleMuteMask;
 
 /*
- * Per-track repeat count for X:Y conditions (S079 §3.2).
+ * Per-track repeat count for X:Y, 1:- and !1- conditions (S079 §3.2;
+ * S104 P1 wrap rule).
  *
- * What: increments when a track's step index wraps (forward: len-1->0,
- * reverse: 0->len-1, pip: at each boundary reversal, random: once per len
- * steps drawn). Why: X:Y conditions need a modulo counter. Reset to 0 on
- * transport/pattern reset (seq_setStepIndexToStart) and Scene change
- * (seq_selectActivePattern). Once modes never wrap, so the counter stays at
+ * What: advances by one each time a track's step index wraps (forward:
+ * len-1->0, reverse: 0->len-1, pip: at each boundary reversal, random: once
+ * per len steps drawn), always through seq_repeatCountNext(). Why: the X:Y
+ * conditions need a modulo counter, and 1:- / !1- need "is this the first
+ * pass" (count 0). Reset to 0 on transport/pattern reset
+ * (seq_setStepIndexToStart), Scene change (seq_resetTrackForSceneChange) and
+ * per-track Scene assignment. Once modes never wrap, so the counter stays at
  * 0. Inputs: play-mode wrap logic in seq_advanceTrackStep(). Outputs:
- * seq_evaluateStepCondition() reads this. RAM: 7 B SRAM1 static. Affiliates:
- * seq_setStepIndexToStart(), seq_selectActivePattern().
+ * seq_conditionEval() and seq_rampConditionPredict(). RAM: 7 B SRAM1
+ * static. Affiliates: seq_setStepIndexToStart(), seq_selectActivePattern(),
+ * seq_repeatCountNext().
  */
 static uint8_t seq_trackRepeatCount[NUM_TRACKS];
+
+/*
+ * Next value of a repeat counter (S104 P1).
+ *
+ * What: c + 1, except that 255 is followed by 4, never by 0.
+ * Why: the counter is one byte. A plain 255 -> 0 wrap made `1:-` play again
+ * after 256 passes, `!1-` skip one, and `1:3` play two passes in a row
+ * (255 % 3 == 0 and 0 % 3 == 0). 256 is 4 modulo 12 (the least common
+ * multiple of the X:Y divisors 2, 3 and 4), so continuing at 4 keeps every
+ * X:Y sequence unbroken, and 0 ("first pass") is reached only by a reset.
+ * Inputs: the current count. Output: the next count. Context: TIM3 (the
+ * wrap sites) and the ramp predictor.
+ * Accessors: seq_advanceTrackStep(), seq_rampConditionPredict().
+ */
+static inline uint8_t seq_repeatCountNext(uint8_t c)
+{
+    return (uint8_t)((c == 255u) ? 4u : (c + 1u));
+}
 
 /*
  * Per-track free step counter for the random play mode (S079 §3.2).
@@ -308,12 +330,13 @@ static uint8_t seq_trackRndStepCount[NUM_TRACKS];
 /*
  * Per-track last-condition-fired flag for lst/!ls chaining (S079 §3.4).
  *
- * What: set to 1 when the last evaluated conditional step (condition 1..36)
+ * What: set to 1 when the last evaluated conditional step (condition 1..41)
  * fired, 0 when it was suppressed. Default 0 (not fired). Updated by
  * seq_evaluateStepCondition() for any step with condition != 0. Why: lst/!ls
  * conditions chain off the most recent conditional step on this track.
- * Inputs: seq_evaluateStepCondition(). Outputs: condition indices 23/24 read
- * this. RAM: 7 B SRAM1 static. Affiliates: seq_setStepIndexToStart().
+ * Inputs: seq_evaluateStepCondition(). Outputs: conditions 26 (lst) and 27
+ * (!ls; S104 P1 numbering) read this. RAM: 7 B SRAM1 static. Affiliates:
+ * seq_setStepIndexToStart().
  */
 static uint8_t seq_trackLastConditionFired[NUM_TRACKS];
 
@@ -889,7 +912,27 @@ static uint8_t seq_effectiveTrackLength[NUM_TRACKS];
 static uint8_t seq_effectiveTrackScale[NUM_TRACKS];
 static uint8_t seq_effectiveTrackShuffle[NUM_TRACKS];
 
-static uint16_t seq_tempo = 120;			/**< seq speed in bpm*/
+/*
+ * Tempo state (S104 P1: hundredths of a BPM and the DJ nudge).
+ *
+ * What: seq_tempoCenti is the base tempo in 1/100 BPM (100..65,500; the
+ * menu's PAR_BPM x 100 + PAR_BPM_FINE, or the measured external tempo x 100
+ * from clockSync/the trigger jack through seq_setBpm()). seq_tempoNudge is
+ * the DJ-mode nudge as a fraction (-0.05..+0.05; 0 outside a nudge).
+ * seq_tempoEff = base x (1 + nudge) in BPM; under external sync the nudge
+ * is ignored. Why: the TIM3 tempo timer (seq_calcDeltaT()) and the
+ * step-length gate (seq_trackStepSamples()) run at the effective tempo, so
+ * a nudge moves the clock and MIDI clock out. Synced LFOs and delays read
+ * seq_getBpm(), the rounded base, so a nudge does not re-tune them
+ * (user, S104 P1). Writers: seq_setTempoCenti(), seq_setTempoNudge()
+ * (foreground; clockSync also from TIM3), each a single aligned store; the
+ * readers take one aligned load. RAM: 2 + 4 + 4 B SRAM1 (S104 P1, +8 B,
+ * approved). Affiliates: seq_updateTempoEff(), menu DJ mode, buttonHandler
+ * nudge ramp.
+ */
+static volatile uint16_t seq_tempoCenti = 12000u;
+static volatile float    seq_tempoNudge = 0.0f;
+static volatile float    seq_tempoEff   = 120.0f;
 
 static uint32_t	seq_lastTick = 0;			/**< stores the time the last step change occured*/
 static float	seq_deltaT;					/**< time in [ms] until the next step
@@ -2048,37 +2091,110 @@ void seq_init()
 	seq_clearAutomationDirty();
 }
 //------------------------------------------------------------------------------
-static void seq_calcDeltaT(uint16_t bpm)
+/*
+ * Tempo-timer period of one 96-PPQ tick (S104 P1: float, effective tempo).
+ *
+ * What: seq_deltaT = 60,000 ms / bpm / 96 x SYSTICK_TICKS_PER_MS, computed in
+ * float from seq_tempoEff (floored at 0.01 BPM). Why: the period was an
+ * integer 60000 / bpm (133 BPM ran at 133.04), and DJ mode needs 1/100 BPM
+ * and the nudge. seq_tick() carries the fractional remainder ("rest"), so
+ * the average tick rate is exact. Inputs: seq_tempoEff. Output: seq_deltaT.
+ * Context: TIM3 (seq_tick(), seq_extClockTicks()).
+ */
+static void seq_calcDeltaT(void)
 {
-	//--- calc deltaT ----
-	// The hardware timer services one 96 PPQ transport tick at a time.
-	// Track/default-step scheduling is derived from those ticks separately.
-	seq_deltaT 	= (1000*60)/bpm; 	//bei 12 = 500ms = time for one beat
-	seq_deltaT /= (float)SEQ_INTERNAL_PPQ;
-	seq_deltaT *= SYSTICK_TICKS_PER_MS; //systick_ticks is the canonical 0.25ms LXR tick
+	const float bpm = (seq_tempoEff > 0.01f) ? seq_tempoEff : 0.01f;
 
+	seq_deltaT = (60000.0f / bpm) / (float)SEQ_INTERNAL_PPQ *
+	             (float)SYSTICK_TICKS_PER_MS;
 	/* The transport tick stays uniform: fixed-grid patterns have no shuffle. */
 }
+
+/*
+ * Recompute the effective tempo (S104 P1).
+ * What: seq_tempoEff = centi / 100 x (1 + nudge); the nudge is ignored under
+ * external sync (the external clock owns the tempo). Inputs: seq_tempoCenti,
+ * seq_tempoNudge, seq_getExtSync(). Output: seq_tempoEff. Context: any;
+ * one aligned float store. Accessors: seq_setTempoCenti(),
+ * seq_setTempoNudge(), seq_setExtSyncSource().
+ */
+static void seq_updateTempoEff(void)
+{
+	const float base = (float)seq_tempoCenti * 0.01f;
+
+	seq_tempoEff = seq_getExtSync() ? base : base * (1.0f + seq_tempoNudge);
+}
+
+/* Contract in sequencer.h (S104 P1). */
+void seq_setTempoCenti(uint16_t centi)
+{
+	const uint16_t oldBpm = seq_getBpm();
+
+	if (centi < 100u)
+		centi = 100u;
+	if (centi > 65500u)
+		centi = 65500u;
+	seq_tempoCenti = centi;
+	seq_updateTempoEff();
+	/* Synced LFOs follow the rounded whole BPM; recompute them only when it
+	 * changes (a hundredths edit or an external tempo jitter of < 0.5 BPM
+	 * leaves their rate alone). */
+	if (seq_getBpm() != oldBpm)
+		lfo_recalcSync();
+}
+
+uint16_t seq_getTempoCenti(void)
+{
+	return seq_tempoCenti;
+}
+
+/* Contract in sequencer.h (S104 P1). */
+void seq_setTempoNudge(float nudge)
+{
+	if (nudge > 0.05f)
+		nudge = 0.05f;
+	if (nudge < -0.05f)
+		nudge = -0.05f;
+	seq_tempoNudge = nudge;
+	seq_updateTempoEff();
+}
+
+float seq_getTempoNudge(void)
+{
+	return seq_tempoNudge;
+}
+
 //------------------------------------------------------------------------------
+/*
+ * Whole-BPM tempo write (menu before S104, clockSync, trigger jack).
+ *
+ * What: bpm 1..655 -> seq_setTempoCenti(bpm x 100). Why: the external tempo
+ * sources measure whole BPM; 655 is the largest whole BPM whose hundredths
+ * fit the 16-bit seq_tempoCenti. Inputs: bpm (0 is treated as 1).
+ * Accessors: clockSync.c sync_tick(), triggerJacks.c.
+ */
 void seq_setBpm(uint16_t bpm)
 {
-	if (bpm == 0)
-		bpm = 1;
-	seq_tempo 	= bpm;
-	//seq_calcDeltaT(bpm);
-	lfo_recalcSync();
+	if (bpm == 0u)
+		bpm = 1u;
+	if (bpm > 655u)
+		bpm = 655u;
+	seq_setTempoCenti((uint16_t)(bpm * 100u));
 }
 //------------------------------------------------------------------------------
+/* The rounded base tempo in whole BPM (S104 P1: from 1/100 BPM). Readers:
+ * LFO sync, Space/CrumpBit delay sync, clockSync's first-window seed. */
 uint16_t seq_getBpm()
 {
-	return seq_tempo;
+	return (uint16_t)((seq_tempoCenti + 50u) / 100u);
 }
 //------------------------------------------------------------------------------
 /*
  * One step of a track in samples (S093 P4). Contract: sequencer.h.
  *
  * Concurrency: seq_effectiveTrackScale[] is written by the foreground
- * refresh (l. 1782) and read by TIM3; seq_tempo by seq_setBpm(). Both are
+ * refresh (l. 1782) and read by TIM3; seq_tempoEff by seq_setTempoCenti()/
+ * seq_setTempoNudge()/seq_setExtSyncSource(). Both are
  * single aligned byte/halfword reads here, so no lock is needed: a value one
  * refresh old shifts one gate by that refresh.
  */
@@ -2090,18 +2206,20 @@ uint32_t seq_trackStepSamples(uint8_t track)
 	                                           : (uint8_t)STEP_SCALE_DEFAULT;
 	/* ticks per step in Q8.8 at 96 PPQ: 1536 (CC 0) .. 49152 (CC 127) */
 	const uint64_t ticksQ8 = (uint64_t)stepScale_ticksQ8(scale);
-	/* the tempo, never 0 (seq_setBpm() clamps too; this guards boot) */
-	const uint64_t bpm = (seq_tempo != 0u) ? (uint64_t)seq_tempo : 1u;
-	/* samples = ticksQ8 x fs x 60 / (256 x 96 x bpm):
-	 *   numerator ticksQ8 x 44108 x 60 = ticksQ8 x 2,646,480, in 64 bits: a
-	 *   1/16 alone is 6144 x 2,646,480 = 1.6e10, past 2^32 (AL-T's break
-	 *   build makes it 32-bit and fails 21 checks);
-	 *   denominator 256 x 96 x bpm = 24,576 x bpm;
-	 *   + den/2 rounds to the nearest sample.
-	 * The M7 calls __aeabi_uldivmod once per trigger (main loop, not the
-	 * audio path) */
-	const uint64_t den = 24576u * bpm;
-	const uint64_t samples = (ticksQ8 * 2646480u + den / 2u) / den;
+	/*
+	 * The effective tempo in hundredths (S104 P1: 1/100 BPM, DJ nudge),
+	 * never below 1 BPM. samples = ticksQ8 x fs x 60 x 100 / (256 x 96 x
+	 * centi): the numerator and the denominator are both x 100 against the
+	 * whole-BPM form, and 24,576 x bpm is even, so every whole tempo gives
+	 * the earlier result bit for bit (law AL-T is unchanged).
+	 *   numerator ticksQ8 x 264,648,000 (x 100 of 2,646,480): at most
+	 *   49,152 x 264,648,000 = 1.3e13, in 64 bits;
+	 *   denominator 24,576 x centi; + den / 2 rounds to the nearest sample.
+	 */
+	const float eff = seq_tempoEff;
+	const uint64_t centi = (eff >= 1.0f) ? (uint64_t)(eff * 100.0f + 0.5f) : 100u;
+	const uint64_t den = 24576u * centi;
+	const uint64_t samples = (ticksQ8 * 264648000u + den / 2u) / den;
 
 	/* at most 5,292,960 (fits 32 bits); >= 1 so a gate always opens */
 	return (samples > 0u) ? (uint32_t)samples : 1u;
@@ -2997,12 +3115,15 @@ static uint8_t seq_trackEffectTypeMatchesActive(uint8_t track)
  */
 
 /*
- * Repeat-count condition test (S079 §3; factored for S081 P2).
+ * Repeat-count condition test (S079 §3; factored for S081 P2; S104 P1 !1-).
  *
  * What: conditions 11..19 ("X:Y") pass when repeatCount % Y == X - 1;
- * 20 ("1:-") passes only on the first play (repeatCount 0). Why: playback
+ * 20 ("1:-") passes only on the first pass (repeatCount 0); 21 ("!1-")
+ * passes on every pass except the first (repeatCount != 0). Why: playback
  * and the ramp predictor must apply the identical rule; the predictor passes
- * the repeat count B will see. Inputs: condition 11..20, repeat count.
+ * the repeat count the next step will see. The counter never returns to 0
+ * except by a reset (seq_repeatCountNext()), so 1:- and !1- stay exact
+ * however long the Scene plays. Inputs: condition 11..21, repeat count.
  * Output: pass flag. Context: TIM3. Accessors: seq_conditionEval(),
  * seq_rampConditionPredict().
  */
@@ -3015,26 +3136,29 @@ static uint8_t seq_conditionRepeatPasses(uint8_t cond, uint8_t repeatCount)
 
     if (cond == 20u)
         return (uint8_t)(repeatCount == 0u);
+    if (cond == 21u)
+        return (uint8_t)(repeatCount != 0u);
     return (uint8_t)((repeatCount % xy_table[cond - 11u][1]) ==
                      (uint8_t)(xy_table[cond - 11u][0] - 1u));
 }
 
 /*
- * Evaluate the per-step trigger condition (S079 §3).
+ * Evaluate the per-step trigger condition (S079 §3; S104 P1 numbering).
  *
  * What: the single gate before a step fires. Returns 1 (fire) or 0
  * (suppress). Updates seq_trackLastConditionFired for conditional steps.
  * Why: all condition logic lives at one entry point. Condition 0 and
- * undefined values (37..255) always pass.
+ * undefined values (42..255) always pass.
  *
  * Probability conditions 1..10 map to 10%..95% and are compared against the
- * hardware RNG. Repeat-count conditions 11..20 fire when
- * (seq_trackRepeatCount % Y) == (X - 1); value 20 ("1:-") fires only on the
- * first play of the track. Fill conditions 21/22 read seq_fillActive.
- * S080 B4 inserts loop conditions 23 ("lop") and 24 ("!lp") between fill and
- * last; last conditions move to 25/26 and read seq_trackLastConditionFired.
- * Mute conditions 27..40 test one voice's mute bit in seq_mutedTracks (27..33
- * muted, 34..40 not muted). Total table size is 41 (indices 0..40).
+ * hardware RNG. Repeat-count conditions 11..21: X:Y (11..19) fire when
+ * (seq_trackRepeatCount % Y) == (X - 1); 20 ("1:-") fires only on the first
+ * pass and 21 ("!1-", S104 P1) on every pass except the first. Fill
+ * conditions 22/23 read seq_fillActive; loop conditions 24 ("lop") and 25
+ * ("!lp") read seq_loopActive; last conditions 26/27 read
+ * seq_trackLastConditionFired. Mute conditions 28..41 test one voice's mute
+ * bit in seq_mutedTracks (28..34 muted, 35..41 not muted). Total table size
+ * is 42 (values 0..41; MenuText.h conditionNames[]).
  *
  * Inputs: specials struct (condition index), track index (for mute/repeat/
  * last state). Outputs: gate result, side effect on
@@ -3055,7 +3179,7 @@ static uint8_t seq_conditionEval(const pat_step_specials_t *sp,
     uint8_t cond = sp->condition;
     uint8_t result = 1u;
 
-    if (cond == 0u || cond > 40u)
+    if (cond == 0u || cond > 41u)
         return 1u;
 
     if (cond <= 10u) {
@@ -3068,46 +3192,46 @@ static uint8_t seq_conditionEval(const pat_step_specials_t *sp,
                                  127u) / 32767u);
 
         result = (uint8_t)(rnd < threshold);
-    } else if (cond <= 20u) {
-        /* Repeat count: X:Y, values 11..20 (shared with the S081 P2 ramp
-         * predictor through seq_conditionRepeatPasses()). */
+    } else if (cond <= 21u) {
+        /* Repeat count: X:Y, 1:- and !1-, values 11..21 (shared with the
+         * S081 P2 ramp predictor through seq_conditionRepeatPasses()). */
         result = seq_conditionRepeatPasses(cond, seq_trackRepeatCount[track]);
-    } else if (cond <= 22u) {
-        /* Fill / not-fill, values 21..22. */
-        if (cond == 21u)
+    } else if (cond <= 23u) {
+        /* Fill / not-fill, values 22..23 (S104 P1 shift). */
+        if (cond == 22u)
             result = seq_fillActive;
         else
             result = (uint8_t)(!seq_fillActive);
-    } else if (cond <= 24u) {
+    } else if (cond <= 25u) {
         /*
-         * Loop active / inactive, values 23..24 (S080 B4).
+         * Loop active / inactive, values 24..25 (S080 B4; S104 P1 shift).
          *
-         * What: index 23 ("lop") fires only while the PERF looper is engaged;
-         * 24 ("!lp") fires only while it is not. Why: lets pattern steps react
+         * What: index 24 ("lop") fires only while the PERF looper is engaged;
+         * 25 ("!lp") fires only while it is not. Why: lets pattern steps react
          * to the looper. Input: seq_loopActive (single-byte, foreground set,
          * ISR read). No boundary timing - evaluated on every step. Affiliates:
          * conditionNames[] (MenuText.h B1), seq_loopEngage()/Disengage().
          */
-        if (cond == 23u)
+        if (cond == 24u)
             result = seq_loopActive;
         else
             result = (uint8_t)(!seq_loopActive);
-    } else if (cond <= 26u) {
-        /* Last / not-last conditional step, values 25..26 (S080 B4 shift). */
-        if (cond == 25u)
+    } else if (cond <= 27u) {
+        /* Last / not-last conditional step, values 26..27 (S104 P1 shift). */
+        if (cond == 26u)
             result = seq_trackLastConditionFired[track];
         else
             result = (uint8_t)(!seq_trackLastConditionFired[track]);
     } else {
         /*
-         * Mute / not-mute, values 27..40 (S080 B4 shift). 27..33 = "is voice N
-         * muted" for voices 1..7, 34..40 = "is voice N not muted". The
-         * zero-based voice index is (cond - 27) mod 7 over both halves.
+         * Mute / not-mute, values 28..41 (S104 P1 shift). 28..34 = "is voice N
+         * muted" for voices 1..7, 35..41 = "is voice N not muted". The
+         * zero-based voice index is (cond - 28) mod 7 over both halves.
          */
-        uint8_t voice_idx = (uint8_t)((cond - 27u) % 7u);
+        uint8_t voice_idx = (uint8_t)((cond - 28u) % 7u);
         uint8_t is_muted = (uint8_t)((seq_mutedTracks >> voice_idx) & 1u);
 
-        if (cond <= 33u)
+        if (cond <= 34u)
             result = is_muted;
         else
             result = (uint8_t)(!is_muted);
@@ -3433,13 +3557,19 @@ static void seq_advanceTrackStep(uint8_t track)
 	if ((play_mode == 4u || play_mode == 5u) &&
 	    (seq_trackPlayState[track] & SEQ_PLAY_STATE_STOPPED))
 		return;
+	/*
+	 * Every pass wrap below advances the repeat counter through
+	 * seq_repeatCountNext() (S104 P1), never with ++: the counter must not
+	 * return to 0 by overflow, because 0 means "first pass" for 1:- / !1-.
+	 */
 	switch (play_mode) {
 	case 1u: /* rev */
 		seq_stepIndex[track]--;
 		if (seq_stepIndex[track] < 0) {
 			seq_stepIndex[track] = (int16_t)(len - 1u);
 			/* Wrap 0 -> len-1 counts as one traversal (S079 §3.2). */
-			seq_trackRepeatCount[track]++;
+			seq_trackRepeatCount[track] =
+			    seq_repeatCountNext(seq_trackRepeatCount[track]);
 		}
 		break;
 	case 2u: /* pip */
@@ -3447,14 +3577,16 @@ static void seq_advanceTrackStep(uint8_t track)
 			if (seq_stepIndex[track] <= 0) {
 				seq_trackPlayState[track] &=
 				    (uint8_t)~SEQ_PLAY_STATE_PIP_REV;
-				seq_trackRepeatCount[track]++;
+				seq_trackRepeatCount[track] =
+			    seq_repeatCountNext(seq_trackRepeatCount[track]);
 			} else {
 				seq_stepIndex[track]--;
 			}
 		} else {
 			if (seq_stepIndex[track] >= (int16_t)(len - 1u)) {
 				seq_trackPlayState[track] |= SEQ_PLAY_STATE_PIP_REV;
-				seq_trackRepeatCount[track]++;
+				seq_trackRepeatCount[track] =
+			    seq_repeatCountNext(seq_trackRepeatCount[track]);
 			} else {
 				seq_stepIndex[track]++;
 			}
@@ -3465,7 +3597,8 @@ static void seq_advanceTrackStep(uint8_t track)
 		    (int16_t)(((uint16_t)GetRngValue() & 0x7FFFu) % len);
 		if (++seq_trackRndStepCount[track] >= len) {
 			seq_trackRndStepCount[track] = 0u;
-			seq_trackRepeatCount[track]++;
+			seq_trackRepeatCount[track] =
+			    seq_repeatCountNext(seq_trackRepeatCount[track]);
 		}
 		break;
 	case 4u: /* onc — once, aligned to the master clock at entry */
@@ -3482,7 +3615,8 @@ static void seq_advanceTrackStep(uint8_t track)
 		seq_stepIndex[track]++;
 		if (seq_stepIndex[track] >= (int16_t)len) {
 			seq_stepIndex[track] = 0;
-			seq_trackRepeatCount[track]++;
+			seq_trackRepeatCount[track] =
+			    seq_repeatCountNext(seq_trackRepeatCount[track]);
 		}
 		break;
 	}
@@ -3523,12 +3657,16 @@ static void seq_advanceTrackStep(uint8_t track)
 				uint8_t cond = msp.condition;
 				uint8_t self_mute = 0u;
 
-				/* S080 B4: mute condition ranges shifted +2 by lop/!lp. */
-				if (cond >= 27u && cond <= 33u &&
-				    (uint8_t)(cond - 27u) == track)
+				/*
+				 * Self-mute conditions (S080 B4; S104 P1 shifts them +1
+				 * behind !1-): 28..34 "this voice muted", 35..41 "this
+				 * voice not muted", voice = cond - 28 or cond - 35.
+				 */
+				if (cond >= 28u && cond <= 34u &&
+				    (uint8_t)(cond - 28u) == track)
 					self_mute = 1u;
-				else if (cond >= 34u && cond <= 40u &&
-				    (uint8_t)(cond - 34u) == track)
+				else if (cond >= 35u && cond <= 41u &&
+				    (uint8_t)(cond - 35u) == track)
 					self_mute = 1u;
 				if (self_mute &&
 				    seq_evaluateStepCondition(&msp, track))
@@ -3960,9 +4098,10 @@ static uint8_t seq_applySceneAutomation(uint16_t target, uint8_t value)
 			scene_getActiveIndex(), descriptor->voice_slot, morph);
 		break;
 	}
-	case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
-		instrumentManager_setSlot6Track7StepDecayOverride(value);
-		break;
+    case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
+        /* `7dc` is layer 0 (S104 P1). */
+        instrumentManager_setSlot6Track7StepDecayOverride(0u, value);
+        break;
 	case SCENE_MOD_TARGET_KIND_AUDIO_OUT:
 		/* Keep the live superpage value aligned with the DSP route. */
 		preset_applyVoiceAudioOutRuntime(descriptor->voice_slot, value);
@@ -4154,6 +4293,38 @@ void seq_drainPendingAutomationTo(uint8_t limit)
                     uint8_t slot = instrumentParam_slot(target);
 
                     /*
+                     * Track-7 decay locks on a Tetrakt (S104 P1).
+                     *
+                     * What: an entry owned by track 7 whose target is one of
+                     * slot 6's four Tetrakt decay rows (tkt_decay_a..d) sets
+                     * that layer's track-7 step override
+                     * (instrumentManager_setSlot6Track7StepDecayOverride())
+                     * and is consumed: the row (track 6's decay) is not
+                     * written, not marked held, and starts no ramp. Why: on a
+                     * Tetrakt, track 7 plays the longer decays and its decay
+                     * automation must move them only (user, S104 P1); the
+                     * value is taken at the track-7 trigger (fixed per note),
+                     * so a ramp has nothing to move. Placed before the R12
+                     * test: a VOICE6 edit of a track-6 decay must not suppress
+                     * track 7's lock. Inputs: owner_track, owner_scene,
+                     * target, value. Outputs: the override; cleared at track
+                     * 7's next trigger restore. Affiliates:
+                     * instrumentManager_track7DecayLayer(),
+                     * seq_restoreAutomatedParameters().
+                     */
+                    if (owner_track == INSTRUMENT_SLOT_COUNT) {
+                        const uint8_t t7Layer =
+                            instrumentManager_track7DecayLayer(owner_scene, target);
+
+                        if (t7Layer < SCENE_TRACK7_DECAY_LAYERS) {
+                            instrumentManager_setSlot6Track7StepDecayOverride(
+                                t7Layer, value);
+                            i++;
+                            continue;
+                        }
+                    }
+
+                    /*
                      * Skip overridden parameters in the drain (S081 §5.1, R12).
                      *
                      * What: for each Instrument-parameter entry, check
@@ -4319,12 +4490,15 @@ uint8_t seq_queueForegroundAutomation(uint8_t track, uint16_t target,
  * neither restored nor un-marked, so the ramp continues without a dip to the
  * menu value. Ramps of the other track sharing slot 5 (tracks 5/6) keep
  * running.
+ * S104 P1: on a Tetrakt, track 7's trigger restores everything except the
+ * four decay rows, and clears its track-7 decay overrides.
  */
 void seq_restoreAutomatedParameters(uint8_t trigger_track)
 {
     uint8_t slot;
     uint64_t mask;
     uint64_t rampHeld = 0u;
+    uint64_t t6Keep = 0u;
     const kit_instrument_slot_t *instrument;
 
     if (trigger_track >= NUM_TRACKS)
@@ -4341,7 +4515,26 @@ void seq_restoreAutomatedParameters(uint8_t trigger_track)
      * clear would be skipped exactly when an override exists.
      */
     seq_menuOverride[slot] = 0u;
-    mask = seq_automation_dirty[slot];
+    /*
+     * Track 7 on a Tetrakt owns only its own decays (S104 P1).
+     *
+     * What: a track-7 trigger (trigger_track 6, slot 5) of a Tetrakt clears
+     * its four track-7 decay step overrides (set by this pass's drain, which
+     * runs after this restore, for the step that fires now) and leaves the
+     * four tkt_decay_a..d locals out of the restore: those rows are track
+     * 6's decays and their locks belong to track 6's step. Without the mask,
+     * a track-7 hit snapped a track-6 decay lock back to its base mid-note.
+     * Inputs: trigger_track, the played Scene's slot-5 type. Outputs: the
+     * overrides; t6Keep, held across the restore. Affiliates:
+     * instrumentManager_track7DecayLocalMask(), the drain's track-7 routing.
+     */
+    if (trigger_track == INSTRUMENT_SLOT_COUNT) {
+        t6Keep = instrumentManager_track7DecayLocalMask(
+            seq_perTrackPattern[trigger_track]);
+        if (t6Keep != 0u)
+            instrumentManager_clearSlot6Track7StepDecayOverride();
+    }
+    mask = seq_automation_dirty[slot] & ~t6Keep;
     if (!mask)
         return;
     /*
@@ -4387,7 +4580,7 @@ void seq_restoreAutomatedParameters(uint8_t trigger_track)
         }
     }
     /* S081 P2: ramp-held parameters stay marked (automation keeps priority). */
-    seq_automation_dirty[slot] = rampHeld & seq_automation_dirty[slot];
+    seq_automation_dirty[slot] = (rampHeld | t6Keep) & seq_automation_dirty[slot];
 }
 
 /* ===== S081 P2 automation ramps ===== */
@@ -4460,8 +4653,8 @@ static int16_t seq_rampNextStep(uint8_t track,
  * Will B play, as far as can be known now? (S081 P2 D1)
  *
  * What: 1 when B's condition is predictable at A's apply time AND passes:
- * no condition, the repeat counters (with the count B will see), or
- * lst/!ls (seq_trackLastConditionFired already holds A's result; no other
+ * no condition, the repeat counters (with the count B will see), 1:- / !1-,
+ * or lst/!ls (seq_trackLastConditionFired already holds A's result; no other
  * condition on this track is evaluated before B). Probability, fill, loop
  * and mute conditions return 0, so B is never ramped to and jumps as today.
  * Why: the ramp rule requires both steps to play; a step that might not
@@ -4473,14 +4666,17 @@ static uint8_t seq_rampConditionPredict(const pat_step_specials_t *sp,
 {
     uint8_t cond = sp->condition;
 
-    if (cond == 0u || cond > 40u)
+    if (cond == 0u || cond > 41u)
         return 1u;
-    if (cond >= 11u && cond <= 20u)
+    /* X:Y, 1:- and !1- (11..21) read the count B will see; the wrap
+     * follows seq_repeatCountNext() exactly as playback does (S104 P1). */
+    if (cond >= 11u && cond <= 21u)
         return seq_conditionRepeatPasses(
-            cond, (uint8_t)(seq_trackRepeatCount[track] + repeatInc));
-    if (cond == 25u)
-        return seq_trackLastConditionFired[track];
+            cond, repeatInc ? seq_repeatCountNext(seq_trackRepeatCount[track])
+                            : seq_trackRepeatCount[track]);
     if (cond == 26u)
+        return seq_trackLastConditionFired[track];
+    if (cond == 27u)
         return (uint8_t)(!seq_trackLastConditionFired[track]);
     return 0u;              /* rNN, fil/!fl, lop/!lp, mute: not predictable */
 }
@@ -7023,6 +7219,7 @@ void seq_setExtSyncSource(uint8_t source)
 	if (source > SEQ_EXT_SYNC_AUTO)
 		source = SEQ_EXT_SYNC_OFF;
 	seq_isSyncExternal = source;
+	seq_updateTempoEff();   /* S104 P1: the nudge applies only to the internal clock. */
 	seq_autoSyncActiveSource = SEQ_EXT_SYNC_OFF;
 	seq_deltaT = 0;
 }
@@ -7094,7 +7291,7 @@ static void seq_extClockTicks(uint16_t ticks)
 		seq_extTicksOwed = (uint8_t)((ticks > 256u) ? 255u : (ticks - 1u));
 	}
 	seq_lastTick = systick_ticks;
-	seq_calcDeltaT(seq_tempo);
+	seq_calcDeltaT();
 }
 
 void seq_triggerNextMasterStep(uint8_t stepSize)
@@ -7147,7 +7344,7 @@ void seq_tick()
 
 		float rest = systick_ticks-seq_lastTick - seq_deltaT;
 		seq_lastTick = systick_ticks;
-		seq_calcDeltaT(seq_tempo);
+		seq_calcDeltaT();
 		seq_deltaT = seq_deltaT - rest;
 
 		/*
@@ -7390,6 +7587,103 @@ void seq_setResumeTick(uint32_t tick)
 {
 	if (!seq_running)
 		seq_resumeTick = tick;
+}
+//------------------------------------------------------------------------------
+/*
+ * Master position for the DJ screen (S104 P1).
+ *
+ * What: *rep = the repetition 1..999 (wrapping), *bar = the bar inside it
+ * 1..8, *step = the step inside the bar 1..16, from the master clock
+ * (seq_elapsedPpqTicks / 24 = master 1/16 steps). A repetition is the
+ * longest effective track length (seq_effectiveTrackLength[], 1..128 steps,
+ * 0 read as 16) on the master 1/16 grid, so it is at most 8 bars (user,
+ * S104 P1: one bar digit). A track slowed by its scale spans several shown
+ * repetitions. Stopped: 1.1.1. Why: the DJ screen's RRR.B.SS. Inputs: the
+ * running flag, the master tick, the effective lengths (single aligned
+ * reads; TIM3 writes them). Outputs: the three values. Context: foreground.
+ * Accessor: menu_repaintDjPage().
+ */
+void seq_getMasterPosition(uint16_t *rep, uint8_t *bar, uint8_t *step)
+{
+	uint32_t steps;
+	uint32_t inRep;
+	uint8_t longest = 0u;
+	uint8_t t;
+
+	if (!rep || !bar || !step)
+		return;
+	if (!seq_running) {
+		*rep = 1u; *bar = 1u; *step = 1u;
+		return;
+	}
+	for (t = 0u; t < NUM_TRACKS; t++) {
+		uint8_t len = seq_effectiveTrackLength[t];
+
+		if (len < 1u)
+			len = NUM_STEPS_PER_BAR;
+		if (len > longest)
+			longest = len;
+	}
+	steps = seq_elapsedPpqTicks / SEQ_INTERNAL_TICKS_PER_DEFAULT_STEP;
+	inRep = steps % longest;
+	*rep = (uint16_t)((steps / longest) % 999u + 1u);
+	*bar = (uint8_t)(inRep / NUM_STEPS_PER_BAR + 1u);
+	*step = (uint8_t)(inRep % NUM_STEPS_PER_BAR + 1u);
+}
+
+/*
+ * Move the running master clock by whole ticks (S104 P1, DJ bar/step pots).
+ *
+ * What: under PRIMASK, moves seq_elapsedPpqTicks by delta (clamped at 0),
+ * re-derives seq_masterStepClock / seq_masterStepCnt, moves every engaged
+ * loop anchor by the same amount (clamped at 0), then
+ * seq_realignActivePatternToMasterClock(): every track's cursor and DDA
+ * phase from the new master tick (play-mode aware), the FX sequence on the
+ * master grid, the R12 menu overrides cleared, ramps ended (a position
+ * break, S081 P2), echo marks expired. Returns 1 when it moved.
+ * Why: DJ pots 3/4 shift the phase of everything by a bar or a step while
+ * playing (beat matching). Moving the anchors keeps a running loop's
+ * window on its own phase. MIDI slaves are not moved: no SPP is sent while
+ * running. Refused while stopped, under external sync (the external clock
+ * owns the position), and before the first tick (seq_initialSchedulerTick).
+ * Inputs: delta in 96-PPQ ticks (384 = a bar, 24 = a step).
+ * Outputs: the master clock and every track position. Context: foreground;
+ * the PRIMASK section is bounded (seven tracks, the 64-bit override memset,
+ * the FX realign; the nested PRIMASK sections inside save and restore).
+ * Accessor: menu_djKnob().
+ */
+uint8_t seq_jumpMasterTicks(int32_t delta)
+{
+	uint32_t primask;
+	int64_t target;
+	uint8_t t;
+
+	if (!seq_running || seq_getExtSync() || seq_initialSchedulerTick ||
+	    delta == 0)
+		return 0u;
+	primask = __get_PRIMASK();
+	__disable_irq();
+	target = (int64_t)seq_elapsedPpqTicks + (int64_t)delta;
+	if (target < 0)
+		target = 0;
+	delta = (int32_t)(target - (int64_t)seq_elapsedPpqTicks);
+	seq_elapsedPpqTicks = (uint32_t)target;
+	seq_masterStepClock = (uint16_t)(seq_elapsedPpqTicks /
+	                                 SEQ_INTERNAL_TICKS_PER_DEFAULT_STEP);
+	seq_masterStepCnt = (uint8_t)seq_masterStepClock;
+	if (seq_loopActive) {
+		for (t = 0u; t < NUM_TRACKS; t++) {
+			int64_t a;
+
+			if ((seq_loopTrackMask & (uint8_t)(1u << t)) == 0u)
+				continue;
+			a = (int64_t)seq_loopAnchor[t] + (int64_t)delta;
+			seq_loopAnchor[t] = (a < 0) ? 0u : (uint32_t)a;
+		}
+	}
+	seq_realignActivePatternToMasterClock();
+	__set_PRIMASK(primask);
+	return 1u;
 }
 //------------------------------------------------------------------------------
 void seq_setMute(uint8_t trackNr, uint8_t isMuted)

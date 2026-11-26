@@ -202,7 +202,7 @@
 #define AUTOSAVE_KIT_NAME_OFFSET                0u
 #define AUTOSAVE_KIT_PARAMETERS_OFFSET         10u
 #define AUTOSAVE_KIT_PARAMETER_ALLOC_BYTES   118u
-#define AUTOSAVE_KIT_PARAMETER_LIVE_BYTES       2u
+#define AUTOSAVE_KIT_PARAMETER_LIVE_BYTES       8u   /* S104 P1: 4 layers x 2 endpoints */
 #define AUTOSAVE_KIT_INSTRUMENTS_OFFSET        128u
 
 /*
@@ -277,11 +277,29 @@ typedef enum {
     AUTOSAVE_SCENE_PARAM_COUNT = 76
 } autosave_scene_parameter_t;
 
+/*
+ * Live Kit-settings cells (S104 P1: four track-7 decay layers).
+ *
+ * Index = 2 x layer + image (0 Normal, 1 Morph), so indices 0 and 1 keep
+ * their pre-S104 meaning (the generic / layer A endpoints) and an older
+ * record restores them unchanged; 2..7 were reserved cells of the 118-byte
+ * Kit allocation (no layout or version change). A pre-S104 record holds no
+ * live B..D bytes; whatever its reserved cells hold is clamped to 0..127 by
+ * the setters on the first restore (no migration).
+ */
 typedef enum {
     AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_DECAY = 0,
     AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_MORPH_DECAY,
+    AUTOSAVE_KIT_PARAM_T7_DECAY_B,
+    AUTOSAVE_KIT_PARAM_T7_MORPH_DECAY_B,
+    AUTOSAVE_KIT_PARAM_T7_DECAY_C,
+    AUTOSAVE_KIT_PARAM_T7_MORPH_DECAY_C,
+    AUTOSAVE_KIT_PARAM_T7_DECAY_D,
+    AUTOSAVE_KIT_PARAM_T7_MORPH_DECAY_D,
     AUTOSAVE_KIT_PARAM_COUNT
 } autosave_kit_parameter_t;
+#define AUTOSAVE_KIT_PARAM_T7(layer, morph) \
+    ((uint8_t)(2u * (uint8_t)(layer) + ((morph) ? 1u : 0u)))
 
 /*
  * Ordered live cells in the 512-byte Effect region.

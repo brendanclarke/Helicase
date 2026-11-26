@@ -77,6 +77,9 @@
 #include <string.h>
 #include <math.h>
 
+/* S104 P1: the host OscInfo layout differs; skip the firmware size assert. */
+#define TKT_HOST 1
+
 #include "osc_host.h"
 #include "Oscillator.host.h"
 #include "Oscillator.host.c"
@@ -114,10 +117,10 @@ uint8_t modNode_interpClaim(void *osc) { (void)osc; return g_claim; }
 #include "TetraktVoice.host.c"
 
 #define BLK OUTPUT_DMA_SIZE
-enum { G_TRIG, G_DEC, G_TUNE, G_SRR, G_TONE, G_DRV, G_W2, G_S1, G_VEL, G_RING, G_READ, G_A2Q, G_N };
+enum { G_TRIG, G_DEC, G_TUNE, G_SRR, G_TONE, G_DRV, G_W2, G_S1, G_VEL, G_RING, G_READ, G_A2Q, G_T7, G_LOOP, G_N };
 static const char *g_name[G_N] = { "TK-TRIG", "TK-DEC", "TK-TUNE", "TK-SRR", "TK-TONE",
                                    "TK-DRV", "TK-W2", "TK-S1", "TK-VEL", "TK-RING",
-                                   "TK-READ", "TK-A2Q" };
+                                   "TK-READ", "TK-A2Q", "TK-T7", "TK-LOOP" };
 static unsigned g_fail[G_N];
 static void fail(int g, const char *what, double a, double b)
 {
@@ -148,6 +151,7 @@ static int16_t smp1[8192];
 static int16_t smp2[8192];
 static int16_t smp3[8192];
 static int16_t smp4[8192];   /* §19: quiet (peak 3,000), so its gain code is above 0 */
+static int16_t smpLoop[1000];   /* S104 P1: a short looped sample [200, 900) */
 
 static void install_samples(void)
 {
@@ -161,6 +165,8 @@ static void install_samples(void)
 		smp3[i] = (int16_t)lrint(32000.0 * sin(2.0 * M_PI * 300.0 * (double)i / 44100.0));
 		smp4[i] = (int16_t)lrint(3000.0 * sin(2.0 * M_PI * 210.0 * (double)i / 44100.0));
 	}
+	for (i = 0u; i < 1000u; i++)
+		smpLoop[i] = (int16_t)lrint(28000.0 * sin(2.0 * M_PI * 37.0 * (double)i / 44100.0));
 	smp0[0] = 32767;
 	smp1[0] = 32767;    /* the peak, so the gain code stays 0 */
 	smp2[0] = 32767;    /* the impulse */
@@ -183,6 +189,10 @@ static void install_samples(void)
 	(void)sampleInstall_beginSample("q4000000", 8192u, &fmt);
 	(void)sampleInstall_writeFrames((const uint8_t *)smp4, 8192u);
 	(void)sampleInstall_finishSample(0u, 8192u, 0u);
+	/* S104 P1: the looped test sample (index 5) */
+	(void)sampleInstall_beginSample("l5000000", 1000u, &fmt);
+	(void)sampleInstall_writeFrames((const uint8_t *)smpLoop, 1000u);
+	(void)sampleInstall_finishSample(200u, 900u, 1u);
 	(void)sampleInstall_commit();
 	sampleMemory_refresh();
 }
@@ -250,7 +260,7 @@ static void test_trig(void)
 	/* A fresh voice (lon A) restarts layer A only. */
 	voice_init();
 	V.layerOn = 1u;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u, NULL);
 	expect(G_TRIG, V.layer[0].stage == TKT_STAGE_START, "fresh A starts", 0, 0);
 	for (i = 1u; i < TKT_LAYERS; i++)
 		expect(G_TRIG, V.layer[i].stage == TKT_STAGE_IDLE, "fresh B..D idle", i, 0);
@@ -264,7 +274,7 @@ static void test_trig(void)
 	for (mask = 0u; mask < 16u; mask++) {
 		voice_init();
 		V.layerOn = 0x0Fu;
-		Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
+		Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u, NULL);
 		block();
 		block();
 
@@ -272,7 +282,7 @@ static void test_trig(void)
 		REF = V;
 		REF.line = lineRef;
 		(void)lineRef;
-		Tetrakt_triggerVoice(&V, 0u, 100u, 63u, 0u);
+		Tetrakt_triggerVoice(&V, 0u, 100u, 63u, 0u, NULL);
 		block();
 
 		for (i = 0u; i < TKT_LAYERS; i++) {
@@ -312,22 +322,22 @@ static void test_trig(void)
 	/* A quiet layer starts at once: lon A then AC, C was idle. */
 	voice_init();
 	V.layerOn = 1u;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u, NULL);
 	block();
 	V.layerOn = 0x05u;
-	Tetrakt_triggerVoice(&V, 0u, 90u, 63u, 0u);
+	Tetrakt_triggerVoice(&V, 0u, 90u, 63u, 0u, NULL);
 	expect(G_TRIG, V.layer[2].stage == TKT_STAGE_START, "C starts at once", 0, 0);
 	expect(G_TRIG, V.layer[0].stage == TKT_STAGE_FADE, "A fades", 0, 0);
 
 	/* lon 0 restarts nothing. */
 	voice_init();
 	V.layerOn = 0x0Fu;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u, NULL);
 	block();
 	V.layerOn = 0u;
 	REF = V;
 	REF.line = lineRef;
-	Tetrakt_triggerVoice(&V, 0u, 1u, 63u, 0u);
+	Tetrakt_triggerVoice(&V, 0u, 1u, 63u, 0u, NULL);
 	for (i = 0u; i < TKT_LAYERS; i++)
 		expect(G_TRIG, V.layer[i].stage == TKT_STAGE_PLAY, "lon 0 leaves play", i, 0);
 	block();
@@ -347,7 +357,7 @@ static void test_dec(void)
 	voice_init();
 	V.layerOn = 1u;
 	V.layer[0].decay = 0u;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u, NULL);
 	block();
 	prev = V.layer[0].env;
 	expect(G_DEC, prev > 0.0f && prev < 1.0f, "starts below 1", prev, 1);
@@ -384,7 +394,7 @@ static void test_a2q(void)
 	V.layerOn = 15u;
 	for (i = 0u; i < TKT_LAYERS; i++)
 		V.layer[i].decay = (uint8_t)(5u + 12u * i);
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 15u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 15u, NULL);
 	block();
 	for (b = 0u; b < 3000u; b++) {
 		float prev[TKT_LAYERS], a1e[TKT_LAYERS];
@@ -412,7 +422,7 @@ static void test_a2q(void)
 	/* (2) a level change reaches each layer on its own scheduled block */
 	voice_init();
 	V.layerOn = 15u;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 15u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 15u, NULL);
 	block();
 	block();
 	{
@@ -446,7 +456,7 @@ static void tune_inc(uint8_t tune, uint32_t note, uint32_t *out)
 	voice_init();
 	V.layerOn = 1u;
 	V.layer[0].tune = tune;
-	Tetrakt_triggerVoice(&V, 0u, 127u, (uint8_t)note, 0u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, (uint8_t)note, 0u, NULL);
 	Tetrakt_calcVoiceAsync(&V);
 	*out = V.layer[0].osc.phaseInc;
 }
@@ -490,7 +500,7 @@ static void test_srr(void)
 	voice_init();
 	V.layerOn = 1u;
 	V.layer[0].srr = 127u;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u, NULL);
 	Tetrakt_calcVoiceAsync(&V);
 	expect(G_SRR, V.layer[0].srrRate == 1.0f, "127 is exactly 1.0",
 	       V.layer[0].srrRate, 1);
@@ -681,7 +691,7 @@ static void test_drv(void)
 	V.layer[0].tone = 63u;
 	V.layer[0].toneEnv = 63u;
 	V.layer[0].srr = 127u;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u, NULL);
 	Tetrakt_calcVoiceAsync(&V);
 	expect(G_DRV, fabsf(V.layer[0].dGain - 1.0f) < 1.0e-6f &&
 	       V.layer[0].dBias == 0.0f &&
@@ -713,7 +723,7 @@ static void test_drv(void)
 	V.layer[0].toneEnv = 63u;
 	V.layer[0].srr = 127u;
 	V.layer[0].decay = 127u;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u, NULL);
 	for (b = 0u; b < 1378u; b++) {
 		block();
 		for (n = 0u; n < BLK; n++)
@@ -745,7 +755,7 @@ static void test_w2(void)
 	V.layerOn = 0x0Fu;
 	for (n = 0u; n < TKT_LAYERS; n++)
 		V.layer[n].level = 100u;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u, NULL);
 	Tetrakt_calcVoiceAsync(&V);
 	expect(G_W2, V.busWMix < 0.001f, "wid at env 1 is panned", V.busWMix, 0);
 	V.layer[0].env = 0.0f;
@@ -858,7 +868,7 @@ static void test_vel(void)
 	V.layerOn = 0x05u;            /* A and C */
 	V.veloKind = TKT_KIND_TONE;
 	velocityModulators[0].amount = 1.0f;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u, NULL);
 	Tetrakt_calcVoiceAsync(&V);
 	expect(G_VEL, V.layer[0].velo == 1.0f && V.layer[2].velo == 1.0f,
 	       "hard hit latches 1", V.layer[0].velo, V.layer[2].velo);
@@ -867,7 +877,7 @@ static void test_vel(void)
 
 	/* A soft hit restarts A only: its tone falls to 0, C keeps its own. */
 	V.layerOn = 0x01u;
-	Tetrakt_triggerVoice(&V, 0u, 0u, 63u, 0u);
+	Tetrakt_triggerVoice(&V, 0u, 0u, 63u, 0u, NULL);
 	Tetrakt_calcVoiceAsync(&V);
 	Tetrakt_calcVoiceAsync(&V);   /* the fade block, then the START latch */
 	expect(G_VEL, V.layer[0].velo == 0.0f, "soft hit latches 0", V.layer[0].velo, 0);
@@ -1062,7 +1072,7 @@ static void test_layers_override(void)
 
 	voice_init();
 	V.layerOn = 0x05u;                 /* A and C in the patch */
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0x02u);   /* the note's layer B */
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0x02u, NULL);   /* the note's layer B */
 	for (i = 0u; i < TKT_LAYERS; i++)
 		expect(G_TRIG, V.layer[i].stage == (i == 1u ? TKT_STAGE_START : TKT_STAGE_IDLE),
 		       "mask override layer state", i, V.layer[i].stage);
@@ -1071,13 +1081,376 @@ static void test_layers_override(void)
 	/* mask 0 falls back to lon */
 	voice_init();
 	V.layerOn = 0x05u;
-	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 0u, NULL);
 	for (i = 0u; i < TKT_LAYERS; i++) {
 		const int on = (i == 0u || i == 2u);
 
 		expect(G_TRIG, V.layer[i].stage == (on ? TKT_STAGE_START : TKT_STAGE_IDLE),
 		       "lon fallback layer state", i, V.layer[i].stage);
 	}
+}
+
+/*
+ * TK-LOOP (S104 P1): the looped-sample seam forms.
+ *
+ * What: with the looped test sample (index 5, loop [200, 900)) bound, form A
+ * (an interpolation slot) equals a double-precision read of the
+ * osc_slpPlainBlock() rule across at least five wraps, at 1.0, 0.73 and 2.6
+ * frames a sample; form B wraps at frame 898 (phase < 899 << 12) and never
+ * reads frame 899; a no-seam block in the plain form is bit-identical to
+ * the one-shot loop at the same phase; a row value samples .. 2 x samples -
+ * 1 binds SLP with index value - samples, and a value below samples binds
+ * SMP.
+ * S104 P1 assessment: the trigger splits the row value (pendSample is the
+ * catalogue index, TKT_PF_PEND_SLP set); the seam threshold seamPh gives the
+ * same decision as phase + 32 x phaseInc >= loopEnd - 4,096 for every phase
+ * at three tunes; in a block where another layer restarts, a seam layer
+ * takes form B even with a slot free (no claim), and form A the next block.
+ * Break (Makefile): dropping the seam select, never predicting a seam, or
+ * claiming in a restart block must fail this law.
+ */
+static double ref_loop_sample(const int16_t *d, uint32_t ph, uint32_t ls,
+                              uint32_t le)
+{
+	const uint32_t idx = ph >> 12;
+	const uint32_t nx = (idx + 1u == le) ? ls : idx + 1u;
+	const int32_t a = d[idx];
+
+	return ((double)((int32_t)a << 12) +
+	        (double)(ph & 0xFFFu) * (double)((int32_t)d[nx] - a)) /
+	       4096.0 / 32768.0;
+}
+
+static void test_loop(void)
+{
+	static const double rates[3] = { 1.0, 0.73, 2.6 };
+	const uint32_t ls = 200u, le = 900u;
+	uint32_t r, b, n;
+
+	for (r = 0u; r < 3u; r++) {
+		TktLayer *L;
+		double ph = (double)(ls << 12);
+		double inc;
+		unsigned wraps = 0u;
+
+		voice_init();
+		L = &V.layer[0];
+		L->osc.oscType = OSC_TYPE_SLP;
+		L->osc.waveform = 5u;
+		L->osc.sampleCacheLooped = OSC_BIND_NONE;
+		tkt_bindLayer(L, 1u);
+		expect(G_LOOP, L->osc.sampleCacheLooped == OSC_BIND_SLP,
+		       "a looped row binds SLP", r, L->osc.sampleCacheLooped);
+		expect(G_LOOP, L->loopStartPh == (ls << 12) && L->loopEndPh == (le << 12),
+		       "the loop points are cached", r, L->loopEndPh);
+		layer_identity(L);
+		L->bindGain = 1.0f;
+		L->osc.phaseInc = (uint32_t)lrint(rates[r] * 4096.0);
+		inc = (double)L->osc.phaseInc;
+		L->osc.phase = ls << 12;
+		L->pflags = (uint8_t)(TKT_FORM_A << TKT_PF_FORM_SHIFT);
+		for (b = 0u; b < 400u; b++) {
+			tkt_layerPostStoreSeamA(L, 1.0f);
+			for (n = 0u; n < BLK; n++) {
+				const double want = ref_loop_sample(
+				    (const int16_t *)L->osc.sampleCacheData,
+				    (uint32_t)ph, ls, le);
+
+				if (fabs((double)tkt_work.busL[n] - want) > 3.0 / 32768.0)
+					fail(G_LOOP, "form A exact across a seam",
+					     (double)(b * BLK + n),
+					     (double)tkt_work.busL[n] - want);
+				ph += inc;
+				if (ph >= (double)(le << 12)) {
+					ph -= (double)((le - ls) << 12);
+					wraps++;
+				}
+			}
+		}
+		expect(G_LOOP, wraps >= 5u, "five wraps in the run", r, wraps);
+	}
+
+	/* form B: early wrap, never reads the last loop frame */
+	{
+		TktLayer *L;
+		double ph = (double)(ls << 12);
+		const double inc = 4096.0;
+		uint32_t seenMax = 0u;
+		unsigned wraps = 0u;
+
+		voice_init();
+		L = &V.layer[0];
+		L->osc.oscType = OSC_TYPE_SLP;
+		L->osc.waveform = 5u;
+		L->osc.sampleCacheLooped = OSC_BIND_NONE;
+		tkt_bindLayer(L, 1u);
+		layer_identity(L);
+		L->bindGain = 1.0f;
+		L->osc.phaseInc = 4096u;
+		L->osc.phase = ls << 12;
+		L->pflags = (uint8_t)(TKT_FORM_B << TKT_PF_FORM_SHIFT);
+		for (b = 0u; b < 80u; b++) {
+			const uint32_t before = L->osc.phase;
+
+			tkt_layerPostStoreSeamB(L, 1.0f);
+			if (L->osc.phase < before)
+				wraps++;
+			if (L->osc.phase < L->loopStartPh || L->osc.phase >= L->loopEndPh)
+				fail(G_LOOP, "form B stays inside the loop", b, L->osc.phase);
+			ph += inc;
+			if (ph >= (double)((le - 1u) << 12)) {
+				ph -= (double)((le - 1u - ls) << 12);
+			}
+			if ((uint32_t)(ph / 4096.0) > seenMax)
+				seenMax = (uint32_t)(ph / 4096.0);
+		}
+		expect(G_LOOP, wraps >= 1u, "form B wraps", 0, wraps);
+		expect(G_LOOP, seenMax <= le - 2u, "form B never reads the last frame",
+		       seenMax, le - 2u);
+	}
+
+	/* a no-seam block is the one-shot loop, bit for bit */
+	{
+		TktLayer A, B2;
+
+		voice_init();
+		memset(&A, 0, sizeof(A));
+		layer_identity(&A);
+		A.osc.oscType = OSC_TYPE_SLP;
+		A.osc.waveform = 5u;
+		A.osc.sampleCacheLooped = OSC_BIND_NONE;
+		tkt_bindLayer(&A, 1u);
+		layer_identity(&A);
+		A.bindGain = 1.0f;
+		A.osc.phaseInc = 4096u;
+		A.osc.phase = 300u << 12;
+		A.pflags = (uint8_t)(TKT_FORM_PLAIN << TKT_PF_FORM_SHIFT);
+		B2 = A;
+		B2.loopStartPh = 0u;
+		B2.loopEndPh = 0u;
+		tkt_layerPostStore(&A, 1.0f);
+		{
+			float ab[BLK];
+			memcpy(ab, tkt_work.busL, sizeof(ab));
+
+			tkt_layerPostStore(&B2, 1.0f);
+			for (n = 0u; n < BLK; n++)
+				expect(G_LOOP, ab[n] == tkt_work.busL[n],
+				       "a no-seam block is the one-shot loop", n, 0);
+		}
+	}
+
+	/* row values: samples .. 2s-1 are looped, below are one-shots */
+	{
+		const uint8_t n = sampleMemory_getNumSamples();
+
+		voice_init();
+		V.layerOn = 1u;
+		V.layer[0].sample = (uint8_t)(n + 1u);
+		Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 1u, NULL);
+		tkt_layerControl(&V, 0u, 0u, 1u);
+		expect(G_LOOP, V.layer[0].osc.oscType == OSC_TYPE_SLP &&
+		       V.layer[0].osc.waveform == 1u, "a looped row binds SLP",
+		       V.layer[0].osc.oscType, V.layer[0].osc.waveform);
+		voice_init();
+		V.layerOn = 1u;
+		V.layer[0].sample = 2u;
+		Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 1u, NULL);
+		tkt_layerControl(&V, 0u, 0u, 1u);
+		expect(G_LOOP, V.layer[0].osc.oscType == OSC_TYPE_SMP &&
+		       V.layer[0].osc.waveform == 2u, "a one-shot row binds SMP",
+		       V.layer[0].osc.oscType, V.layer[0].osc.waveform);
+	}
+
+	/* the async's seam prediction chooses A with a slot and B without */
+	{
+		TktLayer *L;
+		const uint32_t formShift = TKT_PF_FORM_SHIFT;
+
+		voice_init();
+		V.layerOn = 1u;
+		V.layer[0].sample = (uint8_t)(sampleMemory_getNumSamples() + 5u);
+		Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 1u, NULL);
+		tkt_layerControl(&V, 0u, 0u, 1u);   /* latch + bind SLP */
+		L = &V.layer[0];
+		L->stage = TKT_STAGE_PLAY;
+		L->env = L->envLast = 1.0f;
+		g_claim = 1u;
+		L->osc.phase = (le - 1u) << 12;   /* this block reaches the seam */
+		Tetrakt_calcVoiceAsync(&V);
+		expect(G_LOOP, ((L->pflags & TKT_PF_FORM_MASK) >> formShift) == TKT_FORM_A,
+		       "a seam with a slot takes form A", 0, L->pflags);
+		g_claim = 0u;
+		L->osc.phase = (le - 1u) << 12;
+		Tetrakt_calcVoiceAsync(&V);
+		expect(G_LOOP, ((L->pflags & TKT_PF_FORM_MASK) >> formShift) == TKT_FORM_B,
+		       "a seam without a slot takes form B", 0, L->pflags);
+		g_claim = 1u;
+	}
+
+	/* S104 P1 assessment: the trigger splits the row value */
+	{
+		const uint8_t n = sampleMemory_getNumSamples();
+
+		voice_init();
+		V.layerOn = 1u;
+		V.layer[0].sample = (uint8_t)(n + 3u);
+		Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 1u, NULL);
+		expect(G_LOOP, V.layer[0].pendSample == 3u &&
+		       (V.layer[0].pflags & TKT_PF_PEND_SLP) != 0u,
+		       "the trigger maps a looped row", V.layer[0].pendSample,
+		       V.layer[0].pflags);
+		V.layer[0].sample = 3u;
+		Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 1u, NULL);
+		expect(G_LOOP, V.layer[0].pendSample == 3u &&
+		       (V.layer[0].pflags & TKT_PF_PEND_SLP) == 0u,
+		       "the trigger maps a one-shot row", V.layer[0].pendSample,
+		       V.layer[0].pflags);
+	}
+
+	/* S104 P1 assessment: seamPh equals the multiply-add test */
+	{
+		static const uint8_t tunes[3] = { 0u, 63u, 127u };
+		uint32_t t;
+
+		for (t = 0u; t < 3u; t++) {
+			TktLayer *L;
+			uint32_t ph;
+
+			voice_init();
+			V.layerOn = 1u;
+			V.layer[0].sample = (uint8_t)(sampleMemory_getNumSamples() + 5u);
+			V.layer[0].tune = tunes[t];
+			Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 1u, NULL);
+			tkt_layerControl(&V, 0u, 0u, 1u);
+			L = &V.layer[0];
+			for (ph = 0u; ph < (le << 12); ph += 997u) {
+				const uint32_t oldRule =
+				    (uint32_t)(ph + (uint32_t)OUTPUT_DMA_SIZE * L->osc.phaseInc >=
+				               L->loopEndPh - (1u << 12));
+				const uint32_t newRule = (uint32_t)(ph >= L->seamPh);
+
+				if (oldRule != newRule) {
+					expect(G_LOOP, 0, "seamPh matches the seam test", ph, t);
+					break;
+				}
+			}
+		}
+	}
+
+	/* S104 P1 assessment: no slot claim in a restart block */
+	{
+		TktLayer *L;
+		const uint32_t formShift = TKT_PF_FORM_SHIFT;
+
+		voice_init();
+		V.layerOn = 1u;
+		V.layer[0].sample = (uint8_t)(sampleMemory_getNumSamples() + 5u);
+		Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 1u, NULL);
+		tkt_layerControl(&V, 0u, 0u, 1u);   /* latch + bind SLP */
+		L = &V.layer[0];
+		L->stage = TKT_STAGE_PLAY;
+		L->env = L->envLast = 1.0f;
+		g_claim = 1u;
+		V.layer[1].sample = 2u;
+		Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 2u, NULL);   /* B restarts */
+		L->osc.phase = (le - 1u) << 12;
+		Tetrakt_calcVoiceAsync(&V);
+		expect(G_LOOP, ((L->pflags & TKT_PF_FORM_MASK) >> formShift) == TKT_FORM_B,
+		       "a seam in a restart block takes form B", 0, L->pflags);
+		L->osc.phase = (le - 1u) << 12;
+		Tetrakt_calcVoiceAsync(&V);
+		expect(G_LOOP, ((L->pflags & TKT_PF_FORM_MASK) >> formShift) == TKT_FORM_A,
+		       "the next block claims (form A)", 0, L->pflags);
+	}
+}
+
+/*
+ * TK-T7 (S104 P1): the track-7 decays of a Tetrakt on slot 6.
+ *
+ * What: a T7 trigger (altDecay {10,20,30,40}) with lon 15 gives each layer
+ * that alt decay (its first START's envelope factor is colEgK[alt]) while
+ * L->decay stays at track 6's 90 and pflags records ALT; a T6 trigger keeps
+ * track 6's decay. With shared lon masks, T6 pre-empts T7 on a shared layer
+ * in either pop order (T6's decay and velocity), while layers only one
+ * track restarts keep that track's decay. A T7 trigger alone after the START
+ * latch restarts normally with its decay.
+ * Break (Makefile): removing the T6-wins `continue;` must fail this law.
+ */
+static void test_t7(void)
+{
+	static const uint8_t alt[4] = { 10u, 20u, 30u, 40u };
+	uint32_t i;
+
+	/* every layer, T7 alone */
+	voice_init();
+	V.layerOn = 15u;
+	for (i = 0u; i < TKT_LAYERS; i++)
+		V.layer[i].decay = 90u;
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 15u, alt);
+	for (i = 0u; i < TKT_LAYERS; i++) {
+		TktLayer *L = &V.layer[i];
+
+		tkt_layerControl(&V, i, 0u, 1u);
+		expect(G_T7, L->stage == TKT_STAGE_PLAY, "T7 starts the layer", i, L->stage);
+		expect(G_T7, fabsf(L->env - (1.0f - colEgK[alt[i]])) < 1e-6f,
+		       "T7 decay factor", i, L->env);
+		expect(G_T7, L->decay == 90u && L->decayAlt == alt[i],
+		       "T7 keeps track 6's row", i, L->decay);
+		expect(G_T7, (L->pflags & TKT_PF_ALT) != 0u, "T7 flag", i, L->pflags);
+	}
+
+	/* shared mask, T6 then T7: A/B T6, C T7 */
+	voice_init();
+	V.layerOn = 15u;
+	for (i = 0u; i < TKT_LAYERS; i++)
+		V.layer[i].decay = 90u;
+	Tetrakt_triggerVoice(&V, 0u, 120u, 63u, 0x03u, NULL);
+	Tetrakt_triggerVoice(&V, 0u, 90u, 63u, 0x06u, alt);
+	for (i = 0u; i < TKT_LAYERS; i++) {
+		TktLayer *L = &V.layer[i];
+		const uint8_t want = (i < 2u) ? 90u : ((i == 2u) ? alt[2] : 0u);
+
+		if (i >= 3u)
+			continue;
+		tkt_layerControl(&V, i, 0u, 1u);
+		expect(G_T7, L->stage == TKT_STAGE_PLAY, "shared mask starts", i, L->stage);
+		expect(G_T7, fabsf(L->env - (1.0f - colEgK[want])) < 1e-6f,
+		       "T6 wins a shared layer", i, L->env);
+		expect(G_T7, L->velo == ((i < 2u) ? (120.0f / 127.0f)
+		                                 : (90.0f / 127.0f)),
+		       "T6 velocity on the shared layer", i, L->velo);
+	}
+
+	/* reverse pop order: A T6, B T6 (T6 overwrites the pending T7), C T7 */
+	voice_init();
+	V.layerOn = 15u;
+	for (i = 0u; i < TKT_LAYERS; i++)
+		V.layer[i].decay = 90u;
+	Tetrakt_triggerVoice(&V, 0u, 90u, 63u, 0x06u, alt);
+	Tetrakt_triggerVoice(&V, 0u, 120u, 63u, 0x03u, NULL);
+	for (i = 0u; i < TKT_LAYERS; i++) {
+		TktLayer *L = &V.layer[i];
+		const uint8_t want = (i < 2u) ? 90u : ((i == 2u) ? alt[2] : 0u);
+
+		if (i >= 3u)
+			continue;
+		tkt_layerControl(&V, i, 0u, 1u);
+		expect(G_T7, fabsf(L->env - (1.0f - colEgK[want])) < 1e-6f,
+		       "reverse order keeps each track's decay", i, L->env);
+	}
+
+	/* a later T7 trigger after the latch restarts with its own decay */
+	voice_init();
+	V.layerOn = 1u;
+	V.layer[0].decay = 90u;
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 1u, NULL);
+	tkt_layerControl(&V, 0u, 0u, 1u);
+	Tetrakt_triggerVoice(&V, 0u, 127u, 63u, 1u, alt);
+	tkt_layerControl(&V, 0u, 0u, 1u);
+	tkt_layerControl(&V, 0u, 0u, 1u);   /* FADE -> START, then the latch */
+	expect(G_T7, fabsf(V.layer[0].env - (1.0f - colEgK[alt[0]])) < 1e-6f,
+	       "a later T7 restart uses its decay", 0, V.layer[0].env);
 }
 
 int main(void)
@@ -1108,6 +1481,8 @@ int main(void)
 	test_vel();
 	test_ring();
 	test_read();
+	test_t7();
+	test_loop();
 
 	for (i = 0u; i < G_N; i++) {
 		printf("tetrakt %-7s failures: %u\n", g_name[i], g_fail[i]);

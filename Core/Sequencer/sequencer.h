@@ -293,8 +293,22 @@ void seq_continueRunning(uint8_t sendRealtime);
 void seq_setResumeTick(uint32_t tick);
 void seq_setDeltaT(float delta);
 void seq_triggerNextMasterStep(uint8_t stepSize);
+/*
+ * Tempo (S104 P1: 1/100 BPM and the DJ nudge; contract in sequencer.c).
+ * seq_setBpm(): whole BPM 1..655 (external sources). seq_setTempoCenti():
+ * the base tempo in 1/100 BPM (menu PAR_BPM x 100 + PAR_BPM_FINE).
+ * seq_getBpm(): the rounded base (LFO and delay sync). seq_setTempoNudge():
+ * -0.05..+0.05 of the base, internal clock only (DJ BAR buttons).
+ */
 void seq_setBpm(uint16_t bpm);
 uint16_t seq_getBpm(void);
+void seq_setTempoCenti(uint16_t centi);
+uint16_t seq_getTempoCenti(void);
+void seq_setTempoNudge(float nudge);
+float seq_getTempoNudge(void);
+/* S104 P1, DJ mode (contracts in sequencer.c). */
+void seq_getMasterPosition(uint16_t *rep, uint8_t *bar, uint8_t *step);
+uint8_t seq_jumpMasterTicks(int32_t delta);
 /*
  * One step of a track in samples (S093 P4, the Alkaline gate).
  *
@@ -310,8 +324,8 @@ uint16_t seq_getBpm(void);
  *             step length at each trigger (S092 P0 §5.4).
  * Inputs:     track 0..6 (the triggering track; 6 = track 7 on slot 5).
  *             Reads seq_effectiveTrackScale[] (the Morph-resolved scale,
- *             S078) and seq_tempo (written only by seq_setBpm(): menu, clock
- *             sync, trigger jacks).
+ *             S078) and the effective tempo (seq_tempoEff, S104 P1: 1/100
+ *             BPM, nudged in DJ mode).
  * Outputs:    samples per step, 1..5,292,960 (CC 127 = 8x at 1 BPM).
  *             120 BPM 1/16 = 5514.
  * Accessors:  instrumentManager_triggerTrack() (main loop).

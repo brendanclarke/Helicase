@@ -184,9 +184,27 @@ static __attribute__((noinline)) void tkt_bindLayer(TktLayer *L, const uint32_t 
 	osc_userBind(&L->osc);
 	if (restart)
 		L->osc.phase = 0u;
-	entry = (L->osc.sampleCacheLooped == OSC_BIND_SMP) ?
-		sampleMemory_sampleEntry(L->osc.sampleCacheIndex) : NULL;
+	/*
+	 * S104 P1: a looped (SLP) bind is a catalogue sample too: it takes the
+	 * sample's gain and caches its loop points (loopStartPh, loopEndPh); a
+	 * one-shot clears them, which is also the "not looped" test of the async
+	 * and the sync dispatch. A loop under two frames plays as a one-shot
+	 * (S104 P1 assessment): the early-wrap form cannot shorten it, and
+	 * deciding it here once per bind keeps the length test out of the
+	 * per-block seam prediction.
+	 */
+	entry = (L->osc.sampleCacheLooped == OSC_BIND_SMP ||
+	         L->osc.sampleCacheLooped == OSC_BIND_SLP)
+		? sampleMemory_sampleEntry(L->osc.sampleCacheIndex) : NULL;
 	L->bindGain = entry ? sampleMemory_gainFromCode(entry->gain_code) : 1.0f;
+	if (entry && L->osc.sampleCacheLooped == OSC_BIND_SLP &&
+	    entry->loop_end >= entry->loop_start + 2u) {
+		L->loopStartPh = entry->loop_start << OSC_SAMPLE_PHASE_SHIFT;
+		L->loopEndPh = entry->loop_end << OSC_SAMPLE_PHASE_SHIFT;
+	} else {
+		L->loopStartPh = 0u;
+		L->loopEndPh = 0u;
+	}
 }
 
 /*
@@ -241,12 +259,31 @@ static __attribute__((noinline)) void tkt_layerControl(TetraktVoice *voice, cons
 	TktLayer *const L = &voice->layer[i];
 	const uint8_t kind = voice->veloKind;
 	uint32_t restart = 0u;
+	uint8_t dsrc;
 	float off, tune, level, decay, pan, drive, srr, space, tone, tenv;
 
 	/* 1. a START latches what the retrigger asked for */
 	if (!init && L->stage == TKT_STAGE_START) {
+		/*
+		 * S104 P1: the row's value names a one-shot (0 .. samples - 1) or
+		 * the same sample looped (samples .. 2 x samples - 1; the Drum
+		 * family's s/l order). Tetrakt_triggerVoice() has already split it
+		 * (S104 P1 assessment): pendSample is the catalogue index and
+		 * TKT_PF_PEND_SLP says looped, so this block-rate latch only copies.
+		 * osc_userBind() binds SMP or SLP from oscType and the index from
+		 * waveform at this restart's bind below.
+		 */
+		L->osc.oscType = (L->pflags & TKT_PF_PEND_SLP) ? OSC_TYPE_SLP
+		                                              : OSC_TYPE_SMP;
 		L->osc.waveform = L->pendSample;
 		L->velo = (float)L->pendVel * (1.0f / 127.0f);
+		/* S104 P1: the note takes its trigger's track: track 7's decay and
+		 * flag move from pending to playing; the pending marks clear. */
+		L->decayAlt = L->pendDecayAlt;
+		L->pflags = (uint8_t)((L->pflags & (uint8_t)~(TKT_PF_PEND |
+		                                              TKT_PF_PEND_ALT |
+		                                              TKT_PF_ALT)) |
+		                      ((L->pflags & TKT_PF_PEND_ALT) ? TKT_PF_ALT : 0u));
 		restart = 1u;
 	}
 	/*
@@ -256,7 +293,11 @@ static __attribute__((noinline)) void tkt_layerControl(TetraktVoice *voice, cons
 	 */
 	tune  = (float)L->tune;
 	level = (float)L->level;
-	decay = (float)L->decay;
+	/* S104 P1: a note track 7 started plays its track-7 decay (decayAlt);
+	 * track 6's row is L->decay. The velocity group's offset applies to
+	 * whichever the note plays. */
+	dsrc  = (L->pflags & TKT_PF_ALT) ? L->decayAlt : L->decay;
+	decay = (float)dsrc;
 	pan   = (float)L->pan;
 	drive = (float)L->drive;
 	srr   = (float)L->srr;
@@ -268,7 +309,7 @@ static __attribute__((noinline)) void tkt_layerControl(TetraktVoice *voice, cons
 		switch (kind) {
 		case TKT_KIND_TUNE:     tune  = tkt_eff(L->tune, off);    break;
 		case TKT_KIND_LEVEL:    level = tkt_eff(L->level, off);   break;
-		case TKT_KIND_DECAY:    decay = tkt_eff(L->decay, off);   break;
+		case TKT_KIND_DECAY:    decay = tkt_eff(dsrc, off);       break;
 		case TKT_KIND_PAN:      pan   = tkt_eff(L->pan, off);     break;
 		case TKT_KIND_DRIVE:    drive = tkt_eff(L->drive, off);   break;
 		case TKT_KIND_SRR:      srr   = tkt_eff(L->srr, off);     break;
@@ -325,6 +366,20 @@ static __attribute__((noinline)) void tkt_layerControl(TetraktVoice *voice, cons
 		if (bind || restart)
 			tkt_bindLayer(L, restart);
 		L->osc.phaseInc = (uint32_t)(rate * TKT_UNITY_INC + 0.5f);
+		/*
+		 * S104 P1 assessment: the seam threshold for the async's
+		 * prediction, recomputed here because the bind (loop points) and
+		 * the step change only in a control. A block starting at or past
+		 * seamPh can read the last loop frame: phase + 32 x phaseInc >=
+		 * loopEndPh - 4,096. One-shot: 0xFFFFFFFF (never).
+		 */
+		{
+			const uint32_t reach = (uint32_t)OUTPUT_DMA_SIZE * L->osc.phaseInc +
+			                       (1u << OSC_SAMPLE_PHASE_SHIFT);
+
+			L->seamPh = (L->loopEndPh == 0u) ? 0xFFFFFFFFu
+			            : ((L->loopEndPh > reach) ? (L->loopEndPh - reach) : 0u);
+		}
 	}
 
 	/* 5. the tone (plan §5.3) */
@@ -448,6 +503,12 @@ void Tetrakt_initVoice(TetraktVoice *voice, const uint8_t slot, int16_t *line)
 		L->stage = TKT_STAGE_IDLE;
 		L->pendSample = (uint8_t)i;
 		L->pendVel = 127u;
+		L->decayAlt = 70u;
+		L->pendDecayAlt = 70u;
+		L->pflags = 0u;
+		L->loopStartPh = 0u;
+		L->loopEndPh = 0u;   /* S104 P1: a one-shot until a looped bind */
+		L->seamPh = 0xFFFFFFFFu;   /* S104 P1 assessment: never a seam */
 		L->env = L->envLast = 0.0f;
 		L->velo = 1.0f;
 		L->ic1 = L->ic2 = 0.0f;
@@ -462,9 +523,11 @@ void Tetrakt_initVoice(TetraktVoice *voice, const uint8_t slot, int16_t *line)
 
 void Tetrakt_triggerVoice(TetraktVoice *voice, const uint8_t source_slot,
                           const uint8_t velocity, const uint8_t note,
-                          const uint8_t layers)
+                          const uint8_t layers,
+                          const uint8_t *altDecay)
 {
 	const float vel = (float)velocity * (1.0f / 127.0f);
+	uint8_t nSamples;
 	uint32_t i;
 
 	/* --- platform part (as every engine): LFO and velocity, per slot --- */
@@ -487,6 +550,7 @@ void Tetrakt_triggerVoice(TetraktVoice *voice, const uint8_t source_slot,
 	 *             for this trigger; layerOn itself is not written.
 	 */
 	voice->note = note;
+	nSamples = sampleMemory_getNumSamples();   /* S104 P1 assessment: the s/l split */
 	for (i = 0u; i < TKT_LAYERS; i++) {
 		TktLayer *const L = &voice->layer[i];
 
@@ -494,8 +558,37 @@ void Tetrakt_triggerVoice(TetraktVoice *voice, const uint8_t source_slot,
 
 		if (!(on & (1u << i)))
 			continue;
-		L->pendSample = L->sample;
+		/*
+		 * T6 pre-empts T7 (S104 P1, user rule 3): a track-7 trigger leaves
+		 * alone a layer a track-6 trigger has already restarted and whose
+		 * START is still pending (TKT_PF_PEND without TKT_PF_PEND_ALT); a
+		 * track-6 trigger always takes the layer. So when both tracks
+		 * restart a layer in the same pass (or within the one-block START
+		 * window, two after a FADE), it plays track 6's velocity, sample
+		 * and decay whatever the pop order, and layers only one track
+		 * restarts keep that track's decay (rule 4).
+		 */
+		if (altDecay && (L->pflags & TKT_PF_PEND) &&
+		    !(L->pflags & TKT_PF_PEND_ALT))
+			continue;
+		/*
+		 * S104 P1 assessment: split the row value here, once per
+		 * trigger in the foreground, instead of in the block-rate START
+		 * latch: samples .. 2 x samples - 1 is the same sample looped
+		 * (TKT_PF_PEND_SLP set, pendSample the catalogue index).
+		 */
+		if (nSamples != 0u && L->sample >= nSamples) {
+			L->pendSample = (uint8_t)(L->sample - nSamples);
+			L->pflags |= TKT_PF_PEND_SLP;
+		} else {
+			L->pendSample = L->sample;
+			L->pflags &= (uint8_t)~TKT_PF_PEND_SLP;
+		}
 		L->pendVel = velocity;
+		L->pendDecayAlt = altDecay ? altDecay[i] : 0u;
+		L->pflags = (uint8_t)((L->pflags & (uint8_t)~TKT_PF_PEND_ALT) |
+		                      TKT_PF_PEND |
+		                      (altDecay ? TKT_PF_PEND_ALT : 0u));
 		if (L->stage == TKT_STAGE_PLAY && L->env >= TKT_QUIET)
 			L->stage = TKT_STAGE_FADE;
 		else if (L->stage != TKT_STAGE_FADE)
@@ -539,12 +632,41 @@ static inline void tkt_layerCarry(TktLayer *L)
 	L->a3 += (float)OUTPUT_DMA_SIZE * L->da3;
 }
 
+/*
+ * Interpolation-slot claims for this block's seam layers (S104 P1
+ * assessment).
+ *
+ * What: for each layer in `mask` (sounding, at its seam), claims a slot
+ * (modNode_interpClaim()); a granted layer reads its seam exactly (form A),
+ * a refused one keeps the form B the async set. Why: out of line and called only in a block with no layer
+ * restart, so its cost (four claims at most) is counted on the steady seam
+ * block, never on the START block. Unrolled so the static path tool sees
+ * every call. Inputs: voice, mask (bit i = layer i). Outputs: pflags form
+ * bits; slot counters. Accessor: Tetrakt_calcVoiceAsync().
+ */
+static __attribute__((noinline)) void tkt_seamClaims(TetraktVoice *voice,
+                                                     const uint32_t mask)
+{
+	uint32_t i;
+
+#pragma GCC unroll 4
+	for (i = 0u; i < TKT_LAYERS; i++) {
+		TktLayer *const L = &voice->layer[i];
+
+		if ((mask & (1u << i)) && modNode_interpClaim(&L->osc))
+			L->pflags = (uint8_t)((L->pflags & (uint8_t)~TKT_PF_FORM_MASK) |
+			                      (uint8_t)(TKT_FORM_A << TKT_PF_FORM_SHIFT));
+	}
+}
+
 void Tetrakt_calcVoiceAsync(TetraktVoice *voice)
 {
 	const uint32_t gen = sampleMemory_getGeneration();
 	const uint32_t rebind = (uint32_t)(gen != voice->bindGen);
 	float num = 0.0f, den = 0.0f, envW;
 	uint32_t i;
+	uint32_t anyStart = 0u;   /* S104 P1 assessment: a layer restarts this block */
+	uint32_t seamMask = 0u;   /* S104 P1 assessment: layers at a seam this block */
 
 	voice->bindGen = gen;
 	for (i = 0u; i < TKT_LAYERS; i++) {
@@ -560,14 +682,57 @@ void Tetrakt_calcVoiceAsync(TetraktVoice *voice)
 		 * on one block). The blocks between carry (tkt_layerCarry()).
 		 */
 		if (rebind || ((voice->ctlPhase + i) & (TKT_CTL_BLOCKS - 1u)) == 0u ||
-		    L->stage == TKT_STAGE_START || L->stage == TKT_STAGE_FADE)
+		    L->stage == TKT_STAGE_START || L->stage == TKT_STAGE_FADE) {
+			anyStart |= (uint32_t)(L->stage == TKT_STAGE_START);
 			tkt_layerControl(voice, i, 0u, rebind);
-		else
+		} else
 			tkt_layerCarry(L);
 		num += lv * L->env;
 		den += lv;
 	}
 	voice->ctlPhase = (uint8_t)((voice->ctlPhase + 1u) & (TKT_CTL_BLOCKS - 1u));   /* S101 P2 A2q */
+	/*
+	 * Loop seam forms for this block (S104 P1, user Q25; restructured by the
+	 * S104 P1 assessment).
+	 *
+	 * What: a sounding looped layer whose block-start phase is at or past
+	 * its seam threshold (seamPh, set by its last control: the block's reads
+	 * can reach the last loop frame) holds the seam this block. It takes the
+	 * early wrap (form B; a loop under two frames is bound as a one-shot by
+	 * tkt_bindLayer(), so every looped layer here can take B) unless
+	 * tkt_seamClaims() below wins it an interpolation slot (form A, exact).
+	 * Every other layer runs the plain one-shot loop unchanged (its end clamp
+	 * is never reached in such a block). The form is stored in pflags for
+	 * the sync dispatch.
+	 * No slot is claimed in a block where any layer restarted (a START
+	 * latch ran above): those seams take B for that one block (one frame
+	 * shorter on that pass). So the claims (modNode_interpClaim(), 36
+	 * instructions each) never share a block with the four START controls
+	 * and binds; Tetrakt's worst block is the larger of the two
+	 * (tetrakt_cpu.py composes both).
+	 * Why: the exact seam costs a seam select and a wrap per sample (A,
+	 * +3.2 a sample measured), paid only in seam blocks from the slot
+	 * pool's pre-charged 45 a sample (CPU_USE_DSP_AUDIT.md item 75); the
+	 * no-slot form B fits Tetrakt's own gate. Claims are made here in the
+	 * async, after modNode_resetTargets(), never in the sync render (S093 P8
+	 * item 79). Inputs: each layer's phase, seamPh, loop points, stage;
+	 * anyStart. Outputs: the form bits; slot claims (sticky for one more
+	 * block, as every claim is). Affiliates: tkt_layerControl() (seamPh),
+	 * tkt_seamClaims(), Tetrakt_calcVoiceSyncBlock(), tkt_layerPost().
+	 */
+	for (i = 0u; i < TKT_LAYERS; i++) {
+		TktLayer *const L = &voice->layer[i];
+		uint32_t form = TKT_FORM_PLAIN;
+
+		if (L->stage != TKT_STAGE_IDLE && L->osc.phase >= L->seamPh) {
+			seamMask |= (1u << i);
+			form = TKT_FORM_B;   /* every bound loop is >= 2 frames (tkt_bindLayer()) */
+		}
+		L->pflags = (uint8_t)((L->pflags & (uint8_t)~TKT_PF_FORM_MASK) |
+		                      (uint8_t)(form << TKT_PF_FORM_SHIFT));
+	}
+	if (seamMask != 0u && !anyStart)
+		tkt_seamClaims(voice, seamMask);
 	/* W2 on the summed right bus (trim 1): the level-weighted envelope. */
 	envW = (den > 0.0f) ? (num / den) : 0.0f;
 	voice->busWMix = (float)voice->width * (1.0f / 127.0f) *
@@ -618,17 +783,35 @@ void Tetrakt_calcVoiceAsync(TetraktVoice *voice)
  * Accessors:  tkt_layerPostStore(), tkt_layerPostAdd().
  */
 static inline __attribute__((always_inline)) void tkt_layerPost(TktLayer *L, const float vg,
-                                                                  const uint32_t first)
+                                                                  const uint32_t first,
+                                                                  const uint32_t form)
 {
-	/* osc_renderTyped()'s rule: only an SMP bind with data reads; anything
-	 * else (OSC_BIND_NONE: no sample installed) reads a zero pair at phase
-	 * 0, so the loop is the same and the layer is silent */
+	/* osc_renderTyped()'s rule: only a catalogue bind (SMP or, S104 P1,
+	 * SLP) with data reads; anything else reads a zero pair at phase 0,
+	 * so the loop is the same and the layer is silent */
 	static const int16_t tkt_zeroPair[2] = { 0, 0 };
-	const uint32_t live = (L->osc.sampleCacheLooped == OSC_BIND_SMP &&
+	const uint32_t live = ((L->osc.sampleCacheLooped == OSC_BIND_SMP ||
+	                        L->osc.sampleCacheLooped == OSC_BIND_SLP) &&
 	                       L->osc.sampleCacheData && L->osc.sampleCacheSize != 0u);
 	const int16_t *const data = live ? (const int16_t *)L->osc.sampleCacheData : tkt_zeroPair;
 	const uint32_t endPh = live ? (L->osc.sampleCacheSize << OSC_SAMPLE_PHASE_SHIFT) : 0u;
-	const uint32_t inc = L->osc.phaseInc;
+	/*
+	 * S104 P1 seam forms. A (exact): the read after loop_end - 1 is
+	 * loop_start (the Drum osc_slpPlainBlock()'s seam), the phase wraps at
+	 * loop_end by the loop length. B (early wrap): the pass reads
+	 * [loop_start, loop_end - 1] and wraps at loop_end - 1, so no seam
+	 * select is needed (one frame shorter that pass; inaudible on drum
+	 * loops, 1 % sharp on a 100-frame cycle). The step is clamped below the
+	 * wrap length (Q27: no division; a loop shorter than one step at a high
+	 * pitch aliases anyway). Plain: the one-shot clamp at the sample end.
+	 */
+	const uint32_t le = L->loopEndPh >> OSC_SAMPLE_PHASE_SHIFT;
+	const uint32_t ls = L->loopStartPh >> OSC_SAMPLE_PHASE_SHIFT;
+	const uint32_t wrapPh = (form == TKT_FORM_A) ? L->loopEndPh
+	                      : (L->loopEndPh - (1u << OSC_SAMPLE_PHASE_SHIFT));
+	const uint32_t lenPh = wrapPh - L->loopStartPh;
+	const uint32_t inc = (form != TKT_FORM_PLAIN && L->osc.phaseInc >= lenPh)
+	                     ? (lenPh - 1u) : L->osc.phaseInc;
 	uint32_t ph = live ? L->osc.phase : 0u;
 	float *const bL = tkt_work.busL;
 	float *const bR = tkt_work.busR;
@@ -666,12 +849,16 @@ static inline __attribute__((always_inline)) void tkt_layerPost(TktLayer *L, con
 #pragma GCC unroll 1
 	for (n = j; n < j + TKT_SUB_BLOCK; n++) {
 		const uint32_t idx = ph >> OSC_SAMPLE_PHASE_SHIFT;
+		const uint32_t nx = (form == TKT_FORM_A && idx + 1u == le) ? ls : idx + 1u;
 		const int32_t a = data[idx];
 		float x = (float)((a << OSC_SAMPLE_PHASE_SHIFT) +
-		                  (int32_t)(ph & 0xFFFu) * ((int32_t)data[idx + 1u] - a)) * g;
+		                  (int32_t)(ph & 0xFFFu) * ((int32_t)data[nx] - a)) * g;
 
 		ph += inc;
-		ph = (ph > endPh) ? endPh : ph;
+		if (form == TKT_FORM_PLAIN)
+			ph = (ph > endPh) ? endPh : ph;
+		else
+			ph = (ph >= wrapPh) ? (ph - lenPh) : ph;
 		float d, v1, v2, v3, y, r;
 
 		g += gStep;
@@ -712,14 +899,34 @@ static inline __attribute__((always_inline)) void tkt_layerPost(TktLayer *L, con
 		L->osc.phase = ph;
 }
 
-/* The two instances (the Colloid's store / add pattern): one loop each. */
+/*
+ * The post-loop instances (the Colloid's store / add pattern; S104 P1 adds
+ * the two seam forms): layer A stores, B..D add; one loop each, the form a
+ * compile-time constant. Plain is the pre-S104 loop.
+ */
 static __attribute__((noinline)) void tkt_layerPostStore(TktLayer *L, const float vg)
 {
-	tkt_layerPost(L, vg, 1u);
+	tkt_layerPost(L, vg, 1u, TKT_FORM_PLAIN);
 }
 static __attribute__((noinline)) void tkt_layerPostAdd(TktLayer *L, const float vg)
 {
-	tkt_layerPost(L, vg, 0u);
+	tkt_layerPost(L, vg, 0u, TKT_FORM_PLAIN);
+}
+static __attribute__((noinline)) void tkt_layerPostStoreSeamA(TktLayer *L, const float vg)
+{
+	tkt_layerPost(L, vg, 1u, TKT_FORM_A);
+}
+static __attribute__((noinline)) void tkt_layerPostAddSeamA(TktLayer *L, const float vg)
+{
+	tkt_layerPost(L, vg, 0u, TKT_FORM_A);
+}
+static __attribute__((noinline)) void tkt_layerPostStoreSeamB(TktLayer *L, const float vg)
+{
+	tkt_layerPost(L, vg, 1u, TKT_FORM_B);
+}
+static __attribute__((noinline)) void tkt_layerPostAddSeamB(TktLayer *L, const float vg)
+{
+	tkt_layerPost(L, vg, 0u, TKT_FORM_B);
 }
 
 /*
@@ -886,11 +1093,25 @@ void Tetrakt_calcVoiceSyncBlock(TetraktVoice *voice, int16_t *buf, uint8_t size)
 	for (i = 0u; i < TKT_LAYERS; i++) {
 		TktLayer *const L = &voice->layer[i];
 		const float vg = voice->veloVol ? L->velo : 1.0f;
+		/* S104 P1: the form the async chose for this block. */
+		const uint32_t form = (uint32_t)(L->pflags & TKT_PF_FORM_MASK) >>
+		                      TKT_PF_FORM_SHIFT;
 
-		if (i == 0u)
-			tkt_layerPostStore(L, vg);
-		else
-			tkt_layerPostAdd(L, vg);
+		if (i == 0u) {
+			if (form == TKT_FORM_A)
+				tkt_layerPostStoreSeamA(L, vg);
+			else if (form == TKT_FORM_B)
+				tkt_layerPostStoreSeamB(L, vg);
+			else
+				tkt_layerPostStore(L, vg);
+		} else {
+			if (form == TKT_FORM_A)
+				tkt_layerPostAddSeamA(L, vg);
+			else if (form == TKT_FORM_B)
+				tkt_layerPostAddSeamB(L, vg);
+			else
+				tkt_layerPostAdd(L, vg);
+		}
 	}
 	tkt_spaceOut(voice, buf);
 }

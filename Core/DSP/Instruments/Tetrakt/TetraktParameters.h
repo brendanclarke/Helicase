@@ -29,6 +29,9 @@
 #define TETRAKT_INSTRUMENT_TYPE_FLAGS  INSTRUMENT_FLAG_BASIC
 /* The layer switch row (lon): the registry's switch_row_plus1 is this + 1. */
 #define TETRAKT_PARAM_LAYER_ON_INDEX   20u
+/* S104 P1: the layer-A decay row; tkt_decay_a..d are this + 0..3 (track 7's
+ * decays are routed by these indices, InstrumentManager.c). */
+#define TETRAKT_PARAM_DECAY_A_INDEX    12u
 
 extern const ParamDescriptor tetrakt_param_descriptors[];
 extern const uint8_t tetrakt_param_descriptor_count;
@@ -56,4 +59,3 @@ uint8_t tetraktParameters_velocityKind(uint8_t token);
 uint8_t tetraktParameters_velocityTokenHidden(uint8_t token);
 
 #endif /* TETRAKT_PARAMETERS_H_ */
-

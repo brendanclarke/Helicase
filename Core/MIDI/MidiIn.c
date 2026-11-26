@@ -27,6 +27,7 @@
 #include "MidiLearn.h"
 #include "usb_manager.h"
 #include "presetManager.h"
+#include "menu.h"
 #include "config.h"
 
 /* S083 Q13: the USB ring and the arrival stamps are sized from this. */
@@ -34,10 +35,12 @@ _Static_assert(sizeof(MidiMsg) == 6u, "MidiMsg must stay six bytes");
 _Static_assert(sizeof(struct MidiBits) == 1u, "MidiBits must stay one byte");
 
 /*
- * Shared MIDI settings (S083).
+ * Shared MIDI settings (S083; S104 P1 adds `omni`).
  *
  * What: global channel (1..16, 0 = off), the packed filter byte (RX low
- * nibble, TX high nibble, MIDI_FILTER_* bits) and the MRT route mask.
+ * nibble, TX high nibble, MIDI_FILTER_* bits), the MRT route mask and
+ * `omni`: the Omni channel O (1..16, 0 = off; S104 P1). A message on O acts
+ * on the selected track (midiIn_omniTrack()).
  * Why: one owner for settings both directions read. Replaces
  * midi_MidiChannels[8] (8 B), midiParser_txRxFilter and midiParser_routing.
  * Writers: midiIn_set*() from menu_parseGlobalParam() (settings load and
@@ -49,7 +52,8 @@ static struct {
 	uint8_t global;
 	uint8_t filter;
 	uint8_t route;
-} midiIn_config = { 1u, 0xFFu, 0u };
+	uint8_t omni;		/* S104 P1: Omni channel O, 0 = off */
+} midiIn_config = { 1u, 0xFFu, 0u, 0u };
 
 /* DIN framer state (from MidiParser.c). */
 enum {
@@ -74,6 +78,50 @@ void midiIn_setGlobalChannel(uint8_t channel)
 uint8_t midiIn_globalChannel(void)
 {
 	return midiIn_config.global;
+}
+
+/*
+ * MIDI Omni channel O (S104 P1).
+ *
+ * What: midiIn_setOmniChannel() stores O (1..16; 0 or > 16 = off) after
+ * releasing every note still held on the old O (midiNotes_omniReleaseAll(),
+ * which ends paraphonic and gated voices with their own note-offs).
+ * midiIn_omniTrack() is the one resolver every consumer asks first: for a
+ * message on O it returns the selected track (menu_getActiveVoice(), 0..6),
+ * else 0xFF. Why: a channel on O addresses "the selected track as if alone
+ * on its own channel", whatever that track's `ch` (glb, off or a number) and
+ * whatever G is: O wins when they are equal. The selected track is read per
+ * message (no cache), because the user changes it at any time; held notes
+ * keep their track through MidiNotes' latch instead. Inputs: channel 1..16.
+ * Outputs: track or 0xFF. Context: foreground (midiIn_service()).
+ * Accessors: menu_parseGlobalParam() (setter); midiNotes_handle(),
+ * midiControl_voiceSlotsOnChannel(), midiControl_targetOnChannel(),
+ * midiControl_handleCc(), midiProgram_programChange(),
+ * midiProgram_bankChange(). Affiliates: MidiNotes' Omni latch.
+ */
+void midiIn_setOmniChannel(uint8_t channel)
+{
+	if (channel > 16u)
+		channel = 0u;
+	if (channel != midiIn_config.omni)
+		midiNotes_omniReleaseAll();
+	midiIn_config.omni = channel;
+}
+
+uint8_t midiIn_omniChannel(void)
+{
+	return midiIn_config.omni;
+}
+
+uint8_t midiIn_omniTrack(uint8_t channel)
+{
+	const uint8_t o = midiIn_config.omni;
+	uint8_t track;
+
+	if (o == 0u || channel != o)
+		return 0xFFu;
+	track = menu_getActiveVoice();
+	return (track < 7u) ? track : 0xFFu;
 }
 
 void midiIn_setFilter(uint8_t isTx, uint8_t value)

@@ -1,0 +1,1 @@
+lfo_dispatchNextValue: per-block longest 56, loops 0; calls ['instrumentManager_updateLfoAdapters', 'modNode_updateValuePolarity']

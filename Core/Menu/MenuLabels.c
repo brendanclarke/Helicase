@@ -89,6 +89,8 @@ const char shortNames[][4] = {
      * SHORT_LCT); its other rows reuse existing labels */
     {"kik"},{"cy1"},{"sk1"},{"dp1"},{"cy2"},{"sk2"},{"dp2"},{"chs"},
     {"src"},{"dtk"},{"lct"},
+    /* S104 P1: the Global MIDI Omni channel (menu.h SHORT_OMN). */
+    {"omn"},
 };
 
 /*
@@ -197,6 +199,8 @@ const char longNames[][10] = {
     {"Run"},{"Kick"},{"Cycle"},{"Skew"},{"Chaos"},{"SelfMod"},{"VCA Bal"},
     {"Exciter"},{"NoiseMix"},{"SyncThr"},{"Wet"},{"Drift"},{"Tracking"},
     {"Low Cut"},{"OutFilt"},
+    /* S104 P1: the Global MIDI Omni channel (menu.h LONG_OMNI_CH). */
+    {"Omni Ch"},
 };
 
 _Static_assert(sizeof(shortNames) / sizeof(shortNames[0]) == SHORT_LABEL_COUNT,

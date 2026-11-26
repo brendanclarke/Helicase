@@ -1,0 +1,4 @@
+Flash : 697,176 / 753,664 B used, headroom 56,488 B
+ITCM  : 15,424 / 16,384 B
+DTCM  : statics 4,392 B
+FXBUF : 126,656 B at 0x20001140 (min 122,880, margin 3,776)

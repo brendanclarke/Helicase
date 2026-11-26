@@ -1,8 +1,8 @@
 # S104 P1 — Tune-ups: implementation schedule
 
 **Date:** 2026-11-25. **Branch:** `dev-ph7-alkaline`, clean at `9c2462bd`.
-**Status:** schedule. No source has been changed. The design is
-`S104_P1_TUNE-UPS.md` (revision 2).
+**Status:** all eight steps applied and host-tested (see §11); device checks in
+§9.3 are outstanding. The design is `S104_P1_TUNE-UPS.md` (revision 2).
 
 **Decisions in force** (user, 2026-11-25: "Ram approved, everything sounds ok there"):
 - every open recommendation in the plan's §11 is accepted: Q6–Q15, Q17, Q18, Q20, Q21,
@@ -4050,3 +4050,662 @@ No entry edits these. Each needs updating after the schedule lands.
   - `manual/chapters/09_midi.md:10` (Global table: `omn`);
   - `06_operation_modes.md` (PERF: DJ mode);
   - `05_sequencer.md` (conditions, if listed there).
+
+---
+
+## 11. Implementation log
+
+Notes taken while applying the schedule, one block per step. Line numbers below
+are post-change.
+
+### 11.0 Baselines (before step 1)
+
+- `build/lxr02.elf` from the clean tree at `d5948f59`; flash 697,176 B / headroom
+  56,488 B, ITCM 15,424 B, SRAM1 `.bss` 422,540 B (`link_budget.py`).
+- Copied to `tools/dsp_test/baselines/s104p1/`: `lxr02_base.elf`, `tetrakt.txt`
+  (`loops 292.5 + 2771/32 = 379.1`; steady 329.9), `lfo_dispatch_blockpath.txt`,
+  `tetrakt_async_blockpath.txt`, `link_budget.txt`, and
+  `p4base/{osc,mixer}.txt` (`make elf_p4_snapshot`).
+- **Note:** `lfo_calc` and `lfo_stepBlock` are inlined into
+  `lfo_dispatchNextValue` in this image, so their block-path gate is taken on that
+  symbol (56 instructions, 0 frame loops) rather than the named symbols the
+  schedule cites.
+
+### 11.1 Step 1 — P-1 (track-button preview)
+
+- `buttonHandler.c`: the VOICE branch runs `menu_switchPage(voiceNr)` only when
+  `!(shouldPreviewVoice && menu_activePage == voiceNr)`; the comment block is as
+  specified. STEP mode and FX mode untouched.
+- `make all`: no warnings; flash unchanged (697,176 B).
+
+### 11.2 Step 2 — L-1 .. L-4 (Load/Save pot 1)
+
+- `menu.c` `case 0`: sets `SAVE_STATE_EDIT_TYPE`, `editModeActive = 1`, then
+  `menu_handleLoadSaveMenu(delta, 0u)`; the busy-lock block above still drops a
+  pot-1 turn while storage is busy.
+- Removed the pot-only ring: `menu_loadSaveRestoredTypeIndex()`,
+  `menu_instrumentLoadOptionCountForVoice()`, `menu_instrumentLoadOptionAt()`,
+  `menu_instrumentLoadCurrentOptionForVoice()`,
+  `menu_instrumentLoadOptionTotal()`, `menu_loadSaveLogicalPosition()`,
+  `menu_loadSaveLogicalCount()`, `menu_loadSaveSetInstrumentVoiceLed()`,
+  `menu_loadSaveEnterInstrumentLoad()`, `menu_loadSaveEnterInstrumentSave()`,
+  `menu_loadSaveApplyLogicalPosition()`.
+- **Deviation from the schedule's code-dive:** `menu_loadSaveEnterTop()` had no
+  caller left once `menu_loadSaveApplyLogicalPosition()` was gone (the schedule
+  expected other callers). `-Wall` reported it; removed, and the comment that named
+  it now points at `menu_loadSaveEnterTopAt()`.
+- L-4 comments updated; the pot-1 comment no longer claims it crosses voices.
+- `make all`: no warnings; flash **695,404 B** (−1,772 B); headroom 58,260 B.
+
+### 11.3 Step 3 — C-1 .. C-12 (conditions and the wrap)
+
+- `MenuText.h`: 42-entry table with `!1-` at 21; all later values shifted by one.
+- `sequencer.c`: `seq_repeatCountNext()` added; five wrap sites use it; the
+  dispatch, self-probe and predictor renumbered (bounds 41, repeat 11..21, fill
+  22/23, loop 24/25, last 26/27, mute 28..41); comments rewritten. The predictor's
+  wild-card case for `c == 255` cannot occur as a stored count but is handled by
+  the helper for the same reason playback is.
+- `menu.c`: clamp and `menu_getConditionName()` bound 41.
+- New host test `tools/dsp_test/modules/seq_conditions.c` (laws SC-1ST, SC-XY,
+  SC-WRAP, SC-MAP, SC-PRED) and its Makefile rule + break. All laws pass; the
+  break (plain `c + 1`) is caught. `make seq_conditions` green.
+- `make all`: flash **695,484 B** (+80 B over step 2), headroom 58,180 B.
+
+### 11.4 Step 4 — O-1 .. O-15 (MIDI Omni)
+
+- `Par: PAR_MIDI_CHAN_OMNI` appended, dtype `DTYPE_1B16`, labels (omn / Omni
+  Ch / CAT_MIDI), Global row 0 now `bpm syn qnt ch omn txf rxf mrt`, `scr` moved
+  to row 2 column 3, `off` name and 0..16 clamp shared with G, parse case calls
+  `midiIn_setOmniChannel()`.
+- `filesystem.c`: defaults 0 (both default paths), sanitize > 16 -> 0, key
+  `midi_chan_omni`, writer cases 26 `bpm_fine` / 27 `midi_chan_omni` / 28 the
+  terminator `lines=28` (the recovery check compares declared against the file's
+  own line count, so a pre-S104 `lines=26` still validates).
+- `MidiIn.c/h`: `omni` in the config, `midiIn_setOmniChannel()`/`omniChannel()`/
+  `omniTrack()`; `menu.h` included for the selected track.
+- `MidiNotes.c/h`: the 128-bit held map + latch, `midiNotes_omniMap()`,
+  `midiNotes_omniReleaseAll()`; the resolve path uses the one-track map and
+  updates the map only on a resolved note.
+- `MidiControl.c`: slots/targets ask `midiIn_omniTrack()` first; track timing
+  targets compare with the selected track; `onG` is false on O. `MidiProgram.c`:
+  PC on O assigns only that track; CC0 on O not consumed.
+- **Ordering deviation:** `O-8` writes `bpm_fine`, so `D-1`/`D-2` (the parameter
+  and its dtype) were applied here; the rest of step 5 follows. The O-1
+  assert now names `PAR_BPM_FINE`.
+- Host test `tools/midi_test`: `omni_map.c` generated with the extractor, law
+  NM-OMNI added (unassigned / rooted / wide, G == O), break removes
+  `map->global = 0u;` and is caught. `make run` green (both existing tests and
+  both breaks).
+- `make all`: flash **696,512 B**, headroom 57,152 B. The `#if 0` dead block in
+  `filesystem.c` (retired Bank-tree quarantine, ~24,941) leaves seven pre-existing
+  `-Wunused-function` warnings for functions that block references; unchanged by
+  this step (the block is under `#if 0` in the base tree).
+
+### 11.5 Step 5 — D-1 .. D-27 (DJ mode, centi BPM)
+
+- Sequencer: `seq_tempoCenti`/`seq_tempoNudge`/`seq_tempoEff` replace `seq_tempo`;
+  `seq_calcDeltaT()` is float on the effective tempo; `seq_setTempoCenti()`,
+  `seq_setTempoNudge()`, `seq_getBpm()` (rounded base), `seq_setBpm()` (x100,
+  clamped 655), `seq_setExtSyncSource()` recomputes the effective tempo;
+  `seq_trackStepSamples()` uses the x100 form (AL-T unchanged).
+- `seq_getMasterPosition()` and `seq_jumpMasterTicks()` added under PRIMASK
+  (7 tracks, anchors, realign).
+- Menu: BPM/FINE parse case, `menu_djOpen/Close/IsOpen/SetTempoCenti/Knob`, the
+  DJ painter with the diff-paint hook, page-switch close, pot intercept, encoder
+  inert, 25 ms position repaint. `settings.cfg` gains `bpm_fine` (case 26) and
+  `lines=28`.
+- ButtonHandler: DJ state, COPY tap, BAR nudge/ramp, SHIFT+PLAY+PERF entry, any
+  MODE closes, press/release consumption, BAR LED suppression in DJ. `math.h`
+  added for `fabsf`.
+- Host: new `seq_tempo` (TP-PERIOD/NUDGE/ROUND; the integer-period break is
+  caught) and `seq_steplen` updated to `seq_tempoEff` (AL-T unchanged).
+- `make all`: flash **700,056 B**, headroom 53,608 B.
+
+### 11.6 Step 6 — F-1 .. F-10 (LFO waves)
+
+- `lfo.h`: `xtr` 8 and one-shots 9..17, `LFO_WAVE_COUNT` 18, `osState` in the
+  padding, `lfo_retriggerPhase()`; `lfo.c`: `lfo_shapeAt`/`lfo_osWrap`/
+  `lfo_calcOneShot`, new switch cases, the `LFO_WRAP_MASK` test in
+  `lfo_stepBlock()`, retrigger phase; `MenuText.h` 18 names.
+- `InstrumentManager`: voice and Scene retriggers call `lfo_retriggerPhase()`.
+- Host `lfo`: laws LF-OS1..LF-OS5 added; all pass; the new break (DONE re-pin
+  removed) is caught. Existing LF1..LF6 and their three breaks unchanged.
+- **Cost (measured):** `elf_blockpath.py` on `lfo_dispatchNextValue` (the symbol
+  `lfo_calc` and `lfo_stepBlock` are inlined into it in this image): **56 -> 79**
+  per control (+23; the est. was +5..+8). Six slot LFOs on the two-block schedule
+  is ~3 controls/block, so ~+69 instructions/block, ~+2.2 a sample-equivalent
+  (est. +0.6). No per-sample loop changes (`loops 0`). Accepted as measured per
+  Q31; recorded for the CPU audit.
+- `make all`: flash **700,880 B**, headroom 52,784 B.
+
+### 11.7 Step 7 — T-1 .. T-33 (four track-7 decays)
+
+- Data: `kit_settings_t` 2 -> 8 B (two 4-byte arrays),
+  `SCENE_TRACK7_DECAY_LAYERS`, layered `scene_set/getSlot6Track7Decay()` and
+  `...MorphDecay()`, `scene_seedTrack7Decays()` / `scene_seedResidentTrack7Decays()`;
+  reset zeroes all four layers; AutoSave live bytes 2 -> 8 (`index = 2 x layer +
+  image`), apply loops all layers; S098 field lists compare/copy the arrays whole;
+  KitMrp seeds every layer's Morph endpoint; the preset setter is
+  `preset_setSlot6Track7Decay(scene, layer, image, value, record)`.
+- **Existing-file bug fixed (T-11):** the kitset key buffer was `char key[24]` and
+  the 31/37-character track-7 keys were silently truncated, so they never loaded.
+  It is now 40 B, with one key table (eight keys) shared by the parser and writer;
+  `storage_kitset_t.seen_t7_mask` records what the file carried, and the three Kit
+  commits seed the rest. The Kit writer's eight decay lines are 2..9 and the slot
+  block starts at line 11.
+- Runtime: the override is a 4-bit mask + `value[4]`; `track7DecayIndex/LayerOf/
+  Layer/LocalMask` helpers; the T6-pre-empts-T7 pending window; the START latch and
+  decay read (`decayAlt`); the drain routes track-7 locks of `tkt_decay_a..d` to
+  the layer override before the R12 test; the restore masks the four rows out for a
+  track-7 Tetrakt trigger and clears the overrides. Menu: `T7_LAYER_A..D` kit cells,
+  display/commit, clear target, held-step target, marker test. Live recording reads
+  the layer value on track 7.
+- **Host layout note:** the firmware `TktLayer == 204` assert is guarded by
+  `#if !defined(TKT_HOST)`; the host `OscInfo` layout differs, so the host build
+  defines `TKT_HOST` in `modules/tetrakt.c`.
+- Tests: TK-T7 + break (T6-wins `continue;` removed); SQ-T7 (drain routing) and
+  SQ-T7R (restore mask) with its break added to `modules/sequencer.c`. All pass.
+  The Kit file round trip needs the device (no storage host target).
+- **Cost (measured):** `tetrakt_cpu.py` **379.1 -> 380.7** (+1.6 a sample; est.
+  +0.1). The worst block is the 4-START block, so the new latch/decay select is
+  paid four times there. The absolute gate (390) passes. The step's "growth <= 0.5"
+  check cannot be evaluated: `tetrakt_cpu.py --baseline` matches only an integer
+  `loops` field, while the recorded baseline prints `292.5`, so the regex is a
+  no-op (pre-existing). Recorded for the CPU audit.
+- `make all`: flash **703,756 B**, headroom 49,908 B.
+
+### 11.8 Step 8 — K-1 .. K-12 (Tetrakt looped samples)
+
+- `TktLayer` gains `loopStartPh`/`loopEndPh` (212 B; firmware assert, host
+  guarded); `tkt_bindLayer()` caches the loop of an SLP bind and clears it for a
+  one-shot; the START latch maps a row value `samples..2s-1` to SLP with
+  `waveform = value - samples`; the async predicts the seam and claims an
+  interpolation slot (A), else B, else plain in `pflags` bits 3-4; the post loop
+  is parameterised by `form` with six instances; the sync block dispatches on the
+  form. Rows list `s00..` then `l00..` (domain `min(2n,128)-1`) and the menu shows
+  `sNN`/`lNN`.
+- Tests: TK-LOOP (form A exact across >= 5 wraps at 1.0/0.73/2.6 frames a sample,
+  form B early wrap, no-seam bit-identical, row->bind mapping, async form choice)
+  plus two breaks (seam select removed; never predict) - all caught.
+- **Gates:** `tetrakt_cpu.py` **389.8 / 390** with the dearer of plain and B per
+  layer; seam A premium **3.2** per held slot (charge 45). `elf_p4_check`: 83/83
+  oscillator/filter loops exact, 0 missing; mixer hot loops 0 grew (1 shrank).
+  `elf_blockpath`: plain 91, seam A 103, seam B 99 per post instance (per block;
+  /32 in the gate).
+- `make all && make img`: flash **707,068 B** (headroom 46,596 B), SRAM1 `.bss`
+  **422,704 B** (+164 vs the baseline; the §0.3 table totals +152, so **+12 B over
+  the quoted figure** - alignment padding in `kit_t`/`scene_t` is the likely
+  source; flagged for the user). ITCM unchanged 15,424 B.
+- Full host suite (`make -C tools/dsp_test -k all`): the two known failures remain
+  (`voice_control` 14, `alkaline` AL-OD0). **Observed extra:** `colloid` CO-PWG
+  failed once inside the full run but passes on every standalone run
+  (`make colloid` x3, 0 failures, breaks caught); colloid shares no changed code
+  path, so this is recorded as a pre-existing full-run ordering artifact, not
+  attributed to S104.
+- Device checks from §§1-8 remain outstanding (no hardware in this session).
+
+---
+
+## 12. Assessment (2026-11-25)
+
+Independent check of the tree as implemented: the working copy on `d5948f59`, all
+eight steps in. Everything below was re-run or re-read in this assessment, not taken
+from §11.
+
+### 12.1 What was checked
+
+| Check | Result |
+|---|---|
+| `make all` after touching every changed `.c` | Builds. Warnings: the seven `filesystem.c` `-Wunused-function` (the base file gives the same seven, checked) and the toolchain's newlib/LTO notes. None from S104 code. |
+| `link_budget.py` | Flash **707,068 B** (headroom 46,596 B; +9,892 B over the base 697,176, est. +6..+8 KB). ITCM 15,424 B (unchanged). DTCM 4,392 B (unchanged). |
+| RAM, object by object (`nm -S`, base ELF vs new) | **+152 B exactly**, every object as in §0.3. The 12 B more in `.bss` (§11.8) is link padding between objects, not an allocation. |
+| `make -C tools/dsp_test -k all` | Only the known failures: `voice_control` 14, `alkaline` AL-OD0. CO-PWG passed this run (the S101 P2 non-reproducible flake). |
+| New laws and breaks | SC-*, TP-*, LF-OS1..5, TK-T7, TK-LOOP, SQ-T7, SQ-T7R pass; `seq_conditions_break`, `seq_tempo_break`, `lfo_break4`, `tetrakt_break_t7/seam/predict` and `sequencer_break_t7` are caught |
+| `make -C tools/midi_test run` | notemap and notemode PASS; `notemap_break_omni` and `notemode_break_hold` caught |
+| `tetrakt_cpu.py` | 389.8 / 390 as printed; **395.4 with callee costs** (A-1) |
+| `elf_blockpath.py` `lfo_dispatchNextValue` | 56 → 79 (A-2) |
+| Code against the schedule | Read diff by diff for all 35 changed source files (§12.3) |
+
+### 12.2 Findings
+
+| ID | Severity | Finding |
+|---|---|---|
+| A-1 | **High (CPU rule)** | Tetrakt's true worst case is **≈ 395.4**, over the 390 gate; the gate prints 389.8 |
+| A-2 | **Medium (decision)** | One-shot LFOs cost +23 a control (≈ +2.2 a sample system-wide), against the +0.4 accepted under Q31 |
+| A-3 | Medium (tool) | `tetrakt_cpu.py --baseline` never compares (pre-existing); the step-7 growth gate could not run |
+| A-4 | Low | `menu_djIsOpen()` is 1 while a DJ entry waits behind a busy Load/Save exit, so COPY/BAR on the Load/Save page go to DJ mode |
+| A-5 | Low | A BAR held through a DJ exit keeps ramping the nudge until it is released |
+| A-6 | Low | The seam-A premium is checked on the Store instance only |
+| A-7 | Info | Kit writer: the Morph-save condition is now the same for both endpoint lines (a behaviour change for a KitMrp save sourced from Scene 17) |
+| A-8 | Info | Schedule errors the implementer corrected (§12.4) |
+
+#### A-1 — Tetrakt worst case over the gate (high)
+
+**What.** `elf_blockpath.py` counts each `bl` as one instruction and lists the
+callee; "a caller adds the callee's own count" (its docstring). `tetrakt_cpu.py`
+adds `tkt_layerControl`, `tkt_bindLayer` and `osc_userBind`, but not:
+
+| Callee | Path | Calls in the worst block | Uncounted |
+|---|---:|---:|---:|
+| `modNode_interpClaim()` (new, the async's seam claim; the loop is unrolled: 4 `bl` in `Tetrakt_calcVoiceAsync`) | 36 | 4 | 140 |
+| `sampleMemory_getNumSamples()` (new, the START latch's s/l mapping) | 3 | 4 | 8 |
+| `sampleMemory_sampleEntry()` (pre-existing, in the bind) | 8 | 4 | 28 |
+| `sampleMemory_getGeneration()` (pre-existing, async) | 3 | 1 | 2 |
+
+- **Corrected** (same method on both ELFs): base **380.0**, now **395.4** (+15.4).
+- The printed numbers are 379.1 and 389.8; the pre-existing part of the gap is
+  0.9.
+- The worst block is reachable: a hit restarts all four layers (four controls and
+  binds), and a loop shorter than one block's read (under about 32 × phaseInc
+  frames: up to ≈ 2,500 frames at the top pitch) makes the same block a seam block
+  for every layer.
+- A refused claim runs nearly all of `modNode_interpClaim()` (three tests and the
+  counter arithmetic), so the B fallback does not avoid the cost. Charging granted
+  claims to the slot pool does not bring the total under 390 either.
+
+**Where the +309 per-block instructions went** (block paths, base → new):
+
+| Item | Change |
+|---|---|
+| async | 105 → 212 (the seam prediction; est. 40–48) |
+| `tkt_layerControl` | 347 → 371, × 4 (the s/l mapping, the decay select; est. +3) |
+| `tkt_bindLayer` | 30 → 43, × 4 |
+| post-instance block paths (the B form's max) | +44 |
+| sync dispatch | +8 |
+| spaceOut | +2 |
+
+Per-sample loops grew 292.5 → 293.5 (B +0.2 a layer).
+
+**Fix proposal** (measure each; apply all three; est. ≈ 388 after):
+
+1. **A-1a (gate truth).** `tetrakt_cpu.py` adds callee costs for the calls it does
+   not already count:
+
+   ```python
+   # S104 P1 assessment: elf_blockpath counts a `bl` as 1; add the callee's
+   # own path for every call the composition does not already add.
+   CALLEES = (('Tetrakt_calcVoiceAsync', 'sampleMemory_getGeneration', 1),
+              ('Tetrakt_calcVoiceAsync', 'modNode_interpClaim', 4),
+              ('tkt_layerControl', 'sampleMemory_getNumSamples', 4),
+              ('tkt_bindLayer', 'sampleMemory_sampleEntry', BIND_LAYERS))
+   blk += sum(n * (B.block_path(a.elf, callee)[0] - 1)
+              for (_, callee, n) in CALLEES if present(a.elf, callee))
+   ```
+
+   With 1b, the claim term moves to the steady/seam line.
+
+2. **A-1b (no slot claim in a restart block).**
+   - Move the four claims out of the async's straight path into one
+     `noinline tkt_seamClaims(voice)`;
+   - the async calls it only when no layer restarted this block (a voice-local
+     flag set by the control loop when any layer ran a START latch);
+   - in a restart block every predicted seam takes form B (plain if the loop is
+     under 2 frames).
+
+   Why it is enough: claims and STARTs then never share a block, so the gate's
+   worst is max(the START block without claims, a steady seam block with four
+   claims). The latter is ≈ 336.7 + 4.5 ≈ 341. Sound: one block of B, a loop one
+   frame shorter on that pass, only when a hit lands on a seam.
+   `tetrakt_cpu.py` composes the two lines and gates the larger.
+
+3. **A-1c (cheaper per-block work).**
+   - Map the row value to one-shot/looped at the trigger
+     (`Tetrakt_triggerVoice()`, foreground): `pendSample` is stored already
+     reduced, and a `pflags` bit 5 says SLP. The START latch then only copies:
+     −`sampleMemory_getNumSamples()`, a compare, a subtract and a branch in the
+     control, est. −1.0 a sample.
+   - Compute each layer's seam threshold (`loopEndPh − 4096 − 32 × phaseInc`) in
+     the control, where `phaseInc` changes, into a new `uint32_t seamPh` per layer
+     (+16 B in the slot reserve: 1,112 → 1,128 of 1,264). The prediction becomes
+     one load and compare per layer: est. −1.9 a sample (async 212 → ≈ 136,
+     control +4).
+
+   **Est. after 1a + 1b + 1c:** START block ≈ 395.4 − 4.4 − 1.0 − 1.9 + 0.3 ≈
+   **388.4**; seam block ≈ 341. Margin ≈ 1.6. This is an estimate; the gate
+   measures it.
+
+Until A-1 is fixed, step 8 does not meet the CPU ceiling (`MEMORY.md` S089 P2, S093
+per-block rule). Steps 1–7 are unaffected: step 7 alone is 380.7 printed, ≈ 381.9
+corrected.
+
+#### A-2 — One-shot LFO cost (medium, decision)
+
+- **Measured:** `lfo_dispatchNextValue` (with `lfo_calc` and `lfo_stepBlock`
+  inlined) is **56 → 79** a control.
+- Six slot LFOs on the S101 P2 A1 two-block schedule run ≈ 3 controls a block:
+  ≈ +69 a block, **≈ +2.2 a sample system-wide**. Q31 accepted ≈ +0.4 "measured
+  at the gate"; the measured figure is 5×.
+- The dearest path is a one-shot: `lfo_calc()`'s switch, then `lfo_calcOneShot()`,
+  `lfo_osWrap()`, and `lfo_shapeAt()`'s second switch.
+- **Cheaper form (est. ≈ +1.1 a sample):** before `lfo_calc()`'s switch,
+  `if (w >= LFO_OS_FIRST) { ph = one-shot effective phase; w = base; }`, then fall
+  into the existing cases on `ph` (`sq1`/`rn1` handled in the pre-step). One
+  dispatch instead of two. Every LFO pays ≈ 2 for the test.
+- **Decision for you:** accept +2.2 as measured, or take the cheaper form and
+  re-measure.
+
+#### A-3 — `tetrakt_cpu.py --baseline` is a no-op (medium, pre-existing)
+
+- `re.match(r'tetrakt: loops \d+ \+ per block …')` (`tetrakt_cpu.py:195`) needs an
+  integer `loops`, but every output since S101 P2 prints a decimal (`292.5`). The
+  match fails silently and growth is never checked.
+- **Fix:** `loops [0-9.]+`.
+- The step-7 "growth ≤ 0.5" gate (§8.6) could not run. Step 7's measured growth is
+  +1.6 printed (+1.9 corrected), above the 0.5 the schedule set. The schedule's
+  est. +0.1 was wrong: the START latch and decay select run in all four controls of
+  the worst block.
+
+#### A-4 — DJ mode opened behind a busy Load/Save exit (low)
+
+- On a Load/Save page with storage busy, `menu_switchPage(PERFORMANCE_PAGE)`
+  queues the exit and returns.
+- `menu_djOpen()` then sets `menu_djActive` while `menu_activePage` is still
+  Load/Save.
+- The paint and pot hooks test the page, but `menu_djIsOpen()` does not, so
+  `processPress()` takes COPY and BAR as tap/nudge on the Load/Save page (where
+  they are Bank COPY and name editing) until the queued exit runs.
+- **Fix:** `return (uint8_t)(menu_djActive && menu_activePage == PERFORMANCE_PAGE);`.
+  Keep the BAR/COPY release paths on their own flags (they already are).
+
+#### A-5 — Nudge ramp continues after DJ exit while a BAR is held (low)
+
+- `buttonHandler_djNudgeService()` ramps up whenever `bh_djBar` has a held bit.
+  After a MODE press closes DJ mode, a BAR still held keeps pushing toward ±5 %
+  until released.
+- **Fix:** in the service, treat "held" as `(bh_djBar & 0x03u) && menu_djIsOpen()`.
+  With DJ closed, a held BAR ramps down. The release path stays as is.
+
+#### A-6 — The seam-A premium is checked on Store only (low)
+
+- `tetrakt_cpu.py` checks `StoreSeamA − Store` against 45. Add's premium is also
+  3.2 (measured: 61.1 − 57.9), so nothing is over.
+- **Fix:** check the larger of the two premiums.
+
+#### A-7 — Kit writer Morph condition (info)
+
+- Before S104, the Normal line interpolated only when
+  `op_kit_save_source_scene < SCENE_COUNT`, but the Morph line interpolated in
+  every Morph save.
+- The new writer uses the first condition for both lines.
+- For a KitMrp save sourced from Scene 17 (index 16), the Morph line is now
+  written raw, consistent with the Normal line. Flagged; no change proposed.
+
+### 12.3 Conformance, section by section
+
+| § | Entries | Result |
+|---|---|---|
+| 1 | C-1..C-12 | As scheduled. Every renumbered constant (eval, self-probe, predictor, menu clamp, label bound) and all five wrap sites are correct. |
+| 2 | P-1 | As scheduled |
+| 3 | L-1..L-4 | As scheduled, plus `menu_loadSaveEnterTop()` removed (§12.4) |
+| 4 | O-1..O-15 | As scheduled. The unresolved note-off clears its bit and returns 0; O wins over G in notes, CC1, NRPN, PC and CC0. |
+| 5 | D-1..D-27 | As scheduled; A-4 and A-5 are design gaps of the schedule, not deviations |
+| 6 | F-1..F-10 | As scheduled; no loader or menu path clamps the wave byte to the old 0..7 |
+| 7 | T-1..T-33 | As scheduled. Seeding is at all three Kit commits and the Instrument commit, and `op_kitset` is re-initialised on every parse path that reaches them. The implementer also admitted the track-7 cells at a third `va_applyVoiceMarkers()` site. The T6-keep restore law is in `modules/sequencer.c` (SQ-T7R), not `voice_control.c`; equivalent. |
+| 8 | K-1..K-12 | As scheduled; A-1 and A-6 are gate issues |
+
+The seam forms, the pre-emption window and the restore mask were read for
+correctness:
+- **A:** exact seam, single wrap with `inc < lenPh`.
+- **B:** reads stop at `le − 1`.
+- **Plain:** unchanged, bit-identical by TK-LOOP.
+- **Rebind past a new loop:** handled by `osc_userBind()`'s generation fold.
+- **T6 over a pending T7:** in both orders.
+- **T7 restore:** keeps T6's four decay bits held.
+
+No defect was found in these paths.
+
+### 12.4 Schedule errors the implementation corrected
+
+- **L-3:** the schedule said `menu_loadSaveEnterTop()` kept a caller at `:10943`;
+  it had none once `menu_loadSaveApplyLogicalPosition()` went. Removing it was
+  right.
+- **§8.6:** step 7's est. +0.1 was wrong (A-3).
+- **§0.4 item 5:** the async prediction est. (10–12 a layer) was wrong; measured
+  ≈ 27, plus the uncounted claim (A-1).
+- **§0.4 item 6:** the LFO est. +5..+8 a control was wrong; measured +23 (A-2).
+- **O-4 / D-1 ordering:** `bpm_fine` (O-8) needs `PAR_BPM_FINE`, so D-1/D-2 landed
+  in step 4; the schedule should have said so.
+
+### 12.5 Needed before the session can close
+
+1. **A-1** fixed and measured (`tetrakt_cpu.py` with callee costs ≤ 390), or your
+   decision.
+2. **A-2:** your decision (accept +2.2, or the single-dispatch form).
+3. A-3..A-6 fixed: all small; A-3 and A-6 are tool-only, and A-4 and A-5 add no
+   DSP cost.
+4. Device checks §9.3, all outstanding, including the Kit file round trip (T-11's
+   key-truncation fix and the B–D seeding), which has no host target.
+
+---
+
+## 13. Assessment fixes (2026-11-25)
+
+All the §12 fixes are applied. A-2's proposed form was applied and measured; it saves
+nothing (13.2). Line numbers are post-change. Per the S084 rule, code comments name
+the session ("S104 P1 assessment") but no finding ID.
+
+### 13.1 A-1 — Tetrakt worst case back under the gate
+
+**Result:** `tetrakt_cpu.py` with callee costs: **389.9 / 390** (START block). The
+seam block is 341.2, steady 335.4. It was 395.4 corrected (389.8 printed). The
+margin is **0.1**: under the gate, but thin (13.6).
+
+| Fix | Where | What |
+|---|---|---|
+| A-1a | `tools/dsp_test/tetrakt_cpu.py` | `CALLEES` table: every callee of the composed functions is either composed explicitly or added as n × (callee path − 1); a callee missing from the table stops the tool. `callee_extra()` applies it. The START line adds the async's `sampleMemory_getGeneration()` and the bind's `sampleMemory_sampleEntry()` (both pre-existing gaps). The new seam line adds `tkt_seamClaims()` + 4 × `modNode_interpClaim()`. The gate is the larger of the two lines; a new last line prints it. |
+| A-1b | `TetraktVoice.c` `Tetrakt_calcVoiceAsync()`, new `tkt_seamClaims()` | The prediction loop only marks seam layers (`seamMask`) and gives them form B. The four claims moved to the out-of-line `tkt_seamClaims()` (`#pragma GCC unroll 4`, so the path tool sees every call), called only when `seamMask != 0 && !anyStart`. `anyStart` is set when a layer enters its control in START. In a restart block a seam takes B for that one block. |
+| A-1c (1) | `Tetrakt_triggerVoice()`, the START latch, `TetraktVoice.h` `TKT_PF_PEND_SLP` (`pflags` bit 5) | The row value is split at the trigger (foreground, once per trigger): `pendSample` is the catalogue index and bit 5 says looped. The latch copies `oscType`/`waveform` with no `sampleMemory_getNumSamples()` call. |
+| A-1c (2) | `TktLayer.seamPh` (new), `tkt_layerControl()`, `Tetrakt_initVoice()` | The seam threshold `loopEndPh − 4,096 − 32 × phaseInc` (0 when the loop is shorter than one block's reach; 0xFFFFFFFF for a one-shot) is computed in the control after the bind and the step, the only places either changes. The prediction is one compare per layer. |
+| A-1c (3) | `tkt_bindLayer()` | A loop under two frames binds as a one-shot (`loop_end >= loop_start + 2`), so the prediction needs no form-B length test (the last 0.6 a sample). |
+
+**Block paths** (base → assessment → now):
+
+| Function | Base | Assessment | Now |
+|---|---:|---:|---:|
+| async | 105 | 212 | **163** |
+| `tkt_layerControl` | 347 | 371 | 376 |
+| `tkt_bindLayer` | 30 | 43 | 44 |
+| `tkt_seamClaims` | — | — | 46 (seam line only) |
+
+Per-sample loops are unchanged (293.5).
+
+**RAM:** `seamPh` is 4 B a layer: `TktLayer` 212 → 216 B, `TetraktVoice` 1,112 →
+1,128 B, inside the existing 1,264 B slot reserve (`InstrumentManager.c:360`
+assert; the `TktLayer == 216` assert, firmware only). Per your "make those fixes"
+this takes up the 16 B proposed in §12 A-1c. RAM objects are still **+152 B** over
+the base (checked with `nm`); `.bss` is 16 B smaller than before (padding).
+
+**Host tests** (TK-LOOP, header updated):
+- the trigger splits a looped and a one-shot row;
+- `seamPh` gives the same decision as the multiply-add test for every phase
+  (step 997) at tunes 0, 63, 127;
+- a seam in a block where another layer restarts takes B with a slot free, and A
+  the next block.
+
+**Breaks:**
+- `tetrakt_break_predict` now `sed`s the `seamPh` compare to never match;
+- new `tetrakt_break_restart` drops `!anyStart`. Both are caught.
+
+### 13.2 A-2 — One-shot LFO: single dispatch, no saving
+
+- **Applied:** `lfo_calc()` takes the one-shot pre-step (state step, effective
+  phase, `rn1`/`sq1`) before its switch and reads the base wave through the
+  existing cases at that phase. `lfo_shapeAt()` and `lfo_calcOneShot()` are gone,
+  and the looping cases read a local `ph`. `xtr` is an inline case. The test
+  Makefile's `--func` list drops the two helpers.
+- **Measured:** `lfo_dispatchNextValue` stays at **79**, the same as the
+  two-dispatch form. The disassembly shows why: the longest path is a one-shot's
+  wrap block (the state step and its stores) followed by the dearest shape (`xtr`),
+  and both forms compile to the same branch chain. The +23 a control (≈ +2.2 a
+  sample system-wide) is the cost of the one-shot state step itself.
+- The single-dispatch form is kept: it is the same cost with two fewer
+  functions.
+- LF-OS1..5 pass, so waves 0..7 are bit-identical to the pre-S104 reference.
+  `lfo_break4` is caught.
+- **Still your decision (A-2):** accept ≈ +2.2 a sample as measured. Further
+  savings would need a different design (for example, dropping the `xtr` shapes or
+  the start delay), not a restructure.
+
+### 13.3 A-3 — `tetrakt_cpu.py --baseline`
+
+- The regex reads `loops [0-9.]+`. A baseline file without a `tetrakt:` line now
+  stops the tool instead of passing silently.
+- **Proof:** against the pre-S104 `baselines/s104p1/tetrakt.txt` (379.1) the tool
+  now prints `GREW (baseline 379.1)`.
+- The post-fix figure is saved as `baselines/s104p1/tetrakt_assessment.txt` (the
+  START line, 389.9) for later growth checks.
+
+### 13.4 A-4 — DJ open only on PERFORMANCE_PAGE
+
+`menu_djIsOpen()` (`menu.c`) returns
+`menu_djActive && menu_activePage == PERFORMANCE_PAGE`. A DJ entry queued behind a
+busy Load/Save exit no longer takes COPY/BAR on the Load/Save page. The COPY/BAR
+release paths still run on their own flags.
+
+### 13.5 A-5 — No nudge ramp after DJ exit
+
+`buttonHandler_djNudgeService()`:
+- a BAR counts as held only while `menu_djIsOpen()`;
+- `bh_djBar` bit 3 records that the last step was a hold, and the first step after
+  any end of the hold (a release, or the screen closing with a BAR down) fixes the
+  ramp-down step from the value reached;
+- `buttonHandler_djBarRelease()` no longer computes the step;
+- the state comment documents bit 3. No RAM.
+
+### 13.6 A-6 — Seam-A premium on both instances
+
+`tetrakt_cpu.py` checks the larger of `StoreSeamA − Store` and `AddSeamA − Add`
+against 45. Both are 3.2.
+
+### 13.7 Code-comment IDs
+
+Comments citing S104 schedule or assessment IDs were rewritten to name the session
+only: the async's "(K-5)" from the schedule, and the assessment-fix comments. The
+pre-S104 code keeps its own references, as before.
+
+### 13.8 Checks after the fixes
+
+| Check | Result |
+|---|---|
+| `make all` | No new warnings (the seven pre-existing `filesystem.c` ones remain). Flash **706,564 B** (headroom 47,100 B; −504 B against §12). ITCM 15,424 B. |
+| RAM objects (`nm`, base vs now) | +152 B |
+| `make -C tools/dsp_test -k all` | Only `voice_control` 14 and `alkaline` AL-OD0 fail (known); 111 breaks caught, including the new `tetrakt_break_restart` |
+| `make -C tools/midi_test run` | PASS, both breaks caught |
+| `tetrakt_cpu.py` | 389.9 / 390 (START), 341.2 (seam), premium 3.2 |
+| `elf_blockpath.py lfo_dispatchNextValue` | 79 (base 56) |
+
+### 13.9 Open
+
+1. **A-2:** your decision (13.2).
+2. **Tetrakt margin 0.1** (13.1). Any later Tetrakt change must pay for itself.
+   Candidates, if headroom is wanted:
+   - fold the IDLE test into `seamPh` (set 0xFFFFFFFF when a layer goes idle):
+     est. −0.3;
+   - cache the effective decay byte at the START latch instead of selecting it in
+     every control: est. −0.3.
+3. **Device checks §9.3**, all outstanding, including the Kit file round trip and
+   the loop seams (form A with interpolation on, B with it off, and a hit landing
+   on a seam: one B block).
+4. **Statements made out of date (§10), additions:**
+   - `TETRAKT_MODULE_REFERENCE.md`: the seam threshold, no claims in a restart
+     block, loops under two frames bind as one-shots, the trigger-side s/l split;
+   - `CPU_USE_DSP_AUDIT.md`: Tetrakt 389.9 with callee costs (the earlier
+     379.1/380.0 figures did not count `sampleMemory_*`); the LFO +23 a control;
+   - `tools/dsp_test/DSP_TEST.md` (if it describes `tetrakt_cpu.py`): the
+     `CALLEES` table and the two-line gate.
+
+## 14. One-shot LFO cost: `xtr` dropped, below base (2026-11-26)
+
+Your decision on 13.2: "unacceptable increase. Drop xtr." 13.2's diagnosis was wrong.
+The 79 path was not `xtr` but a path that cannot happen: a one-shot in DONE whose
+state step ran into the looping-noise random draw, both under the one shared
+switch. The compiler cannot prove the two exclusive, so the static count stacks
+them. Dropping `xtr` alone left the count at 79.
+
+### 14.1 Applied
+
+- **`xtr`/`xt1` removed** (`lfo.h`, `lfo.c`, `MenuText.h` `lfoWaveNames` 16
+  entries). One-shots are 8..15 and `LFO_WAVE_COUNT` is 16. The test Makefile
+  macros and `modules/lfo.c` `endv[8]` follow. No migration: wave bytes saved by
+  the earlier S104 build read as the renumbered list.
+- **`lfo_calc()`: one switch on wave, state and wrap.** The key is
+  `2 × waveform + osState + wrap`, with `osState` stored pre-scaled (RUN 0, PRE 32,
+  DONE 64) so the key costs `ldrb`, `ldrb`, `adc`. The wrap is the add's carry
+  (`__builtin_add_overflow`).
+  - Every looping wave takes the same case in all six (state, wrap) keys; a stale
+    `osState` is ignored.
+  - Each one-shot has its own cases:
+    - PRE returns its start value. On the wrap it enters RUN and still returns
+      the start value.
+    - RUN reads its looping twin's shape. On the wrap it enters DONE and returns
+      its end value.
+    - DONE returns the end value.
+  - No case tests the wrap flag, and no case does a state step plus a shape or a
+    draw.
+  - The phase is no longer re-pinned in DONE, because the held value is a
+    constant.
+  - Two macros (`LFO_ANY_STATE`, `LFO_ONE_SHOT`) write the cases, and are
+    `#undef`'d after the switch.
+- **Synced step taken straight from `phaseInc`** (`lfo_calc()`,
+  `lfo_stepBlock()`): `sync ? phaseInc : (uint32_t)(phaseInc × modNodeValue)`.
+  The former `× 1.0f` paid the free rate's float round trip plus a branch, and
+  rounded a large `phaseInc`. Law L-D2 (sync wins) is unchanged. The S094
+  comment block is rewritten to match.
+- **`lfo_stepBlock()` wrap:** `noise → draw`, else `wave ≥ 8 → lfo_osWrap()`. The
+  `LFO_WRAP_MASK` table test is removed, along with its macro.
+  `lfo_osWrap()` is now PRE → RUN and RUN → DONE only: no draw, no re-pin.
+- **`rn1`** draws on its first RUN control and goes straight to DONE.
+  `lfo_retriggerPhase()` no longer draws.
+
+### 14.2 Behaviour changes
+
+| Change | Size |
+|---|---|
+| A one-shot with a start delay starts its shape one control after the wrap; the firing control returns the start value | ≤ 1 control (2 blocks, ≈ 1.45 ms) |
+| `rn1` draws on its first running control, not at the retrigger (offset 0), nor on the wrap that ends the delay | 1 control later |
+| `si1` holds exactly 0.5 (it was the table value at phase 0xFFFFFFFF) | none audible |
+| A synced LFO steps by exactly `phaseInc` (it was float-rounded) | rate error was ≤ 6 × 10⁻⁸ relative |
+
+### 14.3 Measured
+
+| Path | Base (HEAD, pre-S104) | 13.8 | Now |
+|---|---|---|---|
+| `elf_blockpath.py lfo_dispatchNextValue` (control) | 56 | 79 | **55** |
+| Stepped block, inlined in `mixer_calcNextSampleBlock` (hand count, longest = noise draw) | 34 | not counted | **30** |
+
+- **Base:** built from a scratch worktree at HEAD, then removed.
+- **Stepped block:** the tool weights the mixer's slot loop 0, so this path was
+  counted by hand from the disassembly, from `instrumentManager_runtimeLfo()`'s
+  return to the `bl lfo_dispatchNextValue`.
+- **Net:** −1 on the control and −4 on the stepped block, for each slot LFO, every
+  two blocks. That's about −0.25 a sample system-wide, so no saving is needed from
+  elsewhere.
+- **Control path now:**
+  - the longest leaf is a tie between `rn1`'s draw-and-DONE store and the looping
+    sine;
+  - the key matches the base's wrap-flag cost;
+  - the dispatch (`cmp`/`bhi`/`tbb`) matches the base's.
+- **Size:** flash 706,428 B, −136 B against 13.8. RAM unchanged.
+
+### 14.4 Tests
+
+- **LF-OS2:** now checks that DONE holds over later wraps (it used to check that
+  the phase was pinned).
+- **LF-OS4:** `rn1` draws once, on the first control. There's a new delay case: no
+  draw during the delay, then exactly one.
+- **`lfo_break2`:** `sed` retargeted to the new select, with an applied-check.
+- **`lfo_break4`:** replaced. A one-shot whose RUN wrap does not enter DONE must
+  fail LF-OS1, and it does.
+- **Laws:** LF1–6 and LF-OS1–5 pass. Waves 0..7 are bit-identical to the pre-S104
+  reference (unsynced).
+- **Full suite** (`make -C tools/dsp_test -k all`): only `voice_control` 14 and
+  `alkaline` AL-OD0 fail (known).
+- **Build:** `make all` gives no new warnings, and `make img` was written.
+
+### 14.5 Open
+
+1. 13.9 item 1 (A-2) is closed by this section.
+2. §10 / 13.9 item 4: in `CPU_USE_DSP_AUDIT.md`, the LFO note now reads "control
+   55 (base 56), stepped block 30 (base 34)", not "+23 a control".
+3. Device check to add to §9.3: a delayed one-shot starts on time, and `rn1`
+   changes once per retrigger, after its delay.

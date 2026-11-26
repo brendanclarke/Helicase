@@ -476,7 +476,7 @@ static uint8_t ccClear_runFxSequence(const cc_job_t *job)
  * Accessors:  bank_sceneFanoutMask32(), preset_resetSlotMorphToNormal(),
  *             preset_setVoiceFxSendMorph(), scene_getVoiceFxSendAmount(),
  *             scene_setSlot6Track7MorphAmpEnvelopeDecay(),
- *             scene_getSlot6Track7AmpEnvelopeDecay(), preset_rebuildMorph().
+ *             scene_getSlot6Track7Decay(), preset_rebuildMorph().
  * Affiliates: ccClear_runSend() (fan-out clear model),
  *             ccCopy_runMorphTrack() (analogous copy).
  */
@@ -488,6 +488,7 @@ static uint8_t ccClear_runResetMorphTrack(const cc_job_t *job)
     uint32_t mask = bank_sceneFanoutMask32(job->scene);
     uint8_t active = scene_getActiveIndex();
     uint8_t m;
+    uint8_t layer;
 
     if ((mask & ccClear_bit(active)) != 0u && !preset_applyWorkersIdle())
         return CC_RUN_WAIT;
@@ -515,8 +516,9 @@ static uint8_t ccClear_runResetMorphTrack(const cc_job_t *job)
             }
         }
         if (slot == INSTRUMENT_SLOT_COUNT - 1u)
-            scene_setSlot6Track7MorphAmpEnvelopeDecay(
-                m, scene_getSlot6Track7AmpEnvelopeDecay(m));
+            for (layer = 0u; layer < SCENE_TRACK7_DECAY_LAYERS; layer++)
+                scene_setSlot6Track7MorphDecay(
+                    m, layer, scene_getSlot6Track7Decay(m, layer));
         ccSvc_nameContentChanged(
             filesystem_identityRow(FS_ROW_INSTRUMENT, m, slot));
     }
@@ -564,7 +566,7 @@ static uint8_t ccClear_runResetMorphTrack(const cc_job_t *job)
  * Accessors:  bank_sceneFanoutMask32(), preset_resetSlotMorphToNormal(),
  *             preset_setVoiceFxSendMorph(), scene_getVoiceFxSendAmount(),
  *             scene_setSlot6Track7MorphAmpEnvelopeDecay(),
- *             scene_getSlot6Track7AmpEnvelopeDecay(),
+ *             scene_getSlot6Track7Decay(),
  *             effects_resetMorphToNormalSingle(), preset_rebuildMorph().
  * Affiliates: ccClear_runFx() (fan-out clear model),
  *             ccClear_runResetMorphTrack() (per-slot fan-out morph reset),
@@ -575,6 +577,7 @@ static uint8_t ccClear_runResetSceneMorph(const cc_job_t *job)
     uint32_t mask = bank_sceneFanoutMask32(job->scene);
     uint8_t active = scene_getActiveIndex();
     uint8_t m;
+    uint8_t layer;
 
     if ((mask & ccClear_bit(active)) != 0u && !preset_applyWorkersIdle())
         return CC_RUN_WAIT;
@@ -590,8 +593,9 @@ static uint8_t ccClear_runResetSceneMorph(const cc_job_t *job)
             ccSvc_nameContentChanged(
                 filesystem_identityRow(FS_ROW_INSTRUMENT, m, slot));
         }
-        scene_setSlot6Track7MorphAmpEnvelopeDecay(
-            m, scene_getSlot6Track7AmpEnvelopeDecay(m));
+        for (layer = 0u; layer < SCENE_TRACK7_DECAY_LAYERS; layer++)
+            scene_setSlot6Track7MorphDecay(
+                m, layer, scene_getSlot6Track7Decay(m, layer));
         (void)effects_resetMorphToNormalSingle(m);
         /*
          * S078 §5.4: equalise this Scene's track Morph endpoints to its own

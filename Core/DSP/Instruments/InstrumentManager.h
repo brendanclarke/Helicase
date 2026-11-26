@@ -761,8 +761,16 @@ void instrumentManager_updateLfoAdapters(uint8_t source_slot,
  * any LFO overlay, then to the retained Kit value. Sequencer owns the call
  * boundary and clears it at transport/Pattern restore.
  */
-void instrumentManager_setSlot6Track7StepDecayOverride(uint8_t value);
+void instrumentManager_setSlot6Track7StepDecayOverride(uint8_t layer, uint8_t value);
+void instrumentManager_clearSlot6Track7StepDecayLayer(uint8_t layer);
 void instrumentManager_clearSlot6Track7StepDecayOverride(void);
+/* S104 P1: the track-7 decay row mapping (contract in InstrumentManager.c). */
+uint8_t instrumentManager_track7DecayIndex(instrument_type_t type, uint8_t layer,
+                                           uint8_t *index_out);
+uint8_t instrumentManager_track7DecayLayerOf(instrument_type_t type, uint8_t local);
+uint8_t instrumentManager_track7DecayLayer(uint8_t scene_index,
+                                           instrument_param_id_t id);
+uint64_t instrumentManager_track7DecayLocalMask(uint8_t scene_index);
 /*
  * LFO phase Scene-change handoff (S076 P2).
  *

@@ -57,6 +57,37 @@
 #define LFO_EXP_UP		0x06
 #define LFO_EXP_DOWN	0x07
 
+/*
+ * S104 P1: the one-shot waves.
+ *
+ * What: values 8..15 are the one-shot forms of the eight looping waves in
+ * their order (base = value - LFO_OS_FIRST): each plays
+ * one cycle and holds its end value until the next retrigger; LFO_OS_REC is
+ * inverted (1 for the first half, then 0) and LFO_OS_NOISE holds one random
+ * value drawn on its first running control. LFO_OS_RUN/PRE/DONE are Lfo.osState values,
+ * pre-scaled by 32 so lfo_calc()'s key (2 x wave + state + wrap) needs no
+ * shift: PRE is the start delay (the phase runs up to its wrap from -phaseOffset),
+ * DONE holds the end.
+ * Why: one-shot LFOs with a start delay (knowledge_files/drafts/
+ * ENHANCED_FEATURES.md, user S104 P1). Stored wave values 0..7 keep their
+ * meaning; LFO_WAVE_COUNT is the menu list length (lfoWaveNames[]).
+ */
+/* (The exponential triangle `xtr` and its one-shot were dropped in the S104
+ * P1 assessment: their shape was the dearest LFO path, user decision.) */
+#define LFO_OS_FIRST	0x08
+#define LFO_OS_SINE		0x08
+#define LFO_OS_TRI		0x09
+#define LFO_OS_SAW_UP	0x0A
+#define LFO_OS_SAW_DOWN	0x0B
+#define LFO_OS_REC		0x0C
+#define LFO_OS_NOISE	0x0D
+#define LFO_OS_EXP_UP	0x0E
+#define LFO_OS_EXP_DOWN	0x0F
+#define LFO_WAVE_COUNT	16u
+#define LFO_OS_RUN		0u
+#define LFO_OS_PRE		32u
+#define LFO_OS_DONE		64u
+
 
 /*
  * LFO rate table (S094 P1 S1).
@@ -106,6 +137,15 @@ typedef struct LfoStruct
 	uint32_t 	phaseInc;	// the phase increment controls the LFO frequency
 	uint8_t 	waveform;	// selects the waveform
 	uint8_t 	retrigger;	// defines the voice nr that retriggers the LFO (0=no retrigger)
+	/*
+	 * One-shot state (S104 P1): LFO_OS_RUN (0, also every looping wave),
+	 * LFO_OS_PRE (the start delay), LFO_OS_DONE (holding the end value).
+	 * Set by lfo_retriggerPhase(), advanced on a phase wrap by
+	 * lfo_osWrap() from lfo_calc() and lfo_stepBlock(). It sits in the two
+	 * padding bytes before phaseOffset (offsets 10..11, measured), so
+	 * sizeof(Lfo) stays 124 B and no voice struct moves.
+	 */
+	uint8_t		osState;
 	uint32_t 	phaseOffset;// the phase value to which the LFO is retriggered
 	float 		rnd;
 	/*
@@ -173,7 +213,7 @@ void lfo_dispatchNextValue(Lfo* lfo, uint8_t source_slot);
  * lfo_stepBlock(): advance the phase by one block without dispatching, by
  * lfo_calc()'s own step law (the rate-scale select and the 32-bit step); a
  * noise LFO whose phase wraps in that step draws its next random value, as
- * lfo_calc() does on a wrap. The control runs every other block and calls
+ * lfo_calc() does on a wrap, and a one-shot takes its state step. The control runs every other block and calls
  * this before lfo_dispatchNextValue(), so the LFO's rate is exact.
  * lfo_reapplyValue(): re-apply the LFO's last dispatched value (both nodes
  * and both adapter pairs) with no phase step, for a target whose base an
@@ -211,5 +251,17 @@ void lfo_setFreq(Lfo *lfo, float f);
 void lfo_setSync(Lfo* lfo, uint8_t sync);
 void lfo_recalcSync();
 void lfo_retrigger(uint8_t voiceNr);
+
+/*
+ * Retrigger one LFO's phase (S104 P1).
+ *
+ * Looping waves: phase = phaseOffset (as before S104). One-shot waves: with
+ * a nonzero offset, phase = 0 - phaseOffset and LFO_OS_PRE (the wave holds
+ * its start value until the phase wraps, offset / 127 of one cycle later,
+ * then runs one cycle); with offset 0, phase 0 and LFO_OS_RUN (`rn1` draws
+ * on the next control, lfo_calc()). Accessors: instrumentManager_retriggerRuntimeLfos(),
+ * instrumentManager_restoreLfoPhaseIfNeeded() (Scene retrigger).
+ */
+void lfo_retriggerPhase(Lfo *lfo);
 
 #endif /* LFO_H_ */

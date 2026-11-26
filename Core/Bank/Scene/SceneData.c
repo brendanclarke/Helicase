@@ -3,6 +3,7 @@
 #include "BankData.h"
 #include "MidiPitch.h"
 #include "MidiDefs.h"
+#include "InstrumentManager.h"   /* S104 P1: the track-7 decay row mapping */
 #include <string.h>
 
 /*
@@ -602,82 +603,130 @@ uint8_t scene_getVoiceFaderSetting(uint8_t scene_index, uint8_t slot)
     return scene->settings.fader_setting[slot];
 }
 
-void scene_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index, uint8_t value)
+void scene_setSlot6Track7Decay(uint8_t scene_index, uint8_t layer, uint8_t value)
 {
     scene_t *scene = scene_get(scene_index);
 
     /*
-     * Store the generated slot-6 track-7 base decay endpoint.
+     * Store one generated track-7 Normal decay endpoint (S104 P1: per layer).
      *
-     * Inputs: resident Scene index and a 0..127 menu-domain decay value.
-     * Output: Kit settings retain the value used when track 7 triggers a
-     * non-Choke instrument assigned to slot 6. This cannot be folded into the
-     * descriptor-image setters because the value is not part of any instrument
-     * file and has no descriptor index. A changed normalized byte is stored
-     * before the named Kit parameter is marked; equal values do nothing.
+     * Inputs: resident Scene index, layer 0..3 and a 0..127 menu-domain
+     * value. Output: Kit settings retain the value the track-7 trigger uses
+     * for that layer (InstrumentManager: the amp EG of a generic slot-6
+     * instrument for layer 0; a Tetrakt's layer decays). This cannot be
+     * folded into the descriptor-image setters because the value is not part
+     * of any instrument file and has no descriptor index. A changed
+     * normalized byte is stored before its named Kit parameter
+     * (AUTOSAVE_KIT_PARAM_T7(layer, 0)) is marked; equal values do nothing.
      */
-    if (!scene)
+    if (!scene || layer >= SCENE_TRACK7_DECAY_LAYERS)
         return;
     if (value > 127u)
         value = 127u;
     scene_storeKitParameterByte(
-        scene_index,
-        &scene->kit.settings.slot6_track7_amp_envelope_decay,
-        AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_DECAY, value);
+        scene_index, &scene->kit.settings.slot6_track7_decay[layer],
+        AUTOSAVE_KIT_PARAM_T7(layer, 0u), value);
 }
 
-uint8_t scene_getSlot6Track7AmpEnvelopeDecay(uint8_t scene_index)
+uint8_t scene_getSlot6Track7Decay(uint8_t scene_index, uint8_t layer)
 {
     const scene_t *scene = scene_getConst(scene_index);
 
-    /*
-     * Read the generated slot-6 track-7 base decay endpoint.
-     *
-     * Input: resident Scene index. Output: retained 0..127 value, or 0 for an
-     * invalid Scene. Clients are Menu display, Preset apply, storage, and the
-     * track-7 trigger path.
-     */
-    return scene ? scene->kit.settings.slot6_track7_amp_envelope_decay : 0u;
+    /* Retained 0..127 Normal endpoint; 0 for an invalid Scene or layer.
+     * Clients: Menu display, Preset apply, storage, the track-7 trigger. */
+    return (scene && layer < SCENE_TRACK7_DECAY_LAYERS)
+        ? scene->kit.settings.slot6_track7_decay[layer] : 0u;
 }
 
-void scene_setSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index,
-                                               uint8_t value)
+void scene_setSlot6Track7MorphDecay(uint8_t scene_index, uint8_t layer,
+                                    uint8_t value)
 {
     scene_t *scene = scene_get(scene_index);
 
     /*
-     * Store the generated slot-6 track-7 Morph decay endpoint.
-     *
-     * Inputs: resident Scene index and 0..127 value. Output: Kit settings
-     * retain the Morph-side endpoint for the generated non-Choke track-7 decay
-     * parameter. It stays separate from Scene voice_morph_amount[], which is
-     * the interpolation amount rather than an endpoint. A changed normalized
-     * byte is stored before the named Kit parameter is marked; equal values do
-     * nothing.
+     * Store one generated track-7 Morph decay endpoint (S104 P1: per layer).
+     * Same contract as the Normal setter; the AutoSave cell is
+     * AUTOSAVE_KIT_PARAM_T7(layer, 1). Kept separate from Scene
+     * voice_morph_amount[], which is the interpolation amount.
      */
-    if (!scene)
+    if (!scene || layer >= SCENE_TRACK7_DECAY_LAYERS)
         return;
     if (value > 127u)
         value = 127u;
     scene_storeKitParameterByte(
-        scene_index,
-        &scene->kit.settings.slot6_track7_morph_amp_envelope_decay,
-        AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_MORPH_DECAY, value);
+        scene_index, &scene->kit.settings.slot6_track7_morph_decay[layer],
+        AUTOSAVE_KIT_PARAM_T7(layer, 1u), value);
 }
 
-uint8_t scene_getSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index)
+uint8_t scene_getSlot6Track7MorphDecay(uint8_t scene_index, uint8_t layer)
 {
     const scene_t *scene = scene_getConst(scene_index);
 
-    /*
-     * Read the generated slot-6 track-7 Morph decay endpoint.
-     *
-     * Input: resident Scene index. Output: retained 0..127 Morph endpoint, or
-     * 0 for invalid scenes. Preset/Morph code uses this with the slot-6 voice
-     * Morph amount to derive the runtime generated decay.
-     */
-    return scene ? scene->kit.settings.slot6_track7_morph_amp_envelope_decay
-                 : 0u;
+    return (scene && layer < SCENE_TRACK7_DECAY_LAYERS)
+        ? scene->kit.settings.slot6_track7_morph_decay[layer] : 0u;
+}
+
+/*
+ * Seed the track-7 decays a load did not carry (S104 P1; user Q24: "a load
+ * sets T7 decays the same as T6 if they aren't present in the scene or kit").
+ *
+ * What: for each layer that slot 6's type has a track-7 decay for
+ * (instrumentManager_track7DecayIndex(): a Tetrakt has A..D at its
+ * tkt_decay_a..d rows; any other type with amp_envelope_decay has layer 0),
+ * an endpoint whose bit is clear in seen_mask (bit 2 x layer = Normal,
+ * bit 2 x layer + 1 = Morph; storage_kitset_t.seen_t7_mask) takes slot 6's
+ * own value of that row from the same image (Normal from
+ * instrument_parameters[], Morph from morph_instrument_parameters[]).
+ * scene_seedTrack7Decays() writes a staged kit_t directly (the commit that
+ * follows copies the whole Kit and marks it); scene_seedResidentTrack7Decays()
+ * writes a resident Scene through the setters (AutoSave-marked), for an
+ * Instrument Load into slot 6, which never carries these values.
+ * Why: an older or hand-made Kit file, or a newly loaded slot-6 instrument,
+ * would otherwise leave track 7 at 0 (an instant decay) or at another
+ * type's value. Inputs: the Kit or Scene, the seen mask. Outputs: unseen
+ * endpoints. Accessors: filesystem.c Kit/Scene/boot commits,
+ * presetManager.c Instrument commit. Affiliates: scene_setSlot6Track7Decay().
+ */
+void scene_seedTrack7Decays(kit_t *kit, uint8_t seen_mask)
+{
+    const kit_instrument_slot_t *slot6;
+    uint8_t layer;
+
+    if (!kit)
+        return;
+    slot6 = &kit->instruments[INSTRUMENT_SLOT_COUNT - 1u];
+    for (layer = 0u; layer < SCENE_TRACK7_DECAY_LAYERS; layer++) {
+        uint8_t index;
+
+        if (!instrumentManager_track7DecayIndex(slot6->type, layer, &index))
+            continue;
+        if ((seen_mask & (uint8_t)(1u << (2u * layer))) == 0u)
+            kit->settings.slot6_track7_decay[layer] =
+                slot6->parameter_images.instrument_parameters[index];
+        if ((seen_mask & (uint8_t)(1u << (2u * layer + 1u))) == 0u)
+            kit->settings.slot6_track7_morph_decay[layer] =
+                slot6->parameter_images.morph_instrument_parameters[index];
+    }
+}
+
+void scene_seedResidentTrack7Decays(uint8_t scene_index)
+{
+    const kit_instrument_slot_t *slot6 =
+        scene_instrumentSlotConst(scene_index, INSTRUMENT_SLOT_COUNT - 1u);
+    uint8_t layer;
+
+    if (!slot6)
+        return;
+    for (layer = 0u; layer < SCENE_TRACK7_DECAY_LAYERS; layer++) {
+        uint8_t index;
+
+        if (!instrumentManager_track7DecayIndex(slot6->type, layer, &index))
+            continue;
+        scene_setSlot6Track7Decay(scene_index, layer,
+            slot6->parameter_images.instrument_parameters[index]);
+        scene_setSlot6Track7MorphDecay(scene_index, layer,
+            slot6->parameter_images.morph_instrument_parameters[index]);
+    }
 }
 
 const effect_record_t *scene_effectConst(uint8_t scene_index)
@@ -1212,8 +1261,8 @@ uint8_t scene_commitSettings(uint8_t scene_index, const scene_settings_t *src)
 /*
  * Reset one Scene's Kit to the fresh-Scene Kit (contract in SceneData.h).
  *
- * Whole-Kit commit: each slot is reset through its descriptors, the slot-6 /
- * track-7 decay pair returns to 0 through its own setters, then the Kit
+ * Whole-Kit commit: each slot is reset through its descriptors, every slot-6 /
+ * track-7 decay layer returns to 0 through its own setters, then the Kit
  * region marker and the card-clean bit are set (the direct slot assignment is
  * the validated whole-commit exception of the AutoSave extension rule).
  */
@@ -1227,8 +1276,12 @@ void scene_resetKitToDefaults(uint8_t scene_index)
     for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++)
         instrumentManager_resetSlot(&scene->kit.instruments[slot],
                                     scene_initialInstrumentTypes[slot]);
-    scene_setSlot6Track7AmpEnvelopeDecay(scene_index, 0u);
-    scene_setSlot6Track7MorphAmpEnvelopeDecay(scene_index, 0u);
+    /* S104 P1: every track-7 decay layer, both endpoints, to 0 (a reset is
+     * not a load: the load seeding rule does not apply here). */
+    for (slot = 0u; slot < SCENE_TRACK7_DECAY_LAYERS; slot++) {
+        scene_setSlot6Track7Decay(scene_index, slot, 0u);
+        scene_setSlot6Track7MorphDecay(scene_index, slot, 0u);
+    }
     bank_invalidateSdCleanScene(scene_index);
     autosave_markKitDirty(scene_index);
 }

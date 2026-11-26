@@ -26,7 +26,8 @@
 /* the two sequencer statics the extracted function reads, owned here */
 #define NUM_TRACKS 7u
 static uint8_t seq_effectiveTrackScale[NUM_TRACKS];
-static uint16_t seq_tempo = 120u;
+/* S104 P1: the function reads the effective tempo */
+static volatile float seq_tempoEff = 120.0f;
 #include "seq_stepsamples.c"
 
 static int failures;
@@ -60,22 +61,22 @@ int main(void)
 			                         / (256.0 * 96.0 * bpms[b]) + 0.5);
 			uint32_t got;
 
-			seq_tempo = bpms[b];
+		seq_tempoEff = (float)bpms[b];
 			seq_effectiveTrackScale[2] = scales[s];
 			got = seq_trackStepSamples(2u);
 			expect(got == want[b][s], "AL-T table", got, want[b][s]);
 			expect((double)got == ref, "AL-T against double", got, (unsigned)ref);
 		}
 	/* an out-of-range track index falls back to the 1/16 */
-	seq_tempo = 120u;
+	seq_tempoEff = 120.0f;
 	expect(seq_trackStepSamples(NUM_TRACKS) == 5514u, "AL-T default scale beyond NUM_TRACKS",
 	       seq_trackStepSamples(NUM_TRACKS), 5514u);
 	/* the longest step fits 32 bits, and BPM 0 counts as 1 */
-	seq_tempo = 1u;
+	seq_tempoEff = 1.0f;
 	seq_effectiveTrackScale[0] = 127u;
 	expect(seq_trackStepSamples(0u) == 5292960u, "AL-T longest step",
 	       seq_trackStepSamples(0u), 5292960u);
-	seq_tempo = 0u;
+	seq_tempoEff = 0.0f;
 	expect(seq_trackStepSamples(0u) == 5292960u, "AL-T BPM 0 as 1",
 	       seq_trackStepSamples(0u), 5292960u);
 	printf("seq_steplen: %s (%d failures)\n", failures ? "FAILED" : "OK", failures);

@@ -52,8 +52,12 @@ static const Page menuStaticPages[MENU_STATIC_PAGE_COUNT][NUM_SUB_PAGES] = {
 ** paths. When globals are reordered, manually verify the table; inserting an
 ** early TEXT_EMPTY/PAR_NONE pair can block access to later globals pages. */
 {
-  {TEXT_BPM,TEXT_EXT_SYNC,TEXT_QUANTISATION,TEXT_MIDI_CHAN_GLOBAL,TEXT_MIDI_FILT_TX,TEXT_MIDI_FILT_RX,TEXT_MIDI_ROUTING,TEXT_SCREENSAVER_ON_OFF,
-    PAR_BPM,PAR_EXT_SYNC, PAR_QUANTISATION, PAR_MIDI_CHAN_GLOBAL, PAR_MIDI_FILT_TX, PAR_MIDI_FILT_RX, PAR_MIDI_ROUTING, PAR_SCREENSAVER_ON_OFF},
+  /*
+   * S104 P1: `omn` (the MIDI Omni channel) sits beside G (`ch`) in column 4;
+   * the screensaver cell moves to the Scene-change screen (row 2, column 3).
+   */
+  {TEXT_BPM,TEXT_EXT_SYNC,TEXT_QUANTISATION,TEXT_MIDI_CHAN_GLOBAL,TEXT_MIDI_CHAN_OMNI,TEXT_MIDI_FILT_TX,TEXT_MIDI_FILT_RX,TEXT_MIDI_ROUTING,
+    PAR_BPM,PAR_EXT_SYNC, PAR_QUANTISATION, PAR_MIDI_CHAN_GLOBAL, PAR_MIDI_CHAN_OMNI, PAR_MIDI_FILT_TX, PAR_MIDI_FILT_RX, PAR_MIDI_ROUTING},
   /* The final two cells expose AutoSave and the retained Pattern pool-use
    * reading before the traversal terminator. Pattern is read-only and uses a
    * virtual parameter sentinel; AutoSave remains the real Global parameter. */
@@ -62,9 +66,9 @@ static const Page menuStaticPages[MENU_STATIC_PAGE_COUNT][NUM_SUB_PAGES] = {
   /*
    * Scene change / queue globals (S080 F3, P2).
    *
-   * What: scd, qcd, qac in columns 0-2; columns 3-7 are TEXT_EMPTY/PAR_NONE,
-   * so no parameter follows qac on this screen and it is the last Global
-   * screen. Its scroll cue is '^' (a Scene-settings page follows). Why: the
+   * What: scd, qcd, qac in columns 0-2; `scr` follows qac (S104 P1); no
+   * parameter follows `scr` on this screen, and it is the last Global screen.
+   * Its scroll cue is '^' (a Scene-settings page follows). Why: the
    * compressor cells are Scene settings and must sit together on their own
    * page, marked '+' (user, S080 P2 follow-up). Encoder traversal crosses
    * from qac to the compressor page through the static cross-sub-page step
@@ -72,9 +76,9 @@ static const Page menuStaticPages[MENU_STATIC_PAGE_COUNT][NUM_SUB_PAGES] = {
    * MODE MENU re-press cycle reaches it through menu_switchSubPage().
    * Affiliates: checkScrollSign() ('^' cue), MENU_GLOBAL_SCENE_SUBPAGE.
    */
-  {TEXT_SCENE_CHANGE_DIV,TEXT_SCENE_QUEUE_DIV,TEXT_SCENE_QUEUE_ACTION,TEXT_EMPTY,
+  {TEXT_SCENE_CHANGE_DIV,TEXT_SCENE_QUEUE_DIV,TEXT_SCENE_QUEUE_ACTION,TEXT_SCREENSAVER_ON_OFF,
     TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,
-    PAR_SCENE_CHANGE_DIV,PAR_SCENE_QUEUE_DIV,PAR_SCENE_QUEUE_ACTION,PAR_NONE,
+    PAR_SCENE_CHANGE_DIV,PAR_SCENE_QUEUE_DIV,PAR_SCENE_QUEUE_ACTION,PAR_SCREENSAVER_ON_OFF,
     PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
   /*
    * Scene-owned bus compressor page (MENU_GLOBAL_SCENE_SUBPAGE, S074 /

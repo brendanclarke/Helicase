@@ -95,6 +95,24 @@ uint8_t instrumentManager_targetValid(uint8_t scene, uint16_t target,
 	(void)scene; (void)target; (void)use;
 	return 1u;
 }
+/* S104 P1: the Tetrakt track-7 decay mapping of the drain's voice branch. */
+#define SCENE_TRACK7_DECAY_LAYERS 4u
+static uint8_t t7_layer = 0xFFu;
+static uint8_t t7_value;
+static int t7_sets;
+uint8_t instrumentManager_track7DecayLayer(uint8_t scene_index, uint16_t target)
+{
+	const uint8_t local = (uint8_t)(target & 0x3fu);
+
+	(void)scene_index;
+	return (local >= 12u && local <= 15u) ? (uint8_t)(local - 12u) : 0xFFu;
+}
+void instrumentManager_setSlot6Track7StepDecayOverride(uint8_t layer, uint8_t value)
+{
+	t7_layer = layer;
+	t7_value = value;
+	t7_sets++;
+}
 static const ParamDescriptor *seq_writeInstrumentAutomation(
 	uint8_t owner_scene, uint16_t target, uint8_t value)
 {
@@ -183,6 +201,37 @@ void instrumentManager_requestGateDuck(uint8_t track) { (void)track; }
 
 #include "sequencer_len.c"
 
+/* ------------------------------------------------- S104 P1: the restore -- */
+#define SEQ_RAMP_SLOTS 8u
+typedef struct { uint16_t id; } seq_ramp_entry_t;
+static seq_ramp_entry_t seq_ramps[SEQ_RAMP_SLOTS];
+static void seq_rampConsumeTrack(uint8_t track) { (void)track; }
+static uint64_t seq_automation_dirty[INSTRUMENT_SLOT_COUNT];
+static uint8_t seq_perTrackPattern[NUM_TRACKS];
+typedef struct {
+	uint8_t type;
+	struct { uint8_t morph_interpolation[64]; } parameter_images;
+} kit_instrument_slot_t;
+static const kit_instrument_slot_t seq_fake_slot;
+static const kit_instrument_slot_t *scene_instrumentSlotConst(uint8_t scene,
+                                                              uint8_t slot)
+{ (void)scene; (void)slot; return &seq_fake_slot; }
+static const ParamDescriptor *instrumentManager_descriptor(uint8_t type,
+                                                           uint8_t local)
+{ (void)type; return (local < 64u) ? (const ParamDescriptor *)&seq_fake_slot : 0; }
+static unsigned restore_writes;
+static unsigned restore_clears;
+static void instrumentManager_writeRuntime(uint8_t slot,
+                                           const ParamDescriptor *d,
+                                           uint8_t value)
+{ (void)slot; (void)d; (void)value; restore_writes++; }
+static uint64_t instrumentManager_track7DecayLocalMask(uint8_t scene)
+{ (void)scene; return 0xFULL << 12u; }
+static void instrumentManager_clearSlot6Track7StepDecayOverride(void)
+{ restore_clears++; }
+
+#include "sequencer_restore.c"
+
 /* --------------------------------------------------------------- helpers -- */
 static void queue_clear(void)
 {
@@ -216,6 +265,65 @@ static void queue_put_live(uint8_t target, uint8_t value)
 		(uint16_t)((uint16_t)target | ((uint16_t)(value & 0x7fu) << 9u));
 	seq_pending_automation_count = (uint8_t)(i + 1u);
 	seq_pending_automation_drain = 1u;
+}
+
+/* S104 P1: an automation entry owned by `track` (step 0 of that track). */
+static void queue_put_track(uint8_t target, uint8_t value, uint8_t track)
+{
+	uint8_t i = seq_pending_automation_count;
+
+	seq_pending_automation[i].identity = (uint16_t)(
+		((uint16_t)track * NUM_STEPS) | SEQ_PENDING_TYPE_AUTOMATION_BIT);
+	seq_pending_automation[i].payload =
+		(uint16_t)((uint16_t)target | ((uint16_t)(value & 0x7fu) << 9u));
+	seq_pending_automation_count = (uint8_t)(i + 1u);
+	seq_pending_automation_drain = 1u;
+}
+
+/* SQ-T7 (S104 P1): a track-7 lock of a Tetrakt decay row is consumed into
+ * the layer override; the same lock on track 6 writes the row. */
+static void test_t7(void)
+{
+	queue_clear();
+	t7_sets = 0;
+	t7_layer = 0xFFu;
+	queue_put_track(13u, 55u, 6u);
+	seq_drainPendingAutomationTo(1u);
+	expect(t7_sets == 1 && t7_layer == 1u && t7_value == 55u,
+	       "SQ-T7: a track-7 decay lock sets its layer's override");
+	expect(applied_n == 0, "SQ-T7: the track-6 row is not written");
+
+	queue_clear();
+	t7_sets = 0;
+	queue_put_track(13u, 55u, 5u);
+	seq_drainPendingAutomationTo(1u);
+	expect(t7_sets == 0, "SQ-T7: a track-6 lock sets no override");
+	expect(applied_n == 1 && applied[0] == 13u,
+	       "SQ-T7: a track-6 lock writes the row");
+}
+
+/* SQ-T7R (S104 P1): a track-7 trigger restores everything except the four
+ * Tetrakt decay rows, and keeps those locks held for track 6; a track-6
+ * trigger restores them. */
+static void test_t7_restore(void)
+{
+	seq_automation_dirty[5] = (1ULL << 12u) | (1ULL << 13u) | (1ULL << 20u);
+	restore_writes = 0u;
+	restore_clears = 0u;
+	seq_restoreAutomatedParameters(6u);
+	expect(restore_clears == 1u, "SQ-T7R: the track-7 overrides are cleared");
+	expect(restore_writes == 1u, "SQ-T7R: only the non-decay lock is restored");
+	expect((seq_automation_dirty[5] & ((1ULL << 12u) | (1ULL << 13u))) ==
+	       ((1ULL << 12u) | (1ULL << 13u)), "SQ-T7R: T6 locks stay held");
+	expect((seq_automation_dirty[5] & (1ULL << 20u)) == 0u,
+	       "SQ-T7R: the restored lock is released");
+
+	restore_writes = 0u;
+	restore_clears = 0u;
+	seq_restoreAutomatedParameters(5u);
+	expect(restore_clears == 0u, "SQ-T7R: a T6 trigger clears no T7 override");
+	expect(restore_writes == 2u, "SQ-T7R: a T6 trigger restores the decays");
+	expect(seq_automation_dirty[5] == 0u, "SQ-T7R: every lock is released");
 }
 
 /* SQ-LEN (S096 P3 C1): a plain step's fill window, its end, replacement and
@@ -320,6 +428,8 @@ int main(void)
 	       "S096 P3: the waiting entry applies on the next pass");
 
 	test_len();
+	test_t7();
+	test_t7_restore();
 
 	printf("sequencer failures: %d\n", failures);
 	return failures ? 1 : 0;

@@ -184,6 +184,8 @@ enum NamesEnum {
     TEXT_TRACK_NOTE,
     /* S083 follow-up: SHIFT+REC overlay roll rhythm `pv<` / `pv>`. */
     TEXT_PERF_VEL_LT, TEXT_PERF_VEL_RT,
+    /* S104 P1: the Global MIDI Omni channel `omn` (category MIDI). */
+    TEXT_MIDI_CHAN_OMNI,
     NUM_NAMES
 };
 
@@ -289,6 +291,8 @@ enum longNamesEnum {
     LONG_RUN, LONG_KICK, LONG_CYCLE, LONG_SKEW, LONG_CHAOS, LONG_SELFMOD,
     LONG_VCABAL, LONG_EXCITER, LONG_NOISEMIX, LONG_SYNCTHR, LONG_WET,
     LONG_DRIFT, LONG_TRACK, LONG_LOWCUT, LONG_OUTFILT,
+    /* S104 P1: "Omni Ch" (MenuLabels.c, same position). */
+    LONG_OMNI_CH,
     LONG_LABEL_COUNT
 };
 
@@ -394,6 +398,8 @@ enum shortNamesEnum {
      */
     SHORT_KIK, SHORT_CY1, SHORT_SK1, SHORT_DP1, SHORT_CY2, SHORT_SK2,
     SHORT_DP2, SHORT_CHS, SHORT_SRCE, SHORT_DTK, SHORT_LCT,
+    /* S104 P1: "omn" (MenuLabels.c, same position). */
+    SHORT_OMN,
     SHORT_LABEL_COUNT
 };
 
@@ -637,6 +643,16 @@ uint8_t menu_chainMenuOpen(uint8_t scene_index);
 void    menu_chainMenuView(uint8_t scene_index);
 void    menu_chainMenuClose(void);
 uint8_t menu_chainMenuIsOpen(void);
+/*
+ * DJ mode (S104 P1; contract in menu.c). menu_djOpen()/Close(): the DJ
+ * screen over PERFORMANCE_PAGE (ButtonHandler opens it on SHIFT+PLAY+PERF and
+ * closes it on any MODE press). menu_djIsOpen(): 1 while shown.
+ * menu_djSetTempoCenti(): set the base tempo in 1/100 BPM (pots, tap).
+ */
+void menu_djOpen(void);
+void menu_djClose(void);
+uint8_t menu_djIsOpen(void);
+void menu_djSetTempoCenti(uint16_t centi);
 /*
  * Repaint the temporary MODE VOICE held Scene edit-mask view.
  *

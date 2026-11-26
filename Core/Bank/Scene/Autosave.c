@@ -1325,19 +1325,16 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
             (uint8_t)(relative - AUTOSAVE_KIT_PARAMETERS_OFFSET);
 
         /*
-         * Only the two slot-6/track-7 endpoint bytes currently exist.
-         *
-         * Inputs: Kit parameter indices 0..119. Output: indices 0/1 sample the
-         * retained normal/Morph decay; later reserved indices report absent.
+         * The eight track-7 decay cells (S104 P1: index = 2 x layer +
+         * image). Inputs: Kit parameter indices 0..117. Output: indices 0..7
+         * sample the retained endpoints; later reserved indices report absent.
          */
-        if (kit_parameter == AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_DECAY) {
-            *value = scene->kit.settings.slot6_track7_amp_envelope_decay;
-            return 1u;
-        }
-        if (kit_parameter ==
-            AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_MORPH_DECAY) {
-            *value =
-                scene->kit.settings.slot6_track7_morph_amp_envelope_decay;
+        if (kit_parameter < AUTOSAVE_KIT_PARAM_COUNT) {
+            const uint8_t layer = (uint8_t)(kit_parameter / 2u);
+
+            *value = (kit_parameter & 1u)
+                ? scene->kit.settings.slot6_track7_morph_decay[layer]
+                : scene->kit.settings.slot6_track7_decay[layer];
             return 1u;
         }
         return 0u;
@@ -1709,26 +1706,28 @@ void autosave_applyEffectPayload(uint8_t scene_index,
  * Apply a validated winner record's Kit parameters to resident SceneData.
  *
  * What: the inverse of the Kit portion of autosave_getLivePayloadByte().
- * Reads the 2 live Kit-parameter bytes. Inputs: scene_index, pointer to
+ * Reads the 8 live Kit-parameter bytes. Inputs: scene_index, pointer to
  * the Kit sub-section (scene_section + AUTOSAVE_KIT_OFFSET). Outputs:
- * slot6_track7_amp_envelope_decay and slot6_track7_morph_amp_envelope_decay.
- * Why: these two Choke-related Kit parameters are the only live Kit-level
+ * slot6_track7_decay[] and slot6_track7_morph_decay[] (S104 P1: four layers).
+ * Why: these Choke-related Kit parameters are the only live Kit-level
  * payload bytes. Affiliates: autosave_getLivePayloadByte() lines 831-854,
  * autosave_kit_parameter_t, SceneData.h kit_settings_t.
  */
 void autosave_applyKitPayload(uint8_t scene_index,
                               const uint8_t *kit_section)
 {
+    uint8_t layer;
+
     if (!kit_section || scene_index >= AUTOSAVE_SCENE_COUNT)
         return;
-    scene_setSlot6Track7AmpEnvelopeDecay(
-        scene_index,
-        kit_section[AUTOSAVE_KIT_PARAMETERS_OFFSET +
-                    AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_DECAY]);
-    scene_setSlot6Track7MorphAmpEnvelopeDecay(
-        scene_index,
-        kit_section[AUTOSAVE_KIT_PARAMETERS_OFFSET +
-                    AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_MORPH_DECAY]);
+    for (layer = 0u; layer < SCENE_TRACK7_DECAY_LAYERS; layer++) {
+        scene_setSlot6Track7Decay(scene_index, layer,
+            kit_section[AUTOSAVE_KIT_PARAMETERS_OFFSET +
+                        AUTOSAVE_KIT_PARAM_T7(layer, 0u)]);
+        scene_setSlot6Track7MorphDecay(scene_index, layer,
+            kit_section[AUTOSAVE_KIT_PARAMETERS_OFFSET +
+                        AUTOSAVE_KIT_PARAM_T7(layer, 1u)]);
+    }
 }
 
 /*

@@ -148,6 +148,8 @@ _Static_assert(TKT_PARAM_COUNT <= INSTRUMENT_PARAM_COUNT,
                "Tetrakt rows must fit the 64-cell Kit image");
 _Static_assert(TETRAKT_PARAM_LAYER_ON_INDEX == TKT_PARAM_LAYER_ON,
                "TETRAKT_PARAM_LAYER_ON_INDEX names the switch row");
+_Static_assert(TETRAKT_PARAM_DECAY_A_INDEX == TKT_PARAM_DECAY_A,
+               "TETRAKT_PARAM_DECAY_A_INDEX names the layer-A decay row");
 
 /*
  * Tetrakt parameter descriptors (S096 P1, plan §4, §8.2).
@@ -334,4 +336,3 @@ uint8_t tetraktParameters_velocityTokenHidden(const uint8_t token)
 #undef MOD_PM63
 #undef MOD_0_127
 #undef MOD_NONE
-

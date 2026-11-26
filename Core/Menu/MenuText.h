@@ -106,8 +106,14 @@ static const char nextPatternNames[][4] = {
 static const char retriggerNames[][4] = {
     {8}, {"off"},{"v1"},{"v2"},{"v3"},{"v4"},{"v5"},{"v6"},{"scn"},
 };
+/*
+ * LFO wave names (S104 P1: 16; the value is the stored lfo_wave byte).
+ * 0..7 the looping waves, 8..15 their one-shot forms `si1 .. xd1` (lfo.h
+ * LFO_OS_*). The count is the row's menu clamp (menu.c MENU_LFO_WAVES).
+ */
 static const char lfoWaveNames[][4] = {
-    {8}, {"sin"},{"tri"},{"sup"},{"sdn"},{"sqr"},{"rnd"},{"xup"},{"xdn"},
+    {16}, {"sin"},{"tri"},{"sup"},{"sdn"},{"sqr"},{"rnd"},{"xup"},{"xdn"},
+    {"si1"},{"tr1"},{"su1"},{"sd1"},{"sq1"},{"rn1"},{"xu1"},{"xd1"},
 };
 /* Three-character display names for the shared LFO polarity selector.
 ** Clients: descriptor ROW("lfo_polarity", ..., DTYPE_LFO_POLARITY), compact
@@ -508,26 +514,30 @@ static inline const char *menuLabel_long(uint8_t id)  { return longNames[id]; }
 
 /*
  * Trigger condition display names (S079 §3; fix 3 extends to track 7;
- * S080 B1 adds the loop-active pair).
+ * S080 B1 adds the loop-active pair; S104 P1 adds `!1-`).
  *
- * S080 B1: insert `lop` (loop active) and `!lp` (loop inactive) after `!fl`;
- * the count grows 39 -> 41 and every later condition shifts up by two.
- * The table is indexed directly by the stored condition value
- * (menu_getConditionName() reads conditionNames[value + 1]), so it must stay
- * in numeric order. The mute group is therefore emitted in the dispatch's
- * order - 1mu..7mu (indices 27..33) then !1m..!7m (34..40) - matching
- * seq_evaluateStepCondition()'s (cond - 27) % 7 / boundary cond <= 33 rule.
- * (S079 fix 3 had appended 7mu/!7m at the end of the old 6-track grouping,
- * leaving the displayed labels one group out of step; this corrects it.)
+ * What: the 3-character label of every step trigger condition, indexed
+ * directly by the stored condition value (menu_getConditionName() reads
+ * conditionNames[value + 1]), so the table must stay in numeric order.
+ * S104 P1 inserts `!1-` at value 21, right after `1:-` (20): `1:-` plays a
+ * step only on the track's first pass since its Scene (or the transport)
+ * started it, and `!1-` plays it on every pass except that first one. Both
+ * read the per-track repeat counter (seq_trackRepeatCount[]).
+ * Every later condition moves up by one: fil/!fl 22/23, lop/!lp 24/25,
+ * lst/!ls 26/27, 1mu..7mu 28..34, !1m..!7m 35..41. The mute group stays
+ * in the dispatch's order (seq_conditionEval(): voice (cond - 28) % 7,
+ * muted when cond <= 34).
+ * No migration (user, S104 P1): a Pattern stored before S104 that used
+ * values 21..40 now plays the condition one place earlier in this list.
  *
- * [0]=count; [1..41] = condition indices 0..40.
+ * [0] = count 42; [1..42] = condition values 0..41.
  */
 static const char conditionNames[][4] = {
-    {41},
+    {42},
     {"  -"},{"r10"},{"r20"},{"r30"},{"r40"},{"r50"},{"r60"},{"r70"},
     {"r80"},{"r90"},{"r95"},
     {"1:2"},{"2:2"},{"1:3"},{"2:3"},{"3:3"},{"1:4"},{"2:4"},{"3:4"},
-    {"4:4"},{"1:-"},
+    {"4:4"},{"1:-"},{"!1-"},
     {"fil"},{"!fl"},{"lop"},{"!lp"},{"lst"},{"!ls"},
     {"1mu"},{"2mu"},{"3mu"},{"4mu"},{"5mu"},{"6mu"},{"7mu"},
     {"!1m"},{"!2m"},{"!3m"},{"!4m"},{"!5m"},{"!6m"},{"!7m"},

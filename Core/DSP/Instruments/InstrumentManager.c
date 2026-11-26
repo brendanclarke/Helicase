@@ -261,17 +261,25 @@ static uint8_t slot6_track7_decay_lfo_active;
 static uint8_t slot6_track7_decay_lfo_value;
 
 /*
- * Step-automation runtime override for generated slot-6 track-7 decay.
+ * Step-automation runtime overrides of the generated track-7 decays
+ * (S104 P1: one per layer).
  *
- * Inputs: sequencer Scene-target automation supplies a per-step 0..127 value;
- * transport-boundary restore clears it. Output: the track-7 alternate trigger
- * path uses this transient value ahead of the continuous LFO override and the
- * retained Kit setting. Lifetime: static runtime state only; no Kit/Scene
- * storage or AutoSave marker is touched. Owner: InstrumentManager trigger
- * backend. Affiliate: Sequencer Scene-automation restore.
+ * What: bit L of slot6_track7_decay_step_active set = layer L's track-7
+ * decay is slot6_track7_decay_step_value[L] at the next track-7 trigger,
+ * ahead of the LFO override (layer 0 only) and the retained Kit value.
+ * Writers: the Scene target `7dc` (layer 0; seq_applySceneAutomation(),
+ * cleared at the Scene-automation restore), and, for a Tetrakt on slot 6,
+ * a track-7 step lock of tkt_decay_a..d routed by its track
+ * (seq_drainPendingAutomationTo(); cleared at track 7's next trigger
+ * restore, seq_restoreAutomatedParameters()). Rule A: a menu edit of one
+ * layer clears that layer (instrumentManager_clearSlot6Track7StepDecayLayer()).
+ * Lifetime: runtime only; no Kit/Scene storage or AutoSave marker is
+ * touched. RAM: 1 + 4 B (S104 P1: was 1 + 1; +3 B, approved).
+ * Affiliates: instrumentManager_track7LayerDecays(),
+ * instrumentManager_applySlot6AlternateDecay().
  */
 static uint8_t slot6_track7_decay_step_active;
-static uint8_t slot6_track7_decay_step_value;
+static uint8_t slot6_track7_decay_step_value[SCENE_TRACK7_DECAY_LAYERS];
 /*
  * Runtime type shadow for deferred Scene switching.
  *
@@ -485,6 +493,8 @@ static uint8_t instrumentManager_resolveModulationTarget(
     uint8_t scene_index,
     instrument_param_id_t id,
     instrument_runtime_target_t *target_out);
+/* S104 P1: the four track-7 decays of a Tetrakt slot-6 trigger. */
+static void instrumentManager_track7LayerDecays(uint8_t out[SCENE_TRACK7_DECAY_LAYERS]);
 static instrument_type_t instrumentManager_slotType(uint8_t slot);
 static SlopeEg2 *instrumentManager_ampEg(uint8_t slot);
 static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
@@ -1283,15 +1293,19 @@ static uint8_t instrumentManager_waveDomainMax(uint8_t slot,
     /*
      * S096 P1: a Tetrakt sample row (tkt_sample_a..d) lists the installed
      * samples: 0 .. count - 1 (0 with none installed: the layer is silent).
-     * The rows are MENU_WAVEFORM selectors (TetraktParameters.c
+     * S104 P1: then the same samples looped, count .. 2 x count - 1 (the
+     * Drum family's s, l order), capped at 128 values as osc_userListCount()
+     * caps the modulator list (with more than 64 samples the top loops are
+     * unreachable). The rows are MENU_WAVEFORM selectors (TetraktParameters.c
      * ROW_MENU_SELECT), so this is their menu clamp and automation range
      * (instrumentManager_waveCellCount()).
      */
     if (descriptor && descriptor->file_key &&
         strncmp(descriptor->file_key, "tkt_sample_", 11u) == 0) {
-        const uint8_t samples = sampleMemory_getNumSamples();
+        const uint16_t list = (uint16_t)((uint16_t)sampleMemory_getNumSamples() * 2u);
+        const uint8_t count = (uint8_t)((list > 128u) ? 128u : list);
 
-        return samples ? (uint8_t)(samples - 1u) : 0u;
+        return count ? (uint8_t)(count - 1u) : 0u;
     }
     if (descriptor && descriptor->file_key &&
         strstr(descriptor->file_key, "_wave")) {
@@ -2662,7 +2676,7 @@ void instrumentManager_retriggerRuntimeLfos(uint8_t trigger_track)
         if (lfo && lfo->retrigger != 0u &&
             lfo->retrigger <= INSTRUMENT_SLOT_COUNT &&
             lfo->retrigger == (uint8_t)(trigger_track + 1u))
-            lfo->phase = lfo->phaseOffset;
+            lfo_retriggerPhase(lfo);   /* S104 P1: one-shot delay */
     }
 }
 
@@ -3268,11 +3282,11 @@ static void instrumentManager_applySlot6AlternateDecay(uint8_t alternate)
      * trigger-time target, so it intentionally wins over continuous LFO data.
      */
     value = alternate
-        ? (slot6_track7_decay_step_active
-              ? slot6_track7_decay_step_value
+        ? ((slot6_track7_decay_step_active & 1u)
+              ? slot6_track7_decay_step_value[0]
               : (slot6_track7_decay_lfo_active
                     ? slot6_track7_decay_lfo_value
-                    : scene->kit.settings.slot6_track7_amp_envelope_decay))
+                    : scene->kit.settings.slot6_track7_decay[0]))
         : slot_state->parameter_images.morph_interpolation[base_index];
     if (value > 127u)
         value = 127u;
@@ -3365,10 +3379,14 @@ void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
         /*
          * S096 P1: no step length (one-shot layers that decay). The
          * platform part (LFO retrigger, velocity nodes) runs inside
-         * Tetrakt_triggerVoice() for `slot`; the slot-5 alternate decay above
-         * finds no amp_envelope_decay row and does nothing, so track 7 plays
-         * slot 5 as an ordinary hit (plan §11). The layer switch is read
-         * here, after this step's automation (voiceControl_processPending()).
+         * Tetrakt_triggerVoice() for `slot`.
+         * S104 P1: track 7 on slot 6 passes its four track-7 decays
+         * (instrumentManager_track7LayerDecays()); each restarted layer
+         * plays the decay of the track that restarted it, and a T6 trigger
+         * keeps a layer a pending T7 trigger also asked for (TetraktVoice.c
+         * Tetrakt_triggerVoice()). Track 6 passes NULL. The layer switch is
+         * read here, after this step's automation
+         * (voiceControl_processPending()).
          */
         /*
          * S096 P3 T1: `layers` (from a MIDI layer note or an overlay repeat)
@@ -3377,8 +3395,15 @@ void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
          * played (one note per layer, decided Q15; finding D3: TIM3's TX ran
          * before the step's lon was drained).
          */
-        Tetrakt_triggerVoice(instrumentManager_tetraktRuntime(slot), slot,
-                             velocity, note, layers);
+        {
+            uint8_t altDecay[SCENE_TRACK7_DECAY_LAYERS];
+
+            if (alternate_slot6)
+                instrumentManager_track7LayerDecays(altDecay);
+            Tetrakt_triggerVoice(instrumentManager_tetraktRuntime(slot), slot,
+                                 velocity, note, layers,
+                                 alternate_slot6 ? altDecay : NULL);
+        }
         midiOut_trackLayers(trigger_track, seq_getTrackPlayedScene(trigger_track),
                             note, velocity,
                             layers ? layers : instrumentManager_tetraktRuntime(slot)->layerOn);
@@ -4390,8 +4415,9 @@ static uint8_t instrumentManager_applyVelocitySceneTarget(
         preset_morphVoice(descriptor->voice_slot, (uint8_t)value);
         return 1u;
     case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
-        preset_setSlot6Track7AmpEnvelopeDecay(scene_getActiveIndex(), 0u,
-                                              (uint8_t)value, 0u);
+        /* S104 P1: layer 0 (the generic `7dc` value), image Main. */
+        preset_setSlot6Track7Decay(scene_getActiveIndex(), 0u, 0u,
+                                   (uint8_t)value, 0u);
         return 1u;
     default:
         return 0u;
@@ -4504,7 +4530,7 @@ static uint8_t instrumentManager_updateLfoSceneDestination(
         return 1u;
     }
     case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
-        base = scene->kit.settings.slot6_track7_amp_envelope_decay;
+        base = scene->kit.settings.slot6_track7_decay[0];
         shaped = modNode_shapeRangeU16(base, descriptor->min_value,
                                        descriptor->max_value,
                                        lfo_value_0_1, amount, polarity);
@@ -4526,33 +4552,119 @@ static uint8_t instrumentManager_updateLfoSceneDestination(
     }
 }
 
-void instrumentManager_setSlot6Track7StepDecayOverride(uint8_t value)
+/*
+ * Track-7 decay step overrides (S104 P1: per layer; contract above the
+ * statics). Set: layer 0..3, 7-bit value. ClearLayer: one layer (Rule A).
+ * Clear: every layer (Scene-automation restore, Scene activation, slot
+ * step-override clear). ClearTetraktTrack7: every layer, at track 7's
+ * trigger restore on a Tetrakt (the locks belong to the step that fired).
+ */
+void instrumentManager_setSlot6Track7StepDecayOverride(uint8_t layer, uint8_t value)
 {
-    /*
-     * Set the transient generated track-7 decay used by the next alternate
-     * trigger.
-     *
-     * Inputs: seven-bit step-automation value. Output: the trigger path uses
-     * this value without changing retained Kit settings or AutoSave state.
-     * Client: seq_applySceneAutomation(); restore: clear function below.
-     */
+    if (layer >= SCENE_TRACK7_DECAY_LAYERS)
+        return;
     if (value > 127u)
         value = 127u;
-    slot6_track7_decay_step_active = 1u;
-    slot6_track7_decay_step_value = value;
+    slot6_track7_decay_step_value[layer] = value;
+    slot6_track7_decay_step_active |= (uint8_t)(1u << layer);
+}
+
+void instrumentManager_clearSlot6Track7StepDecayLayer(uint8_t layer)
+{
+    if (layer < SCENE_TRACK7_DECAY_LAYERS)
+        slot6_track7_decay_step_active &= (uint8_t)~(1u << layer);
 }
 
 void instrumentManager_clearSlot6Track7StepDecayOverride(void)
 {
-    /*
-     * Clear the transient generated track-7 decay.
-     *
-     * Output: subsequent alternate triggers fall back to the active LFO
-     * override or retained Kit value. Client: transport-boundary Scene
-     * automation restore; no retained data is modified.
-     */
     slot6_track7_decay_step_active = 0u;
-    slot6_track7_decay_step_value = 0u;
+}
+
+/*
+ * Track-7 decay mapping (S104 P1).
+ *
+ * instrumentManager_track7DecayIndex(): the descriptor index of `type`'s
+ * track-6 decay for track-7 layer `layer`: a Tetrakt's tkt_decay_a..d
+ * (TETRAKT_PARAM_DECAY_A_INDEX + layer); for another type, layer 0 is its
+ * amp_envelope_decay row, if any. 1 with *index_out, else 0.
+ * instrumentManager_track7DecayLayerOf(): the inverse for a Tetrakt (the
+ * layer 0..3 of descriptor `local`, else 0xFF); other types give 0xFF (their
+ * one generic value is the Scene target `7dc`, not a descriptor).
+ * instrumentManager_track7DecayLayer(): the same for a voice target id in
+ * `scene_index` (slot 6 only). instrumentManager_track7DecayLocalMask(): the
+ * four Tetrakt decay locals as a 64-bit slot mask (0 for other types).
+ * Why: track 7 on a Tetrakt owns these four rows for automation and
+ * display, track 6 the rows themselves; one place knows the mapping.
+ * Accessors: Menu (VOICE7 cells), Sequencer (drain routing, restore),
+ * SceneData (load seeding), LiveRecord (recorded value).
+ */
+uint8_t instrumentManager_track7DecayIndex(instrument_type_t type, uint8_t layer,
+                                           uint8_t *index_out)
+{
+    if (layer >= SCENE_TRACK7_DECAY_LAYERS || !index_out)
+        return 0u;
+    if (type == INSTRUMENT_TYPE_TKT) {
+        *index_out = (uint8_t)(TETRAKT_PARAM_DECAY_A_INDEX + layer);
+        return 1u;
+    }
+    if (layer != 0u)
+        return 0u;
+    return instrumentManager_descriptorIndexByKey(type, "amp_envelope_decay",
+                                                  index_out) ? 1u : 0u;
+}
+
+uint8_t instrumentManager_track7DecayLayerOf(instrument_type_t type, uint8_t local)
+{
+    if (type != INSTRUMENT_TYPE_TKT || local < TETRAKT_PARAM_DECAY_A_INDEX ||
+        local >= (uint8_t)(TETRAKT_PARAM_DECAY_A_INDEX + SCENE_TRACK7_DECAY_LAYERS))
+        return 0xFFu;
+    return (uint8_t)(local - TETRAKT_PARAM_DECAY_A_INDEX);
+}
+
+uint8_t instrumentManager_track7DecayLayer(uint8_t scene_index,
+                                           instrument_param_id_t id)
+{
+    const kit_instrument_slot_t *slot;
+
+    if (!instrumentParam_isVoiceParameter(id) ||
+        instrumentParam_slot(id) != INSTRUMENT_SLOT_COUNT - 1u)
+        return 0xFFu;
+    slot = scene_instrumentSlotConst(scene_index, INSTRUMENT_SLOT_COUNT - 1u);
+    return slot ? instrumentManager_track7DecayLayerOf(slot->type,
+                                                       instrumentParam_local(id))
+                : 0xFFu;
+}
+
+uint64_t instrumentManager_track7DecayLocalMask(uint8_t scene_index)
+{
+    const kit_instrument_slot_t *slot =
+        scene_instrumentSlotConst(scene_index, INSTRUMENT_SLOT_COUNT - 1u);
+
+    return (slot && slot->type == INSTRUMENT_TYPE_TKT)
+        ? (0xFULL << TETRAKT_PARAM_DECAY_A_INDEX) : 0u;
+}
+
+/*
+ * The four track-7 decays a track-7 trigger plays (S104 P1).
+ * What: per layer, the step override if set, else (layer 0) the 7dc LFO
+ * override if active, else the active Scene's retained Normal value
+ * (the generic path's precedence, layer by layer). Inputs: the overrides,
+ * the active Scene's Kit. Output: out[4]. Accessor:
+ * instrumentManager_triggerTrack() (Tetrakt on slot 6, track 7).
+ */
+static void instrumentManager_track7LayerDecays(uint8_t out[SCENE_TRACK7_DECAY_LAYERS])
+{
+    const uint8_t scene_index = scene_getActiveIndex();
+    uint8_t layer;
+
+    for (layer = 0u; layer < SCENE_TRACK7_DECAY_LAYERS; layer++) {
+        if (slot6_track7_decay_step_active & (uint8_t)(1u << layer))
+            out[layer] = slot6_track7_decay_step_value[layer];
+        else if (layer == 0u && slot6_track7_decay_lfo_active)
+            out[layer] = slot6_track7_decay_lfo_value;
+        else
+            out[layer] = scene_getSlot6Track7Decay(scene_index, layer);
+    }
 }
 
 /*
@@ -4669,7 +4781,7 @@ void instrumentManager_restoreLfoPhaseIfNeeded(uint8_t slot)
     if (!lfo)
         return;
     if (lfo->retrigger == LFO_RETRIGGER_SCENE)
-        lfo->phase = lfo->phaseOffset;
+        lfo_retriggerPhase(lfo);   /* S104 P1: a Scene retrigger restarts a one-shot too */
     else
         lfo->phase = lfo_scene_handoff.phase[slot];
 }

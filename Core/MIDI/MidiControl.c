@@ -83,6 +83,16 @@ uint8_t midiControl_voiceSlotsOnChannel(uint8_t channel)
 	uint8_t slots = 0u;
 	uint8_t t;
 
+	/*
+	 * S104 P1, Omni: a message on O addresses only the selected track's
+	 * slot (track 7 shares slot 6), whatever G and the track channels are.
+	 */
+	{
+		const uint8_t omni = midiIn_omniTrack(channel);
+
+		if (omni != 0xFFu)
+			return (uint8_t)(1u << ((omni >= 6u) ? 5u : omni));
+	}
 	if (channel == 0u || channel == midiIn_globalChannel())
 		return 0u;
 	midiNoteMap_load(scene_getActiveIndex(), &map);
@@ -99,8 +109,10 @@ uint8_t midiControl_targetOnChannel(uint16_t id, uint8_t channel)
 {
 	uint8_t global = midiIn_globalChannel();
 	uint8_t slots;
+	/* S104 P1: O is never G (O wins when equal). */
+	const uint8_t omni = midiIn_omniTrack(channel);
 
-	if (global != 0u && channel == global)
+	if (omni == 0xFFu && global != 0u && channel == global)
 		return 1u;
 	slots = midiControl_voiceSlotsOnChannel(channel);
 	if (slots == 0u)
@@ -124,6 +136,9 @@ uint8_t midiControl_targetOnChannel(uint16_t id, uint8_t channel)
 		case SCENE_MOD_TARGET_KIND_TRACK_SHUFFLE: {
 			midiNoteMap_settings_t map;
 
+			/* S104 P1: on O, only the selected track's own timing. */
+			if (omni != 0xFFu)
+				return (uint8_t)(d->voice_slot == omni);
 			midiNoteMap_load(scene_getActiveIndex(), &map);
 			return (uint8_t)(midiNoteMap_effectiveChannel(&map,
 			                 d->voice_slot) == channel);
@@ -231,7 +246,8 @@ uint8_t midiControl_targetValue7(uint8_t scene_index, uint16_t id)
 		case SCENE_MOD_TARGET_KIND_FX_SEND:
 			return scene_getVoiceFxSendAmount(scene_index, slot);
 		case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
-			return scene_getSlot6Track7AmpEnvelopeDecay(scene_index);
+			/* S104 P1: layer 0 is the generic `7dc` value. */
+			return scene_getSlot6Track7Decay(scene_index, 0u);
 		case SCENE_MOD_TARGET_KIND_EFFECT_MORPH: {
 			uint8_t m = scene_getEffectMorphAmount(scene_index);
 
@@ -274,7 +290,9 @@ uint8_t midiControl_handleCc(const MidiMsg *msg)
 	const uint8_t cc = msg->data1;
 	const uint8_t value = msg->data2;
 	const uint8_t global = midiIn_globalChannel();
-	const uint8_t onG = (uint8_t)(global != 0u && channel == global);
+	/* S104 P1: a message on the Omni channel is never a G message. */
+	const uint8_t onG = (uint8_t)(global != 0u && channel == global &&
+	                              midiIn_omniTrack(channel) == 0xFFu);
 	const uint8_t voiceSlots = midiControl_voiceSlotsOnChannel(channel);
 	const uint8_t port = (uint8_t)msg->bits.source;
 	midiControl_nrpn_t *ctx;

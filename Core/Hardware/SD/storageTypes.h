@@ -173,6 +173,13 @@ typedef struct {
     uint8_t seen_type_mask;
     uint8_t seen_file_mask;
     uint8_t seen_audio_out_mask;
+    /*
+     * S104 P1: the track-7 decay endpoints this file carried, bit 2 x layer
+     * (Normal) and 2 x layer + 1 (Morph); scene_seedTrack7Decays() fills the
+     * rest from slot 6's track-6 decays at the commit. Cleared by
+     * storage_kitsetInit().
+     */
+    uint8_t seen_t7_mask;
 } storage_kitset_t;
 
 /* Incremental parse state for one instrument file.
@@ -293,6 +300,9 @@ void storage_kitsetInit(storage_kitset_t *kit);
 storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
                                          const char *line,
                                          kit_t *target_kit);
+/* S104 P1: the key text of kit track-7 decay bit 0..7 (2 x layer + image),
+ * for the writer; "" for a bit past 7. */
+const char *storage_kitsetTrack7KeyName(uint8_t bit);
 /*
  * Read legacy kitset audio routing side data.
  *

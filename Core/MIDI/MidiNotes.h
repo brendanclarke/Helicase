@@ -47,6 +47,12 @@
  */
 uint8_t midiNotes_handle(const MidiMsg *msg);
 /*
+ * S104 P1: release every note held on the Omni channel (the latched track's
+ * note-offs through the overlay and the note modes), then clear the latch.
+ * Accessor: midiIn_setOmniChannel() (before O changes).
+ */
+void midiNotes_omniReleaseAll(void);
+/*
  * CC2 on G only (C8): 0 single trigger (overlay off), 1 BAR `<` overlay,
  * 2 BAR `>` overlay. Sets the PERF BAR overlay exactly like a BAR press:
  * the BAR LEDs follow in PERF, panel VOICE triggers and received notes use

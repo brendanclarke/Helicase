@@ -2030,6 +2030,37 @@ void storage_kitsetInit(storage_kitset_t *kit)
         kit->instrument_type[i] = STORAGE_INSTRUMENT_UNKNOWN;
 }
 
+/*
+ * Kitset track-7 decay keys (S104 P1). Index = 2 x layer + image (the
+ * AutoSave order); the writer (filesystem_nextKitsetLine()) uses the same
+ * table. Output: 1 with *bit for a known key.
+ */
+static const char *const storage_kitsetTrack7Keys[8] = {
+    "slot6_track7_amp_envelope_decay", "slot6_track7_morph_amp_envelope_decay",
+    "slot6_track7_decay_b", "slot6_track7_morph_decay_b",
+    "slot6_track7_decay_c", "slot6_track7_morph_decay_c",
+    "slot6_track7_decay_d", "slot6_track7_morph_decay_d",
+};
+
+static uint8_t storage_kitsetTrack7Key(const char *key, uint8_t *bit)
+{
+    uint8_t i;
+
+    for (i = 0u; i < 8u; i++) {
+        if (storage_streq(key, storage_kitsetTrack7Keys[i])) {
+            *bit = i;
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+/* The key text of bit 0..7 for the writer (contract in storageTypes.h). */
+const char *storage_kitsetTrack7KeyName(uint8_t bit)
+{
+    return (bit < 8u) ? storage_kitsetTrack7Keys[bit] : "";
+}
+
 /* See storageTypes.h for the public contract.
  *
  * The parser is intentionally incremental because filesystem.c reads from SD in
@@ -2044,10 +2075,18 @@ storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
                                          const char *line,
                                          kit_t *target_kit)
 {
-    char key[24];
+    /*
+     * Key buffer (S104 P1: 24 -> 40). storage_splitKeyValue() truncates a
+     * key to key_max - 1 characters, so the 31- and 37-character track-7
+     * decay keys never matched in a 24-byte buffer and were silently
+     * dropped on load (found in S104 P1). 40 covers every kitset key; it is
+     * stack only.
+     */
+    char key[40];
     const char *value;
     storage_status_t st;
     uint8_t parsed;
+    uint8_t t7_bit;
 
     line = storage_trimLeft(line);
     if (*line == '\0' || *line == '#')
@@ -2079,16 +2118,19 @@ storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
             if (parsed != 1u)
                 return STORAGE_STATUS_UNSUPPORTED_VERSION;
             kit->seen_version = 1u;
-        } else if (storage_streq(key, "slot6_track7_amp_envelope_decay")) {
+        } else if (storage_kitsetTrack7Key(key, &t7_bit)) {
             /*
-             * Optional generated non-Choke track-7 decay endpoint.
+             * Optional generated track-7 decay endpoints (S104 P1: per layer).
              *
-             * Inputs: top-level kitset key in the normal 0..127 parameter
-             * domain. Output: target_kit retains the generated main endpoint
-             * used when track 7 triggers a non-Choke instrument assigned to
-             * slot 6. This is kit-owned metadata, not an instrument-file
-             * descriptor, so it is parsed from kitset.kcg rather than any
-             * `.drm`/`.snr`/`.cym`/`.hat` file.
+             * Keys: slot6_track7_amp_envelope_decay /
+             * slot6_track7_morph_amp_envelope_decay (layer 0, the generic
+             * value and Tetrakt A: names kept), slot6_track7_decay_b/c/d and
+             * slot6_track7_morph_decay_b/c/d (Tetrakt B..D). Inputs: a
+             * top-level kitset key in the 0..127 parameter domain. Output:
+             * target_kit retains the endpoint and seen_t7_mask its bit. This
+             * is Kit-owned metadata, not an instrument-file descriptor, so it
+             * is parsed from kitset.kcg. Missing keys are seeded at the commit
+             * (scene_seedTrack7Decays()).
              */
             if (!target_kit)
                 return STORAGE_STATUS_BAD_VALUE;
@@ -2097,26 +2139,11 @@ storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
                 return st;
             if (parsed > 127u)
                 parsed = 127u;
-            target_kit->settings.slot6_track7_amp_envelope_decay = parsed;
-        } else if (storage_streq(key,
-                    "slot6_track7_morph_amp_envelope_decay")) {
-            /*
-             * Optional generated non-Choke track-7 Morph endpoint.
-             *
-             * Inputs: top-level kitset key. Output: target_kit retains the
-             * Morph-side endpoint for the same generated track-7 decay
-             * parameter. It is optional for backward compatibility; missing
-             * keys leave SceneData defaults in place.
-             */
-            if (!target_kit)
-                return STORAGE_STATUS_BAD_VALUE;
-            st = storage_parseU8(value, &parsed);
-            if (st != STORAGE_STATUS_OK)
-                return st;
-            if (parsed > 127u)
-                parsed = 127u;
-            target_kit->settings.slot6_track7_morph_amp_envelope_decay =
-                parsed;
+            if (t7_bit & 1u)
+                target_kit->settings.slot6_track7_morph_decay[t7_bit / 2u] = parsed;
+            else
+                target_kit->settings.slot6_track7_decay[t7_bit / 2u] = parsed;
+            kit->seen_t7_mask |= (uint8_t)(1u << t7_bit);
         }
         return STORAGE_STATUS_OK;
     }

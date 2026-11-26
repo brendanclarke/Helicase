@@ -324,6 +324,37 @@ enum ParamEnums
 	PAR_PERF_VEL_LT,
 	PAR_PERF_VEL_RT,
 
+	/*
+	 * S104 P1: the MIDI Omni channel `omn` (0 off, 1..16).
+	 *
+	 * What: a persisted Global beside G. A channel message received on it
+	 * acts on the selected track (menu_getActiveVoice()) as if that track
+	 * were alone on its own MIDI channel (MidiIn.c midiIn_omniTrack()).
+	 * Why: play and control whichever track is selected from one keyboard
+	 * channel without re-assigning track channels (user, S104 P1).
+	 * Appended after PAR_PERF_VEL_RT so no established id is renumbered;
+	 * NUM_PARAMS stays 384. Inputs: Global page row 0 column 4, settings.cfg
+	 * `midi_chan_omni`. Outputs: menu_parseGlobalParam() ->
+	 * midiIn_setOmniChannel(). Affiliates: filesystem settings writer/parser,
+	 * filesystem_sanitizeLoadedGlobals().
+	 */
+	PAR_MIDI_CHAN_OMNI,
+
+	/*
+	 * S104 P1: the BPM's hundredths (0..99).
+	 *
+	 * What: the internal tempo is PAR_BPM + PAR_BPM_FINE / 100 BPM
+	 * (seq_setTempoCenti(PAR_BPM x 100 + PAR_BPM_FINE)). Why: DJ mode sets
+	 * the tempo to 1/100 BPM with its second pot and with tap tempo, and
+	 * the setting must survive a power cycle (settings.cfg `bpm_fine`).
+	 * No menu cell shows it: the Global page's `bpm` cell edits the whole
+	 * BPM and keeps the fraction. Appended so no id is renumbered.
+	 * Inputs: DJ pots and tap (menu_djSetTempoCenti()), settings load.
+	 * Outputs: menu_parseGlobalParam() PAR_BPM/PAR_BPM_FINE case.
+	 * Affiliates: filesystem settings writer/parser, sanitize.
+	 */
+	PAR_BPM_FINE,
+
 	NUM_PARAMS = 384,
 };
 
@@ -344,6 +375,10 @@ _Static_assert(PAR_TRACK_AUTO_SMOOTH < NUM_PARAMS,
 	"S081 P2 rmp mirror must fit the fixed flat parameter allocation");
 _Static_assert(PAR_PERF_VEL_RT < NUM_PARAMS,
 	"S083 pv</pv> Globals must fit the fixed flat parameter allocation");
+
+/* S104 P1: the appended Globals still fit the fixed flat array. */
+_Static_assert(PAR_BPM_FINE < NUM_PARAMS,
+               "S104 P1 Globals must stay inside NUM_PARAMS");
 
 #include "stm32f4xx.h"
 

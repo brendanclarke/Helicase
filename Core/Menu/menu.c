@@ -1351,6 +1351,13 @@ const enum Datatypes parameter_dtypes[NUM_PARAMS] = {
      * PAR_STEP_RHYTHM (menu_paramIsRollRhythm()). */
     [PAR_PERF_VEL_LT] = DTYPE_0B255,
     [PAR_PERF_VEL_RT] = DTYPE_0B255,
+    /* S104 P1: omn is G's twin (0 off, 1..16; the off name and the clamp are
+     * static-param special cases in menu_getMidiStaticName() and the static
+     * clamp, as for PAR_MIDI_CHAN_GLOBAL). */
+    [PAR_MIDI_CHAN_OMNI] = DTYPE_1B16,
+    /* S104 P1: the BPM's hundredths; no cell shows it (DJ mode writes it,
+     * clamped to 0..99 there and on settings load). */
+    [PAR_BPM_FINE] = DTYPE_0B127,
 };
 
 /* -----------------------------------------------------------------------
@@ -1497,6 +1504,8 @@ static const Name valueNames[NUM_NAMES] = {
     /* S083 follow-up: SHIFT+REC overlay roll rhythm pv</pv>. */
     {SHORT_PERF_VEL_LT,CAT_PERFORMANCE,LONG_PERF_VEL_LT},
     {SHORT_PERF_VEL_RT,CAT_PERFORMANCE,LONG_PERF_VEL_RT},
+    /* S104 P1: TEXT_MIDI_CHAN_OMNI. */
+    {SHORT_OMN,CAT_MIDI,LONG_OMNI_CH},
 };
 
 /* -----------------------------------------------------------------------
@@ -2199,7 +2208,18 @@ typedef enum {
 
 typedef enum {
     MENU_KIT_SETTING_NONE = 0,
-    MENU_KIT_SETTING_SLOT6_TRACK7_AMP_DECAY
+    MENU_KIT_SETTING_SLOT6_TRACK7_AMP_DECAY,
+    /*
+     * S104 P1: a Tetrakt on slot 6 shows its four track-7 decays on VOICE7
+     * in the tkt_decay_a..d cells (layer = kind - ..._A). Their value is
+     * Kit-owned (scene_get/setSlot6Track7Decay()); their automation target is
+     * the slot-6 descriptor itself, recorded on track 7's steps and routed by
+     * track (seq_drainPendingAutomationTo()).
+     */
+    MENU_KIT_SETTING_T7_LAYER_A,
+    MENU_KIT_SETTING_T7_LAYER_B,
+    MENU_KIT_SETTING_T7_LAYER_C,
+    MENU_KIT_SETTING_T7_LAYER_D
 } menu_kit_setting_kind_t;
 
 typedef enum {
@@ -2237,6 +2257,16 @@ typedef struct {
     /* Effect page cell identity; meaningful only for MENU_CELL_EFFECT. */
     menuEffects_cell_t fx;
 } menu_cell_t;
+
+/* S104 P1: the layer 0..3 of a Tetrakt track-7 cell, else 0xFF. */
+static uint8_t menu_kitSettingT7Layer(const menu_cell_t *cell)
+{
+    if (!cell || cell->kind != MENU_CELL_KIT_SETTING ||
+        cell->kit_setting < MENU_KIT_SETTING_T7_LAYER_A ||
+        cell->kit_setting > MENU_KIT_SETTING_T7_LAYER_D)
+        return 0xFFu;
+    return (uint8_t)(cell->kit_setting - MENU_KIT_SETTING_T7_LAYER_A);
+}
 
 /* S080 E6/F10: shared resolver for the overlay/scene-global static names. */
 static uint8_t menu_getS080StaticName(const menu_cell_t *cell,
@@ -3594,9 +3624,11 @@ static void va_applyVoiceMarkers(void)
     if (editModeActive) {
         menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
         if (cell.kind == MENU_CELL_INSTRUMENT ||
-            cell.kind == MENU_CELL_SCENE_SETTING) {
+            cell.kind == MENU_CELL_SCENE_SETTING ||
+            menu_kitSettingT7Layer(&cell) < SCENE_TRACK7_DECAY_LAYERS) {
             instrument_param_id_t target =
-                (cell.kind == MENU_CELL_INSTRUMENT)
+                (cell.kind == MENU_CELL_INSTRUMENT ||
+                 menu_kitSettingT7Layer(&cell) < SCENE_TRACK7_DECAY_LAYERS)
                     ? instrumentParam_make(slot, cell.descriptor_index)
                     : menu_sceneSettingAutomationTarget(&cell);
             uint8_t value7;
@@ -3630,7 +3662,8 @@ static void va_applyVoiceMarkers(void)
                         desired_valid = 0x01u;
                     }
                 }
-            } else if (cell.kind == MENU_CELL_INSTRUMENT &&
+            } else if ((cell.kind == MENU_CELL_INSTRUMENT ||
+                        menu_kitSettingT7Layer(&cell) < SCENE_TRACK7_DECAY_LAYERS) &&
                        va_searchComplete &&
                        va_searchTestBit(cell.descriptor_index)) {
                 int8_t left;
@@ -3704,7 +3737,8 @@ static void va_applyVoiceMarkers(void)
                     desired_valid |= (uint8_t)(1u << i);
                 }
             }
-        } else if (cell.kind == MENU_CELL_INSTRUMENT &&
+        } else if ((cell.kind == MENU_CELL_INSTRUMENT ||
+                    menu_kitSettingT7Layer(&cell) < SCENE_TRACK7_DECAY_LAYERS) &&
                    va_searchComplete &&
                    va_searchTestBit(cell.descriptor_index)) {
             int8_t left;
@@ -4114,6 +4148,12 @@ static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
         target = menu_sceneSettingAutomationTarget(&cell);
         if (target == INSTRUMENT_PARAM_INVALID)
             return;
+    } else if (menu_kitSettingT7Layer(&cell) < SCENE_TRACK7_DECAY_LAYERS) {
+        /* S104 P1: held-step edits of a Tetrakt track-7 decay cell write the
+         * slot-6 decay row on the held (track-7) steps; the drain routes them
+         * to track 7. */
+        target = instrumentParam_make(menu_voicePageToSlot(menu_activePage),
+                                      cell.descriptor_index);
     } else {
         return;
     }
@@ -4845,6 +4885,32 @@ static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position)
         if (!cell.descriptor)
             return cell;
 
+        if (menu_activePage == VOICE7_PAGE && slot_index == 5u) {
+            const uint8_t t7Layer = instrumentManager_track7DecayLayerOf(
+                slot->type, cell.descriptor_index);
+
+            /*
+             * Tetrakt track-7 decay cells (S104 P1).
+             *
+             * What: on VOICE7, a Tetrakt's tkt_decay_a..d cells show and edit
+             * track 7's decay of that layer (Kit-owned), borrowing the row's
+             * descriptor for name, dtype and the automation target. Why: on
+             * tracks 6 and 7 the Tetrakt's four decays are per track (user,
+             * S104 P1: "the track selection is the decider", no new names).
+             * Inputs: the slot-6 type, the resolved descriptor index.
+             * Output: a MENU_CELL_KIT_SETTING cell of kind T7_LAYER_A..D.
+             * Affiliates: menu_kitSettingT7Layer(), the Kit cell display,
+             * commit, clear-target and held-step paths.
+             */
+            if (t7Layer < SCENE_TRACK7_DECAY_LAYERS) {
+                cell.kind = MENU_CELL_KIT_SETTING;
+                cell.kit_setting =
+                    (uint8_t)(MENU_KIT_SETTING_T7_LAYER_A + t7Layer);
+                cell.slot = slot_index;
+                return cell;
+            }
+        }
+
         if (menu_activePage == VOICE7_PAGE &&
             slot_index == 5u &&
             (instrumentManager_typeFlags(slot->type) & INSTRUMENT_FLAG_CHOKE)) {
@@ -5352,9 +5418,16 @@ static uint16_t menu_cellDisplayValue(const menu_cell_t *cell)
         if (cell->kit_setting ==
             MENU_KIT_SETTING_SLOT6_TRACK7_AMP_DECAY) {
             return voiceModeShowMorph
-                ? scene_getSlot6Track7MorphAmpEnvelopeDecay(
-                    scene_getActiveIndex())
-                : scene_getSlot6Track7AmpEnvelopeDecay(scene_getActiveIndex());
+                ? scene_getSlot6Track7MorphDecay(scene_getActiveIndex(), 0u)
+                : scene_getSlot6Track7Decay(scene_getActiveIndex(), 0u);
+        }
+        /* S104 P1: a Tetrakt track-7 layer (Normal, or Morph in a Morph view). */
+        if (menu_kitSettingT7Layer(cell) < SCENE_TRACK7_DECAY_LAYERS) {
+            const uint8_t layer = menu_kitSettingT7Layer(cell);
+
+            return voiceModeShowMorph
+                ? scene_getSlot6Track7MorphDecay(scene_getActiveIndex(), layer)
+                : scene_getSlot6Track7Decay(scene_getActiveIndex(), layer);
         }
         return 0u;
     }
@@ -5498,8 +5571,8 @@ static uint8_t menu_cellCommitValueEx(const menu_cell_t *cell, uint16_t value,
                  scene_index++) {
                 if ((edit_mask & (1ul << scene_index)) == 0u)
                     continue;
-                changed |= preset_setSlot6Track7AmpEnvelopeDecay(
-                    scene_index,
+                changed |= preset_setSlot6Track7Decay(
+                    scene_index, 0u,
                     morphView ? INSTRUMENT_IMAGE_MORPH
                                        : INSTRUMENT_IMAGE_MAIN,
                     (uint8_t)value,
@@ -5526,6 +5599,30 @@ static uint8_t menu_cellCommitValueEx(const menu_cell_t *cell, uint16_t value,
                 if (target != (uint16_t)INSTRUMENT_PARAM_INVALID &&
                     sceneModTarget_indexFromId(target, &index))
                     seq_clearSceneAutomationBit(index);
+            }
+            return changed;
+        }
+        if (menu_kitSettingT7Layer(cell) < SCENE_TRACK7_DECAY_LAYERS) {
+            /*
+             * Commit a Tetrakt track-7 decay layer (S104 P1).
+             *
+             * What: every masked resident Scene receives the layer's Kit
+             * endpoint (Normal, or Morph in a Morph view) through
+             * preset_setSlot6Track7Decay(), which also ends that layer's step
+             * override (Rule A: the menu value takes effect at the next
+             * track-7 hit). No Scene-automation bit: the layer's automation
+             * is the slot-6 descriptor on track 7's steps, not `7dc`.
+             */
+            const uint8_t layer = menu_kitSettingT7Layer(cell);
+
+            for (scene_index = 0u; scene_index < SCENE_SLOT_TOTAL; scene_index++) {
+                if ((edit_mask & (1ul << scene_index)) == 0u)
+                    continue;
+                changed |= preset_setSlot6Track7Decay(
+                    scene_index, layer,
+                    morphView ? INSTRUMENT_IMAGE_MORPH : INSTRUMENT_IMAGE_MAIN,
+                    (uint8_t)value,
+                    (uint8_t)(!morphView && scene_index == scene_getActiveIndex()));
             }
             return changed;
         }
@@ -6640,6 +6737,7 @@ static uint8_t menu_getMidiStaticName(const menu_cell_t *cell, uint16_t value,
         return 0u;
     switch (cell->static_param) {
     case PAR_MIDI_CHAN_GLOBAL:
+    case PAR_MIDI_CHAN_OMNI:      /* S104 P1: omn shows `off` for 0, as G */
         if (value != 0u)
             return 0u;
         memcpy(buf, menuText_off, 3);
@@ -6900,6 +6998,7 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
          * menu_trackMidiChanToMenu() and the other conversions.
          */
         case PAR_MIDI_CHAN_GLOBAL:
+        case PAR_MIDI_CHAN_OMNI:  /* S104 P1: 0 off, 1..16 */
             if (*value > 16u) *value = 16u;
             return;
         case PAR_TRACK_MIDI_CHAN:
@@ -6952,15 +7051,15 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
         }
     }
     /*
-     * Step-special domains (S079; S080 widens condition): condition 0..40,
-     * roll rate 0..8,
+     * Step-special domains (S079; S080 widens condition; S104 P1 adds !1-):
+     * condition 0..41, roll rate 0..8,
      * micro-timing 0..99, roll fill 0..100, rhythm snapped to its ordered list
      * (S079 P2). Applied here because the DTYPE_* nibble space is full.
      */
     if (cell->kind == MENU_CELL_STATIC &&
         cell->static_param == PAR_STEP_CONDITION) {
-        if (*value > 40u)
-            *value = 40u;
+        if (*value > 41u)
+            *value = 41u;
         return;
     }
     if (cell->kind == MENU_CELL_STATIC &&
@@ -7285,7 +7384,8 @@ static uint8_t menu_loadSaveTypeIsRestored(uint8_t what)
 }
 
 /*
- * Pot-1 and encoder type cycling use explicit lists instead of enum order.
+ * Encoder and pot-1 type cycling (pot 1 is an encoder turn on the type row
+ * since S104 P1) use explicit lists instead of enum order.
  *
  * The enum still contains legacy/future save types so lower layers compile,
  * but UI reachability is the promotion gate. Adding a type to these arrays is
@@ -10268,6 +10368,122 @@ uint8_t menu_chainMenuIsOpen(void)
     return (uint8_t)(menu_chainMenuScene < 16u);
 }
 
+/*
+ * DJ mode (S104 P1).
+ *
+ * What: menu_djActive is set while the DJ screen replaces the PERF page's
+ * cells. The mode is still SELECT_MODE_PERF and menu_activePage stays
+ * PERFORMANCE_PAGE, so VOICE (mutes, overlay triggers), SEQ (Scenes) and
+ * SELECT (looper) act exactly as in PERF. Shown: top row "BPM 128.50 +1.2%"
+ * (EXT under external sync; the nudge field is blank at 0), bottom row
+ * "POS RRR.B.SS" (seq_getMasterPosition()). Pots: 1 = whole BPM, 2 = BPM
+ * hundredths, 3 = bar jump, 4 = step jump (running only). The encoder is
+ * inert. menu_djPaintTick paces the position refresh.
+ * Why: a tempo/position surface for playing live (user, S104 P1).
+ * Inputs: ButtonHandler (open/close), pots, the runtime service.
+ * Outputs: LCD rows, tempo writes, master-clock jumps. Closed by
+ * menu_djClose() (every MODE press through
+ * buttonHandler_closeLatchedSurfaces()) and by any switch to another page
+ * (menu_switchPage()). RAM: 1 + 2 B SRAM1 (approved).
+ * Affiliates: menu_repaintDjPage(), menu_djKnob(), buttonHandler DJ
+ * gestures, seq_setTempoCenti(), seq_jumpMasterTicks().
+ */
+#define MENU_DJ_PAINT_MS 25u
+static uint8_t  menu_djActive = 0u;
+static uint16_t menu_djPaintTick = 0u;
+
+void menu_djOpen(void)
+{
+    menu_djActive = 1u;
+    editModeActive = 0u;
+    menu_djPaintTick = time_sysTick;
+    menu_repaintAll();
+}
+
+void menu_djClose(void)
+{
+    if (!menu_djActive)
+        return;
+    menu_djActive = 0u;
+    menu_repaintAll();
+}
+
+uint8_t menu_djIsOpen(void)
+{
+    /*
+     * S104 P1 assessment: open only while PERFORMANCE_PAGE shows it. A
+     * DJ entry made behind a busy Load/Save exit (menu_switchPage() queued
+     * the page) sets menu_djActive before the page changes; ButtonHandler
+     * must not take COPY/BAR as tap/nudge on the Load/Save page meanwhile.
+     */
+    return (uint8_t)(menu_djActive && menu_activePage == PERFORMANCE_PAGE);
+}
+
+/*
+ * Set the base tempo in 1/100 BPM (S104 P1, DJ pots and tap).
+ * What: clamps to 1.00..255.99 BPM, splits into PAR_BPM / PAR_BPM_FINE,
+ * applies through menu_parseGlobalParam() (seq_setTempoCenti()) and
+ * restarts the settings.cfg debounce. Why: the Global commit marks settings
+ * dirty only for MENU_MIDI_PAGE/RECORDING_PAGE cells (menu_cellCommitValue()),
+ * and the DJ writes are not cells. Inputs: centi. Outputs: the two
+ * parameter bytes, the sequencer tempo, a settings write.
+ * Accessors: menu_djKnob(), buttonHandler_djTap().
+ */
+void menu_djSetTempoCenti(uint16_t centi)
+{
+    if (centi < 100u)
+        centi = 100u;
+    if (centi > 25599u)
+        centi = 25599u;
+    parameter_values[PAR_BPM] = (uint8_t)(centi / 100u);
+    parameter_values[PAR_BPM_FINE] = (uint8_t)(centi % 100u);
+    menu_parseGlobalParam(PAR_BPM, parameter_values[PAR_BPM]);
+    filesystem_markSettingsDirty();
+    menu_knobs_dirty = 1u;
+}
+
+/*
+ * One DJ pot turn (S104 P1).
+ * What: pot 1 moves the whole BPM by delta (the hundredths kept), pot 2 the
+ * hundredths by delta (carrying into the whole BPM), pot 3 the running
+ * master clock by delta bars (384 ticks), pot 4 by delta steps (24 ticks).
+ * Nothing under external sync (the external clock owns tempo and position).
+ * Inputs: knob 0..3, signed delta. Outputs: menu_djSetTempoCenti() or
+ * seq_jumpMasterTicks(); a repaint request.
+ * Accessor: menu_parseKnobDelta().
+ */
+static void menu_djKnob(uint8_t knobNr, int8_t delta)
+{
+    int32_t centi = (int32_t)parameter_values[PAR_BPM] * 100 +
+                    (int32_t)parameter_values[PAR_BPM_FINE];
+
+    if (delta == 0 || seq_getExtSync())
+        return;
+    switch (knobNr) {
+    case 0:
+        centi += (int32_t)delta * 100;
+        break;
+    case 1:
+        centi += (int32_t)delta;
+        break;
+    case 2:
+        (void)seq_jumpMasterTicks((int32_t)delta * 384);
+        menu_knobs_dirty = 1u;
+        return;
+    case 3:
+        (void)seq_jumpMasterTicks((int32_t)delta * 24);
+        menu_knobs_dirty = 1u;
+        return;
+    default:
+        return;
+    }
+    if (centi < 100)
+        centi = 100;
+    if (centi > 25599)
+        centi = 25599;
+    menu_djSetTempoCenti((uint16_t)centi);
+}
+
 static uint8_t menu_paramIsChain(uint16_t paramNr)
 {
     return (uint8_t)(paramNr >= PAR_CHAIN_COND1 && paramNr <= PAR_CHAIN_NEXT2);
@@ -10940,7 +11156,7 @@ static void menu_resetLoadSaveSceneSelection(void)
      * off at every reset boundary (entry, type change, Load<->Save, mode change,
      * a new Load source, a completed Save).
      * Inputs: page/type. Outputs: menu_kitLoadSceneMask, menu_bankUiFlags, LED_COPY.
-     * Accessors: menu_loadSaveEnterTop(), the type-row handler,
+     * Accessors: menu_loadSaveEnterTopAt(), the type-row handler,
      * menu_resetSaveParametersEx(), menu_requestBankChildPreview() (new Load source).
      * Affiliates: menu_bankOperationMasks(), menu_refreshLoadSceneLeds().
      */
@@ -11401,7 +11617,7 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
      *
      * Inputs: the selected VOICE button and current Save/Load page. Output:
      * both `Load:[Type]` and `Save:[Type]` enter with brackets on the top row,
-     * matching top-level Load/Save entry and Pot-1 navigation.
+     * matching top-level Load/Save entry.
      */
     editModeActive = 1u;
     slot = scene_instrumentSlotConst(menu_instrumentLoadScene, voiceNr);
@@ -11454,174 +11670,6 @@ uint8_t menu_loadInstrumentTransactionBusy(void)
                      (menu_storageBusy || preset_getStatus() != PRESET_IDLE));
 }
 
-/*
- * Hardware Load/Save Pot-1 linearization helpers.
- *
- * The first endless pot does not merely cycle the current page's type enum.
- * It walks one logical ring:
- *
- *   Load main rows -> Instrument Load rows voice 1..6 -> Save main rows ->
- *   Instrument Save rows voice 1..6.
- *
- * Instrument Load rows expand by selectable instrument type for each voice,
- * inserting the same-type Morph Load row beside the normal row. Instrument
- * Save rows are two rows per voice: normal and Mrp. Applying a logical
- * position re-enters the same UI state a VOICE button would have selected,
- * including source/destination voice, top-row brackets, Scene LED refresh, and
- * voice blink feedback. Returning to a main row clears Instrument blink because
- * non-instrument Load/Save entries never own a blinking VOICE indicator.
- *
- * Affiliates/clients: menu_handleLoadSaveKnobDelta(), ButtonHandler's VOICE
- * Load/Save entry, LED voice feedback, and menu_requestCurrentLoadSaveSelection().
- */
-static uint8_t menu_loadSaveRestoredTypeIndex(uint8_t page, uint8_t what)
-{
-    const uint8_t *types =
-        (page == LOAD_PAGE) ? menu_loadSaveLoadTypes : menu_loadSaveSaveTypes;
-    uint8_t count = (page == LOAD_PAGE)
-        ? (uint8_t)(sizeof(menu_loadSaveLoadTypes) /
-                    sizeof(menu_loadSaveLoadTypes[0]))
-        : (uint8_t)(sizeof(menu_loadSaveSaveTypes) /
-                    sizeof(menu_loadSaveSaveTypes[0]));
-    uint8_t i;
-
-    for (i = 0u; i < count; i++) {
-        if (types[i] == what)
-            return i;
-    }
-    return 0u;
-}
-
-static uint8_t menu_instrumentLoadOptionCountForVoice(uint8_t voice)
-{
-    const kit_instrument_slot_t *slot =
-        scene_instrumentSlotConst(scene_getActiveIndex(), voice);
-    instrument_type_t base_type = slot ? slot->type : INSTRUMENT_TYPE_DRM;
-    uint8_t count = 0u;
-    uint8_t i;
-
-    for (i = 0u; i < instrumentManager_registryCount(); i++) {
-        const instrument_registry_entry_t *entry =
-            instrumentManager_registryEntryAt(i);
-        if (!entry ||
-            !instrumentManager_typeSelectableForSceneSlot(
-                scene_getActiveIndex(), voice, entry->type))
-            continue;
-        count++;
-        if (entry->type == base_type)
-            count++;
-    }
-    return count;
-}
-
-static uint8_t menu_instrumentLoadOptionAt(uint8_t voice, uint8_t option,
-                                           instrument_type_t *type,
-                                           uint8_t *morph)
-{
-    const kit_instrument_slot_t *slot =
-        scene_instrumentSlotConst(scene_getActiveIndex(), voice);
-    instrument_type_t base_type = slot ? slot->type : INSTRUMENT_TYPE_DRM;
-    uint8_t logical = 0u;
-    uint8_t i;
-
-    for (i = 0u; i < instrumentManager_registryCount(); i++) {
-        const instrument_registry_entry_t *entry =
-            instrumentManager_registryEntryAt(i);
-        if (!entry ||
-            !instrumentManager_typeSelectableForSceneSlot(
-                scene_getActiveIndex(), voice, entry->type))
-            continue;
-        if (logical == option) {
-            *type = entry->type;
-            *morph = 0u;
-            return 1u;
-        }
-        logical++;
-        if (entry->type == base_type) {
-            if (logical == option) {
-                *type = entry->type;
-                *morph = 1u;
-                return 1u;
-            }
-            logical++;
-        }
-    }
-
-    *type = base_type;
-    *morph = 0u;
-    return (uint8_t)(logical > 0u);
-}
-
-static uint8_t menu_instrumentLoadCurrentOptionForVoice(uint8_t voice)
-{
-    uint8_t count = menu_instrumentLoadOptionCountForVoice(voice);
-    uint8_t i;
-
-    for (i = 0u; i < count; i++) {
-        instrument_type_t type;
-        uint8_t morph;
-        if (menu_instrumentLoadOptionAt(voice, i, &type, &morph) &&
-            type == menu_instrumentLoadType &&
-            morph == menu_instrumentLoadMorphMode)
-            return i;
-    }
-    return 0u;
-}
-
-static uint16_t menu_instrumentLoadOptionTotal(void)
-{
-    uint16_t total = 0u;
-    uint8_t voice;
-
-    for (voice = 0u; voice < INSTRUMENT_SLOT_COUNT; voice++)
-        total = (uint16_t)(total +
-                           menu_instrumentLoadOptionCountForVoice(voice));
-    return total;
-}
-
-static uint16_t menu_loadSaveLogicalPosition(void)
-{
-    uint16_t load_type_count =
-        (uint16_t)(sizeof(menu_loadSaveLoadTypes) /
-                   sizeof(menu_loadSaveLoadTypes[0]));
-    uint16_t load_instrument_total = menu_instrumentLoadOptionTotal();
-    uint16_t save_type_count =
-        (uint16_t)(sizeof(menu_loadSaveSaveTypes) /
-                   sizeof(menu_loadSaveSaveTypes[0]));
-
-    if (menu_activePage == LOAD_PAGE && !menu_instrumentLoadActive)
-        return menu_loadSaveRestoredTypeIndex(LOAD_PAGE,
-                                              menu_saveOptions.what);
-    if (menu_activePage == LOAD_PAGE && menu_instrumentLoadActive) {
-        uint16_t index = load_type_count;
-        uint8_t voice;
-        for (voice = 0u; voice < menu_instrumentLoadSlot; voice++)
-            index = (uint16_t)(index +
-                               menu_instrumentLoadOptionCountForVoice(voice));
-        return (uint16_t)(index +
-            menu_instrumentLoadCurrentOptionForVoice(menu_instrumentLoadSlot));
-    }
-    if (menu_activePage == SAVE_PAGE && !menu_instrumentLoadActive)
-        return (uint16_t)(load_type_count + load_instrument_total +
-                          menu_loadSaveRestoredTypeIndex(SAVE_PAGE,
-                                                         menu_saveOptions.what));
-    return (uint16_t)(load_type_count + load_instrument_total +
-                      save_type_count +
-                      ((uint16_t)menu_instrumentLoadSlot * 2u) +
-                      (menu_instrumentLoadMorphMode ? 1u : 0u));
-}
-
-static uint16_t menu_loadSaveLogicalCount(void)
-{
-    return (uint16_t)(
-        (uint16_t)(sizeof(menu_loadSaveLoadTypes) /
-                   sizeof(menu_loadSaveLoadTypes[0])) +
-        menu_instrumentLoadOptionTotal() +
-        (uint16_t)(sizeof(menu_loadSaveSaveTypes) /
-                   sizeof(menu_loadSaveSaveTypes[0])) +
-        ((uint16_t)INSTRUMENT_SLOT_COUNT * 2u));
-}
-
 static void menu_loadSaveClearInstrumentVoiceBlinks(void)
 {
     uint8_t blink_voice;
@@ -11640,9 +11688,10 @@ static void menu_loadSaveClearInstrumentVoiceBlinks(void)
 static void menu_loadSaveEnterTopAt(uint8_t page, uint8_t what,
                                     uint16_t bank_slot)
 {
-    /* Pot-1 can leave nested Instrument Load without passing the dedicated
-     * exit button. Finalize the one reversible preview before replacing its
-     * type/index browser context or clearing the nested-active flag. */
+    /* A MIDI-origin Bank load can leave nested Instrument Load without passing
+     * the dedicated exit button (S104 P1: pot 1 no longer can). Finalize the
+     * one reversible preview before replacing its type/index browser context
+     * or clearing the nested-active flag. */
     menu_invalidateInstrumentLoadTemp();
     menu_activePage = page;
     menu_instrumentLoadActive = 0u;
@@ -11655,7 +11704,8 @@ static void menu_loadSaveEnterTopAt(uint8_t page, uint8_t what,
         menu_currentPresetNr[SAVE_TYPE_BANK] = bank_slot;
     menu_resetLoadSaveSceneSelection();
     /*
-     * Pot-1 can leave the combined Kit/Instrument family without leaving the
+     * A top-level type entry (encoder or pot 1 on the type row, or a
+     * MIDI-origin Bank load) can leave the Kit family without leaving the
      * overall Load/Save page. Update the target UI state first, then perform
      * the one deferred HCNAMES write. Its completion sees this new non-Kit
      * context and loads that browser. Kit <-> KitMrp and Kit <-> Instrument
@@ -11669,19 +11719,6 @@ static void menu_loadSaveEnterTopAt(uint8_t page, uint8_t what,
     filesystem_clearNameCache();
     menu_requestCurrentLoadSaveSelection(0);
     menu_refreshLoadSceneLeds();
-}
-
-static void menu_loadSaveEnterTop(uint8_t page, uint8_t what)
-{
-    /*
-     * Enter a top-level Load/Save type at the persistent Bank restore slot.
-     *
-     * Inputs: page and type. Outputs: the ordinary entry state built by
-     * menu_loadSaveEnterTopAt(). The Bank slot is the one Bank Save/Load
-     * restored for this page; the MIDI-origin background load supplies an
-     * explicit slot through the At variant.
-     */
-    menu_loadSaveEnterTopAt(page, what, bank_restoreBankSlot());
 }
 
 /*
@@ -11858,187 +11895,6 @@ uint8_t menu_backgroundBankLoadUiPoll(uint16_t slot, uint16_t *act_mask,
     return MENU_BG_UI_READY;
 }
 
-static void menu_loadSaveSetInstrumentVoiceLed(uint8_t voice)
-{
-    /*
-     * Mirror the VOICE-button Instrument Load/Save feedback for pot navigation.
-     *
-     * Pot 1 can enter nested Instrument rows without passing through
-     * ButtonHandler's voice-button branch. Menu already owns the selected
-     * source/destination voice in that path, so it must also refresh the
-     * physical voice LED: one active voice, and one blinking Instrument slot.
-     */
-    led_setActiveVoice(voice);
-    menu_loadSaveClearInstrumentVoiceBlinks();
-    led_setBlinkLed((uint8_t)(LED_VOICE1 + voice), 1u);
-}
-
-static void menu_loadSaveEnterInstrumentLoad(uint8_t voice, uint8_t option)
-{
-    instrument_type_t type;
-    uint8_t morph;
-
-    /* Pot-1 must not mutate nested ownership while another facade/Preset
-     * transaction is still completing; the next detent can retry the target. */
-    if (menu_storageBusy || preset_getStatus() != PRESET_IDLE)
-        return;
-    /*
-     * LSR-01: Pot-1 entry into nested Instrument Load is a cache-domain
-     * boundary. Install the destination context before flushing so the
-     * completion callback re-enters this Instrument row, not the old Kit row.
-     * Inputs: selected voice/type, dirty mask, and generation. Outputs: an
-     * accepted flush consumes this logical position; a clean/refused flush
-     * falls through to the normal entry names request. Affiliate:
-     * menu_loadInstrumentVoicePressed(), which handles the equivalent button
-     * path.
-     */
-    menu_selectionGeneration++;
-    /* Re-entering via Pot-1 may replace another nested Instrument context.
-     * End that one first so no snapshot/name row crosses voice/type/mode. */
-    menu_invalidateInstrumentLoadTemp();
-    menu_activePage = LOAD_PAGE;
-    menu_instrumentLoadActive = 1u;
-    menu_instrumentSaveMode = 0u;
-    menu_instrumentLoadSlot = voice;
-    /*
-     * S082 P1 R1: a Load session on Scene 17 targets the home Scene (the SEQ
-     * shown as the Load destination); a Save session reads Scene 17 (D29).
-     * The mask is explicit for index 16 instead of a truncated shift.
-     */
-    menu_instrumentLoadScene = menu_instrumentEntryScene(0u);
-    menu_loadSaveSourceScene = menu_instrumentLoadScene;
-    menu_kitLoadSceneMask = (menu_instrumentLoadScene < SCENE_COUNT)
-        ? (uint16_t)(1u << menu_instrumentLoadScene) : 0u;
-    menu_instrumentLoadSource = MENU_INSTRUMENT_SOURCE_KIT;
-    menu_saveOptions.what = SAVE_TYPE_KIT;
-    menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
-    editModeActive = 1u;
-    menu_instrumentLoadRefreshBaseType(0u);
-    if (menu_instrumentLoadOptionAt(voice, option, &type, &morph)) {
-        menu_instrumentLoadType = type;
-        menu_instrumentLoadMorphMode = morph;
-    }
-    menu_invalidateInstrumentLoadTemp();
-    menu_instrumentLoadClampIndex();
-    menu_setActiveVoice(voice);
-    menu_loadSaveSetInstrumentVoiceLed(voice);
-    menu_refreshLoadSceneLeds();
-    /*
-     * LSR-01 user feel: show the Pot-1 Instrument Load destination before a
-     * dirty-name checkpoint starts. Inputs: the installed page, type, voice,
-     * and LEDs. Output: immediate destination context; the later index load
-     * supplies the definitive list/name frame.
-     */
-    menu_repaintAll();
-    if (menu_residentNameDirtySceneMask != 0u &&
-        menu_endResidentNameScratchSession())
-        return;
-    /* Pot-1 follows the same session entry as a VOICE button: read all seven
-     * HCNAMES rows only for a new Scene/session, then activate the typed index.
-     * Re-entry in the same Scene selects the retained voice row directly. */
-    menu_requestInstrumentEntryNames();
-}
-
-static void menu_loadSaveEnterInstrumentSave(uint8_t voice, uint8_t morph)
-{
-    /* Save entry has the same transaction boundary as Load entry. */
-    if (menu_storageBusy || preset_getStatus() != PRESET_IDLE)
-        return;
-    /*
-     * LSR-01: Pot-1 entry into nested Instrument Save is the same HCNAMES
-     * checkpoint boundary as Instrument Load. Install the destination
-     * page/mode/voice before flushing so completion dispatches to Save's
-     * Instrument context. Inputs: selected voice, Morph row, dirty mask, and
-     * generation. Output: an accepted flush consumes this logical position;
-     * a clean/refused flush follows the normal entry names request. Affiliate:
-     * menu_loadSaveEnterInstrumentLoad().
-     */
-    menu_selectionGeneration++;
-    /* Save has no parameter preview. End any preceding nested normal Load
-     * before changing page/mode so the selected pool identity is not lost. */
-    menu_invalidateInstrumentLoadTemp();
-    menu_activePage = SAVE_PAGE;
-    menu_instrumentLoadActive = 1u;
-    menu_instrumentSaveMode = 1u;
-    menu_instrumentLoadSlot = voice;
-    /*
-     * S082 P1 R1/D29: Save reads Scene 17 directly (the live track data);
-     * Load redirects to the home Scene.  menu_instrumentEntryScene(1u)
-     * returns scene_getActiveIndex() unchanged for Save.
-     */
-    menu_instrumentLoadScene = menu_instrumentEntryScene(1u);
-    menu_loadSaveSourceScene = menu_instrumentLoadScene;
-    menu_kitLoadSceneMask = (menu_instrumentLoadScene < SCENE_COUNT)
-        ? (uint16_t)(1u << menu_instrumentLoadScene) : 0u;
-    menu_instrumentLoadSource = MENU_INSTRUMENT_SOURCE_KIT;
-    menu_saveOptions.what = SAVE_TYPE_KIT;
-    menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
-    editModeActive = 1u;
-    menu_instrumentLoadRefreshBaseType(0u);
-    menu_instrumentLoadMorphMode = morph ? 1u : 0u;
-    menu_setActiveVoice(voice);
-    menu_loadSaveSetInstrumentVoiceLed(voice);
-    menu_refreshLoadSceneLeds();
-    /*
-     * LSR-01 user feel: show the Pot-1 Instrument Save destination before a
-     * dirty-name checkpoint starts. Inputs: the installed Save page, voice,
-     * Morph row, and LEDs. Output: immediate Save/Instrument context while
-     * the asynchronous name/cache handoff finishes in the background.
-     */
-    menu_repaintAll();
-    if (menu_residentNameDirtySceneMask != 0u &&
-        menu_endResidentNameScratchSession())
-        return;
-    /*
-     * Save's Pot-1 entry uses the same seven-row scratch as VOICE-button entry.
-     * HCNAMES is read only if no session exists for this Scene; otherwise the
-     * selected voice's resident seed is already available without card I/O.
-     */
-    menu_requestInstrumentEntryNames();
-}
-
-static void menu_loadSaveApplyLogicalPosition(uint16_t target)
-{
-    uint16_t load_type_count =
-        (uint16_t)(sizeof(menu_loadSaveLoadTypes) /
-                   sizeof(menu_loadSaveLoadTypes[0]));
-    uint16_t save_type_count =
-        (uint16_t)(sizeof(menu_loadSaveSaveTypes) /
-                   sizeof(menu_loadSaveSaveTypes[0]));
-    uint16_t load_instrument_total = menu_instrumentLoadOptionTotal();
-    uint16_t cursor = load_type_count;
-    uint8_t voice;
-
-    if (target < load_type_count) {
-        menu_loadSaveEnterTop(LOAD_PAGE, menu_loadSaveLoadTypes[target]);
-        return;
-    }
-    if (target < (uint16_t)(load_type_count + load_instrument_total)) {
-        uint16_t local = (uint16_t)(target - load_type_count);
-        for (voice = 0u; voice < INSTRUMENT_SLOT_COUNT; voice++) {
-            uint8_t count = menu_instrumentLoadOptionCountForVoice(voice);
-            if (local < count) {
-                menu_loadSaveEnterInstrumentLoad(voice, (uint8_t)local);
-                return;
-            }
-            local = (uint16_t)(local - count);
-        }
-    }
-
-    cursor = (uint16_t)(load_type_count + load_instrument_total);
-    if (target < (uint16_t)(cursor + save_type_count)) {
-        menu_loadSaveEnterTop(
-            SAVE_PAGE, menu_loadSaveSaveTypes[target - cursor]);
-        return;
-    }
-
-    target = (uint16_t)(target - cursor - save_type_count);
-    voice = (uint8_t)(target / 2u);
-    if (voice >= INSTRUMENT_SLOT_COUNT)
-        voice = (uint8_t)(INSTRUMENT_SLOT_COUNT - 1u);
-    menu_loadSaveEnterInstrumentSave(voice, (uint8_t)(target & 1u));
-}
-
 static char *menu_loadSaveActiveNameBuffer(void)
 {
     if (menu_instrumentLoadActive && menu_instrumentSaveMode)
@@ -12080,8 +11936,9 @@ static void menu_handleLoadSaveKnobDelta(uint8_t knobNr, int8_t delta)
      * Instrument Load - the same "Load-number turn" the encoder may still make
      * while an older request drains (menu_parseEncoder(),
      * allow_load_number_scroll). Pot behaviour is otherwise unchanged (S14).
-     * Why: the pots bypassed this gate, so pot 1 could change page, type or
-     * nested Instrument mode and clear the shared name cache while an index
+     * Why: the pots bypassed this gate, so pot 1 could change the type (and,
+     * before S104 P1, page or nested Instrument mode) and clear the shared
+     * name cache while an index
      * load, HCNAMES read, `.hctmp` save (removed in S090), Instrument apply or Bank preview
      * owned the filesystem facade. Completions then ran against a changed
      * context and the busy owner could be lost - the most probable route to
@@ -12124,18 +11981,36 @@ static void menu_handleLoadSaveKnobDelta(uint8_t knobNr, int8_t delta)
 #endif
 
     switch (knobNr) {
-    case 0: {
-        uint16_t count = menu_loadSaveLogicalCount();
-        int32_t target;
-        if (count == 0u)
-            return;
-        target = (int32_t)menu_loadSaveLogicalPosition() + (int32_t)delta;
-        while (target < 0)
-            target += count;
-        while (target >= (int32_t)count)
-            target -= count;
-        menu_loadSaveApplyLogicalPosition((uint16_t)target);
-        break; }
+    case 0:
+        /*
+         * Pot 1 is the type row's encoder turn (S104 P1, open item M1).
+         *
+         * What: puts the cursor on the type row in edit mode and hands the
+         * delta to menu_handleLoadSaveMenu(), exactly as an encoder turn on
+         * that row is handled: top level steps only this page's explicit type
+         * list with wraparound (menu_nextRestoredLoadSaveType(): Load = Kit,
+         * KitMrp, Scene, Bank, Pattern, Samples; Save = the first five);
+         * nested Instrument Load steps the selected track's Instrument types
+         * (menu_instrumentLoadStepType()); nested Instrument Save toggles
+         * Normal/Morph. Every boundary the encoder applies comes with it
+         * (index-read cancel, name-session flush, Scene-mask reset, busy
+         * paint).
+         * Why: pot 1 walked one combined ring (all Load types, every track's
+         * Instrument options, all Save types, 14 nested-Save rows), so a turn
+         * crossed Load <-> Save and entered or left nested Instrument modes
+         * (user, S104 P1: "clamped to only the global load or save types in
+         * the same way as the main encoder"). Nested modes are still entered
+         * with the VOICE buttons and left with the Load/Save MODE button.
+         * The storage lock above still drops a pot-1 turn while storage is
+         * busy (S090 P1: pots keep the full lock).
+         * Inputs: delta. Outputs: menu_saveOptions.state, editModeActive, the
+         * encoder's type step. Affiliates: menu_handleLoadSaveMenu(),
+         * menu_nextRestoredLoadSaveType(), menu_instrumentLoadStepType().
+         */
+        menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
+        editModeActive = 1u;
+        menu_handleLoadSaveMenu(delta, 0u);
+        break;
 
     case 1:
         if (menu_instrumentLoadActive && menu_instrumentSaveMode) {
@@ -12174,7 +12049,7 @@ static void menu_handleLoadSaveKnobDelta(uint8_t knobNr, int8_t delta)
      * What: pots 2-4 (slot number, cursor, character) now only raise
      * menu_knobs_dirty; menu_serviceKnobRepaint() repaints at most once per
      * LCD_LIMIT_TICKS_PER_REFRESH (20 ms) and sends changed characters only.
-     * Pot 1 still repaints in full because it changes the page/type layout.
+     * Pot 1 still repaints in full because it changes the type row's layout.
      * Why: the former menu_repaintAll() on every delta invalidated the LCD shadow,
      * so each pot step queued a whole 32-character frame (~70 queue ops, ~70 ms on
      * the TIM7 nibble machine). While one frame drained the next did not fit and
@@ -12596,16 +12471,23 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
     }
     /*
      * S096 P1: a Tetrakt sample row (tkt_sample_a..d) names the installed
-     * sample at its value: the catalogue's 8-character name and its sNN code;
-     * a value past the installed count names nothing (blank, "---" in the
-     * compact cell). The count is the row's clamp (InstrumentManager.c
-     * instrumentManager_waveDomainMax()).
+     * sample at its value: the catalogue's 8-character name and its sNN code.
+     * S104 P1: values samples .. 2 x samples - 1 (below 128) name the same
+     * sample looped, with the lNN code, as the Drum family's modulator list.
+     * A value past the list names nothing (blank, "---" in the compact cell).
+     * The count is the row's clamp (instrumentManager_waveDomainMax()).
      */
     if (isInstrument && strncmp(cell->descriptor->file_key, "tkt_sample_", 11u) == 0) {
         if (value < samples) {
             sampleMemory_getDisplayName(value, name);
             memcpy(nameDst, name, SAMPLE_DISPLAY_NAME_LEN);
             menu_formatUserShortName('s', value, codeDst);
+        } else if (value < (uint16_t)(2u * samples) && value < 128u) {
+            const uint8_t looped = (uint8_t)(value - samples);
+
+            sampleMemory_getDisplayName(looped, name);
+            memcpy(nameDst, name, SAMPLE_DISPLAY_NAME_LEN);
+            menu_formatUserShortName('l', looped, codeDst);
         }
         return;
     }
@@ -13209,22 +13091,21 @@ static void menu_getPlayModeName(uint16_t value, char *buf)
 }
 
 /*
- * Format one step trigger condition into a three-character field (S079 §3).
+ * Format one step trigger condition into a three-character field (S079 §3;
+ * S104 P1: 42 conditions).
  *
- * What: writes the 3-char condition label for values 0..40 (S080 B1 adds the
- * lop/!lp pair; fix 3 added track 7); values 41..255 (undefined, forward
- * compatible) and any
- * out-of-range input display as the always-fire default. Inputs: raw stored
- * condition and a three-character
- * output. Outputs: exactly three characters, no terminator. Affiliates:
- * conditionNames[] (MenuText.h), va_formatValue3(), menu_formatCellValue3(),
- * the edit-view painter.
+ * What: writes the 3-char condition label for values 0..41 (S080 B1 adds the
+ * lop/!lp pair; fix 3 added track 7; S104 P1 adds !1- at 21). Values
+ * 42..255 (undefined) display as the always-fire default. Inputs: raw stored
+ * condition and a three-character output. Outputs: exactly three
+ * characters, no terminator. Affiliates: conditionNames[] (MenuText.h),
+ * va_formatValue3(), menu_formatCellValue3(), the edit-view painter.
  */
 static void menu_getConditionName(uint16_t value, char *buf)
 {
     const char *p;
 
-    if (value > 40u)
+    if (value > 41u)
         value = 0u;
     p = conditionNames[value + 1u];
     buf[0] = p[0];
@@ -15034,7 +14915,8 @@ static uint8_t menu_stepAutomationCurrentValue(
             return menu_morphAutomationStore(
                 scene_getVoiceMorphAmount(scene, descriptor->voice_slot));
         case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
-            value = scene_getSlot6Track7AmpEnvelopeDecay(scene);
+            /* S104 P1: `7dc` addresses layer 0. */
+            value = scene_getSlot6Track7Decay(scene, 0u);
             break;
         case SCENE_MOD_TARGET_KIND_AUDIO_OUT:
             value = scene_getVoiceAudioOut(scene, descriptor->voice_slot);
@@ -15626,6 +15508,71 @@ static void menu_repaintStepAutomation(void)
     }
 }
 
+/*
+ * Write v as `digits` decimal digits, zero-padded (S104 P1, DJ screen).
+ */
+static void menu_djPutDec(char *dst, uint32_t v, uint8_t digits)
+{
+    while (digits-- != 0u) {
+        dst[digits] = (char)('0' + (v % 10u));
+        v /= 10u;
+    }
+}
+
+/*
+ * Paint the DJ screen into editDisplayBuffer (S104 P1).
+ *
+ * What: row 0 "BPM ddd.dd +n.n%" ("EXT" under external sync; whole BPM
+ * right-aligned in 3 cells; the nudge in tenths of a percent, blank at 0),
+ * row 1 "POS RRR.B.SS" (seq_getMasterPosition()). Why: the DJ screen
+ * replaces the PERF cells while menu_djActive is set; painting through
+ * menu_repaintGeneric() means every caller (menu_repaint(), the knob
+ * service, the marker retry) shows it and sendDisplayBuffer() sends only the
+ * changed characters. Inputs: seq_getTempoCenti(), seq_getTempoNudge(),
+ * seq_getExtSync(), the master position. Outputs: both shadow rows; the
+ * cursor off. Accessor: menu_repaintGeneric().
+ */
+static void menu_repaintDjPage(void)
+{
+    const uint16_t centi = seq_getTempoCenti();
+    const uint16_t whole = (uint16_t)(centi / 100u);
+    const float n = seq_getTempoNudge();
+    const int32_t tenths = (int32_t)(n * 1000.0f + ((n >= 0.0f) ? 0.5f : -0.5f));
+    uint16_t rep;
+    uint8_t bar;
+    uint8_t step;
+
+    memset(editDisplayBuffer[0], ' ', 16u);
+    memset(editDisplayBuffer[1], ' ', 16u);
+    editDisplayBuffer[0][16] = '\0';
+    editDisplayBuffer[1][16] = '\0';
+    memcpy(&editDisplayBuffer[0][0], seq_getExtSync() ? "EXT" : "BPM", 3u);
+    if (whole >= 100u)
+        editDisplayBuffer[0][4] = (char)('0' + whole / 100u);
+    if (whole >= 10u)
+        editDisplayBuffer[0][5] = (char)('0' + (whole / 10u) % 10u);
+    editDisplayBuffer[0][6] = (char)('0' + whole % 10u);
+    editDisplayBuffer[0][7] = '.';
+    menu_djPutDec(&editDisplayBuffer[0][8], centi % 100u, 2u);
+    if (tenths != 0) {
+        const uint32_t a = (uint32_t)((tenths < 0) ? -tenths : tenths);
+
+        editDisplayBuffer[0][11] = (tenths < 0) ? '-' : '+';
+        editDisplayBuffer[0][12] = (char)('0' + (a / 10u) % 10u);
+        editDisplayBuffer[0][13] = '.';
+        editDisplayBuffer[0][14] = (char)('0' + a % 10u);
+        editDisplayBuffer[0][15] = '%';
+    }
+    seq_getMasterPosition(&rep, &bar, &step);
+    memcpy(&editDisplayBuffer[1][0], "POS", 3u);
+    menu_djPutDec(&editDisplayBuffer[1][4], rep, 3u);
+    editDisplayBuffer[1][7] = '.';
+    editDisplayBuffer[1][8] = (char)('0' + bar % 10u);
+    editDisplayBuffer[1][9] = '.';
+    menu_djPutDec(&editDisplayBuffer[1][10], step, 2u);
+    cur_want_on = 0u;
+}
+
 /* -----------------------------------------------------------------------
 ** menu_repaintGeneric — exact port of original
 ** ----------------------------------------------------------------------- */
@@ -15635,6 +15582,11 @@ static void menu_repaintGeneric(void)
     const uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
     char valueAsText[3];
 
+    /* S104 P1: the DJ screen owns the PERF page's LCD while it is open. */
+    if (menu_djActive && menu_activePage == PERFORMANCE_PAGE) {
+        menu_repaintDjPage();
+        return;
+    }
     if (menu_stepAutomationPageActive()) {
         menu_repaintStepAutomation();
         return;
@@ -17408,6 +17360,16 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
      * storage is busy, so the tail paints it. */
     uint8_t browse_nav_admitted = 0u;
 
+    /*
+     * S104 P1: the encoder is inert on the DJ screen (its PERF cells are
+     * hidden). The button state is still tracked so no stale click is seen
+     * after the screen closes.
+     */
+    if (menu_djActive && menu_activePage == PERFORMANCE_PAGE) {
+        lastEncoderButton = button;
+        return;
+    }
+
     /* S082 P3: an unlocked background Bank load blocks only Load/Save; other
      * pages take the encoder (menu_backgroundLoadReleasesPanel()). */
     if ((menu_storageBusy || preset_getStatus() != PRESET_IDLE) &&
@@ -17452,8 +17414,8 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
          * - copy/clear does not own the encoder;
          * - nested Instrument Save is excluded: its type row only toggles
          *   Morph and never needs a read.
-         * Pots (menu_handleLoadSaveKnobDelta()) keep their lock: Pot 1 also
-         * crosses voices and pages, whose entry paths are transaction-guarded.
+         * Pots (menu_handleLoadSaveKnobDelta()) keep their lock (S090 P1, kept
+         * in S104 P1 although pot 1 now steps types only).
          * Affiliates: menu_handleLoadSaveMenu() type branches,
          * menu_paintTypeStepWhileBusy(), filesystem_cancelBrowseRead(),
          * menu_instrumentIndexLoadComplete(), menu_libraryIndexLoadComplete().
@@ -17792,6 +17754,10 @@ static uint8_t menu_cellMidiTarget(const menu_cell_t *cell, uint16_t *id)
         target = (uint16_t)menu_sceneSettingAutomationTarget(cell);
         break;
     case MENU_CELL_KIT_SETTING:
+        /* S104 P1: a Tetrakt track-7 decay cell has no MIDI address: tracks 6
+         * and 7 share slot 6, so an NRPN or a Learn row of tkt_decay_x
+         * reaches track 6's row; the track-7 values are reached by step
+         * automation, VOICE7 edits and live recording. */
         if (cell->kit_setting == MENU_KIT_SETTING_SLOT6_TRACK7_AMP_DECAY)
             target = sceneModTarget_slot6DecayId();
         break;
@@ -18069,6 +18035,23 @@ static uint8_t menu_cellClearTarget(uint8_t active_page, uint8_t position,
         return 1u;
     }
     if (cell.kind == MENU_CELL_KIT_SETTING) {
+        /* S104 P1: the Tetrakt track-7 decay cells' target is the slot-6
+         * decay row itself; a lock recorded or cleared from VOICE7 lives on
+         * track 7's steps and is routed by track. */
+        {
+            uint8_t idx;
+            const uint8_t layer = menu_kitSettingT7Layer(&cell);
+
+            if (layer < SCENE_TRACK7_DECAY_LAYERS) {
+                const kit_instrument_slot_t *s6 =
+                    scene_instrumentSlotConst(scene_getActiveIndex(), 5u);
+
+                if (!s6 || !instrumentManager_track7DecayIndex(s6->type, layer, &idx))
+                    return 0u;
+                out->pattern_target = instrumentParam_make(5u, idx);
+                return 1u;
+            }
+        }
         if (cell.kit_setting != MENU_KIT_SETTING_SLOT6_TRACK7_AMP_DECAY)
             return 0u;
         out->pattern_target = sceneModTarget_slot6DecayId();
@@ -18223,6 +18206,17 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
 {
     /* S082 P3: pots stay locked only on Load/Save during an unlocked load. */
     if (menu_storageBusy && !menu_backgroundLoadReleasesPanel()) return;
+
+    /*
+     * S104 P1: the DJ screen owns the four pots (tempo, hundredths, bar
+     * jump, step jump) before Learn target selection, copy/clear and the
+     * cell editor: the PERF cells are hidden, so no pot may edit them.
+     */
+    if (menu_djActive && menu_activePage == PERFORMANCE_PAGE) {
+        if (knobNr < ENDLESS_POT_COUNT)
+            menu_djKnob(knobNr, delta);
+        return;
+    }
 
     /*
      * Q13 silent refusal while T != A (S081 §7.5, H-2a).
@@ -18567,6 +18561,19 @@ void menu_serviceRuntimeWidgets(void)
      * (menu_backgroundLoadReleasesPanel()). */
     if (menu_storageBusy && !menu_backgroundLoadReleasesPanel())
         return;
+
+    /*
+     * S104 P1: the DJ screen's position follows the master clock. A repaint
+     * every MENU_DJ_PAINT_MS (25 ms) through menu_repaint(); the diff paint
+     * sends only the characters that changed (usually the step digits).
+     * Paused under the screensaver, as the live Scene refresh is.
+     */
+    if (menu_djActive && menu_activePage == PERFORMANCE_PAGE &&
+        !screensaver_isActive() &&
+        (uint16_t)(time_sysTick - menu_djPaintTick) >= MENU_DJ_PAINT_MS) {
+        menu_djPaintTick = time_sysTick;
+        menu_repaint();
+    }
 
     /*
      * VOICE overlay services run every foreground pass, independently of the
@@ -19863,6 +19870,15 @@ void menu_switchPage(uint8_t pageNr)
      * the selected step remain unchanged. Affiliate: menu_showStepEditPage()
      * re-enables the custom page explicitly when appropriate.
      */
+    /*
+     * S104 P1: DJ mode lives on PERFORMANCE_PAGE only. A real switch to any
+     * other page (a MIDI-origin Bank load, the chain editor, a mode press)
+     * ends it; PERF re-entries (the PERF SHIFT release) keep it. Placed
+     * after the busy/queued-exit returns, so only a page change that happens
+     * closes it.
+     */
+    if (pageNr != PERFORMANCE_PAGE)
+        menu_djActive = 0u;
     menu_stepAutomationReset();
 
     /*
@@ -20371,6 +20387,20 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
         midiIn_setGlobalChannel(value);
         break;
 
+    case PAR_MIDI_CHAN_OMNI:
+        /*
+         * MIDI Omni channel O (S104 P1).
+         *
+         * What: 1..16, 0 = off. A channel message on O acts on the selected
+         * track as if that track were alone on its own channel; O wins over
+         * G and track channels with the same number. Inputs: menu/settings
+         * value. Output: MidiIn configuration; MidiIn releases every note
+         * still held on the old O first. Affiliates: midiIn_setOmniChannel(),
+         * midiIn_omniTrack(), filesystem_sanitizeLoadedGlobals().
+         */
+        midiIn_setOmniChannel(value);
+        break;
+
     /*
      * PAR_POS_X, PAR_POS_Y, PAR_FLUX and PAR_SOM_FREQ have no action: the SOM
      * generator they drove is archived (S097, archive/som/). The ids stay so
@@ -20515,15 +20545,30 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
         break;
 
     case PAR_BPM:
+    case PAR_BPM_FINE:
         /*
-         * BPM is Sequencer transport timing. Menu clamps zero to one before
-         * calling Sequencer because the sequencer cannot run at 0 BPM.
+         * Tempo, to 1/100 BPM since S104 P1.
+         *
+         * What: PAR_BPM (the whole BPM, 1..255) and PAR_BPM_FINE (its
+         * hundredths, 0..99) together set the sequencer's base tempo
+         * through seq_setTempoCenti(). Either id applies both, so a bulk
+         * Global apply (PAR_BPM first, PAR_BPM_FINE later in the id order)
+         * and a single edit give the same result. Menu clamps a zero BPM to
+         * one, because the sequencer cannot run at 0 BPM, and an
+         * out-of-range fraction to 0.
+         * Inputs: parameter_values[PAR_BPM], [PAR_BPM_FINE] (already stored
+         * by the caller). Outputs: Sequencer base tempo; synced LFOs follow
+         * the rounded whole BPM (seq_setTempoCenti()).
+         * Affiliates: menu_djSetTempoCenti(), filesystem settings,
+         * seq_setTempoCenti().
          */
-        if (value == 0u) {
-            value = 1u;
+        (void)value;
+        if (parameter_values[PAR_BPM] == 0u)
             parameter_values[PAR_BPM] = 1u;
-        }
-        seq_setBpm(value);
+        if (parameter_values[PAR_BPM_FINE] > 99u)
+            parameter_values[PAR_BPM_FINE] = 0u;
+        seq_setTempoCenti((uint16_t)((uint16_t)parameter_values[PAR_BPM] * 100u +
+                                     parameter_values[PAR_BPM_FINE]));
         break;
 
     case PAR_EXT_SYNC:

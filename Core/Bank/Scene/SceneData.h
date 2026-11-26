@@ -65,29 +65,37 @@ typedef struct kit_instrument_slot {
     instrument_parameter_images_t parameter_images;
 } kit_instrument_slot_t;
 
+#define SCENE_TRACK7_DECAY_LAYERS 4u   /* S104 P1: layer 0 generic/A, 1..3 Tetrakt B..D */
+
 typedef struct {
     /*
      * Kit-level settings that are not instrument parameter images.
      *
-     * slot6_track7_amp_envelope_decay and its Morph mirror are generated
-     * kit-owned endpoint values for the shared slot-6/track-7 voice pair. They
-     * are used only when slot 6 hosts a non-Choke instrument with a base
-     * amp_envelope_decay descriptor; Choke instruments use real `_choke`
-     * descriptors inside their instrument file instead.
+     * slot6_track7_decay[] and slot6_track7_morph_decay[] are the generated
+     * track-7 decay endpoints (Normal, Morph) of the shared slot-6/track-7
+     * voice pair, one per layer (S104 P1). Layer 0 is the generic value used
+     * when slot 6 hosts a non-Choke instrument with a base
+     * amp_envelope_decay row; a Tetrakt uses all four, one per layer A..D
+     * (its tkt_decay_a..d rows are the track-6 values). Choke instruments use
+     * real `_choke` descriptors inside their instrument file instead.
+     * These are Kit-owned because they depend on the Kit's slot-6 voice
+     * layout; they are never written into an instrument file.
      *
      * Per-voice audio routing used to live here but is now Scene-owned in
      * scene_settings_t. Routing is a performance/mix setting that must survive
-     * root Kit swaps, while these generated decay endpoints depend on the
-     * current kit voice layout and therefore remain Kit-owned.
+     * root Kit swaps.
      *
      * Autosave extension rule: every new serialized Kit setting must append a
      * named Kit parameter index/getter and write through SceneData's change-
      * aware Kit store boundary. Direct assignment is reserved for boot
      * initialization or a validated whole-object commit followed by the named
-     * Kit region marker. Affiliates: Autosave.h and future Kit copy/load code.
+     * Kit region marker. RAM: 8 B per Kit (S104 P1: was 2; +6 B x 17 resident
+     * Scenes = +102 B SRAM1, approved). Affiliates: Autosave.h
+     * AUTOSAVE_KIT_PARAM_*, scene_setSlot6Track7Decay(),
+     * scene_seedTrack7Decays().
      */
-    uint8_t slot6_track7_amp_envelope_decay;
-    uint8_t slot6_track7_morph_amp_envelope_decay;
+    uint8_t slot6_track7_decay[SCENE_TRACK7_DECAY_LAYERS];
+    uint8_t slot6_track7_morph_decay[SCENE_TRACK7_DECAY_LAYERS];
 } kit_settings_t;
 
 typedef struct {
@@ -520,22 +528,24 @@ void scene_setVoiceFaderSetting(uint8_t scene_index, uint8_t slot,
                                 uint8_t mode);
 uint8_t scene_getVoiceFaderSetting(uint8_t scene_index, uint8_t slot);
 /*
- * Kit-owned generated track-7 decay accessors.
+ * Kit-owned generated track-7 decay accessors (S104 P1: one per layer).
  *
- * Inputs: resident Scene index plus 0..127 endpoint value for setters. Outputs
- * are retained main/morph values, or 0 for invalid scenes. These are specific
- * rather than a generic kit-setting accessor because the generated parameter
- * has a fixed behavioral contract: slot 6, track 7, amp envelope decay,
- * non-Choke fallback. Menu, Preset, storage, and future Scene mod targets use
- * these helpers instead of reaching into kit_settings_t directly. Changed
- * final values mark their named Kit autosave cells after storage; equal values
- * do not schedule work.
+ * Inputs: resident Scene index, layer 0..3 (0 = the generic non-Choke
+ * value and Tetrakt layer A; 1..3 = Tetrakt B..D) and a 0..127 endpoint for
+ * setters. Outputs: retained Normal/Morph values, or 0 for an invalid Scene
+ * or layer. Changed final values mark their named Kit AutoSave cells after
+ * storage; equal values do not schedule work. scene_seedTrack7Decays()
+ * fills the endpoints a loaded Kit did not carry from slot 6's own track-6
+ * decays (a staged Kit); scene_seedResidentTrack7Decays() does the same for
+ * a resident Scene through the setters (Instrument Load into slot 6).
  */
-void scene_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index, uint8_t value);
-uint8_t scene_getSlot6Track7AmpEnvelopeDecay(uint8_t scene_index);
-void scene_setSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index,
-                                               uint8_t value);
-uint8_t scene_getSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index);
+void scene_setSlot6Track7Decay(uint8_t scene_index, uint8_t layer, uint8_t value);
+uint8_t scene_getSlot6Track7Decay(uint8_t scene_index, uint8_t layer);
+void scene_setSlot6Track7MorphDecay(uint8_t scene_index, uint8_t layer,
+                                    uint8_t value);
+uint8_t scene_getSlot6Track7MorphDecay(uint8_t scene_index, uint8_t layer);
+void scene_seedTrack7Decays(kit_t *kit, uint8_t seen_mask);
+void scene_seedResidentTrack7Decays(uint8_t scene_index);
 
 /*
  * Scene Effect accessors (Session 072, Effects Phase 5 step 3).

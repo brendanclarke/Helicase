@@ -549,10 +549,10 @@ uint8_t preset_setVoiceFxSendMorph(uint8_t scene_index, uint8_t slot,
                                    uint8_t amount);
 uint8_t preset_setVoiceFaderSetting(uint8_t scene_index, uint8_t slot,
                                     uint8_t mode);
-uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,
-                                              instrument_image_select_t image,
-                                              uint8_t value,
-                                              uint8_t record_automation);
+uint8_t preset_setSlot6Track7Decay(uint8_t scene_index, uint8_t layer,
+                                   instrument_image_select_t image,
+                                   uint8_t value,
+                                   uint8_t record_automation);
 
 /*
  * Deferred active-Scene sound apply.

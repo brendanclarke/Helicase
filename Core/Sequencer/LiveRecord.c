@@ -622,6 +622,17 @@ static uint8_t liveRec_targetValue7(uint16_t target)
         uint8_t local = instrumentParam_local(target);
         const kit_instrument_slot_t *instr = scene_instrumentSlotConst(a, slot);
 
+        /*
+         * S104 P1: recording on track 7 (rtk 6) of a Tetrakt decay row takes
+         * track 7's value of that layer (the cell the user turns on VOICE7),
+         * not track 6's row.
+         */
+        if (liveRec_rtk == INSTRUMENT_SLOT_COUNT) {
+            const uint8_t t7Layer = instrumentManager_track7DecayLayer(a, target);
+
+            if (t7Layer < SCENE_TRACK7_DECAY_LAYERS)
+                return scene_getSlot6Track7Decay(a, t7Layer);
+        }
         if (instr && local < INSTRUMENT_PARAM_COUNT)
             return instr->parameter_images.instrument_parameters[local];
         return 0u;
@@ -645,7 +656,8 @@ static uint8_t liveRec_targetValue7(uint16_t target)
         case SCENE_MOD_TARGET_KIND_FX_SEND:
             return scene_getVoiceFxSendAmount(a, slot);
         case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
-            return scene_getSlot6Track7AmpEnvelopeDecay(a);
+            /* S104 P1: the generic track-7 value is layer 0. */
+            return scene_getSlot6Track7Decay(a, 0u);
         case SCENE_MOD_TARGET_KIND_EFFECT_MORPH: {
             uint8_t m = scene_getEffectMorphAmount(a);
 

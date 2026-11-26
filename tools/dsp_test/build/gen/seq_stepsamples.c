@@ -7,18 +7,20 @@ uint32_t seq_trackStepSamples(uint8_t track)
 	                                           : (uint8_t)STEP_SCALE_DEFAULT;
 	/* ticks per step in Q8.8 at 96 PPQ: 1536 (CC 0) .. 49152 (CC 127) */
 	const uint64_t ticksQ8 = (uint64_t)stepScale_ticksQ8(scale);
-	/* the tempo, never 0 (seq_setBpm() clamps too; this guards boot) */
-	const uint64_t bpm = (seq_tempo != 0u) ? (uint64_t)seq_tempo : 1u;
-	/* samples = ticksQ8 x fs x 60 / (256 x 96 x bpm):
-	 *   numerator ticksQ8 x 44108 x 60 = ticksQ8 x 2,646,480, in 64 bits: a
-	 *   1/16 alone is 6144 x 2,646,480 = 1.6e10, past 2^32 (AL-T's break
-	 *   build makes it 32-bit and fails 21 checks);
-	 *   denominator 256 x 96 x bpm = 24,576 x bpm;
-	 *   + den/2 rounds to the nearest sample.
-	 * The M7 calls __aeabi_uldivmod once per trigger (main loop, not the
-	 * audio path) */
-	const uint64_t den = 24576u * bpm;
-	const uint64_t samples = (ticksQ8 * 2646480u + den / 2u) / den;
+	/*
+	 * The effective tempo in hundredths (S104 P1: 1/100 BPM, DJ nudge),
+	 * never below 1 BPM. samples = ticksQ8 x fs x 60 x 100 / (256 x 96 x
+	 * centi): the numerator and the denominator are both x 100 against the
+	 * whole-BPM form, and 24,576 x bpm is even, so every whole tempo gives
+	 * the earlier result bit for bit (law AL-T is unchanged).
+	 *   numerator ticksQ8 x 264,648,000 (x 100 of 2,646,480): at most
+	 *   49,152 x 264,648,000 = 1.3e13, in 64 bits;
+	 *   denominator 24,576 x centi; + den / 2 rounds to the nearest sample.
+	 */
+	const float eff = seq_tempoEff;
+	const uint64_t centi = (eff >= 1.0f) ? (uint64_t)(eff * 100.0f + 0.5f) : 100u;
+	const uint64_t den = 24576u * centi;
+	const uint64_t samples = (ticksQ8 * 264648000u + den / 2u) / den;
 
 	/* at most 5,292,960 (fits 32 bits); >= 1 so a gate always opens */
 	return (samples > 0u) ? (uint32_t)samples : 1u;

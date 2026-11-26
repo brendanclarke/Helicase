@@ -1,0 +1,3 @@
+tetrakt: loops 292.5 + per block 2771/32 = 379.1
+  spaceOut frame 64, segment 57 x 4; binds 4 x START
+  S101 P2 A2q steady (one layer control a block, no START): loops 292.5 + per block 1198/32 = 329.9

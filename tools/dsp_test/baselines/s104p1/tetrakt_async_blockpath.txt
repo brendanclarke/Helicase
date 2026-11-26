@@ -1,0 +1,1 @@
+Tetrakt_calcVoiceAsync: per-block longest 105, loops 0; calls ['sampleMemory_getGeneration', 'tkt_layerControl']

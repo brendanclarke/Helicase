@@ -43,6 +43,7 @@
 #include "MidiNoteMap.h"     /* S102 P1: the keyboard's MIDI channel */
 #include <string.h>
 #include <stdint.h>
+#include <math.h>   /* S104 P1: fabsf() in the DJ nudge */
 #include "AutosaveTrace.h"
 
 /* -----------------------------------------------------------------------
@@ -356,6 +357,37 @@ static uint8_t bh_shiftReleaseConsume = 0u;
  * SRAM1. Affiliates: menu_chainMenuOpen().
  */
 static uint8_t bh_chainPlayArmed = 0u;
+
+/*
+ * DJ-mode gesture state (S104 P1; +17 B SRAM1, approved).
+ *
+ * What: bh_djCopyConsume swallows the release of a COPY press taken as a
+ * tap. bh_djBar: bit 0 BAR1 held, bit 1 BAR2 held, bit 2 the last pressed is
+ * BAR2 (with both held the last pressed wins), bit 3 the nudge service's last
+ * step was a hold (S104 P1 assessment). bh_djDownStep is the ramp-down
+ * step per 10 ms after a hold ends (a release or the DJ screen closing; the
+ * value reached / 50, so the nudge reaches 0 in 0.5 s). bh_djRampTick paces the nudge service on the
+ * 1 ms time_sysTick. bh_djTapFirstUs / bh_djTapLastUs / bh_djTapCount are
+ * the tap sequence on the TIM2 microsecond counter (unsigned deltas through
+ * timebase_tim2Delta()). Why: DJ mode's COPY tap tempo and BAR nudge (user,
+ * S104 P1). The nudge value itself is Sequencer's (seq_getTempoNudge()).
+ * Inputs: COPY/BAR presses while menu_djIsOpen(), buttonHandler_tick().
+ * Outputs: seq_setTempoNudge(), menu_djSetTempoCenti(). Affiliates:
+ * buttonHandler_djTap(), buttonHandler_djBarPress()/Release(),
+ * buttonHandler_djNudgeService().
+ */
+#define BH_DJ_RAMP_MS          10u
+#define BH_DJ_NUDGE_MAX        0.05f
+#define BH_DJ_NUDGE_UP_STEP    (BH_DJ_NUDGE_MAX * (float)BH_DJ_RAMP_MS / 2000.0f)
+#define BH_DJ_RELEASE_STEPS    50u          /* 0.5 s of 10 ms steps */
+#define BH_DJ_TAP_GAP_US       2000000u     /* a longer gap starts a new tap run */
+static uint8_t  bh_djCopyConsume = 0u;
+static uint8_t  bh_djBar = 0u;
+static float    bh_djDownStep = 0.0f;
+static uint16_t bh_djRampTick = 0u;
+static uint32_t bh_djTapFirstUs = 0u;
+static uint32_t bh_djTapLastUs = 0u;
+static uint8_t  bh_djTapCount = 0u;
 
 /*
  * BAR overlay state (S080 E8).
@@ -1453,7 +1485,9 @@ void buttonHandler_setOverlay(uint8_t which)
         return;
     buttonHandler_overlayDrainAll();     /* S084 P0 A3: old rhythm */
     bh_overlayActive = which;
-    if (bh_state.selectButtonMode == SELECT_MODE_PERF && !seq_loopActive) {
+    /* S104 P1: in DJ mode the BAR LEDs show the nudge buttons. */
+    if (bh_state.selectButtonMode == SELECT_MODE_PERF && !seq_loopActive &&
+        !menu_djIsOpen()) {
         led_setValue((uint8_t)(which == 1u), LED_BAR1);
         led_setValue((uint8_t)(which == 2u), LED_BAR2);
     }
@@ -1770,8 +1804,147 @@ static void buttonHandler_chromaPulseService(void)
         buttonHandler_chromaPaint();
 }
 
+/*
+ * COPY tap in DJ mode (S104 P1).
+ * What: a tap more than 2 s after the last one starts a new run (the first
+ * tap only stamps). From the second tap: tempo = 60 s / (the mean interval
+ * since the run's first tap), to 1/100 BPM, through menu_djSetTempoCenti()
+ * (clamped 1.00..255.99). After 255 taps the run restarts from the latest
+ * tap (the count is one byte). The COPY LED flashes on every tap. Nothing
+ * changes under external sync. Inputs: TIM2 now. Outputs: the tap state, a
+ * tempo write. Accessor: processPress() DJ branch.
+ */
+static void buttonHandler_djTap(void)
+{
+    const uint32_t now = timebase_tim2Now();
+
+    led_flashLed(LED_COPY);
+    if (seq_getExtSync())
+        return;
+    if (bh_djTapCount == 0u || bh_djTapCount == 255u ||
+        timebase_tim2Delta(now, bh_djTapLastUs) > BH_DJ_TAP_GAP_US) {
+        bh_djTapFirstUs = (bh_djTapCount == 255u) ? bh_djTapLastUs : now;
+        bh_djTapLastUs = now;
+        bh_djTapCount = (bh_djTapCount == 255u) ? 2u : 1u;
+        if (bh_djTapCount == 1u)
+            return;
+    } else {
+        bh_djTapLastUs = now;
+        bh_djTapCount++;
+    }
+    {
+        const uint32_t span = timebase_tim2Delta(now, bh_djTapFirstUs);
+        const uint32_t mean = span / (uint32_t)(bh_djTapCount - 1u);
+        uint64_t centi;
+
+        if (mean == 0u)
+            return;
+        centi = (6000000000ULL + (uint64_t)(mean / 2u)) / (uint64_t)mean;
+        if (centi > 25599u)
+            centi = 25599u;
+        menu_djSetTempoCenti((uint16_t)centi);
+    }
+}
+
+/*
+ * BAR press/release in DJ mode (S104 P1). bar: 1 = BAR1 (nudge down),
+ * 2 = BAR2 (nudge up). A press marks the button held and the last pressed;
+ * the release clears it, hands "last pressed" to the button still held, and
+ * when none is held fixes the ramp-down step from the current nudge (so it
+ * reaches 0 in 0.5 s). The BAR LED is lit while its button is held.
+ * Accessors: processPress()/processRelease() DJ branches.
+ */
+static void buttonHandler_djBarPress(uint8_t bar)
+{
+    bh_djBar = (uint8_t)((bh_djBar | bar) & 0x03u);
+    if (bar == 2u)
+        bh_djBar |= 0x04u;
+    led_setValue(1u, (bar == 1u) ? LED_BAR1 : LED_BAR2);
+}
+
+static void buttonHandler_djBarRelease(uint8_t bar)
+{
+    bh_djBar = (uint8_t)(bh_djBar & (uint8_t)~bar);
+    if ((bh_djBar & 0x03u) == 0x01u)
+        bh_djBar &= (uint8_t)~0x04u;
+    else if ((bh_djBar & 0x03u) == 0x02u)
+        bh_djBar |= 0x04u;
+    /* The ramp-down step is fixed by buttonHandler_djNudgeService() at the
+     * end of the hold (S104 P1 assessment). */
+    led_setValue(0u, (bar == 1u) ? LED_BAR1 : LED_BAR2);
+}
+
+/*
+ * The DJ nudge ramp (S104 P1), every pass from buttonHandler_tick().
+ * What: per 10 ms step: while a BAR is held, the nudge moves 0.025 % toward
+ * the held direction (2.5 %/s, so 0 to +-5 % in 2 s), clamped at +-5 %;
+ * with none held it moves toward 0 by bh_djDownStep. A re-press continues
+ * from the current value. At most 20 steps are caught up after a stall;
+ * then the pacing re-anchors. Under external sync the nudge is set to 0.
+ * The ramp runs whether or not the DJ screen is open, so a nudge left when
+ * the screen closes still returns to 0. Writes only on a change.
+ * Inputs: bh_djBar, bh_djDownStep, time_sysTick. Outputs:
+ * seq_setTempoNudge(). Accessor: buttonHandler_tick().
+ */
+static void buttonHandler_djNudgeService(void)
+{
+    uint8_t steps = 0u;
+    uint8_t held;
+    float n;
+    float old;
+
+    while ((uint16_t)(time_sysTick - bh_djRampTick) >= BH_DJ_RAMP_MS &&
+           steps < 20u) {
+        bh_djRampTick = (uint16_t)(bh_djRampTick + BH_DJ_RAMP_MS);
+        steps++;
+    }
+    if ((uint16_t)(time_sysTick - bh_djRampTick) >= BH_DJ_RAMP_MS)
+        bh_djRampTick = time_sysTick;
+    if (steps == 0u)
+        return;
+    old = seq_getTempoNudge();
+    n = old;
+    /*
+     * S104 P1 assessment: a BAR counts as held only while the DJ screen
+     * is open, so a BAR held through a MODE press (or any page change that
+     * closes DJ mode) stops pushing the nudge. Bit 3 of bh_djBar remembers
+     * that the last step was a hold; the first step after any end of the
+     * hold (a release, or the screen closing) fixes the ramp-down step from
+     * the value reached, so the nudge returns to 0 in 0.5 s either way.
+     */
+    held = (uint8_t)((bh_djBar & 0x03u) != 0u && menu_djIsOpen());
+    if (!held && (bh_djBar & 0x08u)) {
+        bh_djDownStep = fabsf(n) / (float)BH_DJ_RELEASE_STEPS;
+        bh_djBar &= (uint8_t)~0x08u;
+    }
+    if (held)
+        bh_djBar |= 0x08u;
+    if (seq_getExtSync()) {
+        n = 0.0f;
+    } else {
+        while (steps-- != 0u) {
+            if (held) {
+                n += (bh_djBar & 0x04u) ? BH_DJ_NUDGE_UP_STEP
+                                        : -BH_DJ_NUDGE_UP_STEP;
+                if (n > BH_DJ_NUDGE_MAX)
+                    n = BH_DJ_NUDGE_MAX;
+                if (n < -BH_DJ_NUDGE_MAX)
+                    n = -BH_DJ_NUDGE_MAX;
+            } else if (n > 0.0f) {
+                n = (n > bh_djDownStep) ? (n - bh_djDownStep) : 0.0f;
+            } else if (n < 0.0f) {
+                n = (-n > bh_djDownStep) ? (n + bh_djDownStep) : 0.0f;
+            }
+        }
+    }
+    if (n != old)
+        seq_setTempoNudge(n);
+}
+
 void buttonHandler_tick(void)
 {
+    /* S104 P1: the DJ nudge ramp (runs also after the DJ screen closes). */
+    buttonHandler_djNudgeService();
     /* S080 E12 / S084 P2: publish the overlay rhythm and report live hits. */
     buttonHandler_overlayTick();
     /* S102 P1: the chromatic keyboard's played-note pulse. */
@@ -2140,7 +2313,8 @@ static void buttonHandler_loopCheckDisengage(void)
         seq_loopDisengage();
     bh_loopTrackMask = 0u;
     bh_loopBarModifier = 0u;
-    if (bh_state.selectButtonMode == SELECT_MODE_PERF) {
+    /* S104 P1: in DJ mode the BAR LEDs show the nudge buttons. */
+    if (bh_state.selectButtonMode == SELECT_MODE_PERF && !menu_djIsOpen()) {
         menu_syncPerfSelectLed();
         led_setValue((uint8_t)(bh_overlayActive == 1u), LED_BAR1);
         led_setValue((uint8_t)(bh_overlayActive == 2u), LED_BAR2);
@@ -2535,6 +2709,9 @@ static void buttonHandler_closeLatchedSurfaces(uint8_t restore_page,
     }
     if (menu_chainMenuIsOpen())
         menu_chainMenuClose();
+    /* S104 P1: every MODE press (and the MIDI-origin Bank load) ends DJ mode. */
+    if (menu_djIsOpen())
+        menu_djClose();
     /* S099 P3: a mode change ends a VOICE step edit (the new mode's page
      * replaces it; the held steps' releases then take the new mode's path) */
     if (bh_voiceStepEdit) {
@@ -2584,6 +2761,40 @@ static void handleModeButtons(uint8_t mode)
      */
     if (preset_backgroundBankLoadLocked())
         return;
+    /*
+     * SHIFT+PLAY+PERF opens DJ mode (S104 P1).
+     *
+     * What: with SHIFT held and the SHIFT+PLAY chord armed (PLAY held), the
+     * PERF MODE button enters PERF mode (as a plain PERF press, without
+     * arming the fill hold) and opens the DJ screen on PERFORMANCE_PAGE.
+     * Every latched surface closes first (an open DJ screen too, so a
+     * repeat of the chord reopens it), the chromatic keyboard is left (DJ
+     * takes BAR1/BAR2), and the BAR LEDs go dark until a nudge.
+     * Why: SHIFT+PERF alone is the Effect mode ((mode + 4) & 7 below), so
+     * the chord needs its own branch ahead of that arithmetic (user,
+     * S104 P1). Inputs: SHIFT, bh_chainPlayArmed, mode. Outputs: PERF mode,
+     * the DJ screen. Affiliates: menu_djOpen(),
+     * buttonHandler_closeLatchedSurfaces(), the SHIFT+PLAY chord (BUT_START_STOP).
+     */
+    if (buttonHandler_getShift() && bh_chainPlayArmed &&
+        mode == SELECT_MODE_PERF) {
+        buttonHandler_closeLatchedSurfaces(1u, 0u);
+        if (bh_chroma.which != 0u)
+            buttonHandler_chromaExit();
+        buttonHandler_setMorphVoiceMode(0u);
+        bh_state.selectButtonMode = SELECT_MODE_PERF;
+        led_clearAllBlinkLeds();
+        led_setMode2(SELECT_MODE_PERF);
+        led_clearSequencerLeds();
+        led_clearSelectLeds();
+        menu_switchPage(PERFORMANCE_PAGE);
+        menu_switchSubPage(0);
+        menu_resetActiveParameter();
+        menu_djOpen();
+        led_setValue(0u, LED_BAR1);
+        led_setValue(0u, LED_BAR2);
+        return;
+    }
     /*
      * SHIFT+MODE STEP has no action (S097).
      *
@@ -3320,8 +3531,29 @@ static void handleVoiceButton(uint8_t voiceNr)
         menu_setActiveVoice(voiceNr);
         led_setActiveVoice(voiceNr);
         if (bh_state.selectButtonMode == SELECT_MODE_VOICE) {
-            menu_switchPage(voiceNr);
-            led_setActiveSelectButton(menu_getSubPage());
+            /*
+             * A stopped-transport audition keeps the menu cursor (S104 P1).
+             *
+             * What: when this press re-presses the selected track while its
+             * own voice page is already showing and the transport is stopped
+             * (shouldPreviewVoice), the page is not switched again; the press
+             * only previews (below). Any other press still runs
+             * menu_switchPage(), which rebuilds the page and puts the cursor on
+             * the screen's first selectable column (menu_resetActiveParameter()).
+             * Why: the re-switch moved the selected parameter back to column 0
+             * at every audition (user report, S104 P1). A different surface on
+             * the same voice (the VOICE step edit, or a Morph view whose page
+             * differs) leaves menu_activePage != voiceNr, so that press returns
+             * to the voice page as before.
+             * Inputs: shouldPreviewVoice, menu_activePage, voiceNr.
+             * Outputs: no page or cursor change on an audition re-press.
+             * Affiliates: menu_switchPage(), menu_resetActiveParameter(),
+             * seq_previewVoice() at the end of this function.
+             */
+            if (!(shouldPreviewVoice && menu_activePage == voiceNr)) {
+                menu_switchPage(voiceNr);
+                led_setActiveSelectButton(menu_getSubPage());
+            }
             /*
              * View-follows-track when PAR_FOLLOW is on (S077 P2 §6.1).
              *
@@ -3421,6 +3653,23 @@ static void processPress(uint8_t buttonNr)
      * and BAR and SEQ while it is up, before any other routing (Load/Save
      * text helpers, Effect hooks, live erase, held COPY, Scene buttons).
      */
+    /*
+     * S104 P1: DJ mode takes COPY (tap tempo) and BAR1/BAR2 (nudge down/up)
+     * before every other routing (the chromatic keyboard, held COPY and live
+     * erase, the PERF overlay and looper BAR meanings). Copy/clear and live
+     * erase are unavailable while the DJ screen is open.
+     */
+    if (menu_djIsOpen()) {
+        if (buttonNr == BUT_COPY) {
+            bh_djCopyConsume = 1u;
+            buttonHandler_djTap();
+            return;
+        }
+        if (buttonNr == BUT_BAR1 || buttonNr == BUT_BAR2) {
+            buttonHandler_djBarPress((buttonNr == BUT_BAR1) ? 1u : 2u);
+            return;
+        }
+    }
     if (buttonHandler_chromaPress(buttonNr))
         return;
     (void)dblclick_onPress(buttonNr);
@@ -3893,6 +4142,20 @@ void buttonHandler_setLearnLeds(uint8_t on)
 
 static void processRelease(uint8_t buttonNr)
 {
+    /*
+     * S104 P1: releases of presses DJ mode took, whether or not the screen
+     * is still open (a MODE press may close it while a BAR is held; that BAR's
+     * release still ends its nudge hold).
+     */
+    if (buttonNr == BUT_COPY && bh_djCopyConsume) {
+        bh_djCopyConsume = 0u;
+        return;
+    }
+    if ((buttonNr == BUT_BAR1 && (bh_djBar & 0x01u)) ||
+        (buttonNr == BUT_BAR2 && (bh_djBar & 0x02u))) {
+        buttonHandler_djBarRelease((buttonNr == BUT_BAR1) ? 1u : 2u);
+        return;
+    }
     /* S102 P1: releases of presses the chromatic keyboard took. */
     if (buttonHandler_chromaRelease(buttonNr))
         return;
