@@ -85,10 +85,10 @@ const char shortNames[][4] = {
      * (their rows use dec len tim fbk dtn ton / atk dec slv rel amt). Each
      * string left the table at the position its id left menu.h's enum. */
     {"fx "},{"dpt"},
-    /* S103 P1 / P3 Tier B: the Katran's 11 own labels (menu.h SHORT_KIK ..
-     * SHORT_LCT); its other rows reuse existing labels */
-    {"kik"},{"cy1"},{"sk1"},{"dp1"},{"cy2"},{"sk2"},{"dp2"},{"chs"},
-    {"src"},{"dtk"},{"lct"},
+    /* S103 P1 / S105 P1: the Katran's own short labels (menu.h SHORT_KIK ..
+     * SHORT_SDB); its other rows reuse existing labels */
+    {"kik"},{"cyc"},{"skw"},{"imd"},{"chs"},{"dtk"},{"exc"},{"slf"},{"r/f"},
+    {"sdb"},
     /* S104 P1: the Global MIDI Omni channel (menu.h SHORT_OMN). */
     {"omn"},
 };
@@ -132,6 +132,9 @@ const char catNames[][9] = {
     {"Amp EG"},{"Pitch"},{"Unison"},{"Filt EG"},{"Pitch EG"},{"Sample"},
     {"Envelope"},{"Space"},{"Tone"},{"Effect"},{"Bits"},{"CrumpBit"},
     {"Grain"},{"Reverb"},{"Delay"},{"Shimmer"},{"Echo"},{"Plate"},
+    /* S105 P1 (A1): Katran's block categories (menu.h CAT_OSC1 .. CAT_TORCIDO) */
+    {"Osc 1"},{"Osc 2"},{"Buffer"},{"Exciter"},{"Chaos"},{"Stereo"},{"VCA"},
+    {"Ring/FM"},{"Torcido"},
 };
 
 const char longNames[][10] = {
@@ -195,10 +198,9 @@ const char longNames[][10] = {
     {"Freeze"},{"Interval"},{"GateBlom"},{"EchoRvb"},{"Blend"},
     /* S099 P1: the chorus rows */
     {"Depth"},{"Source"},
-    /* S103 P1: the Katran rows (menu.h LONG_RUN .. LONG_OUTFILT) */
-    {"Run"},{"Kick"},{"Cycle"},{"Skew"},{"Chaos"},{"SelfMod"},{"VCA Bal"},
-    {"Exciter"},{"NoiseMix"},{"SyncThr"},{"Wet"},{"Drift"},{"Tracking"},
-    {"Low Cut"},{"OutFilt"},
+    /* S103 P1 / S105 P1: the Katran rows (menu.h LONG_RUN .. LONG_SIDEBAND) */
+    {"Run"},{"Kick"},{"Cycle"},{"Skew"},{"SelfMod"},{"NoiseMix"},{"SyncThr"},
+    {"Tracking"},{"Intermod"},{"Sideband"},
     /* S104 P1: the Global MIDI Omni channel (menu.h LONG_OMNI_CH). */
     {"Omni Ch"},
 };

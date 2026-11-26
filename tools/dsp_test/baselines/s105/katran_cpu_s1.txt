@@ -1,0 +1,8 @@
+katran: loops 276.0 + per block 2352/32 = 349.5
+  OSC B 20/30/26/24  OSC A core A 31/45/42/35  OSC A core B 34/49/46/38  (plain/pwmD/warp/arena)
+  delay A/B 18/18  core A/B 73/79  out 37  (per iteration)
+
+S105 P1 gate 1 (A1, A3, A4, A8). Before: loops 295.0 + 2290/32 = 366.6
+(baselines/s103/katran_cpu_p5.txt). The band replaced F1 + F2: core A
+85 -> 73, core B 93 -> 79. Saving 17.1 a sample (the plan estimated 8..13);
+the drive (step 2) and FM/sidebands (step 4) still to come.

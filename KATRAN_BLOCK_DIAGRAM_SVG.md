@@ -1,8 +1,9 @@
 # Katran — block diagram and parameter description
 
-**Date:** 2026-11-25. **Tree:** `dev-ph7-alkaline`, the S103 P5 Katran
-(cores A / B, the stereo rotation, bipolar width; S103 P6 and P7 do not touch
-Katran). **Status:** description and review notes. **No code was changed.**
+**Date:** 2026-11-26. **Tree:** `dev-ph7-alkaline`, the S105 P1 Katran
+(the band filter, the four chaos rows, a type per oscillator, F3 after the
+matrix, the voice drive, ring/FM and Osc 2's feedback; the diagrams and the
+sections below are updated for it). **Status:** description.
 
 **Your request (2026-11-25):**
 - Katran sounds right, but many parameters do little, overlap, are badly
@@ -60,7 +61,8 @@ envelopes.
 
 1. **The loop (per core).** A short delay (32–1,792 samples, 0.7–41 ms)
    feeds TORCIDO channel 1 (drive + tube soft-clip, dry/wet). That passes
-   through a resonant loop filter F1 and a low-cut F2, and is written back
+   through **the band filter** (one-pole HP then LP: cutoff / width / offset,
+   S105 P1 A4), and is written back
    into the delay with the feedback gain. With enough gain the loop
    self-oscillates at the comb pitch set by the delay time.
 2. **The exciter.** OSC A (the patch's saw), mixed with noise, goes through
@@ -88,7 +90,9 @@ envelopes.
    - A **kick** (any trigger) re-arms it and injects a burst.
    - The **patch LFO** (rate modulated by the loop's own level and its own
      inverse) moves OSC B, F1, the tube, the feedback and the VCAs.
-   - **CE1** moves the level and **CE2** the filters, both cycling freely.
+   - The **fast envelope** moves the level and the **slow one** the band and
+     F3, both cycling freely; `chs` is the depths, `cyc` both rates, `skw`
+     the rise pair and `imd` the relationship between the two (S105 P1 A3).
 
 ---
 
@@ -112,9 +116,9 @@ envelopes.
 
 | Row | Key | Law |
 |---|---|---|
-| `typ` | `osc1_type` | wav / wtb / pwm (shared by OSC A and OSC B) |
-| `wav` | `osc1_wave` | under wav: Saw Rec Tri Sin; under pwm: Tri (warped), Saw / Rec (two-read pulse); under wtb: the installed table |
-| `pos` | `osc1_position` | pwm width / wtb frame / arena window. **Shown "---" and inactive under wav** (unless `src` reads the arena) |
+| `typ` | `osc1_type` | Osc 1's own type: wav / wtb / pwm / **buf** (S105 P1 A8) |
+| `wav` | `osc1_wave` | Osc 1's own wave; "---" under buf |
+| `pos` | `osc1_position` | pwm width / wtb frame / arena window; inactive under wav while Osc 1 is not buf |
 | `dtn` | `kat_spread_a` | **two effects:** detune ±(dtn'² × 25 cents) between the copies (core A −, core B +), **and** a `pos` spread of ±dtn' × 16 steps (`:599–600`) |
 | `snc` | `kat_sync` | hard-sync threshold `th = sth × 258` in int16 units; 127 = never (`:1611`) |
 | `lvA` | `kat_level_a` | the exciter's level into TORCIDO ch 2 (`exc`) |
@@ -127,12 +131,15 @@ envelopes.
     taken.
 - **Core B's copy** runs at half rate with its phase step doubled.
 
-### 2.3 OSC B — the ring modulator (one, full rate)
+### 2.3 OSC B — the ring/FM modulator (one, full rate)
 
-The same forms as OSC A (shared `typ` / `wav`), with its own pitch (`coa`,
-`fin` on the fm page) and `pos` (`kat_b_pos`, plus the patch LFO's
-`cv·lfl·24` steps, `:607`). Its output B multiplies TORCIDO ch 1 in each core,
-and its wrap flag feeds OSC A's sync.
+Its own type and wave (`kat_b_type`, `kat_b_wave`: wav / wtb / pwm / buf,
+S105 P1 A8), its own pitch (`coa`, `fin` on the fm page) and `pos`
+(`kat_b_pos`, plus the patch LFO's `cv·lfl·24` steps). `r/f`
+(`kat_ring_mode`: rng fmA fmB fAB) makes it ring a core or phase-modulate
+that core's loop; `dpt` (`kat_ring_depth`) is the ring crossfade or the FM
+depth; `sdb` (`kat_ring_sideband`) is its own feedback. Its wrap flag feeds
+Osc 1's sync.
 
 ### 2.4 The buffer read ("arena"): where and how it enters
 
@@ -144,9 +151,10 @@ and its wrap flag feeds OSC A's sync.
   rings, **Katran's own two delay rings**) and stale or power-up memory;
 - **float state and 8-bit data read as harsh noise.**
 
-**How it enters (today):**
-- `src` (`kat_source`: off / A / B / AB) switches OSC A's form, OSC B's
-  form, or both, from `typ` / `wav` to **ARENA** (`kat_oscControl()`
+**How it enters:**
+- **buf** is one of the four oscillator types (S105 P1 A8), chosen per
+  oscillator (`osc1_type`, `kat_b_type`), so Osc 1, Osc 2 or both read the
+  arena (`kat_oscControl()`
   `:586–587`, the loops `kat_aArenaCore*`, `kat_bArena`).
 - For a selected oscillator, `typ` and `wav` are ignored.
 

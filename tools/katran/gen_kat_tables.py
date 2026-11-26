@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate and check Core/DSP/Instruments/Katran/KatranTables.c (S103 P1).
 
-What:       writes the seven 128-entry laws and the two scalars of
+What:       writes the eight 128-entry laws and the two scalars of
             KatranTables.h from their formulas (fs = 44,108.07291666667 Hz,
             32-sample blocks); --check compares the committed file byte for
             byte.
@@ -52,15 +52,40 @@ def time_samples(r):
     return 32.0 * 56.0 ** (r / 127.0)
 
 
-def low_cut_k(r):
-    """F2's one-pole coefficient, 5 .. 600 Hz log."""
-    f = 5.0 * 120.0 ** (r / 127.0)
-    return 1.0 - math.exp(-2.0 * math.pi * f / FS)
+# S105 P1 A2: the patch LFO's step-synced periods in 96-PPQ ticks, shortest
+# first: CrumpBit's 16 (gen_crumpbit_tables.py GRAIN_STOP_TICKS, /64 .. 1br)
+# then 2, 4, 8, 16, 32 bars. Read backwards: row 127 = /64 (fastest).
+PLFO_STOP_TICKS = [6, 8, 12, 16, 18, 24, 32, 36, 48, 64, 72, 96, 144, 192,
+                   288, 384, 768, 1536, 3072, 6144, 12288]
 
 
-def plfo_hz(r):
-    """The patch LFO rate, 0.02 .. 20 Hz log."""
-    return 0.02 * 1000.0 ** (r / 127.0)
+def plfo_stop_rows():
+    """The row of each stop, 127 - round(127 log2(t / 6) / log2(2048)),
+    fastest first in the list's order (row 127 for /64 .. row 0 for 32b)."""
+    lo = PLFO_STOP_TICKS[0]
+    span = math.log2(PLFO_STOP_TICKS[-1] / lo)
+    return [127 - int(round(127.0 * math.log2(t / lo) / span))
+            for t in PLFO_STOP_TICKS]
+
+
+def plfo_inv_ticks():
+    """1 / ticks per row: equal ratios between neighbouring stops (the
+    delay_ticks_table() law), exact at every stop, read backwards."""
+    stops = sorted(zip(plfo_stop_rows(), PLFO_STOP_TICKS))
+    out = []
+    for r in range(ROWS):
+        lo, hi = stops[0], stops[-1]
+        for i in range(len(stops) - 1):
+            if stops[i][0] <= r <= stops[i + 1][0]:
+                lo, hi = stops[i], stops[i + 1]
+                break
+        if hi[0] == lo[0]:
+            t = float(lo[1])
+        else:
+            frac = (r - lo[0]) / (hi[0] - lo[0])
+            t = lo[1] * (hi[1] / lo[1]) ** frac
+        out.append(1.0 / t)
+    return out
 
 
 def damp_k(r):
@@ -74,6 +99,17 @@ def damp_k(r):
 def drive_gain(r):
     """TORCIDO drive: 2^(5 r/127) (x1 .. x32)."""
     return 2.0 ** (5.0 * r / 127.0)
+
+
+# S105 P1 A5: the output drive's input gain and its make-up.
+def out_drive_gain(r):
+    """The output drive's input gain, 2^(4 r / 127) (x1 .. x16)."""
+    return 2.0 ** (4.0 * r / 127.0)
+
+
+def out_drive_makeup(r):
+    """Its make-up, gain^-0.6 (by ear: louder with drive, not x16)."""
+    return out_drive_gain(r) ** -0.6
 
 
 KICK_K = 10.0 ** (-3.0 * BLOCK / (FS * 0.080))
@@ -101,14 +137,19 @@ def text():
     L += rows([str(ce_blocks(r)) + "u" for r in range(ROWS)])
     L += ["};", "", "const float katTimeSamples[KAT_TABLE_ROWS] = {"]
     L += rows([f32(time_samples(r)) for r in range(ROWS)])
-    L += ["};", "", "const float katLowCutK[KAT_TABLE_ROWS] = {"]
-    L += rows([f32(low_cut_k(r)) for r in range(ROWS)])
-    L += ["};", "", "const float katPlfoHz[KAT_TABLE_ROWS] = {"]
-    L += rows([f32(plfo_hz(r)) for r in range(ROWS)])
+    L += ["};", "", "const float katPlfoInvTicks[KAT_TABLE_ROWS] = {"]
+    L += rows([f32(v) for v in plfo_inv_ticks()])
+    L += ["};", "", "const uint8_t katPlfoStopRow[KAT_PLFO_STOPS] = {"]
+    L += ["    " + ", ".join(str(v) + "u" for v in plfo_stop_rows()[:11]) + ","]
+    L += ["    " + ", ".join(str(v) + "u" for v in plfo_stop_rows()[11:]) + ","]
     L += ["};", "", "const float katDampK[KAT_TABLE_ROWS] = {"]
     L += rows([f32(damp_k(r)) for r in range(ROWS)])
     L += ["};", "", "const float katDriveGain[KAT_TABLE_ROWS] = {"]
     L += rows([f32(drive_gain(r)) for r in range(ROWS)])
+    L += ["};", "", "const float katOutDriveGain[KAT_TABLE_ROWS] = {"]
+    L += rows([f32(out_drive_gain(r)) for r in range(ROWS)])
+    L += ["};", "", "const float katOutDriveMakeup[KAT_TABLE_ROWS] = {"]
+    L += rows([f32(out_drive_makeup(r)) for r in range(ROWS)])
     L += ["};", "", "const float katKickK = " + f32(KICK_K) + ";",
           "const float katFadeK = " + f32(FADE_K) + ";", ""]
     return "\n".join(L)

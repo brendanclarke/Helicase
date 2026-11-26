@@ -212,6 +212,24 @@ enum catNamesEnum {
     CAT_SAMPLE, CAT_ENVELOPE, CAT_SPACE, CAT_TONE, CAT_EFFECT, CAT_BITS,
     CAT_CRUMPBIT, CAT_GRAIN, CAT_REVERB, CAT_DELAY, CAT_SHIMMER, CAT_ECHO,
     CAT_PLATE,
+    /*
+     * S105 P1 (A1): Katran's block categories (MenuLabels.c, same order).
+     *
+     * What:       nine categories named after the blocks of the Katran
+     *             diagram: Osc 1, Osc 2, Buffer (the arena read's damping),
+     *             Exciter (Osc 1's level and the noise into Torcido ch 2),
+     *             Chaos (the four chaos-envelope rows), Stereo (rotation,
+     *             width), VCA (the balance), Ring/FM (Osc 2's action on
+     *             the cores) and Torcido (the loop's shaper).
+     * Why:        S105_P1_KATRAN_FURTHER_TWEAKS.md §A1.1: Category + Long must
+     *             read as a phrase naming what a knob does ("Ring/FM Depth"),
+     *             and the short name abbreviates the long name. The earlier
+     *             categories (Oscilltr, FM, Envelope, Delay for the shaper)
+     *             did not say which block a row belongs to.
+     * Affiliates: KatranParameters.c (the rows), MenuLabels.c catNames[].
+     */
+    CAT_OSC1, CAT_OSC2, CAT_BUFFER, CAT_EXCITER, CAT_CHAOS, CAT_STEREO,
+    CAT_VCA, CAT_RING_FM, CAT_TORCIDO,
     CAT_LABEL_COUNT
 };
 
@@ -287,10 +305,17 @@ enum longNamesEnum {
     LONG_BLEND,
     /* S099 P1: the chorus rows (Depth, Source) */
     LONG_DEPTH, LONG_SOURCE,
-    /* S103 P1: the Katran rows (MenuLabels.c, same order) */
-    LONG_RUN, LONG_KICK, LONG_CYCLE, LONG_SKEW, LONG_CHAOS, LONG_SELFMOD,
-    LONG_VCABAL, LONG_EXCITER, LONG_NOISEMIX, LONG_SYNCTHR, LONG_WET,
-    LONG_DRIFT, LONG_TRACK, LONG_LOWCUT, LONG_OUTFILT,
+    /*
+     * S103 P1 / S105 P1 (A1): the Katran's own long names (MenuLabels.c,
+     * same order). S105 P1 removed Chaos, VCA Bal, Exciter, Wet, Drift,
+     * Low Cut and OutFilt: their rows now read as Chaos Depth, VCA Balance,
+     * Exciter Level, Torcido Blend, Delay WowFlutr and Voice Tone (existing
+     * ids), and the low-cut row is gone (the band filter, A4). Added
+     * Intermod (Chaos Intermod) and Sideband (Ring/FM Sideband). Label ids
+     * are compile-time only; later ids renumber with no stored effect.
+     */
+    LONG_RUN, LONG_KICK, LONG_CYCLE, LONG_SKEW, LONG_SELFMOD, LONG_NOISEMIX,
+    LONG_SYNCTHR, LONG_TRACK, LONG_INTERMOD, LONG_SIDEBAND,
     /* S104 P1: "Omni Ch" (MenuLabels.c, same position). */
     LONG_OMNI_CH,
     LONG_LABEL_COUNT
@@ -388,16 +413,22 @@ enum shortNamesEnum {
      */
     SHORT_FX, SHORT_FXD,
     /*
-     * S103 P1 / S103 P3 Tier B: the Katran's own labels. Ten planned labels
-     * reuse existing ids instead (the long view tells them apart: category
-     * and long name differ): kat_noise noi, kat_drift wow, kat_wet bln,
-     * kat_level_a lvA, kat_b_level lvB, kat_sync snc, kat_vca bal,
-     * kat_plfo_rate frq, kat_plfo_mod mod, kat_plfo_level dpt. run, tim,
-     * dmp, dtn, spr, wid, fbk, drv, frq, res, typ, cut, pos, coa and fin
-     * were existing ids from the start. 11 new ids remain.
+     * S103 P1 / S105 P1 (A1): the Katran's own short names.
+     *
+     * What:       kik; the chaos rows cyc skw imd (the former cy1 sk1 dp1,
+     *             renamed in place) and chs; dtk; exc (Exciter Level), slf
+     *             (Mod Osc SelfMod), r/f (Ring/FM Mode), sdb (Ring/FM
+     *             Sideband). Removed: cy2 sk2 dp2 (A3, seven chaos rows ->
+     *             four), src (A8: the buffer is an oscillator type), lct
+     *             (A4: the band filter has no separate low-cut).
+     * Why:        the rule of S105_P1_KATRAN_FURTHER_TWEAKS.md §A1.1: a short
+     *             name abbreviates its long name. S103 P3 Tier B's reuses
+     *             that broke it (frq for Rate, dpt for Level, lvA / lvB) are
+     *             undone in KatranParameters.c; shared ids stay shared only
+     *             for the same word (drv, wid, dpt on different pages).
      */
-    SHORT_KIK, SHORT_CY1, SHORT_SK1, SHORT_DP1, SHORT_CY2, SHORT_SK2,
-    SHORT_DP2, SHORT_CHS, SHORT_SRCE, SHORT_DTK, SHORT_LCT,
+    SHORT_KIK, SHORT_CYC, SHORT_SKW, SHORT_IMD, SHORT_CHS, SHORT_DTK,
+    SHORT_EXC, SHORT_SLF, SHORT_RFM, SHORT_SDB,
     /* S104 P1: "omn" (MenuLabels.c, same position). */
     SHORT_OMN,
     SHORT_LABEL_COUNT
@@ -519,6 +550,20 @@ enum Datatypes {
  */
 #define DTYPE_TAG_FX_DEPTH   1u
 #define DTYPE_0B127_FX_DEPTH ((uint8_t)(DTYPE_0B127 | (DTYPE_TAG_FX_DEPTH << 4)))
+/*
+ * A tagged DTYPE_0B127 (S105 P1 A2): Katran's Mod Osc Rate (rte).
+ *
+ * What:       a plain 0..127 row (every dtype switch masks the low
+ *             nibble) whose 21 stop rows display the stop's name (/64 ..
+ *             32b, katranParameters_rateName3()); other rows show their
+ *             number.
+ * Why:        the rate is step-synced (katPlfoInvTicks[]), so its
+ *             musical stops must read as steps and bars.
+ * Accessors:  KatranParameters.c (kat_plfo_rate); menu.c
+ *             menu_formatDtype3().
+ */
+#define DTYPE_TAG_KAT_RATE   2u
+#define DTYPE_0B127_KAT_RATE ((uint8_t)(DTYPE_0B127 | (DTYPE_TAG_KAT_RATE << 4)))
 
 typedef struct PageStruct {
     uint8_t  top1, top2, top3, top4, top5, top6, top7, top8;

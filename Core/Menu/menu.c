@@ -68,7 +68,8 @@
 #include "ColloidVoice.h"      /* S095 P2: COL_WAVE_COUNT, the COL_* counts (the name asserts) */
 #include "BbdChorus.h"         /* S099 P2: BBD_DPT_VAR (the dpt names and their assert) */
 #include "TetraktVoice.h"      /* S096 P1: TKT_LAYER_MASK_COUNT (the name assert) */
-#include "KatranVoice.h"       /* S103 P1: KAT_SRC_COUNT, KAT_LT_COUNT (the name asserts) */
+#include "KatranVoice.h"       /* S103 P1 / S105 P1: KAT_TYPE_COUNT, KAT_RM_COUNT (the name asserts) */
+#include "KatranParameters.h"  /* S105 P1 A2: katranParameters_rateName3() */
 #include "transientGenerator.h"   /* S087 P3: transient list with user one-shots */
 #include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* (name asserts) */
 #include <string.h>
@@ -3460,7 +3461,8 @@ static void va_queueMarkerTransaction(const uint8_t desired_base[4],
  * What: menu_formatDtype3() renders the dtypes that menu_formatCellValue3(),
  * va_formatValue3() and menu_formatAutomationValue3() all rendered with the
  * same code: DTYPE_PM63, DTYPE_NOTE_NAME, DTYPE_MIX_FM (S085 P1: fm / mix /
- * snc / rng), DTYPE_LFO_POLARITY and a tagged DTYPE_ON_OFF (S088 P0 §2.1 D12:
+ * snc / rng), DTYPE_LFO_POLARITY, a tagged 0..127 (S099 P2 fx depth; S105
+ * P1 Katran rate) and a tagged DTYPE_ON_OFF (S088 P0 §2.1 D12:
  * a non-zero high nibble names the tag table, menu_onoffTagNames(); S089 P2:
  * the table follows the tag). It returns 1 when it wrote out[0..2] and 0 for
  * every other dtype, including an untagged on/off: the callers keep their own
@@ -3478,12 +3480,15 @@ menu_formatDtype3(uint8_t dtype, uint8_t value, char *out)
 {
     switch (dtype & 0x0fu) {
     case DTYPE_0B127:
-        /* S099 P2: the Effect Depth (dpt) names 0..2, the Juno modes; every
-         * other 0..127 value, and every untagged row, prints its number */
+        /* S099 P2: the Effect Depth (dpt) names 0..2, the Juno modes; S105
+         * P1 A2: Katran's rte names its step / bar stops; every other
+         * 0..127 value, and every untagged row, prints its number */
         if ((uint8_t)(dtype >> 4) == DTYPE_TAG_FX_DEPTH && value < BBD_DPT_VAR) {
             memcpy(out, fxDepthNames[1u + value], 3);
             return 1u;
         }
+        if ((uint8_t)(dtype >> 4) == DTYPE_TAG_KAT_RATE)
+            return katranParameters_rateName3(value, out);
         return 0u;
     case DTYPE_PM63:
         numtostrps(out, (int8_t)(value - 63));
@@ -5690,6 +5695,11 @@ static uint8_t menu_cellCommitValueEx(const menu_cell_t *cell, uint16_t value,
             IM_SPECIAL_OSC_TYPE) {
             const kit_instrument_slot_t *owner =
                 scene_instrumentSlotConst(scene_getActiveIndex(), cell->slot);
+            /* S105 P1 A8: a Katran's kat_b_type (OSC2) clamps kat_b_wave;
+             * every other typ row clamps osc1_wave */
+            const char *waveKey =
+                ((cell->descriptor->runtime.special & IM_SPECIAL_OSC_MASK) == IM_SPECIAL_OSC2 &&
+                 owner && owner->type == INSTRUMENT_TYPE_KAT) ? "kat_b_wave" : "osc1_wave";
             uint8_t wave_index = INSTRUMENT_PARAM_COUNT;
             uint8_t i;
 
@@ -5700,7 +5710,7 @@ static uint8_t menu_cellCommitValueEx(const menu_cell_t *cell, uint16_t value,
 
                     if (!d)
                         break;
-                    if (strcmp(d->file_key, "osc1_wave") == 0) {
+                    if (strcmp(d->file_key, waveKey) == 0) {
                         wave_index = i;
                         break;
                     }
@@ -12435,8 +12445,14 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
         cell->kind == MENU_CELL_INSTRUMENT && cell->descriptor);
     const uint8_t isOsc1 = (uint8_t)(isInstrument &&
         strcmp(cell->descriptor->file_key, "osc1_wave") == 0);
+    /* S105 P1 A8: Katran's kat_b_wave is named like osc1_wave, by Osc 2's
+     * own type (instrumentManager_katranOsc2Type()); isOscRow covers both */
+    const uint8_t isKatB = (uint8_t)(isInstrument &&
+        strcmp(cell->descriptor->file_key, "kat_b_wave") == 0);
+    const uint8_t isOscRow = (uint8_t)(isOsc1 || isKatB);
     const uint8_t type = isOsc1 ? instrumentManager_osc1Type(cell->slot)
-                                : (uint8_t)OSC_TYPE_WAV;
+                       : (isKatB ? instrumentManager_katranOsc2Type(cell->slot)
+                                 : (uint8_t)OSC_TYPE_WAV);
     char name[SAMPLE_DISPLAY_NAME_LEN + 1u];
     char prefix;
     uint8_t index;
@@ -12501,7 +12517,7 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
      * band-limited rows); under pwm the shared Tri/Saw/Rec branch below names
      * it.
      */
-    if (isOsc1 && type == OSC_TYPE_WAV &&
+    if (isOscRow && type == OSC_TYPE_WAV &&
         (instrumentManager_runtimeEngine(cell->slot) == INSTRUMENT_TYPE_COL ||
          instrumentManager_runtimeEngine(cell->slot) == INSTRUMENT_TYPE_KAT)) {
         if (value < COL_WAVE_COUNT) {
@@ -12539,12 +12555,12 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
      *             the same value as a sample or wavetable index.
      * Accessors:  menu_formatWaveValue3() and the single-parameter painter.
      */
-    if (isOsc1 && type == OSC_TYPE_PWM) {
+    if (isOscRow && type == OSC_TYPE_PWM) {
         if (value < OSC_PWM_WAVE_COUNT)
             memcpy(nameDst, waveformNames[TRI + value + 1u], 3u);
         return;
     }
-    if (isOsc1 && type != OSC_TYPE_WAV) {
+    if (isOscRow && type != OSC_TYPE_WAV) {
         /* osc1 under smp/slp/wtb: the value is the item index. */
         if (type == OSC_TYPE_WTB) {
             if (value >= tables)
@@ -12560,7 +12576,7 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
         /* A stock wave: osc1 under wav, a modulator, or no cell. */
         memcpy(nameDst, waveformNames[value + 1u], 3u);
         return;
-    } else if (isInstrument && !isOsc1) {
+    } else if (isInstrument && !isOscRow) {
         /* A modulator's flat list after the stock waves. */
         const uint16_t entry = (uint16_t)(value - stock);
 
@@ -12858,8 +12874,8 @@ static const char (*menu_onoffTagNames(uint8_t tag))[4]
     case ONOFF_TAG_COL_TYPE:       return colTypeNames;      /* S096 P3 */
     case ONOFF_TAG_TKT_LAYERS:     return tktLayerNames;      /* S096 P1 */
     case ONOFF_TAG_FX_TYPE:        return fxTypeNames;        /* S099 P1/P2 */
-    case ONOFF_TAG_KAT_SOURCE:     return katSourceNames;     /* S103 P1 */
-    case ONOFF_TAG_KAT_LOOP_TYPE:  return katLoopTypeNames;   /* S103 P1 */
+    case ONOFF_TAG_KAT_OSC_TYPE:   return katOscTypeNames;    /* S105 P1 A8 */
+    case ONOFF_TAG_KAT_RING_MODE: return katRingModeNames;   /* S105 P1 A6 */
     default:                    return oscRunNames;
     }
 }
@@ -13040,11 +13056,11 @@ _Static_assert((sizeof(colTypeNames) / sizeof(colTypeNames[0])) - 1u == COL_TYP_
 /* S096 P1: the layer-switch names list every 4-bit mask (TetraktVoice.h). */
 _Static_assert((sizeof(tktLayerNames) / sizeof(tktLayerNames[0])) - 1u == TKT_LAYER_MASK_COUNT,
                "tktLayerNames must list the 16 layer sets");
-/* S103 P1: the Katran lists name every value (KatranVoice.h). */
-_Static_assert((sizeof(katSourceNames) / sizeof(katSourceNames[0])) - 1u == KAT_SRC_COUNT,
-               "katSourceNames must list off, A, B and AB");
-_Static_assert((sizeof(katLoopTypeNames) / sizeof(katLoopTypeNames[0])) - 1u == KAT_LT_COUNT,
-               "katLoopTypeNames must list the six loop filter types");
+/* S103 P1 / S105 P1: the Katran lists name every value (KatranVoice.h KAT_TYPE_*, KAT_RM_*). */
+_Static_assert((sizeof(katOscTypeNames) / sizeof(katOscTypeNames[0])) - 1u == KAT_TYPE_COUNT,
+               "katOscTypeNames must list wav, wtb, pwm and buf");
+_Static_assert((sizeof(katRingModeNames) / sizeof(katRingModeNames[0])) - 1u == KAT_RM_COUNT,
+               "katRingModeNames must list rng, fmA, fmB and fAB");
 /* S099 P1: the chorus lists name every stored value (BbdChorus.h). */
 _Static_assert((sizeof(fxTypeNames) / sizeof(fxTypeNames[0])) - 1u == ADV_FX_COUNT,
                "fxTypeNames must list off and chr (ADV_FX_*)");

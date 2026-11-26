@@ -1,0 +1,10 @@
+katran: loops 297.0 + per block 2655/32 = 380.0
+  OSC B 19/35/27/24  OSC A core A 31/45/42/35  OSC A core B 34/49/46/38  (plain/pwmD/warp/arena)
+  delay A/B 21/21  core A/B 82/88  out 35  (per iteration; the dearer of the plain and drive wrappers, S105 P1)
+
+S105 P1 gate 4 (A6 + A7): the loop PM and Osc 2's self-feedback. From
+gate 3 (372.0) the two cost +8.0 a sample (the plan estimated +7).
+Part A is complete at 380.0, exactly on the gate: no headroom for Part B or
+for 5b (the plan's §C ladder). The delay read and the per-block path were
+fitted by advancing the read position (posq) and the dry index instead of
+rebuilding them, and by hoisting the PM depths, to land on 380.0.

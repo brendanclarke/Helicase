@@ -322,7 +322,7 @@ typedef union {
     AlkalineVoice alkaline;   /* S093 P4: 540 B at r6 (measured); slot reserve 1,264 B */
     ColloidVoice colloid;     /* S095 P3: 1,112 B; S099 P1: 1,224 B (measured); slot reserve 1,264 B */
     TetraktVoice tetrakt;     /* S096 P1: ≈ 1,090 B (est.; asserted below); slot reserve 1,264 B */
-    KatranVoice katran;       /* S103 P1: ≈ 1,104 B (est.; asserted <= 1,200 below); slot reserve 1,264 B */
+    KatranVoice katran;       /* S103 P1; S105 P1: 1,116 B (measured; asserted <= 1,200 below); slot reserve 1,264 B */
     uint8_t reserved[INSTRUMENT_RUNTIME_SLOT_BYTES];
 } InstrumentRuntimeSlot;
 static InstrumentRuntimeSlot runtime_slots[INSTRUMENT_SLOT_COUNT];
@@ -1309,6 +1309,26 @@ static uint8_t instrumentManager_waveDomainMax(uint8_t slot,
     }
     if (descriptor && descriptor->file_key &&
         strstr(descriptor->file_key, "_wave")) {
+        /*
+         * S105 P1 A8: Katran's Osc 2 wave (kat_b_wave) lists its own type's
+         * waves: Saw Rec Tri Sin under wav (COL_WAVE_COUNT, the Colloid's
+         * band-limited rows, as osc1_wave), the platform's three under pwm,
+         * the installed tables under wtb. Without this branch the key falls
+         * to the modulator list below (osc_userListCount()), the wrong range
+         * for the LFO / velocity domain, the menu clamp and automation.
+         */
+        if (strcmp(descriptor->file_key, "kat_b_wave") == 0 &&
+            slot < INSTRUMENT_SLOT_COUNT &&
+            instrumentManager_slotType(slot) == INSTRUMENT_TYPE_KAT) {
+            const KatranVoice *kat = instrumentManager_katranRuntime(slot);
+            const uint8_t t = kat ? kat->bOscType : (uint8_t)OSC_TYPE_WAV;
+            uint8_t count;
+
+            if (t == OSC_TYPE_WAV)
+                return (uint8_t)(COL_WAVE_COUNT - 1u);
+            count = osc_userCount(t);
+            return count ? (uint8_t)(count - 1u) : 0u;
+        }
         if (strcmp(descriptor->file_key, "osc1_wave") == 0 &&
             slot < INSTRUMENT_SLOT_COUNT) {
             const OscInfo *osc = instrumentManager_osc(slot, "osc1_wave");
@@ -1391,6 +1411,28 @@ uint8_t instrumentManager_osc1Type(uint8_t slot)
     const OscInfo *osc = instrumentManager_osc(slot, "osc1_wave");
 
     return osc ? osc->oscType : (uint8_t)OSC_TYPE_WAV;
+}
+
+/*
+ * A Katran slot's Osc 2 table type (S105 P1 A8).
+ *
+ * What:       OSC_TYPE_WAV / _WTB / _PWM of the slot's Katran Osc 2
+ *             (bOscType), or OSC_TYPE_WAV for any other slot or type.
+ * Why:        Menu names kat_b_wave's values by Osc 2's type
+ *             (menu_formatWaveCell()), as it names osc1_wave's by
+ *             instrumentManager_osc1Type(), without owning the runtime.
+ * Inputs:     slot.  Outputs: type.
+ * Accessors:  menu_formatWaveCell().
+ */
+uint8_t instrumentManager_katranOsc2Type(uint8_t slot)
+{
+    const KatranVoice *kat;
+
+    if (slot >= INSTRUMENT_SLOT_COUNT ||
+        instrumentManager_slotType(slot) != INSTRUMENT_TYPE_KAT)
+        return (uint8_t)OSC_TYPE_WAV;
+    kat = instrumentManager_katranRuntime(slot);
+    return kat ? kat->bOscType : (uint8_t)OSC_TYPE_WAV;
 }
 
 static uint8_t instrumentManager_descriptorIsSlotDecimationTarget(
@@ -3216,9 +3258,9 @@ uint8_t instrumentManager_cellInactive(uint8_t slot, const ParamDescriptor *desc
 
         return alk ? alkalineParameters_cellInactive(alk, descriptor) : 0u;
     }
-    /* S103 P1: Katran's dimmed cells (katranParameters_cellInactive(): dmp
-     * while src is off; pos under wav when src does not read the arena with
-     * that oscillator) */
+    /* S103 P1 / S105 P1 A8: Katran's dimmed cells (katranParameters_cellInactive():
+     * dmp while neither oscillator is buf; each pos and wav by its own
+     * oscillator's type) */
     if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_KAT) {
         const KatranVoice *kat = instrumentManager_katranRuntime(slot);
 
@@ -5526,6 +5568,25 @@ static uint8_t instrumentManager_writeSpecialRuntime(
          * Affiliates: osc_setType(), Alkaline_setOscType(); the osc1_type
          *             rows; S087 P0 §12.5, S093 P8.
          */
+        /*
+         * S103 P1 / S105 P1 A8: a Katran's typ writers. osc1_type (OSC1) ->
+         * Katran_setOscType() (wav / wtb / pwm, and buf: Osc 1 reads the
+         * arena); kat_b_type (OSC2) -> Katran_setOscBType(). Handled before
+         * the OscInfo lookup: Osc 2 has no OscInfo (the lookup returns NULL
+         * for OSC2), and both writers work on the voice. The wave rows'
+         * ranges are refreshed as for every type.
+         */
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_KAT) {
+            KatranVoice *kat = instrumentManager_katranRuntime(slot);
+
+            if (!kat) return 0u;
+            if ((special & IM_SPECIAL_OSC_MASK) == IM_SPECIAL_OSC2)
+                Katran_setOscBType(kat, byteValue);
+            else
+                Katran_setOscType(kat, byteValue);
+            instrumentManager_waveDomainChanged(slot);
+            return 1u;
+        }
         OscInfo *osc = instrumentManager_oscBySelector(
             slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
         if (!osc) return 0u;
@@ -5540,12 +5601,6 @@ static uint8_t instrumentManager_writeSpecialRuntime(
 
             if (!col) return 0u;
             Colloid_setOscType(col, byteValue);
-        } else if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_KAT) {
-            /* S103 P1: the Katran's typ (wav / wtb / pwm, alkTypeNames) */
-            KatranVoice *kat = instrumentManager_katranRuntime(slot);
-
-            if (!kat) return 0u;
-            Katran_setOscType(kat, byteValue);
         } else {
             osc_setType(osc, byteValue);
         }

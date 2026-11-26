@@ -7,7 +7,8 @@ What:       from the linked ELF (the tetrakt_cpu.py / colloid_cpu.py method):
               per-sample loops, each at its longest path, per full-rate
               output sample:
                 kat_delayReadA + kat_delayReadB / 2
-                + kat_coreRenderA + kat_coreRenderB / 2
+                + max(kat_coreRenderA, kat_coreRenderAD)
+                + max(kat_coreRenderB, kat_coreRenderBD) / 2
                 + kat_outRender
                 + the dearest OSC B form
                 + the dearest core A OSC A form (kat_a*CoreA)
@@ -18,7 +19,7 @@ What:       from the linked ELF (the tetrakt_cpu.py / colloid_cpu.py method):
               Katran_calcVoiceSyncBlock (straight path) + the out-of-line
               helpers it calls (kat_oscControl, kat_delayControl,
               kat_runControl, kat_plfoStep, kat_ceStep x2, kat_ceStart x2,
-              kat_svfControl x2 (F1 only: F3 is inline since L1),
+              kat_bandControl x2 (S105 P1: the band, F1 + F2; F3 inline),
               kat_stereoTargets (S103 P4),
               kat_guardUpdate x3 with its 4 + 4 + 2 loop iterations) + the
               entry/exit path of each loop function that runs in a block: the
@@ -49,8 +50,8 @@ B_FORMS = ('kat_bPlain', 'kat_bPwmD', 'kat_bWarp', 'kat_bArena')
 # S103 P4: the cores are A (full rate) and B (half rate); formerly *L / *H
 AL_FORMS = ('kat_aPlainCoreA', 'kat_aPwmDCoreA', 'kat_aWarpCoreA', 'kat_aArenaCoreA')
 AH_FORMS = ('kat_aPlainCoreB', 'kat_aPwmDCoreB', 'kat_aWarpCoreB', 'kat_aArenaCoreB')
-CORE = ('kat_delayReadA', 'kat_delayReadB', 'kat_coreRenderA', 'kat_coreRenderB',
-        'kat_outRender')
+CORE = ('kat_delayReadA', 'kat_delayReadB', 'kat_coreRenderA', 'kat_coreRenderAD',
+        'kat_coreRenderB', 'kat_coreRenderBD', 'kat_outRender')
 PER_SAMPLE = CORE + B_FORMS + AL_FORMS + AH_FORMS
 
 
@@ -107,10 +108,13 @@ def main():
     b_max, al_max, ah_max = max(b[:3]), max(al[:3]), max(ah[:3])
     arena_ok = all(s[3] <= max(s[1], s[2]) for s in (b, al, ah))
 
+    core_a = max(longest(a.elf, 'kat_coreRenderA'),
+                 longest(a.elf, 'kat_coreRenderAD'))
+    core_b = max(longest(a.elf, 'kat_coreRenderB'),
+                 longest(a.elf, 'kat_coreRenderBD'))
     per_sample = (longest(a.elf, 'kat_delayReadA')
                   + longest(a.elf, 'kat_delayReadB') / 2.0
-                  + longest(a.elf, 'kat_coreRenderA')
-                  + longest(a.elf, 'kat_coreRenderB') / 2.0
+                  + core_a + core_b / 2.0
                   + longest(a.elf, 'kat_outRender')
                   + b_max + al_max + ah_max / 2.0)
     blk = (B.block_path(a.elf, 'Katran_calcVoiceAsync')[0]
@@ -122,7 +126,7 @@ def main():
     for s, mult in (('kat_oscControl', 1), ('kat_delayControl', 1),
                     ('kat_runControl', 1), ('kat_plfoStep', 1),
                     ('kat_ceStep', 2), ('kat_ceStart', 2),
-                    ('kat_svfControl', 2), ('kat_guardUpdate', 3),
+                    ('kat_bandControl', 2), ('kat_guardUpdate', 3),
                     # S103 P4: the stereo matrix targets (out of line: the
                     # init shares it), once a block from the async
                     ('kat_stereoTargets', 1)):
@@ -134,8 +138,13 @@ def main():
             elif s == 'kat_oscControl':
                 if loops(a.elf, s):
                     blk += 3 * longest(a.elf, s)
-    for s in CORE:
-        blk += B.block_path(a.elf, s)[0]
+    blk += (B.block_path(a.elf, 'kat_delayReadA')[0]
+            + B.block_path(a.elf, 'kat_delayReadB')[0]
+            + max(B.block_path(a.elf, 'kat_coreRenderA')[0],
+                  B.block_path(a.elf, 'kat_coreRenderAD')[0])
+            + max(B.block_path(a.elf, 'kat_coreRenderB')[0],
+                  B.block_path(a.elf, 'kat_coreRenderBD')[0])
+            + B.block_path(a.elf, 'kat_outRender')[0])
     for names in (B_FORMS, AL_FORMS, AH_FORMS):
         blk += max(B.block_path(a.elf, s)[0] for s in names)
     total = per_sample + blk / FRAMES
@@ -159,7 +168,7 @@ def main():
           f'OSC A core A {al[0]}/{al[1]}/{al[2]}/{al[3]}  '
           f'OSC A core B {ah[0]}/{ah[1]}/{ah[2]}/{ah[3]}  (plain/pwmD/warp/arena)')
     print(f'  delay A/B {longest(a.elf, "kat_delayReadA")}/{longest(a.elf, "kat_delayReadB")}  '
-          f'core A/B {longest(a.elf, "kat_coreRenderA")}/{longest(a.elf, "kat_coreRenderB")}  '
+          f'core A/B {core_a}/{core_b}  '
           f'out {longest(a.elf, "kat_outRender")}  (per iteration)')
     sys.exit(1 if fail else 0)
 

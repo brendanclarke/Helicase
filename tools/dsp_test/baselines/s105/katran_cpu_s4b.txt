@@ -1,0 +1,17 @@
+katran: loops 297.0 + per block 2654/32 = 379.9
+  OSC B 19/35/27/24  OSC A core A 31/45/42/35  OSC A core B 34/49/46/38  (plain/pwmD/warp/arena)
+  delay A/B 21/21  core A/B 82/88  out 35  (per iteration)
+
+S105 P1 review fixes (§12 of S105_P1_IMPLEMENTATION.md). From katran_cpu_s4.txt
+(380.0, really 2,655 / 32 = 379.97):
+  R-2  the delay read's per-sample time ramp restored: +8 a block (the
+       step's conversion, 4 a core, which the first step-4 form had let the
+       compiler drop with the ramp); loops unchanged (297.0);
+  R-1  the shape warp on the inverted output: +1 a block;
+  then, to pay for them with no change to the sound:
+       kat_bandTargets() computes both cores at once: -6 a block
+       (Katran_calcVoiceAsync 967 -> 961);
+       the band's ramp ends written back by the core loop, not re-derived
+       in kat_bandControl(): -4 a block net (kat_bandControl 125 -> 121
+       twice, the core wrappers +2 each).
+  Net 2,655 -> 2,654 a block: 379.94, under the 380 gate.

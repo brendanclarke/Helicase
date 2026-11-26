@@ -1,0 +1,10 @@
+sizeof(KatranVoice) = 1,084 B at gate 1; 1,116 B final (S105 P1 complete)
+
+Measured 2026-11-26 at S105 P1 gate 1 (the band + A8 landed; gate 1,200 B,
+slot reserve 1,264 B). Before S105 P1: 1,104 B. The band freed 36 B
+(KatSvf f1[2] 104 B + f2x[2] 8 B + f2K 4 B -> KatBand 80 B); A8 took 16 B
+(aBuf, bOscType, bBind*, padding).
+
+Method: arm-none-eabi-gcc -x c - with "char katran_probe[sizeof(KatranVoice)];"
+and the Makefile's include paths; arm-none-eabi-nm -S reports 0x43c at gate 1
+and 0x45c final (the PM depths and Osc 2's feedback state, +32 B).

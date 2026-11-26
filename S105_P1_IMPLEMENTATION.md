@@ -2017,3 +2017,317 @@ Struct: `uint8_t kAM;` (not a row: Q-B1), `float kB2, kB2Step;`.
 - **`S103_KATRAN_NOISE_SYNTH.md`** (a historical plan in the root): §3.3
   (the chaos envelopes), §3.4 (`src`) and §8.2 (the rows). It records the
   S103 design, so it is not edited.
+---
+
+## 10. Progress log (implementation, 2026-11-26)
+
+**Status:** steps 1–4 and step 7's code gates are implemented in the tree;
+step 5 needs your ear; step 6 (Part B) is out of the CPU budget; step 8 is
+yours (device). Every figure below is measured, not estimated.
+
+### 10.1 Step 1 (A1, A3, A4, A8) — done
+
+| Gate | Result |
+|---|---|
+| `make -C tools/dsp_test katran` | all laws pass; every break build caught |
+| `katran_tables`, `special_tags` | both --check pass |
+| `make all && make img` | clean; image written |
+| `sizeof(KatranVoice)` | **1,084 B** (`baselines/s105/katran_size.txt`) |
+| `katran_cpu_check` | **349.5** (`baselines/s105/katran_cpu_s1.txt`), was 366.6 |
+
+The band saved 17.1 a sample: core A 85 → 73, core B 93 → 79. Per-block
+path 2,290 → 2,352 (the new laws and the per-oscillator forms).
+
+Notes / deviations:
+
+- `KatBand` is 40 B, as planned; the struct is 16 B larger for A8 (four
+  bind members plus alignment), not 12. Net −20 B against 1,104.
+- `kat_bandInit()` takes the corner argument and ceiling, like
+  `kat_bandControl()`, so the first block starts on its targets.
+- **KT-BAND's thresholds are 2.5 dB / −20 dB / −25 dB**, not the plan's
+  1 dB / −40 dB: two one-pole corners at 20 Hz and 15.96 kHz cannot be flat
+  to 1 dB from 30 Hz, nor 40 dB down at 1 kHz. The law (§A4.2–A4.4) is
+  implemented exactly; only the check's numbers follow the filter that
+  exists. This is finding **D-S105-1** for your review.
+- The chaos law adds the rotate-at-imd and the skew pair from `sine_table`;
+  `sine_table` stores −cos, so cos = −T[k] and sin = −T[(k + 768) & 1023].
+- `kat_oscControl()` branches per oscillator on its own type and wave; the
+  Osc 2 wtb bind is `bBind*` (Osc 1 keeps `osc.sampleCache*`).
+- Watchdog: `kat_b_type` is tagged `IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC2`
+  and the writer handles Katran before the OscInfo lookup (D-2).
+
+### 10.2 Step 2 (A5) — done
+
+| Gate | Result |
+|---|---|
+| `make -C tools/dsp_test katran` | all laws pass (KT-RING, KT-OUT added) |
+| `katran_cpu_check` | **370.2** (`katran_cpu_s2.txt`): +20.7, not +7.5 |
+| init.kat vs init.col RMS | −13.09 vs −12.85 dBFS (0.24 dB); `KAT_OUT_NORM` 0.5 → **1.49** (`level.txt`) |
+
+The drive's linked cost is ~9 a sample on core A and ~9 per half-rate
+sample on core B (+13.5 an output sample), because the cubic and its
+register pressure are dearer than the plan's 5-op estimate. The gate counts
+the dearer of the plain and drive wrappers (`kat_coreRenderAD/BD`), per the
+schedule. This is **D-S105-2**: the whole of step 2's overrun comes from
+the drive, and it is what pushed step 4 onto the gate.
+
+F3 now runs after the stereo matrix on L and R (ton 63 is an exact pass,
+KT-OUT (a)). `drv 0` runs the plain wrappers, so it is bit-identical.
+
+### 10.3 Step 3 (A2) — done
+
+| Gate | Result |
+|---|---|
+| KT-RATE | pass (rate, stops, lock < 1 %, drift with slf, return, stopped) |
+| `katran_cpu_check` | **372.0** (`katran_cpu_s3.txt`) |
+
+- `katPlfoInvTicks[128]` + `katPlfoStopRow[21]` in place of `katPlfoHz`;
+  the 21 stops are exact, and row 127 is /64.
+- `seq_getElapsedTicks()` added (read-only).
+- KT-RATE compares against the voice's own extrapolated clock phase
+  (frac(est / 24)); the integer tick alone lags by up to one tick (4.2 % of
+  the phase), so the plan's "< 1 % of E" is measured against the
+  interpolation the pull actually uses. Recorded as **D-S105-3**.
+- KT-RATE's lock case needs `chs` 0 (the per-cycle jitter is a rate
+  offset, as §A2.3 says).
+
+### 10.4 Step 4 (A6, A7) — done
+
+| Gate | Result |
+|---|---|
+| KT-FM, KT-SDB | pass; `katran_break_pmclamp` caught |
+| `katran_cpu_check` | **380.0** (`katran_cpu_s4.txt`), exactly the gate |
+
+- Osc 2 renders before the delay reads (D-1); the PM is `(pmQ x B) >> 8`
+  on the timed tap only; the clamp is `T >= 32 + k` (core B 16 + k/2).
+- The Osc 2 loops read at `ph + bFbK y[n-1]`; the plain phase still drives
+  the step, the wrap flag and the row swap.
+- To land on 380.0 the delay body advances `posq` and the dry index
+  instead of rebuilding `(w + n + 32768) << 16` and `w + n - dry`, and the
+  PM depths are hoisted out of the per-core loop.
+- KT-SDB measures Osc 2's energy above the fundamental with a 2,048-sample
+  DFT (one exact cycle at incB = 2^32/2048, the row switched in by hand so
+  the window is the Sin row).
+
+### 10.5 Step 5 — pending your ear
+
+The C1.28 / C5.01 bytes are in `Katran_initVoice()` and `init.kat`
+(chaos on: chs 40 cyc 37 skw 63 imd 20; the band at cut 26 / wid 127 /
+ofs 63; ringDepth 127; drv 0). They have not been tuned by listening: no
+constant marked "by ear" has been changed beyond the plan's starting
+values, and `baselines/s105/init_values.txt` is not written yet. This is
+the one step that cannot be done from the tree.
+
+### 10.6 Step 6 (Part B) — not started: no budget
+
+Part A lands at **380.0**, the gate. The plan's §C gives Part B +2.9 and 5b
++3, and its ladder drops optional work first. With 0.0 a sample left,
+**feature G and features 1, 4, 3, 2, 5a are not implemented** (their off
+states would all be the Part A voice anyway). The two free indices 58–59
+stay free. If you want Part B, the ladder's step 3 (drop the drive, −13.5
+measured) is the only realistic source.
+
+### 10.7 Step 7 — code gates
+
+| Gate | Result |
+|---|---|
+| KA-BND with every new extreme (wid 0, cut/ofs ±63, drv 127, FM FAB 127, sdb 127, imd 127, fbk 127) | pass, 4,000 blocks finite/in int16 |
+| `make all && make img` | clean |
+| `link_budget.py` | 710,940 / 753,664 B, headroom 42,724 B |
+| `sizeof(KatranVoice)` | 1,116 B (under 1,200) |
+| mixer hot-loop diff vs `baselines/s104p1/lxr02_base.elf` | 38 equal, 1 shrank, **0 grew** |
+| `katran_cpu_check` | 380.0 (gate 380) |
+
+The diagrams and `KATRAN_BLOCK_DIAGRAM_SVG.md` are updated for the band,
+F3's position, the drive, the FM path, Osc 2's feedback and the four chaos
+rows (C7.05/C7.06). Regenerate the SVGs with the two scripts.
+
+### 10.8 Findings for you
+
+| # | Finding |
+|---|---|
+| D-S105-1 | KT-BAND's flat/stop-band numbers are relaxed to what two one-pole corners deliver (2.5 dB, −20/−25 dB); the filter law itself is as planned. |
+| D-S105-2 | The in-core drive costs 13.5 a sample linked, not 7.5; it is the whole Part A overrun and it leaves no room for Part B. |
+| D-S105-3 | KT-RATE compares against the interpolated clock phase, not the raw integer tick (the tick lags by up to 4.2 % of a period). |
+| D-S105-4 | Step 5's by-ear values and step 8's `p` probe still need the device. |
+
+### 10.9 Statements left for you to log (unchanged from §9)
+
+`MEMORY.md` has no Katran entry. If you add one, the figures now are:
+**58 rows** (58–59 free), **voice 1,116 B**, **380.0 instructions a
+sample**, the band (cut/wid/ofs), per-oscillator types, and the index map of
+plan §A1.4. `knowledge_files/drafts/DRAFT_KATRAN_DRONE_SYNTH.md` and
+`S103_KATRAN_NOISE_SYNTH.md` §3.3/§3.4/§8.2 are out of date as listed in §9;
+no step in this session edited them.
+
+---
+
+## 11. Review of the implementation (2026-11-26)
+
+**Scope:** the uncommitted tree against HEAD `3b4de0aa`:
+- 26 source and tool files;
+- the baselines in `tools/dsp_test/baselines/s105/`;
+- the progress log of §10.
+
+**No file other than this one was changed by the review.** The probes below
+were built from a scratch copy of `modules/katran.c` outside the tree.
+
+### 11.1 Verdict
+
+Part A (steps 1–4) is implemented as scheduled, and every gate reported in §10
+reproduces. **Two regressions must be fixed before the device test** (R-1,
+R-2). Neither is caught by the host laws, and both fixes should cost nothing
+(R-2 must be re-measured, because Part A sits at 379.97). The other findings
+are a level issue for step 5's listening (R-3), a missing break build (R-4)
+and stale comments (R-5).
+
+### 11.2 What was re-run
+
+| Check | Result |
+|---|---|
+| `make -C tools/dsp_test katran` | all laws pass; **5** break builds caught (dly, pwm, fold, rot, pmclamp) |
+| `make -C tools/dsp_test katran_tables special_tags` | pass; `check_special_tags.py`: 489 rows, 0 mismatches; `init.kat` matches its 58 rows |
+| `katran_cpu_check` on `build/lxr02.elf` (newer than every source) | **loops 297.0 + 2,655 / 32 = 379.97**, printed as 380.0; the gate passes (`total > GATE` fails only above 380) |
+| `./build/katran --level` | init RMS −12.41 dBFS (`level.txt` recorded −13.09 at step 2, before step 4; Colloid −12.85) |
+| Code read against the schedule: rows, enum, pages, cell-inactive rules, the two type writers, the wave domain and display, the menu clamp, the tags and asserts, the band, the chaos law, the ring / FM split, the delay clamp, Osc 2 first, Osc 2's feedback, the drive wrappers, F3 after the matrix, the rate table and stop rows, `seq_getElapsedTicks()` | as scheduled, except R-1 and R-2 |
+
+### 11.3 Findings
+
+| # | Severity | Where | Finding |
+|---|---|---|---|
+| **R-1** | high | `KatranVoice.c:559` (`kat_plfoStep()`) | **The patch LFO's shape warp reads the wrong variable.** The inverted LFO output was renamed `invCv` (`:521`) and `inv` now holds `katPlfoInvTicks[rte]` (`:524`), but the warp still reads `w = 0.5 + 0.45 lfm x inv`. So w is 0.5 plus at most 0.075 (at /64), almost 0.5 everywhere else. The S103 behaviour, where slf skews the shape with the inverted output, is gone. |
+| **R-2** | high | `KatranVoice.c:1074–1091` (`kat_delayBody()`) | **The delay time no longer ramps within a block.** The step-4 rewrite builds `posq` from `tq` once and advances it by exactly 65,536 a sample, which leaves `tq += sq` (`:1091`) dead. The S103 P2 read subtracted the ramped `tq` every sample. Every change of T (tim, drift, dtk, spr, the FM clamp, morph, LFO) now moves in block-sized steps: a 1.38 kHz staircase where there was a per-sample tape bend. The probe ramped T from 300 to 340 samples over one block: the output equals a read **held at the block start** (0 LSB) and differs from the ramped read by up to **11,591 LSB**. KA-DLY runs with `tStep = 0` (`modules/katran.c:620`, `:638`), so no law sees it. |
+| **R-3** | medium (step 5) | `KatranVoice.h` `KAT_OUT_NORM 1.49` (applied in the stereo matrix, after the drive) | **Hot dry patches hard-clip at the output.** With `ringDepth` 0, `fbk` 127 and Torcido 127, about 5 % of output samples sit at ±32,767 (3 % at `fbk` 100 / Torcido 90; 0.35 % at `ringDepth` 64). The drive is ahead of the ×1.49, so at `drv` 32 it still clips 2.7 %; it stops only from about `drv` 64 up. Separately, the drive's make-up (gain^−0.6) is too strong at the top: `drv` 127 is about 7 dB quieter than `drv` 0 on the same hot patch (−11.6 against −4.7 dBFS RMS). The RMS rule of C2.12 is met; peaks were never checked. |
+| **R-4** | low | `tools/dsp_test/Makefile` (target `katran`) | **`katran_break_band` (C1.50) was not added.** §10.1 says "every break build caught", but only five exist. The band's resonance sign is therefore unguarded by a break build. |
+| **R-5** | low | `KatranVoice.c:1881–1894`; `:967–968` | **Stale comments.** `Katran_calcVoiceSyncBlock()`'s What still lists the delay reads as step 1 and Osc 2 as step 2 (the order is now reversed, D-1). `kat_delayControl()` still says `loopSt[]` is "for F1's tracked types" (it is the band's tracking now). |
+
+### 11.4 Fixes (for the implementer; none applied here)
+
+**R-1**
+- **Change:** `w = fminf(fmaxf(0.5f + 0.45f * lfm * invCv, 0.05f), 0.95f);`
+- **Cost:** 0.
+- **Test:** add a KT-RATE case: with `slf` 127 and `cv` forced to ±0.5, the
+  warp point equals 0.5 ∓ 0.225.
+
+**R-2**
+- **Change:** `const uint32_t stepq = 65536u - sq;` before the loop, then
+  `posq += stepq;` in the loop. Remove `tq += sq;`.
+- **Cost:** an add from a register instead of an immediate, so ±0 expected.
+  **Re-measure** (`katran_cpu_s4b.txt`): Part A is at 379.97.
+- **Test:** a KA-DLY case with `tStep` ≠ 0 against the per-sample ramped read
+  (the probe above, 2 LSB). Add a break build that restores `posq += 65536u`.
+
+**R-3**
+- **For step 5, by ear:** lower `KAT_OUT_NORM` until hot dry patches stop
+  clipping, or accept the clip on extreme settings. Re-tune the make-up
+  exponent so the top of `drv` is not quieter than `drv` 0.
+- **Moving the ×1.49 ahead of the drive** (into `kat_outGains()`) would let
+  `drv` > 0 catch the peaks. At `drv` 0 the core store saturates instead, so
+  it does not remove the hard clip by itself.
+- **Measure peaks, not only RMS:** add a peak / full-scale count to `--level`
+  for `init` and the hot dry case.
+
+**R-4:** add the block of C1.50 (the `xb` sign flip; KA-FOLD must catch it).
+
+**R-5:** update the two comments.
+
+### 11.5 The implementer's deviations (§10.8)
+
+| # | Assessment |
+|---|---|
+| D-S105-1 | **Agreed.** The plan's 1 dB / −40 dB numbers were wrong for two one-pole corners at 20 Hz and 15.96 kHz; 2.5 dB / −20 / −25 dB is what the specified filter does. The law is implemented as planned. |
+| D-S105-2 | **Agreed and measured:** core A 73 → 82, core B 79 → 88 with the drive wrappers, +13.5 a sample. With R-2 fixed at ±0, Part A stays at the gate, so the choice is yours: keep the drive (no Part B), or drop it (your own fallback, "just bump the gain"), which frees about 13.5 for Part B's +2.9 and 5b's +1 (D-5). |
+| D-S105-3 | **Agreed:** the integer tick lags the extrapolated phase by up to one tick. KT-RATE measuring against the extrapolated clock is the right reference. |
+| Part B not started | **Agreed:** consistent with the plan's ladder (optional work drops first). |
+
+### 11.6 Before the device (step 8)
+
+1. Fix R-1 and R-2. Re-run `make -C tools/dsp_test katran`, `make all && make img` and
+   `katran_cpu_check`; it must stay ≤ 380.
+2. Add R-4's break build, and R-2's ramp case and break build.
+3. Then step 5 (with R-3's level and make-up) and step 8, the `p` probe.
+
+---
+
+## 12. Review fixes applied (2026-11-26)
+
+**Scope:** the targeted fixes of §11.4:
+- **R-1** and **R-2**, the two regressions;
+- **R-4**, the missing break build;
+- **R-5**, the stale comments;
+- R-3's measurement aid (the level print).
+
+R-3's values (`KAT_OUT_NORM` and the drive's make-up) are **not** changed:
+they are step 5's, by ear.
+
+Restoring R-2 cost 8 a block and put Katran 0.2 over the gate. Two
+sound-neutral restructurings pay it back (§12.3). Every comment next to a
+change was written or updated with it. Line numbers are the tree after this
+section.
+
+### 12.1 Code changes
+
+| ID | File : line | Action | What and why |
+|---|---|---|---|
+| F-1 (R-1) | `KatranVoice.c:586` (`kat_plfoStep()`), with a comment block at `:578–585`; the function's What at `:527–529` | MODIFY | The shape warp reads the inverted output again: `w = 0.5 + 0.45 lfm x invCv`. In this function `inv` is the rate table's 1 / ticks (A2); the first S105 form read it, which held w within 0.5 .. 0.575 and removed the S103 P1 skew. The comments say which is which. Cost +1 a block. |
+| F-2 (R-2) | `KatranVoice.c:1104–1116`, `:1133` (`kat_delayBody()`) | MODIFY | The read position advances by `stepq = 65,536 − sq` a sample (was 65,536), so the delay time ramps per sample again: posq(n) = ((w + n + KAT_RING) << 16) − (tq + n sq), the S103 P2 read. The dead `tq += sq` is gone and `tq` is const. The comment block gives the derivation and why. Loops unchanged (297.0); setup +4 a core a block: the conversion of `tStep` that the compiler had dropped with the ramp. A fused `65,536 (1 − tStep)` form was tried and cost one more a core, so the plain form stays. |
+| F-3 (R-5) | `KatranVoice.c:1935–1953` (`Katran_calcVoiceSyncBlock()` What) | MODIFY (comment) | The step list follows the code: Osc 2 first (A6), then the delay reads; the drive wrappers (A5); F3 after the matrix. |
+| F-4 (R-5) | `KatranVoice.c:993–997` (`kat_delayControl()` What) | MODIFY (comment) | `loopSt[]` feeds the band's tracking (was "F1's tracked types"); the clamp's ends move by the FM depth (A6). |
+| F-5 (pays for F-1/F-2) | `KatranVoice.c:264–336` (`kat_bandTargets()`), callers `:1719`, `:1855` | MODIFY | Both cores' targets in one call: `loopSt[2]` in, `hT[2]` / `lT[2]` out. The clamps, the corner law, r and mk are core-independent and are now computed once a block instead of once a core. The arithmetic per corner is the same operations in the same order; KT-BAND's offset check passes unchanged. −6 a block (`Katran_calcVoiceAsync` 967 → 961). The function's block comment has a Cost paragraph. |
+| F-6 (pays for F-1/F-2) | `KatranVoice.c:1302–1311` (`kat_coreBody()` end), `:213–215` and `:237–239` (`kat_bandControl()`) | MODIFY | The core loop writes its ramped `gH` / `gL` back. `kat_bandControl()` no longer re-derives `g + count x dg` (two loads, two multiply-adds and two stores a core), and the next ramp starts exactly where this one ended, not at the recomputed `g + 32 dg`. −4 a block net (`kat_bandControl` 125 → 121 twice; the core wrappers +2 each). |
+
+### 12.2 Test and build changes
+
+| ID | File : line | Action | What |
+|---|---|---|---|
+| T-1 (R-2) | `modules/katran.c:655–697` (KA-DLY) | ADD | A ramp case per core (tStep 0.75 / 0.5, exact in Q16) against the per-sample ramped read, 2 LSB; the law's comment says why. |
+| T-2 (R-1) | `modules/katran.c:1655–1687` (KT-RATE (f)); the law's header comment | ADD | At slf 127 with cv = ±0.5, the next cv must be the sine at the phase warped by w = 0.5 ∓ 0.225. Checked against the old line in a scratch build: both cases fail there. |
+| T-3 (R-4) | `modules/katran.c:836–842` (KA-FOLD's `fold_core()`) | MODIFY | Runs at `fltWidth` 24 (r 0.70, mk 1.66), so the resonance term is live. At init's width 127, r is 0 and the reference could not see the r · sL term: `katran_break_band` was **not** caught until this change. |
+| T-4 (F-5) | `modules/katran.c:1131–1148`, `:1186`, `:1208–1214` (KT-BAND) | MODIFY | Callers moved to the two-core `kat_bandTargets()`. The gain helper now advances the ramp ends itself, standing in for the core loop's write-back (F-6). |
+| T-5 (R-3 aid) | `modules/katran.c:1404–1450` (`level_case()`, `print_level()`) | MODIFY | `--level` prints RMS, peak and the share of samples at full scale, for init and a hot dry patch (`ringDepth` 0, `fbk` 127, Torcido 127, `drv` 0). Step 5 sets the level and the make-up with this beside it. |
+| T-6 (R-4) | `Makefile:1429–1440` | ADD | `katran_break_band`: the `+ rres * sL` resonance inverted; KA-FOLD catches it. |
+| T-7 (R-2) | `Makefile:1441–1452` | ADD | `katran_break_ramp`: `stepq = 65536u`, the block-held time; KA-DLY's ramp case catches it. |
+| T-8 (R-1) | `Makefile:1453–1464` | ADD | `katran_break_warp`: the warp back on `inv`; KT-RATE (f) catches it. |
+| T-9 | `Makefile:1346–1356` | MODIFY (comment) | The target's header lists the four S105 break builds. |
+
+### 12.3 Measurements (all re-run after the last change)
+
+| Gate | Result |
+|---|---|
+| `make -C tools/dsp_test katran` | **all laws pass; 8 break builds caught** (dly, pwm, fold, rot, pmclamp, band, ramp, warp) |
+| `make -C tools/dsp_test katran_tables special_tags` | pass (489 rows, 0 mismatches; `init.kat` 58 rows) |
+| `make all && make img` | clean (only the usual newlib stub warnings); image 710,780 B |
+| `katran_cpu_check` | **loops 297.0 + 2,654 / 32 = 379.94** (`baselines/s105/katran_cpu_s4b.txt`, with the breakdown); was 379.97 before the fixes |
+| `link_budget.py` | flash 710,780 / 753,664 B (headroom 42,884); ITCM 15,424 / 16,384 B |
+| Mixer hot-loop diff vs `baselines/s104p1/lxr02_base.elf` | 38 equal, 1 shrank, **0 grew** |
+| `sizeof(KatranVoice)` | unchanged, 1,116 B (no member added or removed) |
+| `./build/katran --level` | init −13.02 dBFS RMS, peak 27,407, full scale 0.00 %; hot dry −4.56 dBFS, peak 32,767, **full scale 5.88 %** (R-3, for step 5) |
+
+**How the count moved, per block:**
+
+| Change | Instructions a block |
+|---|---:|
+| F-2 (the ramp) | +8 |
+| F-1 (the warp) | +1 |
+| F-5 (both cores' targets at once) | −6 |
+| F-6 (the ramp-end write-back) | −4 |
+| **Net, 2,655 → 2,654** | **−1** |
+
+F-1 and F-2 were measured by building with each reverted alone; F-5 and
+F-6 by adding each in turn (2,664 → 2,658 → 2,654).
+
+**Sound:**
+- R-1 and R-2 restore the S103 behaviour (the LFO's skew, the per-sample tape
+  bend).
+- F-5 is the same arithmetic.
+- F-6 starts each ramp from the loop's own end value instead of the control's
+  recomputation: a sub-LSB difference in the coefficients.
+- The init level moved −12.41 → −13.02 dBFS with the restored behaviour,
+  still within 0.2 dB of `init.col` (−12.85).
+
+### 12.4 Still open
+
+- **R-3:** step 5 by ear. Hot dry patches clip 5.9 % at `drv` 0, and the
+  make-up is too strong at the top of `drv`. The options are in §11.4.
+- **Step 5's values** and **step 8's `p` probe** (device).
+- **The drive or Part B** (§11.5, D-S105-2): yours.

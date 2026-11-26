@@ -1,0 +1,10 @@
+katran: loops 287.5 + per block 2648/32 = 370.2
+  OSC B 20/30/26/24  OSC A core A 31/45/42/35  OSC A core B 34/49/46/38  (plain/pwmD/warp/arena)
+  delay A/B 18/18  core A/B 82/88  out 35  (per iteration; the dearer of the plain and drive wrappers, S105 P1)
+
+S105 P1 gate 2 (A5). From gate 1 (349.5): the drive wrappers, the
+crossfade gains and F3 after the matrix cost +20.7 a sample. The plan
+estimated +7.5 for the drive and 0 for the rest; the linked count is the
+authority (the gate counts core A 82 vs 73 and core B 88 vs 79, plus the
+per-block growth from the drive's constants). Still under the 380 gate;
+steps 3 and 4 must fit in about 9.8.

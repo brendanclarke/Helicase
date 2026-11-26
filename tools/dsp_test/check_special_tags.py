@@ -57,6 +57,11 @@ ROW = re.compile(r'^\s*(ROW[A-Z_]*)\("([^"]+)"(.*)\),\s*$')
 
 
 def expected(t, key):
+    # S105 P1 A8: the Katran's Osc 2 type has the platform typ writer
+    # (IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC2: Katran_setOscBType(), then
+    # the wave-domain refresh); every other kat_* key stays NONE.
+    if t == 'KAT' and key == 'kat_b_type':
+        return {'IM_SPECIAL_OSC_TYPE', 'IM_SPECIAL_OSC2'}
     osc = None
     if key.startswith('osc1_'):
         osc = 'IM_SPECIAL_OSC1'

@@ -7,10 +7,13 @@
  *                       T)); [127] = 1.0 (on).
  *   katCeBlocks[128]    a chaos envelope's cycle in blocks: 10 ms .. 60 s, log.
  *   katTimeSamples[128] the delay time: 32 x 56^(tim/127) samples (32 .. 1,792).
- *   katLowCutK[128]     F2's one-pole coefficient: 5 .. 600 Hz, log.
- *   katPlfoHz[128]      the patch LFO rate: 0.02 .. 20 Hz, log.
+ *   katPlfoInvTicks[128] the patch LFO's period as 1 / (96-PPQ ticks), /64 at
+ *                       127 .. 32 bars at 0, the 21 stops exact (S105 P1 A2);
+ *                       katPlfoStopRow[21] the stops' rows (fastest first).
  *   katDampK[128]       the arena damping one-pole: open (1.0) .. ~300 Hz.
  *   katDriveGain[128]   TORCIDO drive: 2^(5 x drv / 127) (x1 .. x32).
+ *   katOutDriveGain[128] / katOutDriveMakeup[128]  the output drive: x1 .. x16
+ *                       in, gain^-0.6 out (S105 P1 A5).
  *   katKickK, katFadeK  scalars: the kick's 80 ms and the fade's 20 ms decay.
  *
  * Why:        no exp/log per block where a table serves (the colEgK[] rule).
@@ -24,14 +27,18 @@
 
 /* One entry per 0..127 row byte. */
 #define KAT_TABLE_ROWS 128u
+/* S105 P1 A2: the patch LFO's 21 step / bar stops. */
+#define KAT_PLFO_STOPS 21u
 
 extern const float    katRunK[KAT_TABLE_ROWS];
 extern const uint32_t katCeBlocks[KAT_TABLE_ROWS];
 extern const float    katTimeSamples[KAT_TABLE_ROWS];
-extern const float    katLowCutK[KAT_TABLE_ROWS];
-extern const float    katPlfoHz[KAT_TABLE_ROWS];
+extern const float    katPlfoInvTicks[KAT_TABLE_ROWS];
+extern const uint8_t  katPlfoStopRow[KAT_PLFO_STOPS];
 extern const float    katDampK[KAT_TABLE_ROWS];
 extern const float    katDriveGain[KAT_TABLE_ROWS];
+extern const float    katOutDriveGain[KAT_TABLE_ROWS];
+extern const float    katOutDriveMakeup[KAT_TABLE_ROWS];
 extern const float    katKickK;
 extern const float    katFadeK;
 

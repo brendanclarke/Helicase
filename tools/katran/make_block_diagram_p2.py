@@ -2,7 +2,7 @@
 """Write katran_block_diagram_p2.svg: Katran as discrete modules and cables.
 
 What:       page 2 of the Katran block diagram. The two cores are collapsed to
-            their essential modules (delay, TORCIDO 1 / 2, F1, F2, the loop
+            their essential modules (delay, TORCIDO 1 / 2, the band, the loop
             write, ring, VCA); the oscillators, the noise, the buffer read and
             the output are their own modules; every internal modulator (the
             patch LFO, the rotation LFO, CE1, CE2, the kick envelope, the run
@@ -95,7 +95,7 @@ text(20, 50, "Cores collapsed to their essential modules. Internal modulators ar
 
 # =============================================================== AUDIO SOURCES (left column)
 LX, LW = 40, 290
-module(LX, 120, LW, 95, "BUFFER READ  (src, dmp)", C_BUF, [
+module(LX, 120, LW, 95, "BUFFER READ  (typ = buf, dmp)", C_BUF, [
     "DTCM FxBuffer arena, raw int16, 1,024-smp",
     "window; position = the osc's pos, speed =",
     "its pitch; DC block → dmp LP → guard 0.7",
@@ -154,8 +154,7 @@ def core(X0, name, rate, vca, osc1):
     mini(X0 + 150, Y0 + 215, 100, 50, "TORCIDO 1", "drv tube bln", "#ef6c00", "#fff8e6")
     add(f'<circle cx="{X0 + 280}" cy="{Y0 + 240}" r="11" fill="#fff" stroke="#111" stroke-width="1.4"/>')
     text(X0 + 280, Y0 + 245, "+", 14, "bold", anchor="middle")
-    mini(X0 + 305, Y0 + 215, 55, 50, "F1", "frq res", "#2e7d32", "#e8f5e9")
-    mini(X0 + 368, Y0 + 215, 50, 50, "F2", "lct", "#2e7d32", "#e8f5e9")
+    mini(X0 + 305, Y0 + 215, 113, 50, "THE BAND", "cut wid ofs", "#2e7d32", "#e8f5e9")
     path([(X0 + 125, Y0 + 240), (X0 + 150, Y0 + 240)])
     path([(X0 + 250, Y0 + 240), (X0 + 269, Y0 + 240)])
     path([(X0 + 250, Y0 + 155), (X0 + 280, Y0 + 155), (X0 + 280, Y0 + 229)])
@@ -348,7 +347,7 @@ rows = [
     (C_LFO, "", "VCA A (AMP2) / B (AMP1)", "offset 0.42 + inv / 0.42 + cv", "dpt"),
     (C_LFO, "", "its own rate, shape", "× 2^(mod·inv), warp 0.45·mod·inv", "mod"),
     (C_CE1, "CE1", "output level", "1 − dp1 + dp1·CE1", "dp1"),
-    (C_CE2, "CE2", "F1 cutoff (A, B)", "± 48 semitones × dp2", "dp2"),
+    (C_CE2, "slow env", "the band (A, B)", "± 48·d_s·(L−0.5) semitones", "chs"),
     (C_CE2, "", "F3 tilt", "± 24 semitones × dp2", "dp2"),
     (C_KICK, "KICK ENV", "exciter level (A, B)", "+ burst·kE·0.8", "kik"),
     (C_KICK, "", "noise mix (A, B)", "+ burst·kE·0.5", "kik"),

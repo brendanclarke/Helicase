@@ -1,0 +1,7 @@
+katran: loops 297.0 + per block 2655/32 = 380.0
+  OSC B 19/35/27/24  OSC A core A 31/45/42/35  OSC A core B 34/49/46/38  (plain/pwmD/warp/arena)
+  delay A/B 21/21  core A/B 82/88  out 35  (per iteration; the dearer of the plain and drive wrappers, S105 P1)
+
+S105 P1 final gate (C7.04): 380.0 against the 380 gate. Part A complete
+(A1 A2 A3 A4 A5 A6 A7 A8); Part B not affordable (see
+S105_P1_IMPLEMENTATION.md §10.6).

@@ -1,0 +1,12 @@
+S105 P1 C7.03: the mixer hot-loop diff (S089 P0 F3 rule).
+
+Base: tools/dsp_test/baselines/s104p1/lxr02_base.elf (the S104 P1 image;
+S104 P1 does not touch Katran).
+Now:  build/lxr02.elf (S105 P1 complete).
+
+elf_loopdump.py --sym mixer_calcNextSampleBlock on both, then
+elf_hotloops.py --compare:
+  elf_hotloops: 38 hot loops equal, 1 shrank, 0 grew
+  (17 other fragments not compared)
+
+No per-sample path in mixer_calcNextSampleBlock() grew.

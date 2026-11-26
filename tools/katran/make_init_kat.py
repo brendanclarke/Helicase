@@ -10,15 +10,17 @@ What:       reads the descriptor rows of Core/DSP/Instruments/Katran/
               [morph] the MORPHABLE rows only (macros ROW, ROW_SPECIAL,
               ROW_MENU, ROW_MENU_SPECIAL, ROW_NOBIND_IMAGE carry FLAGS_IMAGE;
               ROW_SELECT_ONOFF and ROW_NOBIND do not) / blank; LF endings.
-            Values (INIT): Katran_initVoice()'s bytes (plan §11): typ pwm,
-            Rec, coa 36 (32'), fin 63, pos 46, dtn 0, src off, dmp 40; run
-            127 (on), kik 40, CE1 90/63/0, CE2 100/63/63, chaos 20, the patch
-            LFO 74/57/51, vca 63; OSC B 48/64/60/55, exc 50, nse 0, sth 60;
-            drv 56, wet 57, tim 74, fbk 61, drf 0, dtk 0; F1 53/30/LP, lct 20,
-            cut 63; vol 100, pan 63, spr 63, wid 63 (S103 P5: bipolar, 0 = full
-            spread with no collapse); the LFO and velocity rows
-            off (the writer's own-slot token, the target selectors 255);
-            S103 P4: rot 34 (the stereo rotation, last in table order).
+            Values (INIT): Katran_initVoice()'s bytes: Osc 1 typ pwm, Rec,
+            coa 36 (32'), fin 63, pos 46, dtn 0, dmp 40; Osc 2 (S105 P1 A8)
+            typ pwm, wave Rec; run 127 (on), kik 40; the chaos rows (S105 P1
+            A3) chs 40 cyc 37 skw 63 imd 20; the patch LFO 74/57/51, vca 63;
+            Osc 2 48/64/60, ring depth 127, ring mode rng, sdb 0; exc 50,
+            nse 0, sth 60; drv 56, wet 57, tim 74, fbk 61, drf 0, dtk 0; the
+            band (A4) cut 26 / wid 127 / ofs 63; out drive 0; ton 63; vol
+            100, pan 63, spr 63, wid 63 (S103 P5: bipolar, 0 = full spread
+            with no collapse); rot 34 (the stereo rotation, index 37 since
+            S105 P1); the LFO and velocity rows off (the writer's own-slot
+            token, the target selectors 255).
             The Basic table has no fx_ key (the merge's rows are reserved but
             not built, P§9); --check fails if one appears.
 Why:        Instrument Load only lists files, and a slot's type only changes
@@ -53,19 +55,19 @@ MORPHABLE = {"ROW", "ROW_SPECIAL", "ROW_MENU", "ROW_MENU_SPECIAL", "ROW_NOBIND_I
 INIT = {
     "osc1_pitch_coarse": "36", "osc1_pitch_fine": "63", "osc1_position": "46",
     "kat_spread_a": "0", "osc1_wave": "2", "osc1_type": "2",
-    "kat_source": "0", "kat_damp": "40",
+    "kat_b_type": "2", "kat_damp": "40",
     "kat_run": "127", "kat_kick": "40",
-    "kat_ce1_cycle": "90", "kat_ce1_skew": "63", "kat_ce1_depth": "0",
-    "kat_ce2_cycle": "100", "kat_ce2_skew": "63", "kat_ce2_depth": "63",
-    "kat_chaos": "20",
+    "kat_chaos_cycle": "37", "kat_chaos_skew": "63", "kat_chaos_imod": "20",
+    "kat_ring_mode": "0", "kat_ring_sideband": "0", "kat_out_drive": "0",
+    "kat_chaos": "40",
     "kat_plfo_rate": "74", "kat_plfo_mod": "57", "kat_plfo_level": "51",
     "kat_vca": "63",
-    "kat_b_coarse": "48", "kat_b_fine": "64", "kat_b_pos": "60", "kat_b_level": "55",
+    "kat_b_coarse": "48", "kat_b_fine": "64", "kat_b_pos": "60", "kat_ring_depth": "127",
     "kat_level_a": "50", "kat_noise": "0", "kat_sync": "60",
     "kat_drive": "56", "kat_wet": "57", "kat_time": "74", "kat_feedback": "61",
     "kat_drift": "0", "kat_track": "0",
-    "kat_loop_cutoff": "53", "kat_loop_reso": "30", "kat_loop_type": "0",
-    "kat_low_cut": "20", "kat_out_cut": "63",
+    "kat_flt_cut": "26", "kat_flt_width": "127", "kat_flt_offset": "63",
+    "kat_rotate": "34", "kat_out_cut": "63",
     "instrument_vol": "100", "instrument_pan": "63",
     "kat_spread": "63", "kat_width": "63",
     "lfo_rate": "0", "lfo_amount": "0", "lfo_amount_2": "0", "lfo_wave": "0",
@@ -73,10 +75,101 @@ INIT = {
     "velo_mod_amount": "0", "velo_mod_dest": "255",
     "lfo_target_voice": "self", "lfo_target_param": "255",
     "lfo_target_voice_2": "self", "lfo_target_param_2": "255",
-    # S103 P4: the stereo rotation, one turn in about 21 s (KatranVoice.c)
-    "kat_rotate": "34",
+    # S105 P1 A8: Osc 2 as today (pwm Rec)
+    "kat_b_wave": "2",
 }
+
+
+# --- S105 P1 KT-LBL -------------------------------------------------------
 MARKER = "@advanced-rows"
+MENU_H = os.path.join(ROOT, "Core", "Menu", "menu.h")
+LABELS_C = os.path.join(ROOT, "Core", "Menu", "MenuLabels.c")
+ENUM_ROW = re.compile(r'^\s*ROW[A-Z_]*\("([^"]+)",\s*(CAT_[A-Z0-9_]+),\s*'
+                      r'(LONG_[A-Z0-9_]+),\s*(SHORT_[A-Z0-9_]+)')
+
+
+def _enum_names(text, name):
+    m = re.search(r'enum\s+' + name + r'\s*\{(.*?)\}', text, re.S)
+    body = re.sub(r'/\*.*?\*/', '', m.group(1), flags=re.S)
+    body = body.split('CAT_LABEL_COUNT')[0]
+    return [t.strip() for t in body.split(',') if t.strip()]
+
+
+def _label_strings(text, var):
+    m = re.search(r'const char ' + var + r'\[\]\[\d+\]\s*=\s*\{(.*?)\n\};',
+                  text, re.S)
+    body = re.sub(r'/\*.*?\*/', '', m.group(1), flags=re.S)
+    return re.findall(r'"([^"]*)"', body)
+
+
+def _rows_with_labels():
+    out = []
+    with open(TABLE) as fh:
+        for line in fh:
+            m = ENUM_ROW.match(line)
+            if m:
+                out.append((m.group(1), m.group(2), m.group(3), m.group(4)))
+    return out
+
+
+def _page_rows():
+    text = open(TABLE).read()
+    m = re.search(r'katran_menu_pages\[\]\s*=\s*\{(.*?)\n\};', text, re.S)
+    pages = re.findall(r'\{\{(.*?)\}\}', m.group(1), re.S)
+    enum = _enum_names(text, 'enum') if False else []
+    em = re.search(r'typedef enum \{(.*?)\} kat_param_index_t;', text, re.S)
+    names = [t.strip().split('=')[0].strip()
+             for t in re.sub(r'/\*.*?\*/', '', em.group(1), flags=re.S).split(',')
+             if t.strip()]
+    names = [n for n in names if n != 'KAT_PARAM_COUNT']
+    index = {n: i for i, n in enumerate(names)}
+    return [[index.get(t) for t in re.findall(r'KAT_PARAM_[A-Z0-9_]+', p)] for p in pages]
+
+
+def check_labels():
+    """S105 P1 (KT-LBL): the Katran's labels obey §A1.1.
+
+    What:   resolves every row's label ids to their strings (menu.h enums,
+            MenuLabels.c tables, index-aligned) and the page layout
+            (katran_menu_pages[]); fails on a width over the LCD fields
+            (3 / 8 / 9), a short name repeated on one page, or two rows with
+            the same category and long name (the long view could not tell
+            them apart).
+    Why:    the reorganisation's rule must not erode with later rows.
+    """
+    mh = open(MENU_H).read()
+    lc = open(LABELS_C).read()
+    cats = _label_strings(lc, 'catNames')
+    longs = _label_strings(lc, 'longNames')
+    shorts = _label_strings(lc, 'shortNames')
+    cat_id = {n: i for i, n in enumerate(_enum_names(mh, 'catNamesEnum'))}
+    long_id = {n: i for i, n in enumerate(_enum_names(mh, 'longNamesEnum'))}
+    short_id = {n: i for i, n in enumerate(_enum_names(mh, 'shortNamesEnum'))}
+    rows = _rows_with_labels()
+    bad = []
+    seen = {}
+    for i, (key, cat, lng, sht) in enumerate(rows):
+        c = cats[cat_id[cat]] if cat in cat_id else '?'
+        l = longs[long_id[lng]] if lng in long_id else '?'
+        s = shorts[short_id[sht]] if sht in short_id else '?'
+        if len(s) > 3 or len(c) > 8 or len(l) > 9:
+            bad.append(f'{key}: width {c!r} {l!r} {s!r}')
+        if (c, l) in seen:
+            bad.append(f'{key}: {c} / {l} repeats {seen[(c, l)]}')
+        seen[(c, l)] = key
+    for pi, page in enumerate(_page_rows()):
+        used = {}
+        for idx in page:
+            if idx is None or idx >= len(rows):
+                continue
+            key, cat, lng, sht = rows[idx]
+            s = shorts[short_id[sht]] if sht in short_id else '?'
+            if s in used:
+                bad.append(f'page {pi}: {s!r} on both {used[s]} and {key}')
+            used[s] = key
+    if bad:
+        sys.exit('make_init_kat: KT-LBL failures:\n  ' + '\n  '.join(bad))
+
 
 
 def rows():
@@ -112,6 +205,7 @@ def main():
     a = ap.parse_args()
     r = rows()
     keys = [k for _, k in r]
+    check_labels()
     bad_fx = [k for k in keys if k.startswith("fx_")]
     if bad_fx:
         sys.exit(f"make_init_kat: Basic keys must not start with fx_: {bad_fx}")

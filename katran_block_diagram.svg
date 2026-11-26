@@ -29,13 +29,14 @@
 <rect x="208" y="224.5" width="140" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
 <text x="214" y="239" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >fin · osc1_pitch_fine</text>
 <rect x="20" y="252" width="360" height="205" rx="6" fill="#ffffff" stroke="#333" stroke-width="1.4"/>
-<text x="28" y="269" font-size="13" font-weight="bold" fill="#111" text-anchor="start" >OSC B — ring modulator (full rate, 1 copy)</text>
-<text x="28" y="286" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Form = shared typ / wav (wav: Saw Rec Tri Sin; pwm: Tri warp,</text>
-<text x="28" y="300.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >  Saw/Rec two-read pulse; wtb: frame) — or ARENA if src = B / AB</text>
-<text x="28" y="315.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >pos sets pwm width / wtb frame / arena window (+ cv·lfl·24 steps)</text>
-<text x="28" y="329.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Output B[n] (int16), LSB = 1 on the sample its phase wraps</text>
-<text x="28" y="344.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Row / frame / window change only at a cycle start</text>
-<text x="28" y="358.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >pwm D sum halved (B2)</text>
+<text x="28" y="269" font-size="13" font-weight="bold" fill="#111" text-anchor="start" >OSC B — the ring/FM modulator (full rate, 1 copy)</text>
+<text x="28" y="286" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Own type + wave (S105 P1 A8): wav Saw Rec Tri Sin / pwm / wtb,</text>
+<text x="28" y="300.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >  or buf (the arena window); its own wavetable bind</text>
+<text x="28" y="315.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >r/f: rng / fmA / fmB / fAB (loop PM on that core), sdb: feedback</text>
+<text x="28" y="329.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >pos sets pwm width / wtb frame / arena window (+ cv·lfl·24 steps)</text>
+<text x="28" y="344.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Output B[n] (int16), LSB = 1 on the sample its phase wraps</text>
+<text x="28" y="358.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Row / frame / window change only at a cycle start</text>
+<text x="28" y="373.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >pwm D sum halved (B2)</text>
 <rect x="26" y="411.5" width="213" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
 <text x="32" y="426" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >coa · kat_b_coarse  (−48..+79 st)</text>
 <rect x="220" y="411.5" width="109" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
@@ -48,12 +49,13 @@
 <text x="242" y="449" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >typ · osc1_type</text>
 <rect x="20" y="470" width="360" height="190" rx="6" fill="#ffffff" stroke="#333" stroke-width="1.4"/>
 <text x="28" y="487" font-size="13" font-weight="bold" fill="#111" text-anchor="start" >OSC A — the exciter (one copy per core)</text>
-<text x="28" y="504" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Core A copy: full rate, inc = f / ratio, pos − dtn·16</text>
-<text x="28" y="518.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Core B copy: half rate (16 smp/block), f × ratio, pos + dtn·16</text>
-<text x="28" y="533.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >  ratio = 2^(dtn&#x27;² × 25 cents)  — dtn moves detune AND pos spread</text>
-<text x="28" y="547.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Hard sync: reset when (D_core + 0.5·32767·wrapB) crosses th upward</text>
-<text x="28" y="562.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >  th = sth × 258 (int16 units); sth 127 = never</text>
-<text x="28" y="576.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Same forms as OSC B; ARENA if src = A / AB</text>
+<text x="28" y="504" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Own type + wave (S105 P1 A8): wav / pwm / wtb, or buf</text>
+<text x="28" y="518.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Core A copy: full rate, inc = f / ratio, pos − dtn·16</text>
+<text x="28" y="533.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Core B copy: half rate (16 smp/block), f × ratio, pos + dtn·16</text>
+<text x="28" y="547.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >  ratio = 2^(dtn&#x27;² × 25 cents)  — dtn moves detune AND pos spread</text>
+<text x="28" y="562.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Hard sync: reset when (D_core + 0.5·32767·wrapB) crosses th upward</text>
+<text x="28" y="576.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >  th = sth × 258 (int16 units); sth 127 = never</text>
+<text x="28" y="591.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Same forms as OSC B, from Osc 1&#x27;s own type and wave</text>
 <rect x="26" y="626.5" width="128" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
 <text x="32" y="641" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >pos · osc1_position</text>
 <rect x="152" y="626.5" width="122" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
@@ -61,16 +63,16 @@
 <rect x="272" y="626.5" width="97" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
 <text x="278" y="641" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >snc · kat_sync</text>
 <rect x="20" y="674" width="360" height="200" rx="6" fill="#f6eefc" stroke="#6a1b9a" stroke-width="1.4"/>
-<text x="28" y="691" font-size="13" font-weight="bold" fill="#6a1b9a" text-anchor="start" >Arena read — &#x27;buf&#x27; (DTCM FxBuffer, ~63 k smp)</text>
-<text x="28" y="708" font-size="10.5" font-weight="normal" fill="#6a1b9a" text-anchor="start" >Selected by src: off / A / B / AB  (replaces typ for that osc)</text>
+<text x="28" y="691" font-size="13" font-weight="bold" fill="#6a1b9a" text-anchor="start" >Arena read — the &#x27;buf&#x27; oscillator type (DTCM FxBuffer, ~63 k smp)</text>
+<text x="28" y="708" font-size="10.5" font-weight="normal" fill="#6a1b9a" text-anchor="start" >Chosen per oscillator by its typ (Osc 1 or Osc 2)</text>
 <text x="28" y="722.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >x = arena[S + (phase &gt;&gt; 22)]  — 1,024-smp window, no interp</text>
 <text x="28" y="737.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >S = pos × (N − 1024)/127, taken at the osc&#x27;s next cycle start</text>
 <text x="28" y="751.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Speed = the pitch: root note, coa 0 → 1 smp/smp (43 Hz); unclamped</text>
 <text x="28" y="766.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >→ DC block (1-pole HP ≈ 10 Hz)</text>
 <text x="28" y="780.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >→ damp 1-pole LP (dmp)  → guard (peak/8 smp → ≤ 0.7 FS)  → SSAT16</text>
 <text x="28" y="795.0" font-size="10.5" font-weight="normal" fill="#c62828" text-anchor="start" >! dmp: 0 = open, 1 = 20 Hz … 127 = 300 Hz (jump, darkest at 1)</text>
-<rect x="26" y="848.5" width="109" height="18.5" rx="8" fill="#f1e0fb" stroke="#6a1b9a" stroke-width="1"/>
-<text x="32" y="863" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >src · kat_source</text>
+<rect x="26" y="848.5" width="183" height="18.5" rx="8" fill="#f1e0fb" stroke="#6a1b9a" stroke-width="1"/>
+<text x="32" y="863" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >typ · osc1_type / kat_b_type</text>
 <rect x="148" y="848.5" width="97" height="18.5" rx="8" fill="#f1e0fb" stroke="#6a1b9a" stroke-width="1"/>
 <text x="154" y="863" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >dmp · kat_damp</text>
 <circle cx="364" cy="690" r="9" fill="#fff" stroke="#c62828" stroke-width="1.4"/>
@@ -120,21 +122,12 @@
 <text x="648" y="352.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >  (bare cubic, no tube)</text>
 <circle cx="850" cy="260" r="13" fill="#fff" stroke="#111" stroke-width="1.4"/>
 <text x="850" y="265.4" font-size="15" font-weight="bold" fill="#111" text-anchor="middle" >+</text>
-<rect x="880" y="160" width="140" height="125" rx="6" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.4"/>
-<text x="888" y="177" font-size="13" font-weight="bold" fill="#2e7d32" text-anchor="start" >F1 loop filter</text>
-<text x="888" y="194" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >TPT SVF  LP / BP / HP</text>
-<text x="888" y="208.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >abs: 20 Hz..16 kHz</text>
-<text x="888" y="223.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >tracked: loop pitch</text>
-<text x="888" y="237.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >  + frq × 48 st</text>
-<text x="888" y="252.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >+ CE2 ±48 st · dp2</text>
-<text x="888" y="266.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >+ LFO, + spr ±12 st</text>
-<rect x="1035" y="160" width="70" height="125" rx="6" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.4"/>
-<text x="1043" y="177" font-size="13" font-weight="bold" fill="#2e7d32" text-anchor="start" >F2</text>
-<text x="1043" y="194" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >1-pole</text>
-<text x="1043" y="208.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >HP</text>
-<text x="1043" y="223.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >low-cut</text>
-<text x="1043" y="237.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >5..600</text>
-<text x="1043" y="252.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Hz</text>
+<rect x="880" y="160" width="225" height="125" rx="6" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.4"/>
+<text x="888" y="177" font-size="13" font-weight="bold" fill="#2e7d32" text-anchor="start" >The band filter (S105 P1 A4)</text>
+<text x="888" y="194" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >1-pole HP -&gt; 1-pole LP; cut / wid / ofs</text>
+<text x="888" y="208.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >resonance rises as wid narrows</text>
+<text x="888" y="223.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >+ the slow envelope 48·d_s·(L−0.5)</text>
+<text x="888" y="237.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >+ LFO; tracks the loop pitch at narrow wid</text>
 <rect x="1118" y="150" width="74" height="160" rx="6" fill="#f3f3f3" stroke="#333" stroke-width="1.4"/>
 <text x="1126" y="167" font-size="13" font-weight="bold" fill="#111" text-anchor="start" >write</text>
 <text x="1126" y="184" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >gr ×</text>
@@ -169,8 +162,8 @@
 <text x="636" y="347" font-size="10" font-weight="bold" fill="#111" text-anchor="end" >A ▶</text>
 <text x="636" y="368" font-size="10" font-weight="bold" fill="#555" text-anchor="end" >noise ▶</text>
 <text x="1016" y="440" font-size="10" font-weight="bold" fill="#1565c0" text-anchor="end" >B[n] ▲</text>
-<rect x="880" y="289.5" width="158" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
-<text x="886" y="304" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >frq/res/typ · kat_loop_*</text>
+<rect x="880" y="289.5" width="152" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
+<text x="886" y="304" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >cut/wid/ofs · kat_flt_*</text>
 <rect x="1038" y="289.5" width="116" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
 <text x="1044" y="304" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >lct · kat_low_cut</text>
 <rect x="640" y="386.5" width="103" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
@@ -222,21 +215,12 @@
 <text x="648" y="812.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >  (bare cubic, no tube)</text>
 <circle cx="850" cy="720" r="13" fill="#fff" stroke="#111" stroke-width="1.4"/>
 <text x="850" y="725.4" font-size="15" font-weight="bold" fill="#111" text-anchor="middle" >+</text>
-<rect x="880" y="620" width="140" height="125" rx="6" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.4"/>
-<text x="888" y="637" font-size="13" font-weight="bold" fill="#2e7d32" text-anchor="start" >F1 loop filter</text>
-<text x="888" y="654" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >TPT SVF  LP / BP / HP</text>
-<text x="888" y="668.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >abs: 20 Hz..16 kHz</text>
-<text x="888" y="683.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >tracked: loop pitch</text>
-<text x="888" y="697.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >  + frq × 48 st</text>
-<text x="888" y="712.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >+ CE2 ±48 st · dp2</text>
-<text x="888" y="726.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >+ LFO, + spr ±12 st</text>
-<rect x="1035" y="620" width="70" height="125" rx="6" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.4"/>
-<text x="1043" y="637" font-size="13" font-weight="bold" fill="#2e7d32" text-anchor="start" >F2</text>
-<text x="1043" y="654" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >1-pole</text>
-<text x="1043" y="668.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >HP</text>
-<text x="1043" y="683.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >low-cut</text>
-<text x="1043" y="697.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >5..600</text>
-<text x="1043" y="712.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Hz</text>
+<rect x="880" y="620" width="225" height="125" rx="6" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.4"/>
+<text x="888" y="637" font-size="13" font-weight="bold" fill="#2e7d32" text-anchor="start" >The band filter (S105 P1 A4)</text>
+<text x="888" y="654" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >1-pole HP -&gt; 1-pole LP; cut / wid / ofs</text>
+<text x="888" y="668.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >resonance rises as wid narrows</text>
+<text x="888" y="683.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >+ the slow envelope 48·d_s·(L−0.5)</text>
+<text x="888" y="697.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >+ LFO; tracks the loop pitch at narrow wid</text>
 <rect x="1118" y="610" width="74" height="160" rx="6" fill="#f3f3f3" stroke="#333" stroke-width="1.4"/>
 <text x="1126" y="627" font-size="13" font-weight="bold" fill="#111" text-anchor="start" >write</text>
 <text x="1126" y="644" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >gr ×</text>
@@ -271,8 +255,8 @@
 <text x="636" y="807" font-size="10" font-weight="bold" fill="#111" text-anchor="end" >A ▶</text>
 <text x="636" y="828" font-size="10" font-weight="bold" fill="#555" text-anchor="end" >noise ▶</text>
 <text x="1016" y="900" font-size="10" font-weight="bold" fill="#1565c0" text-anchor="end" >B[n] ▲</text>
-<rect x="880" y="749.5" width="158" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
-<text x="886" y="764" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >frq/res/typ · kat_loop_*</text>
+<rect x="880" y="749.5" width="152" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
+<text x="886" y="764" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >cut/wid/ofs · kat_flt_*</text>
 <rect x="1038" y="749.5" width="116" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
 <text x="1044" y="764" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >lct · kat_low_cut</text>
 <rect x="640" y="846.5" width="103" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
@@ -333,7 +317,8 @@
 <text x="1258" y="556.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >wid −12: k = +1 (P4 law, collapses)</text>
 <text x="1258" y="571.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >wid &lt; −12: narrows to mono at −63</text>
 <text x="1258" y="585.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >wid &gt; 0: M/S side × up to 2</text>
-<text x="1258" y="600.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >× CE1 gain × 0.5 norm; ramped</text>
+<text x="1258" y="600.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >× CE1 gain × 1.49 norm; ramped</text>
+<text x="1258" y="614.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >→ F3 tone (ton, after it, S105 P1 A5)</text>
 <polyline points="1380,420 1380,450" fill="none" stroke="#111" stroke-width="1.8" marker-end="url(#ah)"/>
 <rect x="1256" y="686.5" width="164" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
 <text x="1262" y="701" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >wid · kat_width (bipolar)</text>
@@ -349,8 +334,8 @@
 <text x="1262" y="839" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >vol · instrument_vol</text>
 <rect x="1390" y="824.5" width="134" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
 <text x="1396" y="839" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >pan · instrument_pan</text>
-<text x="1250" y="880" font-size="10.5" font-weight="normal" fill="#2e7d32" text-anchor="start" >◀ rot, CE1 (dp1), wid feed the matrix</text>
-<text x="1250" y="896" font-size="10.5" font-weight="normal" fill="#2e7d32" text-anchor="start" >◀ CE2 (dp2) feeds F3 and both F1</text>
+<text x="1250" y="880" font-size="10.5" font-weight="normal" fill="#2e7d32" text-anchor="start" >◀ rot, CE1 (chs), wid feed the matrix; the drive is in the cores</text>
+<text x="1250" y="896" font-size="10.5" font-weight="normal" fill="#2e7d32" text-anchor="start" >◀ the slow envelope (ce[1]) feeds the band and F3</text>
 <text x="20" y="1205" font-size="15" font-weight="bold" fill="#2e7d32" text-anchor="start" >MODULATORS (per block) — their destinations are written into the blocks above</text>
 <rect x="20" y="1215" width="470" height="190" rx="6" fill="#f1f8e9" stroke="#2e7d32" stroke-width="1.4"/>
 <text x="28" y="1232" font-size="13" font-weight="bold" fill="#2e7d32" text-anchor="start" >Patch LFO (the patch&#x27;s unstable LFO)</text>
@@ -363,27 +348,24 @@
 <text x="28" y="1333" font-size="10" font-weight="normal" fill="#c62828" text-anchor="start" >  OSC B fine +cv·lfl·0.3 st, F1 +cv·lfl·12 st, tube +0.15·cv·lfl, fb +0.2·inv·lfl</text>
 <text x="28" y="1347" font-size="10" font-weight="normal" fill="#333" text-anchor="start" >destinations ×lfl once: VCA g1 offset .42 + cv, g2 offset .42 + inv; own rate</text>
 <rect x="26" y="1409.5" width="128" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
-<text x="32" y="1424" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >frq · kat_plfo_rate</text>
+<text x="32" y="1424" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >rte · kat_plfo_rate</text>
 <rect x="156" y="1409.5" width="122" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
-<text x="162" y="1424" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >mod · kat_plfo_mod</text>
+<text x="162" y="1424" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >slf · kat_plfo_mod</text>
 <rect x="290" y="1409.5" width="134" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
 <text x="296" y="1424" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >dpt · kat_plfo_level</text>
 <circle cx="472" cy="1229" r="9" fill="#fff" stroke="#c62828" stroke-width="1.4"/>
 <text x="472" y="1233.32" font-size="12" font-weight="bold" fill="#111" text-anchor="middle" >!</text>
 <rect x="505" y="1215" width="410" height="190" rx="6" fill="#f1f8e9" stroke="#2e7d32" stroke-width="1.4"/>
-<text x="513" y="1232" font-size="13" font-weight="bold" fill="#2e7d32" text-anchor="start" >Chaos envelopes CE1, CE2 (free-running)</text>
-<text x="513" y="1249" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >cycle: cy 10 ms .. 60 s log; never reset by triggers</text>
-<text x="513" y="1263.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >skew sk: rise share of the cycle (each stage ≥ 3 blocks)</text>
-<text x="513" y="1278.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >chs (shared): next cycle ×2^(±chs&#x27;), peak 1 − chs&#x27;·|r|/2;</text>
-<text x="513" y="1292.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >  chs &gt; 64: rise hurried by the loop level (ringPrev)</text>
-<text x="513" y="1307.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >CE1 → output level: 1 − dp1 + dp1·CE1 (stereo matrix)</text>
-<text x="513" y="1321.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >CE2 → F1 ±48 st × dp2 (bipolar), F3 ±24 st × dp2</text>
-<rect x="511" y="1409.5" width="152" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
-<text x="517" y="1424" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >cy1 sk1 dp1 · kat_ce1_*</text>
-<rect x="676" y="1409.5" width="152" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
-<text x="682" y="1424" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >cy2 sk2 dp2 · kat_ce2_*</text>
-<rect x="841" y="1409.5" width="103" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
-<text x="847" y="1424" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >chs · kat_chaos</text>
+<text x="513" y="1232" font-size="13" font-weight="bold" fill="#2e7d32" text-anchor="start" >Chaos: one fast envelope, one slow (free-running)</text>
+<text x="513" y="1249" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >cyc: both rates (10 ms..60 s, faster at the top), slow = N x fast</text>
+<text x="513" y="1263.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >chs: depths (fast d_f = x^2, slow d_s = x(2−x)); never reset</text>
+<text x="513" y="1278.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >skw: the rise pair, opposite / rotated; imd: the relationship</text>
+<text x="513" y="1292.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >fast -&gt; output gain 1 − d_f + d_f·L (the matrix)</text>
+<text x="513" y="1307.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >slow -&gt; the band 48·d_s·(L−0.5), F3 24·d_s·(L−0.5)</text>
+<rect x="511" y="1409.5" width="237" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
+<text x="517" y="1424" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >chs cyc · kat_chaos / kat_chaos_cycle</text>
+<rect x="700" y="1409.5" width="262" height="18.5" rx="8" fill="#fff3c4" stroke="#c9a227" stroke-width="1"/>
+<text x="706" y="1424" font-size="10.5" font-weight="bold" fill="#5a4300" text-anchor="start" >skw imd · kat_chaos_skew / kat_chaos_imod</text>
 <rect x="930" y="1215" width="270" height="90" rx="6" fill="#f1f8e9" stroke="#2e7d32" stroke-width="1.4"/>
 <text x="938" y="1232" font-size="13" font-weight="bold" fill="#2e7d32" text-anchor="start" >Rotation LFO (S103 P4)</text>
 <text x="938" y="1249" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >rot 0 holds; 1..127 = 0.01..4 Hz log</text>
@@ -601,7 +583,7 @@
 <circle cx="2434" cy="593" r="9" fill="#ffeb3b" stroke="#111" stroke-width="1.4"/>
 <text x="2434" y="596.42" font-size="9.5" font-weight="bold" fill="#111" text-anchor="middle" >26</text>
 <text x="2449" y="597" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start" >TORCIDO TONE</text>
-<text x="2575" y="597" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start" >F1 frq (kat_loop_cutoff) + res + typ  [GRF3]</text>
+<text x="2575" y="597" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start" >the band: cut / wid / ofs (kat_flt_*)  [GRF3]</text>
 <circle cx="2434" cy="612" r="9" fill="#ffeb3b" stroke="#111" stroke-width="1.4"/>
 <text x="2434" y="615.42" font-size="9.5" font-weight="bold" fill="#111" text-anchor="middle" >27</text>
 <text x="2449" y="616" font-size="10.5" font-weight="bold" fill="#1d1d1f" text-anchor="start" >LO BOOST</text>
@@ -668,9 +650,9 @@
 <text x="2575" y="901" font-size="10.5" font-weight="normal" fill="#1d1d1f" text-anchor="start" >core B (AMP1 side) — now rotated by rot / wid</text>
 <rect x="1810" y="940" width="1170" height="120" rx="6" fill="#ffffff" stroke="#555" stroke-width="1.4"/>
 <text x="1818" y="957" font-size="13" font-weight="bold" fill="#111" text-anchor="start" >Katran additions with no patch control</text>
-<text x="1818" y="974" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >run, kik (run / kick)  ·  cy1 sk1 dp1 cy2 sk2 dp2, chs (chaos envelopes)  ·  src, dmp (buffer read)  ·  noi (noise exciter)</text>
-<text x="1818" y="988.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >dtn (A detune + pos spread)  ·  wow (delay drift)  ·  spr (core coupling / spread)  ·  dtk (delay tracks OSC B)  ·  res, typ (F1)</text>
-<text x="1818" y="1003.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >lct (F2 loop low-cut)  ·  cut (F3 output tilt)  ·  wid (bipolar width)  ·  rot (stereo rotation)  ·  vol, pan, lfo_*, velo_mod_*</text>
+<text x="1818" y="974" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >run, kik  ·  chaos: chs cyc skw imd  ·  typ/wav per oscillator (buf is a type)  ·  dmp (buffer)  ·  noi (noise)</text>
+<text x="1818" y="988.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >dtn (detune + pos spread)  ·  wow (drift)  ·  spr (times / xfb)  ·  dtk (tracks OSC B)  ·  the band cut wid ofs</text>
+<text x="1818" y="1003.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >r/f (ring or loop PM per core), sdb (Osc 2 feedback)  ·  ton (F3 after the matrix), drv (voice drive)  ·  wid, rot  ·  vol, pan, lfo_*, velo_mod_*</text>
 <text x="1818" y="1017.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Second core (B): half rate, its own OSC A copy (detuned), its own delay ring and loop — the patch had one loop.</text>
 <text x="1818" y="1032.0" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >Fixed by design (no row): LV1/LV2, AMP offsets 0.42, the delay dry/wet 50/50, sync weight P 0.5, kick decay 80 ms,</text>
 <text x="1818" y="1046.5" font-size="10.5" font-weight="normal" fill="#333" text-anchor="start" >  burst targets (0.8 exc, 0.5 nse, 0.3 fb), tube = 0.25·drv, output norm 0.5, guard 0.7, DC block 10 Hz.</text>

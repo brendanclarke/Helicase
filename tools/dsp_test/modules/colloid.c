@@ -2189,9 +2189,33 @@ static void test_chop(void)
 	}
 }
 
-int main(void)
+/* S105 P1 A5 (C2.12): the init.col level, for Katran's KAT_OUT_NORM. */
+static void print_level(void)
+{
+	int n, i;
+	double e = 0.0;
+
+	voice_init();
+	host_running = 1u;
+	Colloid_triggerVoice(&V, 0u, 100u, 63u, 5514u, 1u);
+	for (n = 0; n < 2000; n++) {
+		block();
+		for (i = 0; i < BLK; i++)
+			e += (double)L[i] * (double)L[i] +
+			     (double)V.right[i] * (double)V.right[i];
+	}
+	e /= (double)(2000 * BLK * 2);
+	printf("colloid init level: RMS %.2f dBFS\n",
+	       10.0 * log10(e / (32768.0 * 32768.0)));
+}
+
+int main(int argc, char **argv)
 {
 	unsigned g, total = 0u;
+	if (argc > 1 && strcmp(argv[1], "--level") == 0) {
+		print_level();
+		return 0;
+	}
 	install_table(0u);
 	test_osc(0, -1);
 	test_osc(1, -1);   /* Rec */

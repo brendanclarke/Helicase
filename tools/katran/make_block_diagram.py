@@ -113,9 +113,10 @@ box(SX, 100, 360, 120, "Pitch (per block)", [
 pill(SX + 4, 238, "coa · osc1_pitch_coarse")
 pill(SX + 188, 238, "fin · osc1_pitch_fine")
 
-box(SX, 252, 360, 205, "OSC B — ring modulator (full rate, 1 copy)", [
-    "Form = shared typ / wav (wav: Saw Rec Tri Sin; pwm: Tri warp,",
-    "  Saw/Rec two-read pulse; wtb: frame) — or ARENA if src = B / AB",
+box(SX, 252, 360, 205, "OSC B — the ring/FM modulator (full rate, 1 copy)", [
+    "Own type + wave (S105 P1 A8): wav Saw Rec Tri Sin / pwm / wtb,",
+    "  or buf (the arena window); its own wavetable bind",
+    "r/f: rng / fmA / fmB / fAB (loop PM on that core), sdb: feedback",
     "pos sets pwm width / wtb frame / arena window (+ cv·lfl·24 steps)",
     "Output B[n] (int16), LSB = 1 on the sample its phase wraps",
     "Row / frame / window change only at a cycle start",
@@ -131,19 +132,20 @@ pill(SX + 112, 448, "wav · osc1_wave")
 pill(SX + 216, 448, "typ · osc1_type")
 
 box(SX, 470, 360, 190, "OSC A — the exciter (one copy per core)", [
+    "Own type + wave (S105 P1 A8): wav / pwm / wtb, or buf",
     "Core A copy: full rate, inc = f / ratio, pos − dtn·16",
     "Core B copy: half rate (16 smp/block), f × ratio, pos + dtn·16",
     "  ratio = 2^(dtn'² × 25 cents)  — dtn moves detune AND pos spread",
     "Hard sync: reset when (D_core + 0.5·32767·wrapB) crosses th upward",
     "  th = sth × 258 (int16 units); sth 127 = never",
-    "Same forms as OSC B; ARENA if src = A / AB",
+    "Same forms as OSC B, from Osc 1's own type and wave",
 ], fill="#ffffff")
 pill(SX + 6, 640, "pos · osc1_position")
 pill(SX + 132, 640, "dtn · kat_spread_a")
 pill(SX + 252, 640, "snc · kat_sync")
 
-box(SX, 674, 360, 200, "Arena read — 'buf' (DTCM FxBuffer, ~63 k smp)", [
-    ("Selected by src: off / A / B / AB  (replaces typ for that osc)", BUF),
+box(SX, 674, 360, 200, "Arena read — the 'buf' oscillator type (DTCM FxBuffer, ~63 k smp)", [
+    ("Chosen per oscillator by its typ (Osc 1 or Osc 2)", BUF),
     "x = arena[S + (phase >> 22)]  — 1,024-smp window, no interp",
     "S = pos × (N − 1024)/127, taken at the osc's next cycle start",
     "Speed = the pitch: root note, coa 0 → 1 smp/smp (43 Hz); unclamped",
@@ -151,7 +153,7 @@ box(SX, 674, 360, 200, "Arena read — 'buf' (DTCM FxBuffer, ~63 k smp)", [
     "→ damp 1-pole LP (dmp)  → guard (peak/8 smp → ≤ 0.7 FS)  → SSAT16",
     ("! dmp: 0 = open, 1 = 20 Hz … 127 = 300 Hz (jump, darkest at 1)", WARN),
 ], fill="#f6eefc", stroke=BUF, tfill=BUF)
-pill(SX + 6, 862, "src · kat_source", fill="#f1e0fb", stroke=BUF)
+pill(SX + 6, 862, "typ · osc1_type / kat_b_type", fill="#f1e0fb", stroke=BUF)
 pill(SX + 128, 862, "dmp · kat_damp", fill="#f1e0fb", stroke=BUF)
 circ(SX + 344, 690, 9, "#fff", WARN, "!", 12)
 
@@ -204,16 +206,11 @@ def core(y0, name, rate, out_label, vca_text, vca_pill):
         "  (bare cubic, no tube)",
     ], fill="#fff8e6", stroke="#ef6c00", tfill="#ef6c00")
     circ(X0 + 410, y0 + 160, 13, "#fff", "#111", "+", 15)
-    box(X0 + 440, y0 + 60, 140, 125, "F1 loop filter", [
-        "TPT SVF  LP / BP / HP",
-        "abs: 20 Hz..16 kHz",
-        "tracked: loop pitch",
-        "  + frq × 48 st",
-        "+ CE2 ±48 st · dp2",
-        "+ LFO, + spr ±12 st",
-    ], fill="#e8f5e9", stroke="#2e7d32", tfill="#2e7d32")
-    box(X0 + 595, y0 + 60, 70, 125, "F2", [
-        "1-pole", "HP", "low-cut", "5..600", "Hz",
+    box(X0 + 440, y0 + 60, 225, 125, "The band filter (S105 P1 A4)", [
+        "1-pole HP -> 1-pole LP; cut / wid / ofs",
+        "resonance rises as wid narrows",
+        "+ the slow envelope 48·d_s·(L−0.5)",
+        "+ LFO; tracks the loop pitch at narrow wid",
     ], fill="#e8f5e9", stroke="#2e7d32", tfill="#2e7d32")
     box(X0 + 678, y0 + 50, 74, 160, "write", [
         "gr ×", "( u", "+ fb·D", "+ xfb·", "  D_oth )", "SSAT16", "→ ring",
@@ -245,7 +242,7 @@ def core(y0, name, rate, out_label, vca_text, vca_pill):
     # B into the ring
     text(X0 + 576, y0 + 340, "B[n] ▲", 10, "bold", "#1565c0", "end")
     # pills
-    pill(X0 + 440, y0 + 203, "frq/res/typ · kat_loop_*")
+    pill(X0 + 440, y0 + 203, "cut/wid/ofs · kat_flt_*")
     pill(X0 + 598, y0 + 203, "lct · kat_low_cut")
     pill(X0 + 200, y0 + 300, "drv · kat_drive")
     pill(X0 + 304, y0 + 300, "bln · kat_wet")
@@ -307,7 +304,8 @@ box(OX, 450, 260, 230, "Stereo matrix (rotation + width)", [
     "wid −12: k = +1 (P4 law, collapses)",
     "wid < −12: narrows to mono at −63",
     "wid > 0: M/S side × up to 2",
-    "× CE1 gain × 0.5 norm; ramped",
+    "× CE1 gain × 1.49 norm; ramped",
+    "→ F3 tone (ton, after it, S105 P1 A5)",
 ], fill="#e3f2fd", stroke="#1565c0", tfill="#1565c0")
 line([(OX + 130, 420), (OX + 130, 450)])
 pill(OX + 6, 700, "wid · kat_width (bipolar)")
@@ -320,8 +318,8 @@ box(OX, 725, 260, 95, "Mixer (platform)", [
 line([(OX + 130, 680), (OX + 130, 725)])
 pill(OX + 6, 838, "vol · instrument_vol")
 pill(OX + 140, 838, "pan · instrument_pan")
-text(OX, 880, "◀ rot, CE1 (dp1), wid feed the matrix", 10.5, fill=MOD)
-text(OX, 896, "◀ CE2 (dp2) feeds F3 and both F1", 10.5, fill=MOD)
+text(OX, 880, "◀ rot, CE1 (chs), wid feed the matrix; the drive is in the cores", 10.5, fill=MOD)
+text(OX, 896, "◀ the slow envelope (ce[1]) feeds the band and F3", 10.5, fill=MOD)
 
 # =================================================================== MODULATORS (bottom band)
 MY = 1215
@@ -336,22 +334,20 @@ box(20, MY, 470, 190, "Patch LFO (the patch's unstable LFO)", [
     ("  OSC B fine +cv·lfl·0.3 st, F1 +cv·lfl·12 st, tube +0.15·cv·lfl, fb +0.2·inv·lfl", WARN),
     "destinations ×lfl once: VCA g1 offset .42 + cv, g2 offset .42 + inv; own rate",
 ], fill="#f1f8e9", stroke=MOD, tfill=MOD, lsize=10)
-pill(26, MY + 208, "frq · kat_plfo_rate")
-pill(156, MY + 208, "mod · kat_plfo_mod")
+pill(26, MY + 208, "rte · kat_plfo_rate")
+pill(156, MY + 208, "slf · kat_plfo_mod")
 pill(290, MY + 208, "dpt · kat_plfo_level")
 circ(472, MY + 14, 9, "#fff", WARN, "!", 12)
 
-box(505, MY, 410, 190, "Chaos envelopes CE1, CE2 (free-running)", [
-    "cycle: cy 10 ms .. 60 s log; never reset by triggers",
-    "skew sk: rise share of the cycle (each stage ≥ 3 blocks)",
-    "chs (shared): next cycle ×2^(±chs'), peak 1 − chs'·|r|/2;",
-    "  chs > 64: rise hurried by the loop level (ringPrev)",
-    "CE1 → output level: 1 − dp1 + dp1·CE1 (stereo matrix)",
-    "CE2 → F1 ±48 st × dp2 (bipolar), F3 ±24 st × dp2",
+box(505, MY, 410, 190, "Chaos: one fast envelope, one slow (free-running)", [
+    "cyc: both rates (10 ms..60 s, faster at the top), slow = N x fast",
+    "chs: depths (fast d_f = x^2, slow d_s = x(2−x)); never reset",
+    "skw: the rise pair, opposite / rotated; imd: the relationship",
+    "fast -> output gain 1 − d_f + d_f·L (the matrix)",
+    "slow -> the band 48·d_s·(L−0.5), F3 24·d_s·(L−0.5)",
 ], fill="#f1f8e9", stroke=MOD, tfill=MOD)
-pill(511, MY + 208, "cy1 sk1 dp1 · kat_ce1_*")
-pill(676, MY + 208, "cy2 sk2 dp2 · kat_ce2_*")
-pill(841, MY + 208, "chs · kat_chaos")
+pill(511, MY + 208, "chs cyc · kat_chaos / kat_chaos_cycle")
+pill(700, MY + 208, "skw imd · kat_chaos_skew / kat_chaos_imod")
 
 box(930, MY, 270, 90, "Rotation LFO (S103 P4)", [
     "rot 0 holds; 1..127 = 0.01..4 Hz log",
@@ -412,7 +408,7 @@ marks = [
     (23, 105, 530, "SAW FINE", "OSC A fin (osc1_pitch_fine)"),
     (24, 45, 645, "SAW LEVEL", "lvA (kat_level_a): exciter level into ch 2"),
     (25, 257, 465, "TORCIDO DIST", "drv (kat_drive) ×1..×32, both channels"),
-    (26, 340, 467, "TORCIDO TONE", "F1 frq (kat_loop_cutoff) + res + typ  [GRF3]"),
+    (26, 340, 467, "TORCIDO TONE", "the band: cut / wid / ofs (kat_flt_*)  [GRF3]"),
     (27, 195, 500, "LO BOOST", "not carried (F2 lct low-cut instead)"),
     (28, 407, 500, "BYPASS", "not carried"),
     (29, 300, 570, "LEVEL ×4", "fixed: LV1 60/127 (ch 1), LV2 64/127 (ch 2)"),
@@ -447,9 +443,9 @@ for n, _, _, ctl, kat in marks:
 # Katran-only rows
 KY = 940
 box(1810, KY, 1170, 120, "Katran additions with no patch control", [
-    "run, kik (run / kick)  ·  cy1 sk1 dp1 cy2 sk2 dp2, chs (chaos envelopes)  ·  src, dmp (buffer read)  ·  noi (noise exciter)",
-    "dtn (A detune + pos spread)  ·  wow (delay drift)  ·  spr (core coupling / spread)  ·  dtk (delay tracks OSC B)  ·  res, typ (F1)",
-    "lct (F2 loop low-cut)  ·  cut (F3 output tilt)  ·  wid (bipolar width)  ·  rot (stereo rotation)  ·  vol, pan, lfo_*, velo_mod_*",
+    "run, kik  ·  chaos: chs cyc skw imd  ·  typ/wav per oscillator (buf is a type)  ·  dmp (buffer)  ·  noi (noise)",
+    "dtn (detune + pos spread)  ·  wow (drift)  ·  spr (times / xfb)  ·  dtk (tracks OSC B)  ·  the band cut wid ofs",
+    "r/f (ring or loop PM per core), sdb (Osc 2 feedback)  ·  ton (F3 after the matrix), drv (voice drive)  ·  wid, rot  ·  vol, pan, lfo_*, velo_mod_*",
     "Second core (B): half rate, its own OSC A copy (detuned), its own delay ring and loop — the patch had one loop.",
     "Fixed by design (no row): LV1/LV2, AMP offsets 0.42, the delay dry/wet 50/50, sync weight P 0.5, kick decay 80 ms,",
     "  burst targets (0.8 exc, 0.5 nse, 0.3 fb), tube = 0.25·drv, output norm 0.5, guard 0.7, DC block 10 Hz.",

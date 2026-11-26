@@ -1348,6 +1348,13 @@ tetrakt_tables:
 #             folded TORCIDO dry gain tw0 (a wrong folded scale: law KA-FOLD
 #             must fail) and katran_break_rot (S103 P5) puts wid 0 on the
 #             collapsing law (k = +1: law KA-ROT must fail).
+#             S105 P1: four more: katran_break_pmclamp removes the FM read's
+#             time clamp (law KT-FM must fail), katran_break_band inverts the
+#             band's resonance feedback (law KA-FOLD must fail; review R-4)
+#             katran_break_ramp holds the delay time at the block's start
+#             (law KA-DLY's ramp case must fail; review R-2) and
+#             katran_break_warp puts the patch LFO's shape warp back on the
+#             rate table (law KT-RATE (f) must fail; review R-1).
 # Accessors:  make -C tools/dsp_test katran | katran_tables | katran_cpu_check.
 KAT := $(ROOT)/Core/DSP/Instruments/Katran
 katran: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c $(GEN)/oscPwmTables.host.h \
@@ -1378,9 +1385,10 @@ katran: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c $(GEN)/oscPwmTables.ho
 	@if ./build/katran_break_dly >/dev/null 2>&1; then \
 	  echo "katran_break_dly: FAILED (a read without its fraction not caught)"; exit 1; \
 	else echo "katran_break_dly: caught (law KA-DLY fails as expected)"; fi
-	sed 's/sign \* kat_read(row, q)) >> 1;/sign * kat_read(row, q));/g' \
+	# S105 P1 A7: the read text carries the feedback offset (+ fo)
+	sed 's/sign \* kat_read(row, q\( + fo\)\{0,1\})) >> 1;/sign * kat_read(row, q\1));/g' \
 	  $(GEN)/KatranOsc.host.c > build/break_kat_pwm/KatranOsc.host.c
-	@! grep -q 'kat_read(row, q)) >> 1;' build/break_kat_pwm/KatranOsc.host.c || \
+	@! grep -q 'kat_read(row, q[^)]*)) >> 1;' build/break_kat_pwm/KatranOsc.host.c || \
 	  { echo "katran_break_pwm: sed did not apply"; exit 1; }
 	$(HOSTCC) -Ibuild/break_kat_pwm $(HOSTFLAGS) $(OSC_HOST_INC) -DWAVETABLE_ROW_POINTS=1024u \
 	  modules/katran.c -o build/katran_break_pwm -lm
@@ -1406,6 +1414,54 @@ katran: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c $(GEN)/oscPwmTables.ho
 	@if ./build/katran_break_rot >/dev/null 2>&1; then \
 	  echo "katran_break_rot: FAILED (a collapsing wid 0 not caught)"; exit 1; \
 	else echo "katran_break_rot: caught (law KA-ROT fails as expected)"; fi
+	# S105 P1: the FM clamp removed; KT-FM must catch a read of the current
+	# block's unwritten samples.
+	mkdir -p build/break_kat_pmclamp
+	sed 's/KAT_TIME_MIN + ((c == 0u) ? pmA : 0.0f)/KAT_TIME_MIN/; s/KAT_TIME_MIN_H + pmB/KAT_TIME_MIN_H/' \
+	  $(GEN)/KatranVoice.host.c > build/break_kat_pmclamp/KatranVoice.host.c
+	@! grep -q 'KAT_TIME_MIN + ((c' build/break_kat_pmclamp/KatranVoice.host.c || \
+	  { echo "katran_break_pmclamp: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_kat_pmclamp $(HOSTFLAGS) $(OSC_HOST_INC) -DWAVETABLE_ROW_POINTS=1024u \
+	  modules/katran.c -o build/katran_break_pmclamp -lm
+	@if ./build/katran_break_pmclamp >/dev/null 2>&1; then \
+	  echo "katran_break_pmclamp: FAILED (an unwritten-sample read not caught)"; exit 1; \
+	else echo "katran_break_pmclamp: caught (law KT-FM fails as expected)"; fi
+	# S105 P1 (C1.50, review R-4): the band's resonance feedback inverted;
+	# KA-FOLD's band reference must catch it.
+	mkdir -p build/break_kat_band
+	sed 's/const float xb = mk \* xin + rres \* sL;/const float xb = mk * xin - rres * sL;/' \
+	  $(GEN)/KatranVoice.host.c > build/break_kat_band/KatranVoice.host.c
+	@! grep -q 'mk \* xin + rres \* sL;' build/break_kat_band/KatranVoice.host.c || \
+	  { echo "katran_break_band: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_kat_band $(HOSTFLAGS) $(OSC_HOST_INC) -DWAVETABLE_ROW_POINTS=1024u \
+	  modules/katran.c -o build/katran_break_band -lm
+	@if ./build/katran_break_band >/dev/null 2>&1; then \
+	  echo "katran_break_band: FAILED (an inverted resonance not caught)"; exit 1; \
+	else echo "katran_break_band: caught (law KA-FOLD fails as expected)"; fi
+	# S105 P1 (review R-2): the delay read's per-sample time ramp removed (the
+	# block-held T of the first step-4 form); KA-DLY's ramp case must catch it.
+	mkdir -p build/break_kat_ramp
+	sed 's/const uint32_t stepq = 65536u - sq;/const uint32_t stepq = 65536u;/' \
+	  $(GEN)/KatranVoice.host.c > build/break_kat_ramp/KatranVoice.host.c
+	@! grep -q 'stepq = 65536u - sq;' build/break_kat_ramp/KatranVoice.host.c || \
+	  { echo "katran_break_ramp: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_kat_ramp $(HOSTFLAGS) $(OSC_HOST_INC) -DWAVETABLE_ROW_POINTS=1024u \
+	  modules/katran.c -o build/katran_break_ramp -lm
+	@if ./build/katran_break_ramp >/dev/null 2>&1; then \
+	  echo "katran_break_ramp: FAILED (a block-held delay time not caught)"; exit 1; \
+	else echo "katran_break_ramp: caught (law KA-DLY fails as expected)"; fi
+	# S105 P1 (review R-1): the patch LFO's shape warp reads the rate table's
+	# 1 / ticks again instead of the inverted output; KT-RATE (f) must catch it.
+	mkdir -p build/break_kat_warp
+	sed 's/0.45f \* lfm \* invCv/0.45f * lfm * inv/' \
+	  $(GEN)/KatranVoice.host.c > build/break_kat_warp/KatranVoice.host.c
+	@! grep -q 'lfm \* invCv' build/break_kat_warp/KatranVoice.host.c || \
+	  { echo "katran_break_warp: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_kat_warp $(HOSTFLAGS) $(OSC_HOST_INC) -DWAVETABLE_ROW_POINTS=1024u \
+	  modules/katran.c -o build/katran_break_warp -lm
+	@if ./build/katran_break_warp >/dev/null 2>&1; then \
+	  echo "katran_break_warp: FAILED (a warp off the inverted output not caught)"; exit 1; \
+	else echo "katran_break_warp: caught (law KT-RATE fails as expected)"; fi
 
 katran_tables:
 	cd $(ROOT) && python3 tools/katran/gen_kat_tables.py --check

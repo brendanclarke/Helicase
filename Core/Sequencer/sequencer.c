@@ -2190,6 +2190,22 @@ uint16_t seq_getBpm()
 }
 //------------------------------------------------------------------------------
 /*
+ * The master tick count (S105 P1 A2).
+ *
+ * What:       seq_elapsedPpqTicks: 96-PPQ ticks since the last start or
+ *             pattern reset (0 while stopped). One aligned 32-bit load, atomic
+ *             against TIM3, which writes it.
+ * Why:        Katran's patch LFO is pulled onto the master clock's phase
+ *             (KatranVoice.c kat_plfoStep()); the render reads the count once
+ *             a block. Read-only: nothing in the sequencer changes.
+ * Context:    any (render, foreground).
+ */
+uint32_t seq_getElapsedTicks(void)
+{
+	return seq_elapsedPpqTicks;
+}
+//------------------------------------------------------------------------------
+/*
  * One step of a track in samples (S093 P4). Contract: sequencer.h.
  *
  * Concurrency: seq_effectiveTrackScale[] is written by the foreground

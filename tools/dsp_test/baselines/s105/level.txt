@@ -1,0 +1,18 @@
+S105 P1 A5 (C2.12): the output normalisation.
+
+katran init level: RMS -22.28 dBFS   (KAT_OUT_NORM 0.5, before)
+colloid init level: RMS -12.85 dBFS  (init.col, the reference)
+
+The plan's rule: KAT_OUT_NORM = 0.5 * 10^((RMS_col - RMS_kat) / 20).
+  0.5 * 10^(9.43 / 20) = 1.48; set to 1.49.
+
+After the change:
+katran init level: RMS -13.09 dBFS
+colloid init level: RMS -12.85 dBFS
+  difference 0.24 dB (inside the +-1 dB rule).
+
+Both measured in the host models: init.kat with a kick at velocity 100 and
+2,000 blocks (modules/katran.c --level); init.col with a note at velocity
+100 and 2,000 blocks (modules/colloid.c --level). The colloid figure moves
+by a few hundredths between runs (its own RNG); the comparison is within
+the tolerance either way.

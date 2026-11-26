@@ -107,6 +107,21 @@ static inline __attribute__((always_inline)) int32_t kat_cond(KatranVoice *v, ui
 /* The sync test's weight: one wrap sample is +P x 32767 (P§3.4/L3). */
 #define KAT_SYNC_WRAP ((int32_t)(KAT_SYNC_P * 32767.0f))
 
+/*
+ * OSC B's self-feedback (S105 P1 A7, Ring/FM Sideband).
+ *
+ * What:       every Osc 2 form reads its table at ph + bFbK x y[n - 1], y
+ *             its own last output (int16), bFbK 0 .. 32768 (a quarter turn
+ *             at full scale): a DX-style operator feedback. The phase step,
+ *             the wrap flag in the LSB and the row swap use the plain phase,
+ *             so cycle starts, the sync's wrap bit and K-D10 are unchanged.
+ * Why:        your point P7: raising sdb adds Osc 2's harmonics one order
+ *             after another, so the ring's (and the FM's) sidebands reach
+ *             progressively higher (S105_P1_KATRAN_FURTHER_TWEAKS.md §A7).
+ *             bFbK 0 is today's read exactly.
+ * Cost:       a multiply and an add a sample (+1 for PWM D's second read).
+ */
+
 /* OSC B plain: the shared wav / wavetable form into blkB. */
 void kat_bPlain(KatranVoice *v)
 {
@@ -114,20 +129,25 @@ void kat_bPlain(KatranVoice *v)
 	const int16_t *const rowNext = v->rowBNext;
 	const int16_t *row = v->rowB;
 	int16_t *const out = v->blkB;
+	const int32_t kf = v->bFbK;
+	int32_t prev = v->bFbPrev;
 	uint32_t ph = v->phB;
 	uint32_t n;
 
 	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
-		const int32_t s = kat_read(row, ph);
+		const uint32_t fo = (uint32_t)(kf * prev);
+		const int32_t s = kat_read(row, ph + fo);
 		const uint32_t np = ph + inc;
 		const uint32_t wrap = (uint32_t)(np < ph);
 
 		out[n] = (int16_t)((s & (int32_t)0xFFFFFFFEu) | (int32_t)wrap);
+		prev = s;
 		ph = np;
 		row = wrap ? rowNext : row;
 	}
 	v->phB = ph;
 	v->rowB = row;
+	v->bFbPrev = prev;
 }
 
 /*
@@ -148,22 +168,27 @@ void kat_bPwmD(KatranVoice *v, const int32_t sign)
 	const int16_t *const rowNext = v->rowBNext;
 	const int16_t *row = v->rowB;
 	int16_t *const out = v->blkB;
+	const int32_t kf = v->bFbK;
+	int32_t prev = v->bFbPrev;
 	uint32_t ph = v->phB;
 	uint32_t q = ph - ((uint32_t)v->pwD0[2] << 22);
 	uint32_t n;
 
 	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
-		const int32_t s = (kat_read(row, ph) + sign * kat_read(row, q));
+		const uint32_t fo = (uint32_t)(kf * prev);
+		const int32_t s = (kat_read(row, ph + fo) + sign * kat_read(row, q + fo));
 		const uint32_t np = ph + inc;
 		const uint32_t wrap = (uint32_t)(np < ph);
 
 		out[n] = (int16_t)((s & (int32_t)0xFFFFFFFEu) | (int32_t)wrap);
+		prev = s;
 		ph = np;
 		q += j;
 		row = wrap ? rowNext : row;
 	}
 	v->phB = ph;
 	v->rowB = row;
+	v->bFbPrev = prev;
 }
 
 /* OSC B, the warped triangle. The warp's W, ra, rb come from the slewed
@@ -178,20 +203,25 @@ void kat_bWarp(KatranVoice *v)
 	const int16_t *const rowNext = v->rowBNext;
 	const int16_t *row = v->rowB;
 	int16_t *const out = v->blkB;
+	const int32_t kf = v->bFbK;
+	int32_t prev = v->bFbPrev;
 	uint32_t ph = v->phB;
 	uint32_t n;
 
 	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
-		const int32_t s = kat_read(row, osc_pwmWarp(ph, wPh, ra, rb));
+		const uint32_t fo = (uint32_t)(kf * prev);
+		const int32_t s = kat_read(row, osc_pwmWarp(ph + fo, wPh, ra, rb));
 		const uint32_t np = ph + inc;
 		const uint32_t wrap = (uint32_t)(np < ph);
 
 		out[n] = (int16_t)((s & (int32_t)0xFFFFFFFEu) | (int32_t)wrap);
+		prev = s;
 		ph = np;
 		row = wrap ? rowNext : row;
 	}
 	v->phB = ph;
 	v->rowB = row;
+	v->bFbPrev = prev;
 }
 
 /*
@@ -210,15 +240,20 @@ void kat_bArena(KatranVoice *v)
 	const float guard = v->guard[2];
 	float z = v->dcX[2];
 	float d = v->damp[2];
+	const int32_t kf = v->bFbK;
+	int32_t prev = v->bFbPrev;
 	uint32_t ph = v->phB;
 	uint32_t n;
 
 	for (n = 0u; n < OUTPUT_DMA_SIZE; n++) {
-		const int32_t s = kat_osat16(kat_condStep(&z, &d, dampK, guard, row[ph >> 22]));
+		const uint32_t fo = (uint32_t)(kf * prev);
+		const int32_t s = kat_osat16(kat_condStep(&z, &d, dampK, guard,
+		                                          row[(ph + fo) >> 22]));
 		const uint32_t np = ph + inc;
 		const uint32_t wrap = (uint32_t)(np < ph);
 
 		out[n] = (int16_t)((s & (int32_t)0xFFFFFFFEu) | (int32_t)wrap);
+		prev = s;
 		ph = np;
 		row = wrap ? rowNext : row;
 	}
@@ -226,6 +261,7 @@ void kat_bArena(KatranVoice *v)
 	v->rowB = row;
 	v->dcX[2] = z;
 	v->damp[2] = d;
+	v->bFbPrev = prev;
 }
 
 /*

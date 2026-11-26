@@ -991,6 +991,18 @@ uint8_t instrumentManager_waveCellCount(uint8_t slot,
  */
 uint8_t instrumentManager_osc1Type(uint8_t slot);
 /*
+ * A Katran slot's Osc 2 table type (S105 P1 A8).
+ *
+ * What:       OSC_TYPE_WAV / _WTB / _PWM of the slot's Katran Osc 2
+ *             (bOscType), or OSC_TYPE_WAV for any other slot or type.
+ * Why:        Menu names kat_b_wave's values by Osc 2's type
+ *             (menu_formatWaveCell()), as it names osc1_wave's by
+ *             instrumentManager_osc1Type(), without owning the runtime.
+ * Inputs:     slot.  Outputs: type.
+ * Accessors:  menu_formatWaveCell().
+ */
+uint8_t instrumentManager_katranOsc2Type(uint8_t slot);
+/*
  * A slot's current voice chain (S089 P2).
  *
  * What:       the chainType of the engine occupying the slot

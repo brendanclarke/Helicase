@@ -19,6 +19,8 @@
  *             The arena loops read row[ph >> 22] (no interpolation: the rough
  *             read, P§3.4), then the DC block (one-pole HP at ~10 Hz), the
  *             damping one-pole (dampK), and the guard gain, into int16.
+ *             S105 P1 A7: the OSC B loops read at the phase offset by their
+ *             own last output (bFbK, Ring/FM Sideband).
  * Why:        the Colloid's loops sum pairs into buses and never reset;
  *             Katran's write blocks and take a reset per sample. One loop per
  *             form keeps every form a fixed cost; the dearest (PWM D or warp)

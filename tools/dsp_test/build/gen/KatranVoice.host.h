@@ -3,18 +3,22 @@
  * KatranVoice.h - the Katran drone / noise voice (S103 P1).
  *
  * What:       the eighth instrument type: a dual feedback core after the
- *             TORCIDO noise-synth patch (D§1). Per core: an exciter (OSC A,
- *             or an arena read) -> TORCIDO (two shaped channels) -> the loop
- *             filter F1 (TPT SVF) -> the low-cut F2 -> a 2,048-sample delay
- *             ring in one FxBuffer voice unit, whose output re-clocks the
- *             exciter (hard sync on a threshold crossing). OSC B rings each
- *             core's TORCIDO channel 1; the VCA pair gives the patch's
+ *             TORCIDO noise-synth patch (D§1). Per core: an exciter (Osc 1,
+ *             a table or the arena: its type, KAT_TYPE_*) -> TORCIDO (two
+ *             shaped channels) -> the band filter (S105 P1 A4: a one-pole
+ *             high-pass then a one-pole low-pass, their corners from cutoff /
+ *             width / offset, with a resonance feedback that rises as the
+ *             band narrows; it replaced the F1 TPT SVF and the F2 low-cut) ->
+ *             a 2,048-sample delay ring in one FxBuffer voice unit, whose
+ *             output re-clocks the exciter (hard sync on a threshold
+ *             crossing). Osc 2 (its own type and wave since S105 P1 A8) rings
+ *             each core's TORCIDO channel 1; the VCA pair gives the patch's
  *             asymmetric pair (core A = ring + AMP2(loop), core B = ring +
- *             AMP1(ring)). Then F3 (one coefficient set for both cores) and the
- *             stereo matrix: the rotation, the width, the chaos envelope CE1
- *             and the output scale in one ramped 2x2 gain (S103 P4). Stereo:
- *             buf receives L, the voice's right[] R
- *             (instrumentManager_slotRight()).
+ *             AMP1(ring)). Then F3 (one coefficient set for both sides, after
+ *             the stereo matrix) and the stereo matrix: the rotation, the
+ *             width, the chaos envelope CE1 and the output scale in one
+ *             ramped 2x2 gain (S103 P4). Stereo: buf receives L, the voice's
+ *             right[] R (instrumentManager_slotRight()).
  *             S103 P2: core A runs at the full rate; core B at half rate, its
  *             output interpolated 2x (KAT_HALF_N below; S103_P2_KATRAN_DUAL_
  *             FULL-HALF_IMPLEMENTATION.md).
@@ -76,8 +80,6 @@
 #define KAT_TIME_MAX        1792.0f
 /* spr above its centre spreads the two delay times by +-12 % (P§8.2). */
 #define KAT_SPREAD_TIME     0.12f
-/* spr above its centre spreads F1 by +-12 semitones (P§8.2). */
-#define KAT_SPREAD_F1_ST    12.0f
 /* spr below its centre cross-couples the cores; at 0 the cross-feedback is
  * this (P§8.2). */
 #define KAT_XFB_MAX         0.6f
@@ -91,21 +93,99 @@
 #define KAT_DC_K            0.00142466f
 /* The weight of OSC B's wrap in the sync sum (P§3.4/L3). */
 #define KAT_SYNC_P          0.5f
-/* The src selector: which oscillators read the arena (P§8.2). */
-#define KAT_SRC_OFF         0u
-#define KAT_SRC_A           1u
-#define KAT_SRC_B           2u
-#define KAT_SRC_AB          3u
-#define KAT_SRC_COUNT       4u
-/* F1's type: absolute LP/BP/HP, then the same three tracking the loop's
- * pitch (P§8.2 kat_loop_type). */
-#define KAT_LT_LP           0u
-#define KAT_LT_BP           1u
-#define KAT_LT_HP           2u
-#define KAT_LT_LPT          3u
-#define KAT_LT_BPT          4u
-#define KAT_LT_HPT          5u
-#define KAT_LT_COUNT        6u
+/*
+ * An oscillator's type (S105 P1 A8; the osc1_type and kat_b_type bytes).
+ *
+ * What:       0 wav, 1 wtb, 2 pwm (alkTypeNames' order: the table forms),
+ *             3 buf (the arena window read). Osc 1's buf is aBuf (its
+ *             osc.oscType keeps the table type it had, so leaving buf
+ *             restores its wave); Osc 2's type is the bType byte itself, its
+ *             table type bOscType.
+ * Why:        S105 P1 A8 (your proposal): the buffer read is a type of each
+ *             oscillator. It replaced the src selector (off / A / B / AB),
+ *             which overrode the one typ / wav pair that both oscillators
+ *             shared. Each oscillator now has its own type and wave.
+ *             Per oscillator, not per core (Q-A11): Osc 1's two copies
+ *             (1a core A, 1b core B) share Osc 1's type.
+ */
+#define KAT_TYPE_WAV        0u
+#define KAT_TYPE_WTB        1u
+#define KAT_TYPE_PWM        2u
+#define KAT_TYPE_BUF        3u
+#define KAT_TYPE_COUNT      4u
+/*
+ * The band filter's laws (S105 P1 A4; constants by ear).
+ *
+ * KAT_BAND_OFS_ST     ofs at +-63 moves core A's corners up and core B's
+ *                     down by this many semitones (and the reverse).
+ * KAT_BAND_RES_W      the width below which resonance starts (w = wid / 127).
+ * KAT_BAND_R_MAX      the resonance feedback at width 0: r Gc <= 0.9 with the
+ *                     coincident one-poles' centre gain Gc = 0.5.
+ * KAT_BAND_MK         the make-up: mk = 1 + KAT_BAND_MK (1 - w)^2.
+ * KAT_BAND_TRACK      the loop-pitch tracking at width 0 (none at 127):
+ *                     both corners move by 0.85 (1 - w) (loopSt - ref).
+ * KAT_BAND_TRACK_REF  ref: the loop pitch of tim 74 (init.kat), 32.7
+ *                     semitones above 20 Hz (132 Hz).
+ */
+#define KAT_BAND_OFS_ST     24.0f
+#define KAT_BAND_RES_W      0.5f
+#define KAT_BAND_R_MAX      1.8f
+#define KAT_BAND_MK         1.0f
+#define KAT_BAND_TRACK      0.85f
+#define KAT_BAND_TRACK_REF  32.7f
+/*
+ * The chaos envelopes' laws (S105 P1 A3; constants by ear).
+ *
+ * KAT_CE_N_MAX     the slow envelope's whole multiple of the fast one's
+ *                  cycle: N = 1 + round(KAT_CE_N_MAX x (cyc / 127)^2), 1..8.
+ * KAT_CE_PULL_F    imd's cross-rate pull on the fast envelope (by the slow
+ *                  one's level), KAT_CE_PULL_S on the slow one (by the
+ *                  fast one's).
+ * KAT_CE_ROT       the skew pair's turn per slow cycle at imd 127, in turns
+ *                  (a quarter: opposite -> same -> swapped -> same -> ...).
+ * KAT_CE_BAND_ST   the slow envelope's reach on both band corners at chs
+ *                  127: +-24 semitones about the cutoff (48 (L - 0.5)).
+ * KAT_CE_F3_ST     the same on F3, half (+-12).
+ */
+#define KAT_CE_N_MAX        7.0f
+#define KAT_CE_PULL_F       0.8f
+#define KAT_CE_PULL_S       0.4f
+#define KAT_CE_ROT          0.25f
+#define KAT_CE_BAND_ST      48.0f
+#define KAT_CE_F3_ST        24.0f
+/*
+ * The patch LFO's clock pull (S105 P1 A2; by ear).
+ *
+ * KAT_PLFO_PULL     the pull per block toward the master clock's phase at
+ *                   slf 0 (about 70 ms); x (1 - 0.9 slf') above.
+ * KAT_PLFO_TPS_BPM  96-PPQ ticks per second per BPM: 96 / 60.
+ */
+#define KAT_PLFO_PULL       0.01f
+#define KAT_PLFO_TPS_BPM    1.6f
+/*
+ * Osc 2's action on each core (S105 P1 A6; kat_ring_mode).
+ *
+ * What:       KAT_RM_RING both cores ring (Osc 2 x Torcido ch 1 at the
+ *             output, the crossfade of kat_outGains()); KAT_RM_FMA core A's
+ *             loop is phase-modulated by Osc 2 (its delay read displaced by
+ *             k x B[n]) and core B rings; KAT_RM_FMB the reverse; KAT_RM_FAB
+ *             both cores FM. A core in FM has no ring (its b = 0) and
+ *             ringDepth is its FM depth: k = (ringDepth / 127)^2 x
+ *             KAT_PM_MAX samples (core B half, in its half-rate samples).
+ * Why:        your point P6: the ring switches to FM per core. Phase-
+ *             modulating the loop acts where the ring acts (on the core's
+ *             own signal, Torcido ch 1 being the delay output) and builds up
+ *             with feedback; it leaves the Osc 1 loops untouched.
+ */
+#define KAT_RM_RING         0u
+#define KAT_RM_FMA          1u
+#define KAT_RM_FMB          2u
+#define KAT_RM_FAB          3u
+#define KAT_RM_COUNT        4u
+#define KAT_PM_MAX          8.0f      /* full-rate samples at depth 127 (by ear) */
+/* S105 P1 A7: Osc 2's self-feedback is scaled down above this pitch (Hz),
+ * against aliasing of the harmonics it adds. */
+#define KAT_SDB_FMAX        2000.0f
 /* The loop forms (KatranOsc.c): a stock row / wavetable frame, the two-read
  * pulse, the warped triangle, or the arena window read. */
 #define KAT_FORM_PLAIN      0u
@@ -120,9 +200,10 @@
 #define KAT_QUIET_BLOCKS    72u
 /* The K1 re-arm ramp: ~5 ms at 32 samples a block. */
 #define KAT_KICK_REARM      7u
-/* The output normalisation (P§5, by ear in the host model; the loudest case
- * is a full-level read of arena garbage). */
-#define KAT_OUT_NORM        0.5f
+/* The output normalisation (P§5; S105 P1 A5: raised from 0.5 to the value
+ * measured in tools/dsp_test/baselines/s105/level.txt, which puts init.kat's
+ * RMS on init.col's within 1 dB; the drive's cubic catches the peaks). */
+#define KAT_OUT_NORM        1.49f
 /*
  * The rotation (S103 P4, kat_rotate).
  *
@@ -160,19 +241,43 @@
  *             the output mix; cutSt the slewed cutoff in semitones above
  *             20 Hz; k the slewed damping.
  * Why:        three floats fewer per filter (12 B x 3 filters) for the slot
- *             budget; the arithmetic is the Colloid's.
+ *             budget; the arithmetic is the Colloid's. S105 P1: used by F3
+ *             only (a1, da1, ic1, ic2, mL, cutSt); the loop filters are
+ *             KatBand.
  */
 typedef struct { float ic1, ic2, a1, a2, a3, da1, da2, da3, mH, mB, mL, cutSt, k; } KatSvf;
 
 /*
- * One chaos envelope (S103 P1, P§3.3).
+ * One core's band filter (S105 P1 A4).
+ *
+ * What:       sH, sL the high-pass and low-pass one-pole states (sL is also
+ *             the band's output, fed back one sample late for the
+ *             resonance); gH, gL the one-pole coefficients at the block's
+ *             start and dgH, dgL their per-sample steps; hSt, lSt the slewed
+ *             corners in semitones above 20 Hz; r the resonance feedback and
+ *             mk the input make-up for this block.
+ * Why:        S105_P1_KATRAN_FURTHER_TWEAKS.md §A4: F1 (a TPT SVF with a
+ *             type) and F2 (a fixed low-cut) both high-passed; one band with
+ *             Colloid's corner law (col_noiseControl()) does both jobs.
+ *             40 B a core, against 52 B for a KatSvf plus 4 B for f2x and a
+ *             share of f2K: the pair is 36 B smaller.
+ */
+typedef struct { float sH, sL, gH, gL, dgH, dgL, hSt, lSt, r, mk; } KatBand;
+
+/*
+ * One chaos envelope (S103 P1, P§3.3; S105 P1 A3: the four-row law).
  *
  * What:       level 0..peak; up, down: the per-block steps of the current
  *             cycle's rise and fall (linear); peak: this cycle's top (1 minus
- *             the chaos draw); stage 0 rise, 1 fall.
- * Why:        a free-running cycling function generator; a new cycle draws
- *             new times and a new peak (chs), so the progression never
- *             repeats exactly. Never reset by a trigger (the brief).
+ *             the chaos draw); stage 0 rise, 1 fall. ce[0] is the fast
+ *             envelope (the output gain, through the stereo matrix); ce[1]
+ *             the slow one (both band corners and F3). Its cycle is a whole
+ *             multiple N of the fast one's (kat_ceStart()).
+ * Why:        free-running and never reset by a trigger (the brief). S105
+ *             P1: chs (depths), cyc (both rates, spread wider when faster),
+ *             skw (bipolar, opposite on the two) and imd (the relationship)
+ *             replace the seven cy1 sk1 dp1 cy2 sk2 dp2 chs rows. CE2's
+ *             level, which no code read (finding F-1), now drives the band.
  */
 typedef struct { float level, up, down, peak; uint8_t stage; } KatCe;
 
@@ -201,15 +306,27 @@ typedef struct KatranVoiceStruct
 	uint32_t phB, incB;           /* OSC B */
 	const int16_t *rowA[2], *rowANext[2];     /* the row played; the row from the next cycle start */
 	const int16_t *rowB, *rowBNext;
+	/*
+	 * S105 P1 A8: the oscillator types. aBuf: Osc 1 reads the arena (its
+	 * osc1_type is buf); osc.oscType keeps Osc 1's table type. bOscType:
+	 * Osc 2's table type (OSC_TYPE_WAV / _WTB / _PWM from bType 0..2,
+	 * unchanged while bType is buf). bBind*: Osc 2's own wavetable bind
+	 * (Osc 1's lives in osc.sampleCache*), the key (tag, table index,
+	 * catalogue generation) and the frame count and rows; kat_wtbBindB()
+	 * fills it. RAM: 16 B, inside the slot reserve.
+	 */
+	uint8_t  aBuf, bOscType, bBindTag, bBindIndex;
+	uint16_t bBindFrames;
+	uint32_t bBindGen;
+	const int16_t *bBindData;
 	uint16_t pwD[3], pwD0[3];     /* PWM D form: width at block end / start (A core A, A core B, B) */
 	uint8_t  pwPos[3], pwPos0[3]; /* PWM width index, slewed (warp form) */
 	/* S103 P4: dcY, f2y, f3R1 and f3R2 removed (written at init, read nowhere;
 	 * 28 B, which pays for the stereo matrix and rotation state below) */
 	float    dcX[3], damp[3], guard[3], dampK;   /* arena conditioning */
 	float    tNow[2], tStep[2], drift[2], driftTgt[2];   /* delay times: [0] core A, full-rate samples; [1] core B, half-rate samples (S103 P2) */
-	KatSvf   f1[2];               /* loop filters ([0] A, [1] B) */
-	float    f2x[2], f2K;         /* loop low-cuts */
-	KatSvf   f3;                  /* output filter: shared coefficients; ic1 core A's state, ic2 core B's */
+	KatBand  band[2];             /* S105 P1 A4: the loop band filters ([0] A, [1] B) */
+	KatSvf   f3;                  /* output filter: shared coefficients; ic1 L's state, ic2 R's (S105 P1: F3 after the matrix) */
 	float    tGain, tGain2, tTube, tWet;   /* TORCIDO, this block */
 	float    tExc, tNse;          /* the kick's effective exciter level / noise mix */
 	float    kickSwell;           /* the kick's feedback swell, this block */
@@ -234,15 +351,29 @@ typedef struct KatranVoiceStruct
 	 * current turn's chaos jitter in octaves.
 	 */
 	float    cA0, cA0Step, cA1, cA1Step, cB0, cB0Step, cB1, cB1Step;
+	/* S105 P1 A5: the output drive's cubic for this block, y = c (drvA -
+	 * drvB c^2) with c the core output clamped to +-1.5 x 32768: drvA = the
+	 * make-up, drvB = make-up x (4/27) / 32768^2 (int16 units in and out).
+	 * Read by the drive wrappers only (kat_coreRenderAD / BD). */
+	float    drvA, drvB;
 	float    mx[4], mxStep[4];
 	float    rotPh, rotJit;
 	KatCe    ce[2];
+	float    skPh;                /* S105 P1 A3: the skew pair's rotation, in turns */
 	uint32_t rng;                 /* xorshift for CE and drift draws */
 	float    lfoPh, cv, ringPrev; /* patch LFO */
 	float    plfoJit;             /* the patch LFO's per-cycle chaos jitter */
+	uint32_t tickE;               /* S105 P1 A2: the last master tick seen */
+	uint16_t tickBlocks;          /* blocks since tickE changed (extrapolation) */
 	float    vol;                 /* instrument_vol (the mixer reads it) */
 	uint32_t w[2];                /* each ring's write index */
 	int32_t  syncPrev[2];         /* each core's last sync-test value */
+	/* S105 P1 A6: each core's loop-PM depth in Q8 of the Q16 read position
+	 * per B LSB (0 for a ringing core): the read moves by (pmQ x B) >> 8. */
+	int32_t  pmQ[2];
+	/* S105 P1 A7: Osc 2's self-feedback: the phase offset per output LSB
+	 * (0 .. 32768, a quarter turn at full scale) and the last output. */
+	int32_t  bFbK, bFbPrev;
 	/*
 	 * S103 P2: core B's last half-rate output sample, carried across
 	 * blocks for the 2x linear interpolation into right[] (S103 P4: in
@@ -252,13 +383,17 @@ typedef struct KatranVoiceStruct
 	 * static assert in InstrumentManager.c still gates the size).
 	 */
 	float    hPrev;
-	/* --- row bytes (KatranParameters.c binds them; converted in the async) --- */
-	uint8_t  spreadA, source, damp_, run, kick, ce1Cycle, ce1Skew, ce1Depth,
-	         ce2Cycle, ce2Skew, ce2Depth, chaos, plfoRate, plfoMod, plfoLevel,
-	         vca, bCoarse, bFine, bPos, bLevel, levelA, noise, sync, drive,
-	         wet, time, feedback, drift_, track, loopCut, loopRes, loopType,
-	         lowCut, outCut, spread, width, pan,
-	         rotate;              /* S103 P4: kat_rotate (index 57) */
+	/* --- row bytes (KatranParameters.c binds them; converted in the async).
+	 * S105 P1: bType / bWave (Osc 2's type and wave, A8); chaosCycle,
+	 * chaosSkew, chaosImod with chaos (A3); ringDepth (was bLevel),
+	 * ringMode, ringSideband (A5.2, A6, A7); fltCut, fltWidth, fltOffset
+	 * (the band, A4); outDrive (A5.3). --- */
+	uint8_t  spreadA, bType, bWave, damp_, run, kick, chaosCycle, chaosSkew,
+	         chaosImod, chaos, plfoRate, plfoMod, plfoLevel, vca, bCoarse,
+	         bFine, bPos, ringDepth, ringMode, ringSideband, outDrive, levelA,
+	         noise, sync, drive, wet, time, feedback, drift_, track, fltCut,
+	         fltWidth, fltOffset, outCut, spread, width, pan,
+	         rotate;              /* S103 P4: kat_rotate (index 37 since S105 P1) */
 	uint8_t  fxReserved[4];       /* the later insert effect's rows (P§9); not bound */
 	/* --- control --- */
 	uint8_t  slot, note, wasRunning, armed, fadeReq, stopDecay, rearm, driftTick;
@@ -280,7 +415,8 @@ typedef struct KatranVoiceStruct
  * Katran_isQuiet()           gr has been 0 for KAT_QUIET_BLOCKS blocks.
  * Katran_requestFade()       a deferred Scene/Kit apply is waiting: fade gr
  *                            to 0 over ~20 ms and hold it there while renewed.
- * Katran_setOscType()        the typ writer (wav / wtb / pwm).
+ * Katran_setOscType()        the osc1_type writer (wav / wtb / pwm / buf).
+ * Katran_setOscBType()       the kat_b_type writer (wav / wtb / pwm / buf).
  * The two render entries are noinline so LTO keeps them out of
  * mixer_calcNextSampleBlock() (S086 F1; S101 P3 §4).
  */
@@ -293,6 +429,7 @@ void Katran_calcVoiceSyncBlock(KatranVoice *voice, int16_t *buf, uint8_t size)
 uint8_t Katran_isQuiet(const KatranVoice *voice);
 void Katran_requestFade(KatranVoice *voice);
 void Katran_setOscType(KatranVoice *voice, uint8_t typ);
+void Katran_setOscBType(KatranVoice *voice, uint8_t typ);
 
 #endif /* KATRANVOICE_H_ */
 

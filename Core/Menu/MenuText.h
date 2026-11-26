@@ -433,28 +433,34 @@ static const char fxDepthNames[][4] = {
 };
 
 /*
- * The Katran's selectors (S103 P1).
+ * The Katran's selectors (S103 P1; S105 P1: A8, A6).
  *
- * What:       ONOFF_TAG_KAT_SOURCE 4 (src, katSourceNames: off, A, B, AB: the
- *             oscillators that read the arena, KAT_SRC_*);
- *             ONOFF_TAG_KAT_LOOP_TYPE 10 (the loop filter's typ,
- *             katLoopTypeNames: LP BP HP, then the same tracking the loop's
- *             pitch: LPt BPt HPt, KAT_LT_*). The rows' dtype byte is
- *             DTYPE_ON_OFF | (tag << 4). Tags 4 and 10 were free.
- * Why:        every DTYPE_MENU id is taken (S078); menu_onoffTagNames()
- *             resolves the list per tag, so display, clamp, automation range
- *             and the step-edit line follow the count. The Katran's typ reuses
- *             ONOFF_TAG_ALK_TYPE (alkTypeNames: wav wtb pwm).
+ * What:       ONOFF_TAG_KAT_OSC_TYPE 4 (katOscTypeNames: wav wtb pwm buf):
+ *             the type of each Katran oscillator, osc1_type (Osc 1) and
+ *             kat_b_type (Osc 2). wav / wtb / pwm are the table forms in
+ *             alkTypeNames' order; buf reads the DTCM FxBuffer arena as a
+ *             1,024-sample window (KAT_TYPE_*, KatranVoice.h).
+ *             ONOFF_TAG_KAT_RING_MODE 10 (katRingModeNames: rng fmA fmB fAB):
+ *             kat_ring_mode, whether Osc 2 rings a core's output or phase-
+ *             modulates its loop, per core (KAT_RM_*).
+ *             The rows' dtype byte is DTYPE_ON_OFF | (tag << 4).
+ * Why:        S105 P1 A8 replaced the src selector (tag 4, off/A/B/AB: an
+ *             override of the shared typ) with a type per oscillator, and A4
+ *             removed the loop filter's typ (tag 10). Both tags are reused
+ *             rather than taking new ones; menu_onoffTagNames() resolves the
+ *             list per tag, so display, clamp, automation range and the
+ *             step-edit line follow the counts. Osc 1's typ leaves
+ *             ONOFF_TAG_ALK_TYPE (three values) for the four-value list.
  * Accessors:  KatranParameters.c; menu.c menu_onoffTagNames().
- * Affiliates: KAT_SRC_COUNT, KAT_LT_COUNT (KatranVoice.h): asserted in menu.c.
+ * Affiliates: KAT_TYPE_COUNT, KAT_RM_COUNT (KatranVoice.h): asserted in menu.c.
  */
-#define ONOFF_TAG_KAT_SOURCE       4u
-#define ONOFF_TAG_KAT_LOOP_TYPE    10u
-static const char katSourceNames[][4] = {
-    {4}, {"off"},{"A  "},{"B  "},{"AB "},
+#define ONOFF_TAG_KAT_OSC_TYPE     4u
+#define ONOFF_TAG_KAT_RING_MODE    10u
+static const char katOscTypeNames[][4] = {
+    {4}, {"wav"},{"wtb"},{"pwm"},{"buf"},
 };
-static const char katLoopTypeNames[][4] = {
-    {6}, {"LP "},{"BP "},{"HP "},{"LPt"},{"BPt"},{"HPt"},
+static const char katRingModeNames[][4] = {
+    {4}, {"rng"},{"fmA"},{"fmB"},{"fAB"},
 };
 /*
  * Wavefolder type names: the wav cell under WFd (S089 P2).

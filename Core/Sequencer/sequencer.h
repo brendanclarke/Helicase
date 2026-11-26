@@ -302,6 +302,11 @@ void seq_triggerNextMasterStep(uint8_t stepSize);
  */
 void seq_setBpm(uint16_t bpm);
 uint16_t seq_getBpm(void);
+/*
+ * The master tick count (S105 P1 A2): seq_elapsedPpqTicks, 96-PPQ ticks since
+ * the last start or pattern reset (0 while stopped); one atomic 32-bit load.
+ */
+uint32_t seq_getElapsedTicks(void);
 void seq_setTempoCenti(uint16_t centi);
 uint16_t seq_getTempoCenti(void);
 void seq_setTempoNudge(float nudge);

@@ -2,7 +2,7 @@
  * KatranParameters.h (S103 P1).
  *
  * What:       the registry-facing exports of KatranParameters.c: the 58
- *             descriptor rows (S103 P4: kat_rotate appended at 57), their count,
+ *             descriptor rows (S105 P1: reorganised, §A1.4), their count,
  *             the eight voice pages, the display label, the type flags and the
  *             inactive-cell test.
  * Why:        InstrumentManager's instrument_registry[] imports them, as it
@@ -20,8 +20,8 @@
  * KAT_IDX_*                      the indices InstrumentManager uses (none at
  *                                first; kept for the merge's fx_type).
  * Accessors:  InstrumentManager.c (registry row; cellInactive).
- * Affiliates: KatranVoice.h; MenuText.h (katSourceNames, katLoopTypeNames,
- *             alkTypeNames); tools/katran/make_init_kat.py.
+ * Affiliates: KatranVoice.h; MenuText.h (katOscTypeNames, katRingModeNames);
+ *             tools/katran/make_init_kat.py.
  */
 #ifndef KATRANPARAMETERS_H_
 #define KATRANPARAMETERS_H_
@@ -46,9 +46,9 @@ extern const uint8_t katran_instrument_type_flags;
 /*
  * Whether a Katran cell has no effect in the voice's current mode (S103 P1).
  *
- * What:       1 for dmp while src is off (nothing reads the arena), and for
- *             pos under typ wav when OSC A is not an arena reader (the wav
- *             oscillators are free-running: no frame, width or window).
+ * What:       1 for dmp while neither oscillator is buf; for each pos under
+ *             wav when its oscillator is not buf; for each wav while its
+ *             oscillator is buf (S105 P1 A8).
  * Why:        the compact cell shows "---" for a value that changes nothing
  *             (menu_formatCellValue3()); the value is still stored and
  *             edited, and takes effect when the mode changes.
@@ -58,5 +58,14 @@ extern const uint8_t katran_instrument_type_flags;
  */
 uint8_t katranParameters_cellInactive(const KatranVoice *voice,
                                       const ParamDescriptor *descriptor);
+/*
+ * The rte stop names (S105 P1 A2).
+ *
+ * What:       for a value that is one of katPlfoStopRow[], copies the
+ *             stop's 3-character name and returns 1; else 0 (the caller
+ *             prints the number).
+ * Accessors:  menu.c menu_formatDtype3().
+ */
+uint8_t katranParameters_rateName3(uint8_t value, char out[3]);
 
 #endif /* KATRANPARAMETERS_H_ */
