@@ -5,7 +5,7 @@
    height="720"
    version="1.1"
    id="svg135"
-   sodipodi:docname="LXR02_panel_template 2.svg"
+   sodipodi:docname="LXR02_panel_template.svg"
    inkscape:version="1.4.4 (dcaf3e7, 2026-05-05)"
    xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
    xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
@@ -23,12 +23,12 @@
      inkscape:pagecheckerboard="0"
      inkscape:deskcolor="#d1d1d1"
      inkscape:zoom="1.0003036"
-     inkscape:cx="596.31894"
-     inkscape:cy="502.84732"
+     inkscape:cx="665.29802"
+     inkscape:cy="408.37602"
      inkscape:window-width="1710"
      inkscape:window-height="915"
-     inkscape:window-x="0"
-     inkscape:window-y="39"
+     inkscape:window-x="3443"
+     inkscape:window-y="1090"
      inkscape:window-maximized="0"
      inkscape:current-layer="chassis"
      showguides="false" />
@@ -311,8 +311,8 @@
      inkscape:groupmode="layer"
      inkscape:label="chassis">
     <rect
-       x="171.6171"
-       y="94.538567"
+       x="171.79382"
+       y="94.777771"
        width="955"
        height="550"
        rx="9"
@@ -692,13 +692,6 @@
        id="text70">VOICE</text>
     <text
        class="silk"
-       x="485.81406"
-       y="509.77875"
-       font-size="8.5px"
-       id="text71"
-       style="fill:#f95f2d;fill-opacity:1">PERF</text>
-    <text
-       class="silk"
        x="541.52173"
        y="509.77875"
        font-size="8.5px"
@@ -775,24 +768,6 @@
          y="464.17142"
          font-size="8.5px"
          id="text6">MRP</text>
-    </g>
-    <g
-       id="g13">
-      <rect
-         x="500.67752"
-         y="499.77875"
-         width="14.983485"
-         height="12.5"
-         rx="1.0216013"
-         fill="#cfcfcf"
-         id="rect7"
-         style="stroke-width:0.825268;fill:#f95e2c;fill-opacity:1" />
-      <text
-         class="silk silk-inv"
-         x="508.16925"
-         y="509.77875"
-         font-size="8.5px"
-         id="text7">FX</text>
     </g>
     <g
        id="g11"
@@ -1004,27 +979,25 @@
        y="509.77875"
        font-size="8.5px"
        id="text44">CFG</text>
-    <text
-       class="silk"
-       x="251.93466"
-       y="509.77875"
-       font-size="8.5px"
-       id="text66">PLAY</text>
-    <rect
-       x="265.99945"
-       y="499.77875"
-       width="22"
-       height="12.5"
-       rx="1.5"
-       fill="#cfcfcf"
-       id="rect45"
-       style="fill:#f95e2c;fill-opacity:1" />
-    <text
-       class="silk silk-inv"
-       x="276.99945"
-       y="509.77875"
-       font-size="8.5px"
-       id="text45">CHN</text>
+    <g
+       id="g1"
+       transform="translate(-5.9981789)">
+      <rect
+         x="399.72766"
+         y="573.64899"
+         width="69.110596"
+         height="12.5"
+         rx="4.7120857"
+         fill="#cfcfcf"
+         id="rect45"
+         style="fill:#2c93f9;fill-opacity:1;stroke-width:1.7724" />
+      <text
+         class="silk silk-inv"
+         x="433.54916"
+         y="582.94208"
+         font-size="8.5px"
+         id="text45">CHAIN SCENE</text>
+    </g>
     <g
        id="g55"
        transform="translate(0,-0.50606692)">
@@ -1043,6 +1016,127 @@
          y="450.79416"
          font-size="8.5px"
          id="text48">CHROMATIC</text>
+    </g>
+    <text
+       class="silk"
+       x="485.81409"
+       y="509.77875"
+       font-size="8.5px"
+       id="text71"
+       style="fill:#f95f2d;fill-opacity:1">PERF</text>
+    <g
+       id="g13"
+       transform="translate(-1.6762685)">
+      <rect
+         x="500.67752"
+         y="499.77875"
+         width="14.983485"
+         height="12.5"
+         rx="1.0216013"
+         fill="#cfcfcf"
+         id="rect7"
+         style="fill:#f95e2c;fill-opacity:1;stroke-width:0.825268" />
+      <text
+         class="silk silk-inv"
+         x="508.16925"
+         y="509.77875"
+         font-size="8.5px"
+         id="text7">FX</text>
+    </g>
+    <text
+       class="silk silk-inv"
+       x="522.92822"
+       y="472.93506"
+       font-size="8.5px"
+       id="text4"
+       style="fill:#cfcfcf;fill-opacity:1">DJ</text>
+    <g
+       id="g20">
+      <g
+         id="g4"
+         transform="translate(-2.2493171)">
+        <line
+           x1="231.82664"
+           y1="484.27618"
+           x2="237.35168"
+           y2="484.27618"
+           stroke="#d9d9d9"
+           id="line63-1"
+           style="stroke:#2c93f9;stroke-width:2.13553;stroke-dasharray:none;stroke-opacity:1" />
+        <use
+           xlink:href="#arrow-dn"
+           x="213"
+           y="120"
+           id="use4"
+           transform="matrix(0,-0.46913516,0.46913516,0,181.04827,584.21483)"
+           style="fill:#2c93f9;fill-opacity:1;stroke:#2c93f9;stroke-width:4.7;stroke-dasharray:none;stroke-opacity:1" />
+      </g>
+      <rect
+         x="224.90521"
+         y="478.5824"
+         width="18.28269"
+         height="11.51121"
+         rx="0.32502562"
+         fill="none"
+         stroke="#6a6a6a"
+         stroke-width="0.169286"
+         id="rect11"
+         style="stroke-width:0.869;stroke-dasharray:none;stroke:#2c93f9;stroke-opacity:1" />
+    </g>
+    <g
+       id="g21"
+       transform="translate(-0.26508456,-0.99969649)">
+      <line
+         x1="528.36914"
+         y1="483.3512"
+         x2="519.06403"
+         y2="483.3512"
+         stroke="#d9d9d9"
+         id="line63-1-7"
+         style="stroke:#d9d8d8;stroke-width:2.136;stroke-dasharray:none;stroke-opacity:1" />
+      <use
+         xlink:href="#arrow-dn"
+         x="213"
+         y="120"
+         id="use4-6"
+         transform="matrix(0,-0.46913516,-0.46913516,0,575.36743,583.28984)"
+         style="fill:#2c93f9;fill-opacity:1;stroke:#d9d8d8;stroke-width:4.7;stroke-dasharray:none;stroke-opacity:1" />
+      <use
+         xlink:href="#arrow-dn"
+         x="213"
+         y="120"
+         id="use4-6-2"
+         transform="matrix(0,-0.46913516,0.46913516,0,471.89343,583.27494)"
+         style="fill:#2c93f9;fill-opacity:1;stroke:#d9d8d8;stroke-width:4.7;stroke-dasharray:none;stroke-opacity:1" />
+    </g>
+    <g
+       id="g19"
+       transform="translate(0,-0.35344608)">
+      <text
+         class="silk"
+         x="250.64908"
+         y="509.77875"
+         font-size="8.5px"
+         id="text66">PLAY</text>
+      <g
+         id="g18"
+         transform="translate(-34.460993,-0.17672304)">
+        <rect
+           x="298.88568"
+           y="500.67114"
+           width="23.869497"
+           height="12.5"
+           rx="1.6274656"
+           fill="#cfcfcf"
+           id="rect15"
+           style="fill:#2c93f9;fill-opacity:1;stroke-width:1.04162" />
+        <text
+           class="silk silk-inv"
+           x="310.44009"
+           y="509.96423"
+           font-size="8.5px"
+           id="text18">CHN</text>
+      </g>
     </g>
   </g>
   <g
