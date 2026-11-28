@@ -37,7 +37,7 @@ the RAM delta (§0.3) above all.
 | 0 | B-1 | Baseline before any edit |
 | 1 | F-1 .. F-6 | 64-bit Scene automation mask; the new targets depend on it |
 | 2 | T-1 .. T-12 | Scene target table: shuffle rows out, 28 lane rows in |
-| 3 | S-1 .. S-17 | Scene settings, setters, AutoSave v4, `sceneset.scg`, identity, copy |
+| 3 | S-1 .. S-18 | Scene settings, setters, AutoSave v4, `sceneset.scg`, identity, copy |
 | 4 | G-1 .. G-12 | `GeneratorEngine` with `off` only; hooks; service; switch-time build |
 | 5 | R-1 .. R-10 | Sequencer read routing and the `ato` gate |
 | 6 | M-1 .. M-30 | Menu, buttons, LEDs, MIDI Learn fields |
@@ -64,7 +64,7 @@ The approved table (plan §8) is reproduced with the rows this dive measured or 
 |---|---|---|---:|---|
 | S | `GeneratorEngine.c` | SRAM1 | 112 | `gen_trig[7][16]` |
 | S | `GeneratorEngine.c` | SRAM1 | 3,584 | `gen_spec[7][128][4]` |
-| R | `GeneratorEngine.c` | SRAM1 | 163 | runtime state, measured design (§4, G-2): masks 6, request 1, built type 7, built lanes 28, built length 7, overrides 28 + 4, Scene-dirty 4, live arp 7 × 11 = 77, RNG 4 (plan: 228; the live arp is computed, not tabled, −63 B) |
+| R | `GeneratorEngine.c` + `GeneratorArp.c` | SRAM1 | 166 | runtime state (G-2, A-3). In `GeneratorEngine.c`: masks 5 + request 1, built type 7, built lanes 28, built length 7, overrides 28 + 4, Scene-dirty 4, check cursor 1. In `GeneratorArp.c`: live arp 7 × 11 = 77 and its RNG 4. Sum 85 + 81 = 166. Plan: 228; the live arp is computed, not tabled (−62 B). |
 | C | `SceneData.c` | SRAM1 | 1,547 | 91 B × 17 `scene_t` (padding measured at S-1) |
 | F1 | `sequencer.c` | SRAM1 | +4 | `seq_scene_automation_dirty` 32 → 64 bit |
 | M | `menuGenerator.c` | SRAM1 | 6 | browse candidate, edit flag, Morph view, commit state, LED cache valid, last type |
@@ -73,7 +73,7 @@ The approved table (plan §8) is reproduced with the rows this dive measured or 
 | **L** | **`LiveRecord.c`** | **SRAM1** | **+7** | **`liveRec_lastHitStep[7]`, the step a hit was placed on (L-12)** |
 | **M** | **`MidiLearn.c`** | **SRAM1** | **+1** | **`midiLearn_targetField`, the field of a waiting generator Learn (M-28)** |
 | **A** | **`GeneratorEngine.c`** | **SRAM1** | **+2** | **`gen_freezeMask`, `gen_uiChanged` (C-4, M-24)** |
-| | | **Total** | **≈ 5,446 B** | approved ≈ 5,483; net −37 B; new rows +30 B |
+| | | **Total** | **≈ 5,449 B** | approved ≈ 5,483; net −34 B; new rows +30 B |
 
 The total is below the approved figure, because the live arp shrank. The bold rows are
 new objects with new owners, so they are listed for sign-off all the same.
@@ -4246,3 +4246,1661 @@ and in `COLD_LAST` after `Core/Menu/menuEffects.c \`:
 It is a cold UI source, linked after the DSP objects like `menuEffects.c` (`Makefile:243–253`).
 
 ---
+
+## 7. Roll values `leg`, `sus`, `l+s` (encoding only; plan §7.1)
+
+### K-1 — `Core/Sequencer/sequencer.h:238` — **Add** (the roll value classes, after `seq_rollRhythmVelocity()`)
+
+```c
+/*
+ * Step roll values (S106 P1; plan §7).
+ *
+ * What: the step special `rol` holds 0 (off), 1..9 (the roll rates of
+ * seq_rollPpq()), or the gate values 10 `leg`, 11 `sus`, 12 `l+s`. A gate
+ * value is never a roll: the step fires as a plain step. Only Colloid acts on
+ * the gate values (no attack-decay restart for leg, no release within the
+ * step for sus; plan G35-G38); every other engine plays a plain step. The arp
+ * reads them on its input steps on every track (window restart, sequence
+ * kept; plan G27, FQ9).
+ * Why: one classification for every reader (the roll engine, the carry test,
+ * the deferral, the arp, live record), so a gate value can never reach
+ * seq_rollBegin(), whose ppq 0 would silence the step.
+ */
+#define SEQ_ROLL_RATE_MAX   9u
+#define SEQ_ROLL_LEG       10u
+#define SEQ_ROLL_SUS       11u
+#define SEQ_ROLL_LSUS      12u
+#define SEQ_ROLL_VALUE_MAX 12u
+#define SEQ_ROLL_IS_RATE(r) ((uint8_t)((r) >= 1u && (r) <= SEQ_ROLL_RATE_MAX))
+#define SEQ_ROLL_IS_GATE(r) ((uint8_t)((r) >= SEQ_ROLL_LEG && (r) <= SEQ_ROLL_LSUS))
+#define SEQ_ROLL_HAS_LEG(r) ((uint8_t)((r) == SEQ_ROLL_LEG || (r) == SEQ_ROLL_LSUS))
+#define SEQ_ROLL_HAS_SUS(r) ((uint8_t)((r) == SEQ_ROLL_SUS || (r) == SEQ_ROLL_LSUS))
+```
+
+### K-2 — `Core/Menu/MenuText.h:551–565` and `Core/Menu/menu.c:7076–7085`, `:13233–13240` — **Modify** (names, clamp, name lookup)
+
+```c
+/*
+ * Step-roll display names (S081 R17; S106 P1 adds the gate values).
+ *
+ * What: 13 entries plus the count byte: off, the nine rates, then `leg`,
+ * `sus`, `l+s` (SEQ_ROLL_LEG/SUS/LSUS, sequencer.h). Settable on every track
+ * from the STEP `rol` cell; only Colloid acts on the gate values (plan G35).
+ * The PERF overlay list (perfBtnTypeNames) does not include them (G41).
+ * Affiliates: seq_rollPpq, menu_getRollRateName, STEP roll clamp.
+ */
+static const char stepRollRateNames[][4] = {
+    {13},
+    {"off"},{"1/8"},{"8tr"},{" 16"},{"16t"},{" 32"},{"32t"},{" 64"},{"64t"},{"128"},
+    {"leg"},{"sus"},{"l+s"},
+};
+```
+
+`menu_clampCellValue()`, the `PAR_STEP_ROLL` branch:
+
+```c
+        /*
+         * STEP roll clamp (S081 §5.4; S106 P1): 0..9 rates, 10..12 the gate
+         * values leg / sus / l+s.
+         */
+        if (*value > SEQ_ROLL_VALUE_MAX)
+            *value = SEQ_ROLL_VALUE_MAX;
+```
+
+`menu_getRollRateName()`:
+
+```c
+    /* S106 P1: 13 values (off, nine rates, leg, sus, l+s). */
+    if (value > SEQ_ROLL_VALUE_MAX)
+        value = 0u;
+```
+
+### K-3 — `sequencer.c:3378`, `:3764`, `:3931`, `:3954`, `:3963` — **Modify** (rate tests)
+
+`seq_rollCarries()`:
+
+```c
+                     SEQ_ROLL_IS_RATE(sp->roll) &&
+```
+
+The roll cut (R-5's line):
+
+```c
+		if (seq_rollActive[track] && !SEQ_ROLL_IS_RATE(sp.roll) && step_on &&
+		    step_allowed) {
+```
+
+The deferral record and its carry stretch:
+
+```c
+						seq_trackShuffleRoll[track] =
+						    SEQ_ROLL_IS_RATE(sp.roll);
+```
+
+```c
+						if (SEQ_ROLL_IS_RATE(sp.roll) &&
+						    seq_rollCarries(track, &sp)) {
+```
+
+The trigger branch:
+
+```c
+					} else if (SEQ_ROLL_IS_RATE(sp.roll)) {
+						seq_rollBegin(track, &sp);
+					} else {
+```
+
+Add one comment line above the trigger branch: "S106 P1: a gate value (leg/sus/l+s)
+fires a plain step; only a rate (1..9) starts a roll (SEQ_ROLL_IS_RATE())."
+
+### K-4 — `seq_rollBegin()` (`sequencer.c:3434`) — **No change**
+
+Every caller now passes a rate. Its `ppq == 0` early return (`:3442–3446`) stays as the
+guard.
+
+### K-5 — LiveRecord, PatternData, copy — **No change** (verified)
+
+- `liveRec_commitHit()` receives rates 1..9 from the overlay (`LiveRecord.c:1537–1557`).
+- `pat_recordStep()` stores any nonzero roll with the roll bit (`PatternData.c:886–904`).
+- Copy/paste copies the byte (`copyOps.c:588`).
+
+### K-6 — host test `seq_rolltypes` — **Add** (`tools/dsp_test/modules/seq_rolltypes.c`, Makefile rule)
+
+Laws:
+- **RT-1:** 10..12 fire exactly one plain trigger at the step.
+- **RT-2:** they never call the roll engine.
+- **RT-3:** they cut a running roll like an empty-roll step does.
+- **RT-4:** 1..9 behave exactly as before (the S084 roll suite passes unchanged).
+
+Break proof: reverting the trigger branch to `sp.roll > 0u` fails RT-1 (a silent step).
+
+---
+
+## 8. The Arpeggiator (`arp`, `Arpegtr`; plan §6)
+
+### A-1 — `GeneratorEngine.c` registry — **Modify**
+
+```c
+#include "GeneratorArp.h"
+...
+static const gen_type_desc_t *const gen_registry[GEN_TYPE_COUNT] = {
+    &gen_typeOff,
+    &gen_typeArp,     /* S106 P1: GeneratorArp.c */
+};
+```
+
+### A-2 — `Core/Bank/Scene/Pattern/GeneratorArp.h` — **New file**
+
+```c
+/*
+ * GeneratorArp - the Arpeggiator generator (S106 P1; plan §6).
+ *
+ * What: gen_typeArp, the registry entry (fields, packing, slot map, pass
+ * test, build), and the live MIDI arp (arp_live*): a held chord on the track
+ * plays one note per step from TIM3 while held (plan G20).
+ * Contexts: the build and arp_liveSet()/arp_liveRelease() are foreground;
+ * arp_liveStep() is TIM3. Affiliates: GeneratorEngine.c (registry,
+ * gen_readStep()), MidiNoteModes.c (MNM_ARP), sequencer.c (roll classes).
+ */
+#ifndef GENERATORARP_H_
+#define GENERATORARP_H_
+
+#include <stdint.h>
+#include "GeneratorEngine.h"
+
+extern const gen_type_desc_t gen_typeArp;
+
+/*
+ * The live arp (S106 P1; plan §6.6).
+ * arp_liveSet(): the held set changed. root = the lowest held internal note;
+ *   dist[] = the other held keys' distances above it in press order (up to
+ *   three used); vel = the newest key's velocity; newHold = 1 on the first
+ *   key of a hold (the sequence restarts), else the position is kept.
+ * arp_liveRelease(): every key released; the track returns to the store at
+ *   its next step.
+ * arp_liveStep(): one step of the live arp (TIM3); advance = 1 at the step
+ *   event, 0 for a re-read. Returns the trigger and fills *sp.
+ */
+void arp_liveSet(uint8_t track, uint8_t root, const uint8_t *dist,
+                 uint8_t nDist, uint8_t vel, uint8_t newHold);
+void arp_liveRelease(uint8_t track);
+uint8_t arp_liveStep(uint8_t track, uint8_t advance, pat_step_specials_t *sp);
+
+#endif /* GENERATORARP_H_ */
+```
+
+### A-3 — `Core/Bank/Scene/Pattern/GeneratorArp.c` — **New file**
+
+```c
+/*
+ * GeneratorArp.c - the Arpeggiator (S106 P1; plan §6).
+ * Contract: GeneratorArp.h.
+ */
+#include "stm32f4xx.h"
+#include "GeneratorArp.h"
+#include "PatternData.h"
+#include "SceneData.h"
+#include "sequencer.h"
+#include "random.h"
+#include "config.h"
+#include <string.h>
+
+/* Field indices in gen_typeArp.fields (the page order, plan §5.2). */
+enum { ARP_F_IN1 = 0, ARP_F_IN2, ARP_F_IN3, ARP_F_OCT, ARP_F_DIR,
+       ARP_F_VEL, ARP_F_STP, ARP_F_NLN, ARP_F_COUNT };
+enum { ARP_DIR_UP = 0, ARP_DIR_DN, ARP_DIR_UD, ARP_DIR_RND };
+enum { ARP_VEL_PLAYED = 0, ARP_VEL_RUP = 11, ARP_VEL_RDN, ARP_VEL_PK,
+       ARP_VEL_RND, ARP_VEL_1ST };
+
+/* The `lst` condition value ("previous", MenuText.h conditionNames). */
+#define ARP_COND_LST 26u
+
+static const char arpIntervalNames[14][4] = {
+    "off", "  0", "  1", "  2", "  3", "  4", "  5", "  6",
+    "  7", "  8", "  9", " 10", " 11", " 12" };
+static const char arpOctNames[4][4] = { " +0", " +1", " +2", " +3" };
+static const char arpDirNames[4][4] = { "up ", "dn ", "u-d", "rnd" };
+static const char arpVelNames[16][4] = {
+    "---", "1-2", "1-3", "2-3", "1-4", "2-4", "3-4", "1-5",
+    "2-5", "3-5", "4-5", "rup", "rdn", "pk ", "rnd", "1st" };
+/* plan G27/G28 tables */
+static const uint8_t arpStepNumbers[16] = {
+    1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 12u, 16u, 24u, 32u, 48u, 64u, 128u };
+static const uint8_t arpLenNumbers[16] = {
+    1u, 2u, 3u, 5u, 8u, 12u, 17u, 23u, 29u, 37u, 45u, 54u, 64u, 75u, 87u, 100u };
+/* Velocity patterns 1..10 = the roll "halve" rhythms (menu.c
+ * stepRollRhythmBytes[1..10]) decoded by seq_rollRhythmVelocity(). */
+static const uint8_t arpHalveRhythm[10] = {
+    0x21u, 0x31u, 0x32u, 0x41u, 0x42u, 0x43u, 0x51u, 0x52u, 0x53u, 0x54u };
+
+#define ARP_ORD   GEN_FIELD_ORDERED
+#define ARP_IV    (GEN_FIELD_ORDERED | GEN_FIELD_ZERO_OFF)
+
+/*
+ * The packing (plan §6.3, Q4; schedule A14 reading).
+ *  lane 0 (g1): in1 bits 0..3, oct bits 4..5, in3 bit 3 at bit 6
+ *  lane 1 (g2): in2 bits 0..3, in3 bits 0..2 at bits 4..6
+ *  lane 2 (g3): nln bits 0..3, dir bits 4..5, vel bit 3 at bit 6
+ *  lane 3 (g4): stp bits 0..3, vel bits 0..2 at bits 4..6
+ * part[0] of a split field holds its low bits.
+ */
+static const gen_field_desc_t arpFields[ARP_F_COUNT] = {
+    { "in1", "Intervl1", 14u, 0u,  ARP_IV,  arpIntervalNames, 0, 1u, { { 0u, 0u, 4u }, { 0u, 0u, 0u } } },
+    { "in2", "Intervl2", 14u, 0u,  ARP_IV,  arpIntervalNames, 0, 1u, { { 1u, 0u, 4u }, { 0u, 0u, 0u } } },
+    { "in3", "Intervl3", 14u, 0u,  ARP_IV,  arpIntervalNames, 0, 2u, { { 1u, 4u, 3u }, { 0u, 6u, 1u } } },
+    { "oct", "OctRange",  4u, 0u,  ARP_ORD, arpOctNames,      0, 1u, { { 0u, 4u, 2u }, { 0u, 0u, 0u } } },
+    { "dir", "Directn ",  4u, 0u,  0u,      arpDirNames,      0, 1u, { { 2u, 4u, 2u }, { 0u, 0u, 0u } } },
+    { "vel", "VelPattn", 16u, 0u,  0u,      arpVelNames,      0, 2u, { { 3u, 4u, 3u }, { 2u, 6u, 1u } } },
+    { "stp", "ArpSteps", 16u, 7u,  ARP_ORD, 0, arpStepNumbers,   1u, { { 3u, 0u, 4u }, { 0u, 0u, 0u } } },
+    { "nln", "NoteLen ", 16u, 15u, ARP_ORD, 0, arpLenNumbers,    1u, { { 2u, 0u, 4u }, { 0u, 0u, 0u } } },
+};
+
+/* The decoded fields. iv[] are semitones 0..12 in entered order. */
+typedef struct {
+    uint8_t iv[3];
+    uint8_t nIv;
+    uint8_t oct;
+    uint8_t dir;
+    uint8_t vel;
+    uint8_t stp;
+    uint8_t nln;
+} arp_cfg_t;
+
+static void arp_decode(const uint8_t lane[GEN_LANES], arp_cfg_t *c)
+{
+    uint8_t f;
+
+    c->nIv = 0u;
+    for (f = ARP_F_IN1; f <= ARP_F_IN3; f++) {
+        const uint8_t code = gen_fieldGet(&arpFields[f], lane);
+
+        if (code != 0u)
+            c->iv[c->nIv++] = (uint8_t)(code - 1u);   /* 1..13 -> 0..12 */
+    }
+    c->oct = gen_fieldGet(&arpFields[ARP_F_OCT], lane);
+    c->dir = gen_fieldGet(&arpFields[ARP_F_DIR], lane);
+    c->vel = gen_fieldGet(&arpFields[ARP_F_VEL], lane);
+    c->stp = gen_fieldGet(&arpFields[ARP_F_STP], lane);
+    c->nln = gen_fieldGet(&arpFields[ARP_F_NLN], lane);
+}
+
+/* All three intervals off: the arp is off and the track plays its steps (G22). */
+static uint8_t arp_passes(const uint8_t lane[GEN_LANES])
+{
+    return (uint8_t)(gen_fieldGet(&arpFields[ARP_F_IN1], lane) == 0u &&
+                     gen_fieldGet(&arpFields[ARP_F_IN2], lane) == 0u &&
+                     gen_fieldGet(&arpFields[ARP_F_IN3], lane) == 0u);
+}
+
+/*
+ * Sequence length and the note offset at a position (S106 P1; plan §6.4,
+ * A12). up: octaves 0..R, intervals in entered order within each; dn:
+ * octaves R..0; u-d: up, then octaves R-1..1 (turns not repeated); rnd:
+ * positions of the up sequence drawn at random. Computed, not tabled, so the
+ * live arp needs no sequence buffer (schedule correction).
+ */
+static uint8_t arp_seqLen(uint8_t nIv, uint8_t oct, uint8_t dir)
+{
+    uint8_t n = (uint8_t)(nIv * (oct + 1u));
+
+    if (dir == ARP_DIR_UD && oct >= 2u)
+        n = (uint8_t)(n + nIv * (oct - 1u));
+    return n;
+}
+
+static uint8_t arp_offsetAt(const uint8_t iv[3], uint8_t nIv, uint8_t oct,
+                            uint8_t dir, uint8_t pos)
+{
+    const uint8_t upN = (uint8_t)(nIv * (oct + 1u));
+    uint8_t o;
+    uint8_t i;
+
+    if (nIv == 0u)
+        return 0u;
+    if (dir == ARP_DIR_DN) {
+        o = (uint8_t)(oct - pos / nIv);
+        i = (uint8_t)(pos % nIv);
+    } else if (dir == ARP_DIR_UD && pos >= upN) {
+        const uint8_t q = (uint8_t)(pos - upN);
+
+        o = (uint8_t)((oct - 1u) - q / nIv);
+        i = (uint8_t)(q % nIv);
+    } else {
+        o = (uint8_t)(pos / nIv);
+        i = (uint8_t)(pos % nIv);
+    }
+    return (uint8_t)(iv[i] + 12u * o);
+}
+
+/*
+ * The velocity pattern at window position k of L (S106 P1; plan §6.2, Q11).
+ * Every pattern scales the input velocity v and never exceeds it; the result
+ * is at least 1. rnd draws 50..100 % from `rnd15` (a 15-bit random value the
+ * caller supplies: GetRngValue() at build, the live LCG in TIM3).
+ */
+static uint8_t arp_velocity(uint8_t v, uint8_t pat, uint8_t k, uint8_t L,
+                            uint16_t rnd15)
+{
+    uint16_t pct = 100u;
+    const uint8_t last = (uint8_t)((L > 1u) ? (L - 1u) : 1u);
+
+    if (pat == ARP_VEL_PLAYED)
+        return v;
+    if (pat <= 10u)
+        return seq_rollRhythmVelocity(arpHalveRhythm[pat - 1u], v, k);
+    switch (pat) {
+    case ARP_VEL_RUP: pct = (uint16_t)(25u + (75u * k) / last); break;
+    case ARP_VEL_RDN: pct = (uint16_t)(100u - (75u * k) / last); break;
+    case ARP_VEL_PK: {
+        const uint8_t mid = (uint8_t)(last / 2u);
+        const uint8_t dist = (k > mid) ? (uint8_t)(k - mid) : (uint8_t)(mid - k);
+
+        pct = (uint16_t)(100u - (75u * dist) / ((mid > 0u) ? mid : 1u));
+        break; }
+    case ARP_VEL_RND: pct = (uint16_t)(50u + rnd15 % 51u); break;
+    case ARP_VEL_1ST: pct = (k == 0u) ? 100u : 50u; break;
+    default: break;
+    }
+    v = (uint8_t)(((uint16_t)v * pct) / 100u);
+    return (v == 0u) ? 1u : v;
+}
+
+/*
+ * Build the arp from the Pattern (S106 P1; plan §6.4, §6.5).
+ *
+ * What: every active Pattern step b in 0..len-1 is an input. It opens a
+ * window of W = stp steps (b + k) mod len (Q1: wrap), cut at the next input.
+ * A plain input restarts the sequence position; a leg/sus/l+s input keeps it
+ * (G27, FQ9: read on every track). Output at window position k: trigger;
+ * note = input note + sequence offset (clamped 0..127); velocity = the
+ * pattern of the input velocity; fill = nln; condition = the input's at
+ * k = 0, `lst` after when the input has one (G18), else none. Steps outside
+ * every window are off. Input roll rates, timing and rhythm are not carried
+ * (Q10b). Slot map: note, velocity, fill, condition.
+ * Cost: one pass over len inputs plus at most 128 output writes. Context:
+ * foreground (gen_rebuildTrack()).
+ */
+static void arp_build(uint8_t track, uint8_t scene,
+                      const uint8_t lane[GEN_LANES],
+                      const uint8_t fixed[GEN_FIXED_PARAMS], uint8_t len,
+                      uint8_t trig[PATTERN_TRACK_BYTES],
+                      uint8_t spec[NUM_STEPS][GEN_SPECIAL_SLOTS])
+{
+    arp_cfg_t c;
+    uint8_t inputs[NUM_STEPS];
+    uint8_t nIn = 0u;
+    uint8_t n;
+    uint8_t pos = 0u;
+    uint8_t b;
+    uint8_t i;
+
+    (void)fixed;
+    memset(trig, 0, PATTERN_TRACK_BYTES);
+    arp_decode(lane, &c);
+    n = arp_seqLen(c.nIv, c.oct, c.dir);
+    if (n == 0u)
+        return;
+    for (b = 0u; b < len; b++)
+        if (pat_isStepActive(track, b, scene))
+            inputs[nIn++] = b;
+    for (i = 0u; i < nIn; i++) {
+        const uint8_t base = inputs[i];
+        const uint8_t gap = (nIn == 1u) ? len
+            : (uint8_t)((inputs[(i + 1u) % nIn] + len - base) % len);
+        const uint8_t stp = arpStepNumbers[c.stp];
+        const uint8_t W = (stp < gap) ? stp : gap;
+        const pat_step_specials_t sp = pat_readStepSpecials(scene, track, base);
+        uint8_t k;
+
+        if (!SEQ_ROLL_IS_GATE(sp.roll))
+            pos = 0u;
+        for (k = 0u; k < W; k++) {
+            const uint8_t s = (uint8_t)((base + k) % len);
+            const uint16_t r = (uint16_t)(GetRngValue() & 0x7FFF);
+            const uint8_t idx = (c.dir == ARP_DIR_RND)
+                ? (uint8_t)(r % (uint16_t)(c.nIv * (c.oct + 1u))) : pos;
+            int16_t note = (int16_t)sp.note +
+                (int16_t)arp_offsetAt(c.iv, c.nIv, c.oct, c.dir, idx);
+
+            if (note > 127)
+                note = 127;
+            spec[s][0] = (uint8_t)note;
+            spec[s][1] = arp_velocity(sp.velocity, c.vel, k, W, (uint16_t)(r >> 1u));
+            spec[s][2] = arpLenNumbers[c.nln];
+            spec[s][3] = (k == 0u) ? sp.condition
+                                   : (sp.condition != 0u ? ARP_COND_LST : 0u);
+            trig[s >> 3u] |= (uint8_t)(1u << (s & 7u));
+            pos = (uint8_t)((pos + 1u) % n);
+        }
+    }
+}
+
+const gen_type_desc_t gen_typeArp = {
+    "arp", "Arpegtr ",
+    ARP_F_COUNT, arpFields,
+    0u, 0,
+    { PAT_SPECIAL_NOTE_BIT, PAT_SPECIAL_VEL_BIT, PAT_SPECIAL_FILL_BIT,
+      PAT_SPECIAL_COND_BIT },
+    0u,              /* passthrough_bits: none (plan G43) */
+    1u,              /* wraps at the effective track length (Q1) */
+    arp_passes,
+    arp_build,
+    0                /* commitStep: write as built (the arp's random is
+                      * already rolled into the store, G31) */
+};
+
+/*
+ * The live arp state (S106 P1; plan §6.6; RAM 77 B SRAM1, 7 x 11, in the
+ * approved runtime row; schedule §0.3 lists it under GeneratorEngine).
+ *
+ * root: the lowest held internal note; iv[3]/nIv: the intervals (the held
+ * keys' distances, folded, or the lanes' with one key); oct/dir/vel/stp/nln:
+ * the effective fields at the last held-set change (oct raised by folding);
+ * pos: the sequence position; k: the window position (velocity pattern);
+ * vel: the newest key's velocity. Written by arp_liveSet() under PRIMASK;
+ * read by arp_liveStep() in TIM3. arp_rng: a 32-bit xorshift for live `rnd`
+ * (TIM3 has no hardware RNG read here), seeded at each new hold.
+ */
+typedef struct {
+    uint8_t root;
+    uint8_t iv[3];
+    uint8_t nIv;
+    uint8_t shape;    /* oct (bits 0..1) | dir (bits 2..3) */
+    uint8_t vel;
+    uint8_t pos;
+    uint8_t k;
+    uint8_t cfg;      /* velocity pattern (bits 4..7) | nln (bits 0..3) */
+    uint8_t stp;      /* window length for the velocity pattern */
+} arp_live_t;
+
+static arp_live_t arp_live[NUM_TRACKS];
+static uint32_t arp_rng = 0x2545F491u;
+
+static uint16_t arp_rngNext(void)
+{
+    arp_rng ^= arp_rng << 13u;
+    arp_rng ^= arp_rng >> 17u;
+    arp_rng ^= arp_rng << 5u;
+    return (uint16_t)(arp_rng & 0x7FFFu);
+}
+
+void arp_liveSet(uint8_t track, uint8_t root, const uint8_t *dist,
+                 uint8_t nDist, uint8_t vel, uint8_t newHold)
+{
+    uint8_t lane[GEN_LANES];
+    arp_cfg_t c;
+    arp_live_t L;
+    uint8_t i;
+    uint32_t primask;
+
+    if (track >= NUM_TRACKS)
+        return;
+    gen_effectiveLanes(track, seq_getTrackPlayedScene(track), lane);
+    arp_decode(lane, &c);
+    memset(&L, 0, sizeof(L));
+    L.root = root;
+    L.oct = 0u;
+    if (nDist == 0u) {
+        /* One key: the interval lanes on that root (A13). */
+        memcpy(L.iv, c.iv, sizeof(L.iv));
+        L.nIv = c.nIv;
+    } else {
+        /*
+         * Other keys replace the intervals, in press order, up to three
+         * (FQ10). d <= 12 is the interval; d > 12 folds to d mod 12 (12 for
+         * exact octaves) and raises the octave range to ceil(d / 12) - 1,
+         * capped at +3 ("as much as the parameter limits allow", G20).
+         */
+        uint8_t oct = c.oct;
+
+        for (i = 0u; i < nDist && i < 3u; i++) {
+            uint8_t d = dist[i];
+            uint8_t o = 0u;
+
+            if (d > 12u) {
+                o = (uint8_t)((d + 11u) / 12u - 1u);
+                d = (uint8_t)(d % 12u);
+                if (d == 0u)
+                    d = 12u;
+            }
+            if (o > oct)
+                oct = o;
+            L.iv[i] = d;
+        }
+        L.nIv = (nDist < 3u) ? nDist : 3u;
+        c.oct = (oct > 3u) ? 3u : oct;
+    }
+    L.shape = (uint8_t)((c.oct & 3u) | ((c.dir & 3u) << 2u));
+    L.vel = vel;
+    L.cfg = (uint8_t)(((c.vel & 0x0Fu) << 4u) | (c.nln & 0x0Fu));
+    L.stp = arpStepNumbers[c.stp];
+    primask = __get_PRIMASK();
+    __disable_irq();
+    if (!newHold) {
+        L.pos = arp_live[track].pos;
+        L.k = arp_live[track].k;
+    } else {
+        arp_rng ^= (uint32_t)(uint16_t)GetRngValue() | 1u;
+    }
+    arp_live[track] = L;
+    if (L.nIv > 0u)
+        gen_liveMask |= (uint8_t)(1u << track);
+    else
+        gen_liveMask &= (uint8_t)~(1u << track);
+    __set_PRIMASK(primask);
+}
+
+void arp_liveRelease(uint8_t track)
+{
+    uint32_t primask;
+
+    if (track >= NUM_TRACKS)
+        return;
+    primask = __get_PRIMASK();
+    __disable_irq();
+    gen_liveMask &= (uint8_t)~(1u << track);
+    __set_PRIMASK(primask);
+}
+
+/*
+ * One live step (S106 P1; plan §6.6). TIM3.
+ *
+ * What: fires the sequence note at the current position with the velocity
+ * pattern and nln; the condition is none. advance 1 moves pos and k on;
+ * advance 0 (a re-read of the same step) only reports the fill. Pattern
+ * input steps are ignored while held (Q8). Output: 1 (a held arp fires every
+ * step), *sp.
+ */
+uint8_t arp_liveStep(uint8_t track, uint8_t advance, pat_step_specials_t *sp)
+{
+    arp_live_t *L = &arp_live[track];
+    const uint8_t oct = (uint8_t)(L->shape & 3u);
+    const uint8_t dir = (uint8_t)((L->shape >> 2u) & 3u);
+    const uint8_t n = arp_seqLen(L->nIv, oct, dir);
+    uint8_t idx;
+    int16_t note;
+
+    sp->fill = arpLenNumbers[L->cfg & 0x0Fu];
+    sp->flags |= PAT_SPECIAL_FILL_BIT;
+    if (!advance || n == 0u)
+        return (uint8_t)(n != 0u);
+    idx = (dir == ARP_DIR_RND)
+        ? (uint8_t)(arp_rngNext() % (uint16_t)(L->nIv * (oct + 1u))) : L->pos;
+    note = (int16_t)L->root + (int16_t)arp_offsetAt(L->iv, L->nIv, oct, dir, idx);
+    sp->note = (uint8_t)((note > 127) ? 127 : note);
+    sp->velocity = arp_velocity(L->vel, (uint8_t)(L->cfg >> 4u), L->k,
+                                L->stp, arp_rngNext());
+    sp->flags |= (uint8_t)(PAT_SPECIAL_NOTE_BIT | PAT_SPECIAL_VEL_BIT);
+    L->pos = (uint8_t)((L->pos + 1u) % n);
+    L->k = (uint8_t)((L->k + 1u) % ((L->stp > 0u) ? L->stp : 1u));
+    return 1u;
+}
+```
+
+`GeneratorEngine.h` must declare `gen_liveMask` writable by GeneratorArp.c (G-1 already
+declares it `extern volatile`).
+
+### A-4 — `GeneratorEngine.c` `gen_readStep()` — **Modify** (the live branch)
+
+After the default-specials block and the bounds test:
+
+```c
+    /*
+     * S106 P1 (plan §6.6): a MIDI hold drives the live arp, ahead of the
+     * store and of the ready bit; Pattern input steps are ignored meanwhile.
+     */
+    if ((gen_liveMask & bit) != 0u)
+        return arp_liveStep(track, advanceLive, sp);
+```
+
+Remove the `(void)advanceLive;` line, and add `#include "GeneratorArp.h"`.
+
+### A-5 — `Core/MIDI/MidiNoteModes.h:31–37` — **Modify** (the mode)
+
+```c
+typedef enum {
+    MNM_NORMAL = 0,
+    MNM_LAYER4,
+    MNM_PARA,
+    MNM_POLY,
+    /*
+     * S106 P1 (plan §6.6, Q8): the track's generator is the arp (not passing
+     * through). Every note on the track goes to the arp's held set (press
+     * order); no note triggers the voice directly; the live arp plays one
+     * note per step. Precedence over MNM_PARA and MNM_LAYER4. Each note-on is
+     * still reported to LiveRecord as a plain hit, so recording writes the
+     * arp's input (schedule SD4).
+     */
+    MNM_ARP
+} midiNoteMode_t;
+```
+
+### A-6 — `Core/MIDI/MidiNoteModes.c:149–163` — **Modify** (`midiNoteMode_trackMode()`)
+
+At the top of the function:
+
+```c
+    /* S106 P1 (Q8): an arp generator takes every note on its track. */
+    if (track < 7u && scene_getGenType(scene_index, track) == GEN_TYPE_ARP &&
+        (gen_passMask & (uint8_t)(1u << track)) == 0u)
+        return MNM_ARP;
+```
+
+Add `#include "GeneratorEngine.h"` and `#include "GeneratorArp.h"` under the `#else`
+(non-host) include block, and the host stubs to `notemode_host.h` (see §11.1).
+
+### A-7 — `MidiNoteModes.c` after `midiNoteMode_paraOff()` (ends `:601`) — **Add** (the arp held set)
+
+```c
+/*
+ * The arp's held set (S106 P1; plan §6.6, Q8, FQ10; schedule SD11).
+ *
+ * What: keys held on an MNM_ARP track live in the slot's group (mode
+ * MNM_ARP), in press order, exactly as the paraphonic keys do. On every
+ * change the root (lowest key) and the other keys' distances in press order
+ * go to arp_liveSet(); the first key of a hold restarts the sequence. The
+ * last release frees the group and ends the live arp. Each note-on is
+ * reported to LiveRecord as a single hit (the input; SD4) and never
+ * triggers the voice. Inputs: track, channel, internal note, velocity.
+ * Context: foreground (MIDI dispatch, the chromatic keyboard).
+ */
+static void midiNoteMode_arpPublish(uint8_t track, const midiNoteMode_group_t *g,
+                                    uint8_t vel, uint8_t newHold)
+{
+    uint8_t root = 127u;
+    uint8_t rootAt = 0u;
+    uint8_t dist[3];
+    uint8_t n = 0u;
+    uint8_t i;
+
+    for (i = 0u; i < g->count; i++)
+        if (g->key[i].note < root) {
+            root = g->key[i].note;
+            rootAt = i;
+        }
+    for (i = 0u; i < g->count && n < 3u; i++)
+        if (i != rootAt)
+            dist[n++] = (uint8_t)(g->key[i].note - root);
+    arp_liveSet(track, root, dist, n, vel, newHold);
+}
+
+static uint8_t midiNoteMode_arpOn(uint8_t track, uint8_t channel,
+                                  uint8_t internal, uint8_t vel, uint16_t ageUs)
+{
+    const uint8_t slot = midiNoteMode_slotOf(track);
+    uint8_t gi = midiNoteMode_groupOfSlot(slot);
+    midiNoteMode_group_t *g;
+    uint8_t newHold;
+
+    if (gi == 0xFFu) {
+        gi = midiNoteMode_newGroup(slot, channel);
+        if (gi == 0xFFu)
+            return 1u;                    /* pool full: the key is ignored (R12) */
+        midiNoteMode_group[gi].mode = MNM_ARP;
+    }
+    g = &midiNoteMode_group[gi];
+    newHold = (uint8_t)(g->count == 0u);
+    if (midiNoteMode_findKey(g, internal) < 0 && g->count < MIDI_NOTEMODE_KEYS) {
+        g->key[g->count].note = internal;
+        g->key[g->count].vel = vel;
+        g->key[g->count].owner = 0xFFu;
+        g->count++;
+    }
+    midiNoteMode_arpPublish(track, g, vel, newHold);
+    midiNoteMode_report(track, internal, vel, LIVEREC_HIT_SINGLE, ageUs, 0, 0, 0u);
+    return 1u;
+}
+
+static uint8_t midiNoteMode_arpOff(uint8_t track, uint8_t internal)
+{
+    const uint8_t gi = midiNoteMode_groupOfSlot(midiNoteMode_slotOf(track));
+    midiNoteMode_group_t *g;
+    int16_t at;
+
+    if (gi == 0xFFu)
+        return 1u;
+    g = &midiNoteMode_group[gi];
+    at = midiNoteMode_findKey(g, internal);
+    if (at >= 0)
+        midiNoteMode_removeKey(g, (uint8_t)at);
+    if (g->count == 0u) {
+        midiNoteMode_freeGroup(gi);
+        arp_liveRelease(track);
+    } else {
+        midiNoteMode_arpPublish(track, g, g->key[g->count - 1u].vel, 0u);
+    }
+    return 1u;
+}
+```
+
+In `midiNoteMode_noteOn()` (`:611`), before `if (mode == MNM_PARA)`:
+
+```c
+    if (mode == MNM_ARP)
+        return midiNoteMode_arpOn(track, channel, internal, vel, ageUs);
+```
+
+In `midiNoteMode_noteOff()` (`:658–660`):
+
+```c
+    if (track < 7u) {
+        const midiNoteMode_t mode =
+            midiNoteMode_trackMode(scene_getActiveIndex(), track, channel);
+
+        if (mode == MNM_ARP)
+            return midiNoteMode_arpOff(track, internal);   /* S106 P1 */
+        if (mode == MNM_PARA)
+            return midiNoteMode_paraOff(track, internal);
+    }
+```
+
+`midiNoteMode_newGroup(slot, channel)` (`:216`) sets `mode = MNM_PARA` (`:225`), so
+`midiNoteMode_arpOn()` overwrites it with `MNM_ARP` right after the call.
+`midiNoteMode_prepareTrigger()` (`:666`) and the paraphonic paths test `mode == MNM_PARA`,
+so an arp group never enters them.
+
+### A-8 — `MidiNoteModes.c:695–735` — **Modify** (`midiNoteMode_service()`: revalidate arp groups)
+
+At the top of the group loop, before `if (g->mode != MNM_PARA) continue;`:
+
+```c
+        /*
+         * S106 P1: an arp group whose track no longer resolves to MNM_ARP (the
+         * type changed, all intervals went off, a Scene change) is freed and
+         * its live arp ended; its keys then play nothing until pressed again.
+         */
+        if (g->mode == MNM_ARP) {
+            uint8_t s, t = 0xFFu;
+
+            for (s = 0u; s < MIDI_NOTEMODE_GROUPS; s++)
+                if ((g->members & (uint8_t)(1u << s)) != 0u) { t = s; break; }
+            if (t == 0xFFu ||
+                midiNoteMode_trackMode(scene, t, g->channel) != MNM_ARP) {
+                if (t != 0xFFu)
+                    arp_liveRelease(t);
+                midiNoteMode_freeGroup(gi);
+            }
+            continue;
+        }
+```
+
+The group stores slots, so slot 5 revalidates track 5 (tracks 5/6 share it, SD11).
+
+### A-9 — `Makefile:146` — **Add**
+
+```make
+  Core/Bank/Scene/Pattern/GeneratorEngine.c \
+  Core/Bank/Scene/Pattern/GeneratorArp.c \
+```
+
+---
+
+## 9. Colloid legato and sustain, and the live-record `leg` rule (plan §7.2, §7.3)
+
+### L-1 — `Core/MIDI/MidiVoiceControl.h:82` and `MidiVoiceControl.c:407` — **Add** (the legato trigger)
+
+Header, after `voiceControl_noteOnLayers()`:
+
+```c
+/*
+ * Enqueue a legato trigger (S106 P1; plan G37). As voiceControl_noteOn()
+ * (pending reset set), with VC_TRIGGER_LEGATO in the ring entry's layers
+ * byte. instrumentManager_triggerTrack() strips the bit; a Colloid then
+ * triggers without restarting attack-decay; every other type ignores it.
+ */
+#define VC_TRIGGER_LEGATO 0x80u
+void voiceControl_noteOnLegato(uint8_t voice, uint8_t note, uint8_t vel);
+```
+
+Source:
+
+```c
+void voiceControl_noteOnLegato(uint8_t voice, uint8_t note, uint8_t vel)
+{
+	uint32_t primask;
+
+	if (voice >= 7u)
+		return;
+	primask = voiceControl_irqSave();
+	active_voices |= (1 << voice);
+	voiceControl_enqueueTriggerLocked(voice, note, vel, VC_TRIGGER_LEGATO);
+	voiceControl_pendingReset |= (uint8_t)(1u << voice);
+	voiceControl_irqRestore(primask);
+}
+```
+
+### L-2 — `Core/Sequencer/sequencer.h:224` and `sequencer.c:2494` — **Add** (`seq_triggerVoiceLegato()`)
+
+```c
+/*
+ * A legato step trigger (S106 P1; plan G37): as seq_triggerVoice(voice, vol,
+ * note, 1) (hardware trigger, MIDI note-off/on, track MIDI TX) but the voice
+ * trigger carries the legato flag (voiceControl_noteOnLegato()).
+ */
+void seq_triggerVoiceLegato(uint8_t voiceNr, uint8_t vol, uint8_t note);
+```
+
+```c
+void seq_triggerVoiceLegato(uint8_t voiceNr, uint8_t vol, uint8_t note)
+{
+	if (voiceNr > 6)
+		return;
+	if (voiceNr >= 5) {
+		trigger_triggerVoice(5, TRIGGER_OFF);
+		trigger_triggerVoice(6, TRIGGER_OFF);
+	} else {
+		trigger_triggerVoice(voiceNr, TRIGGER_OFF);
+	}
+	voiceControl_noteOff(voiceNr);
+	voiceControl_noteOnLegato(voiceNr, note, vol);
+	midiOut_trackTrigger(voiceNr, seq_perTrackPattern[voiceNr], note, vol);
+}
+```
+
+### L-3 — `sequencer.c:3963–3968` — **Modify** (the plain trigger: legato, sustain)
+
+```c
+					} else {
+						/*
+						 * S106 P1 (plan §7.2): a `leg`/`l+s` step triggers
+						 * legato (a Colloid keeps its envelope stages); a
+						 * `sus`/`l+s` step opens no length window, so the
+						 * fill cannot release the note within the step (the
+						 * hold below does the rest; FQ7: sus wins).
+						 */
+						if (SEQ_ROLL_HAS_LEG(sp.roll))
+							seq_triggerVoiceLegato(track, sp.velocity, sp.note);
+						else
+							seq_triggerVoice(track, sp.velocity, sp.note, 1);
+						if (!SEQ_ROLL_HAS_SUS(sp.roll))
+							seq_lenStart(track, sp.fill);   /* S096 P3 */
+					}
+```
+
+### L-4 — `sequencer.c` after R-4's block (the step event) — **Add** (the sustain hold)
+
+After `const uint8_t step_fires = ...;`:
+
+```c
+		/*
+		 * Sustain on a step (S106 P1; plan G36, FQ8).
+		 *
+		 * What: a passing step whose roll value is `sus` or `l+s` cancels the
+		 * track's running length window (a previous step's fill) and asks the
+		 * slot for a gate hold: a Colloid renews its gate past this step and
+		 * drops a pending non-forced release, so the note cannot enter its
+		 * release during the step. Empty steps count too. Forced releases
+		 * (mute, a Scene/track change) still act. Other engines ignore the
+		 * request. With `col_sustain` on the note holds anyway.
+		 * Context: TIM3. Affiliates: instrumentManager_requestGateHold().
+		 */
+		if (step_allowed && SEQ_ROLL_HAS_SUS(sp.roll)) {
+			seq_lenWindow[track] = 0u;
+			instrumentManager_requestGateHold(track);
+		}
+```
+
+### L-5 — `sequencer.c:6751–6760` — **Modify** (`seq_fireDeferred()`: the plain branch)
+
+```c
+		pat_step_specials_t sp;
+
+		(void)seq_stepRead(track, step, 0u, &sp);
+		/* S106 P1: legato and sustain as at the step event. */
+		if (SEQ_ROLL_HAS_LEG(sp.roll))
+			seq_triggerVoiceLegato(track, seq_trackShuffleVel[track],
+			                       seq_trackShuffleNote[track]);
+		else
+			seq_triggerVoice(track, seq_trackShuffleVel[track],
+			                 seq_trackShuffleNote[track], 1);
+		if (!SEQ_ROLL_HAS_SUS(sp.roll))
+			seq_lenStart(track, sp.fill);
+```
+
+### L-6 — `Core/DSP/Instruments/Colloid/ColloidVoice.c:1258–1303` and `ColloidVoice.h:620` — **Modify / Add** (the legato twin)
+
+Rename the body to a static helper with a `legato` argument, and keep the public functions:
+
+```c
+/*
+ * The Colloid trigger (S095 P2; S096 P3 gate; S106 P1 legato).
+ *
+ * legato 0: today's trigger, bit-identical (both attacks restart from their
+ * levels, the pitch envelope too). legato 1 (plan G37, FQ6 "as written"):
+ * the three envelope stages are left as they are, whatever they are; the
+ * note, velocity, LFO retrigger, gate and per-note draws are as for any
+ * trigger (schedule SD7). Recording never writes `leg` on a note in release
+ * (MidiNoteModes.c, G40); a menu-set or automated `leg` applies as written.
+ */
+static void col_trigger(ColloidVoice *voice, uint8_t source_slot,
+                        uint8_t velocity, uint8_t note,
+                        uint32_t stepSamples, uint8_t first, uint8_t legato);
+
+void Colloid_triggerVoice(ColloidVoice *voice, const uint8_t source_slot,
+                          const uint8_t velocity, const uint8_t note,
+                          const uint32_t stepSamples, const uint8_t first)
+{
+	col_trigger(voice, source_slot, velocity, note, stepSamples, first, 0u);
+}
+
+void Colloid_triggerVoiceLegato(ColloidVoice *voice, const uint8_t source_slot,
+                                const uint8_t velocity, const uint8_t note,
+                                const uint32_t stepSamples)
+{
+	col_trigger(voice, source_slot, velocity, note, stepSamples, 1u, 1u);
+}
+```
+
+Inside the body, guard the three stage writes:
+
+```c
+	/* both attacks restart from their current levels (S106 P1: not legato) */
+	if (!legato) {
+		voice->ampEg.stage = COL_EG_ATTACK;
+		voice->fltEg.stage = COL_EG_ATTACK;
+	}
+	...
+	if (!legato)
+		voice->pitchEg.stage = COL_EG_ATTACK;   /* with the amp and filter (P3b) */
+```
+
+Header (`ColloidVoice.h:620`), beside `Colloid_triggerVoice()`:
+
+```c
+/* S106 P1: a legato trigger: as a first hit, but no envelope stage restarts. */
+void Colloid_triggerVoiceLegato(ColloidVoice *voice, uint8_t source_slot,
+                                uint8_t velocity, uint8_t note,
+                                uint32_t stepSamples);
+```
+
+The 64 host-test calls in `tools/dsp_test/modules/colloid.c` keep compiling unchanged.
+
+### L-7 — `Core/DSP/Instruments/InstrumentManager.c:3338–3341`, `:3405–3419` — **Modify** (`instrumentManager_triggerTrack()`)
+
+At the top of the body:
+
+```c
+    /*
+     * S106 P1: the legato flag rides in the layers byte (VC_TRIGGER_LEGATO,
+     * MidiVoiceControl.h). It is stripped here, so a Tetrakt still sees its
+     * layer mask (0 = lon) unchanged, and only the Colloid case reads it.
+     */
+    const uint8_t legato = (uint8_t)((layers & VC_TRIGGER_LEGATO) != 0u);
+
+    layers = (uint8_t)(layers & (uint8_t)~VC_TRIGGER_LEGATO);
+```
+
+The Colloid case:
+
+```c
+        if (legato && reset)
+            Colloid_triggerVoiceLegato(instrumentManager_colloidRuntime(slot), slot,
+                                       velocity, note,
+                                       seq_trackStepSamples(trigger_track));
+        else
+            Colloid_triggerVoice(instrumentManager_colloidRuntime(slot), slot,
+                                 velocity, note, seq_trackStepSamples(trigger_track),
+                                 reset);
+```
+
+**Gate (§11.2):** this function is inlined into the render loop's trigger drain
+(`MidiVoiceControl.c:117–131`, the S102 note). The loop gates must stay exact. If a
+register moves, keep the strip and branch in a `noinline` helper.
+
+### L-8 — `InstrumentManager.c:415`, `:3014–3021`, `:3548` — **Add** (the sustain hold request)
+
+After `instrumentManager_gateRelease[]`:
+
+```c
+/*
+ * Per-slot sustain hold request (S106 P1; plan G36; RAM +6 B SRAM1, row L).
+ *
+ * What: 0 none, else trigger track + 1: the slot's Colloid must not enter
+ * release during the current step. Written by TIM3 at a `sus`/`l+s` step
+ * (instrumentManager_requestGateHold()); consumed in
+ * instrumentManager_calcSlotAsync() before the release request: the gate is
+ * renewed to the track's step length + 64 samples (two blocks, schedule
+ * SD8), and a pending non-forced release (1) is dropped; a forced one (2)
+ * still acts. Only a Colloid slot acts; other types clear it unread.
+ */
+static volatile uint8_t instrumentManager_gateHold[INSTRUMENT_SLOT_COUNT];
+```
+
+In `instrumentManager_calcSlotAsync()`, before `if (instrumentManager_gateRelease[slot]) {`
+(`:3014`):
+
+```c
+    if (instrumentManager_gateHold[slot]) {
+        const uint8_t t = (uint8_t)(instrumentManager_gateHold[slot] - 1u);
+
+        instrumentManager_gateHold[slot] = 0u;
+        if (instrumentManager_typeEngine(instrumentManager_slotType(slot)) ==
+            INSTRUMENT_TYPE_COL) {
+            if (instrumentManager_gateRelease[slot] == 1u)
+                instrumentManager_gateRelease[slot] = 0u;
+            Colloid_gateRenew(instrumentManager_colloidRuntime(slot),
+                              seq_trackStepSamples(t) + 2u * OUTPUT_DMA_SIZE);
+        }
+    }
+```
+
+After `instrumentManager_requestGateRelease()`:
+
+```c
+void instrumentManager_requestGateHold(uint8_t trigger_track)
+{
+    uint8_t slot;
+
+    if (trigger_track > INSTRUMENT_SLOT_COUNT)
+        return;
+    slot = (trigger_track >= INSTRUMENT_SLOT_COUNT)
+        ? (uint8_t)(INSTRUMENT_SLOT_COUNT - 1u) : trigger_track;
+    instrumentManager_gateHold[slot] = (uint8_t)(trigger_track + 1u);
+}
+```
+
+Clear the hold beside the two release-request resets (`:2140`, `:2586`). Declare it in
+`InstrumentManager.h` beside `instrumentManager_requestGateRelease()` (`:1185`):
+
+```c
+/* S106 P1: no release during this step (a `sus` step); any context. */
+void instrumentManager_requestGateHold(uint8_t trigger_track);
+```
+
+### L-9 — `InstrumentManager.c` after `instrumentManager_renewGate()` (`:3562`) — **Add** (the stage test)
+
+```c
+/*
+ * Is the slot's Colloid note sounding before release? (S106 P1; plan G40)
+ *
+ * What: 1 when the slot holds a Colloid whose amp envelope is in attack,
+ * decay or sustain (COL_EG_ATTACK..COL_EG_SUSTAIN, ColloidVoice.h:261-265);
+ * 0 in release, idle, or for any other type. Why: live record writes `leg`
+ * only on a note that is not releasing. Context: foreground; the stage is
+ * one byte written in the render context, so the read is atomic.
+ */
+uint8_t instrumentManager_colloidNoteHeld(uint8_t slot)
+{
+    uint8_t stage;
+
+    if (slot >= INSTRUMENT_SLOT_COUNT ||
+        instrumentManager_typeEngine(instrumentManager_slotType(slot)) !=
+            INSTRUMENT_TYPE_COL)
+        return 0u;
+    stage = instrumentManager_colloidRuntime(slot)->ampEg.stage;
+    return (uint8_t)(stage >= COL_EG_ATTACK && stage <= COL_EG_SUSTAIN);
+}
+```
+
+Declare it in `InstrumentManager.h`.
+
+### L-10 — `MidiNoteModes.c:111` and `:643–664` — **Add / Modify** (normal-mode held state; the `leg` rule)
+
+After `static uint8_t midiNoteMode_epoch;`:
+
+```c
+/*
+ * Normal-mode held keys and the legato candidate (S106 P1; plan G40;
+ * RAM +14 B SRAM1, row L).
+ *
+ * midiNoteMode_held[t]: keys held on track t in MNM_NORMAL (MIDI and the
+ * chromatic keyboard's single keys both arrive here). midiNoteMode_legPend[t]:
+ * 0xFF none, else the step a note-on arrived on while other keys were held
+ * and the track's Colloid was sounding before release. A release on that
+ * same step marks the recorded hit `leg` (liveRec_markLegato()). The decision
+ * waits for the release because legato playing releases the old key just
+ * after pressing the new one.
+ */
+static uint8_t midiNoteMode_held[7];
+static uint8_t midiNoteMode_legPend[7];
+```
+
+`midiNoteMode_init()` clears `held[]` to 0 and `legPend[]` to `0xFF`.
+
+The NORMAL branch of `midiNoteMode_noteOn()` (`:643–651`):
+
+```c
+    /*
+     * NORMAL (S096 P3: the S083 single trigger, moved here unchanged).
+     * S106 P1 (G40): on a Colloid track, a note-on while other keys are held
+     * and the note is sounding before release (read before this trigger)
+     * becomes a legato candidate for this step.
+     */
+    {
+        const uint8_t slot = midiNoteMode_slotOf(track);
+        seq_track_time_t snap;
+
+        midiNoteMode_legPend[track] = 0xFFu;
+        if (midiNoteMode_held[track] > 0u &&
+            instrumentManager_colloidNoteHeld(slot)) {
+            seq_captureTrackTime(track, &snap);
+            midiNoteMode_legPend[track] = (uint8_t)snap.stepIndex;
+        }
+        if (midiNoteMode_held[track] < 0xFFu)
+            midiNoteMode_held[track]++;
+    }
+    seq_triggerVoice(track, vel, internal, 1u);
+    liveRec_triggerIn(&lr);
+```
+
+The NORMAL tail of `midiNoteMode_noteOff()`:
+
+```c
+    /*
+     * NORMAL and LAYER4: a note-off still ends an overlay roll (handled by
+     * MidiNotes before this call); a single trigger ignores it.
+     * S106 P1 (G40): a release on the step of a legato candidate marks the
+     * recorded hit `leg`.
+     */
+    if (track < 7u) {
+        seq_track_time_t snap;
+
+        if (midiNoteMode_held[track] > 0u)
+            midiNoteMode_held[track]--;
+        if (midiNoteMode_legPend[track] != 0xFFu) {
+            seq_captureTrackTime(track, &snap);
+            if ((uint8_t)snap.stepIndex == midiNoteMode_legPend[track])
+                liveRec_markLegato(track);
+            midiNoteMode_legPend[track] = 0xFFu;
+        }
+    }
+    return 1u;
+```
+
+### L-11 — `Core/Sequencer/LiveRecord.c:69`, `:365`, `:1208–1216` — **Add** (the last hit's step)
+
+After `static uint8_t liveRec_target = 0u;`:
+
+```c
+/*
+ * The step each track's last recorded hit was placed on (S106 P1; plan G40;
+ * RAM +7 B SRAM1, row L). 0xFF = none in this take. Writer:
+ * liveRec_commitHit(); reader: liveRec_markLegato(); reset by
+ * liveRec_newTake().
+ */
+static uint8_t liveRec_lastHitStep[NUM_TRACKS];
+```
+
+`liveRec_newTake()` (`:365`) adds `memset(liveRec_lastHitStep, 0xFF, sizeof(liveRec_lastHitStep));`.
+
+`liveRec_commitHit()`, after a successful `liveRec_writeStep(...)`:
+
+```c
+    liveRec_lastHitStep[track] = pl->step;   /* S106 P1 */
+```
+
+### L-12 — `LiveRecord.c` after `liveRec_commitHit()` and `LiveRecord.h:125` — **Add** (`liveRec_markLegato()`)
+
+```c
+/*
+ * Mark the track's last recorded hit legato (S106 P1; plan G40).
+ *
+ * What: while live record writes the Pattern, the step of the track's last
+ * recorded hit gets roll `leg`, or `l+s` when it already holds a menu-set
+ * `sus`. A step with a roll rate keeps its rate. Why: MidiNoteModes decided
+ * (at the release) that the hit was a legato note-on on a sounding Colloid
+ * note. Recording never writes `sus` (FQ8). Inputs: track. Output: one
+ * patSvc_setStepRoll() write. Context: foreground (MIDI dispatch).
+ */
+void liveRec_markLegato(uint8_t track)
+{
+    uint8_t step;
+    pat_step_specials_t sp;
+
+    if (track >= NUM_TRACKS || !liveRec_patternWriting() ||
+        liveRec_lastHitStep[track] >= NUM_STEPS)
+        return;
+    step = liveRec_lastHitStep[track];
+    sp = pat_readStepSpecials(liveRec_target, track, step);
+    if (SEQ_ROLL_IS_RATE(sp.roll))
+        return;
+    (void)patSvc_setStepRoll(liveRec_target, track, step,
+                             (sp.roll == SEQ_ROLL_SUS) ? SEQ_ROLL_LSUS
+                                                       : SEQ_ROLL_LEG);
+}
+```
+
+Header:
+
+```c
+/* S106 P1: mark the track's last recorded hit `leg` (MidiNoteModes, G40). */
+void    liveRec_markLegato(uint8_t track);
+```
+
+### L-13 — Paraphonic recording — **No change** (verified; FQ8)
+
+`liveRec_writeHitAutomation()` (`LiveRecord.c:1171`) and the paraphonic `col_sustain` queue
+(`MidiNoteModes.c:288`, `midiNoteMode_queueSus()`) are unchanged. Nothing in this schedule
+writes `sus` from any recording.
+
+### L-14 — host tests — **Modify / Add**
+
+- `tools/dsp_test/modules/colloid.c`: three new laws on `Colloid_triggerVoiceLegato()`.
+  - **CL-LEG1:** the stages are unchanged in A/D/S.
+  - **CL-LEG2:** the stages are unchanged in release.
+  - **CL-LEG3:** note, gate and velocity are set as for a first hit.
+  - **Break proof:** forcing the stage writes fails CL-LEG1.
+- `tools/midi_test/notemode_test.c`: three new laws.
+  - **NM-LEG1:** a press while another key is held and the voice is sounding, then a
+    release on the same step, marks `leg`.
+  - **NM-LEG2:** the release on a later step marks nothing.
+  - **NM-LEG3:** a voice in release marks nothing.
+- `seq_rolltypes` (K-6) adds two laws.
+  - **RT-SUS:** a `sus` step opens no length window and requests a hold.
+  - **RT-LEG:** a `leg` step enqueues a trigger with `VC_TRIGGER_LEGATO`.
+
+---
+
+## 10. The commit job (plan §5.5, G31, G42, G43)
+
+### C-1 — `Core/Menu/CopyClear/copyClearService.h:27–30`, `:127` — **Add** (the job class)
+
+```c
+#define CC_JOB_PASTE      0x10u
+#define CC_JOB_CLEAR      0x20u
+/*
+ * S106 P1: rewrite one track's Pattern from its generator (the `cmt` cell,
+ * plan §5.5). kind = CC_KIND_TRACK, scene = the track's played Scene,
+ * track = the track. Executor: ccSvc_runGeneratorCommit().
+ */
+#define CC_JOB_GEN_COMMIT 0x30u
+```
+
+and after `ccSvc_runRegionReset()`:
+
+```c
+/* S106 P1: the generator commit executor (bounded; DONE/WAIT/DROP). */
+uint8_t ccSvc_runGeneratorCommit(const cc_job_t *job);
+```
+
+### C-2 — `copyClearService.c` after `ccSvc_runPatternClear()` (ends `:1086`), and `:1683–1684` — **Add / Modify**
+
+Dispatch in `ccSvc_tick()`:
+
+```c
+            switch (job->op & CC_JOB_CLASS_MASK) {
+            case CC_JOB_PASTE:      r = ccCopy_runJob(job); break;
+            /* S106 P1: the generator commit runs in the same service, holding
+             * the raw block API exclusively like every Pattern job. */
+            case CC_JOB_GEN_COMMIT: r = ccSvc_runGeneratorCommit(job); break;
+            default:                r = ccClear_runJob(job); break;
+            }
+```
+
+In the same function's DROP handling, and in `ccSvc_dropQueued()` for every dropped
+queue entry, **Add**:
+
+```c
+            /* S106 P1: a dropped commit unfreezes its track. */
+            if ((job->op & CC_JOB_CLASS_MASK) == CC_JOB_GEN_COMMIT)
+                gen_commitEnd(job->track, job->scene, 0u);
+```
+
+The executor:
+
+```c
+/*
+ * Rewrite one track from its generator (S106 P1; plan §5.5, G31, G42, G43).
+ *
+ * What, in the paste engine's phases:
+ *  sub 0: CLAIM + EVACUATE (ccSvc_claimAndEvacuate());
+ *  sub 1: CHECK - for every step, the new block's chunks against the live
+ *         block's, against pat_rawFreeChunks(); no room refuses the whole
+ *         commit before anything changes (FQ4);
+ *  sub 2: PLACE - each step's block from gen_commitBuildStep(): the built
+ *         trigger, the type's specials (as built: the last random roll is
+ *         fixed data), the specials the type passes through kept from the
+ *         Pattern step, every other special cleared, and the step's
+ *         automation kept when `ato` is on, removed when it is off; growing
+ *         steps use pat_rawPlace() with compaction, shrinking ones
+ *         ccSvc_rewriteShrink();
+ *  sub 3: FINISH - gen_commitEnd(..., 1) sets the track's generator off
+ *         (G42), release, UI refresh.
+ * Why: one bounded, publication-safe rewrite through the copy/clear service
+ * (MEMORY.md: copy/clear holds the raw block API exclusively). The track is
+ * frozen from request to end (schedule SD10), so its own Pattern writes do
+ * not rebuild the store it reads.
+ * Inputs: the queue-head job. Outputs: the rewritten Pattern track; the
+ * generator off. Returns DONE / WAIT / DROP.
+ */
+uint8_t ccSvc_runGeneratorCommit(const cc_job_t *job)
+{
+    cc_run_t *run = &ccSvc_runState;
+    uint8_t block[PAT_RAW_BLOCK_MAX];
+    uint8_t n;
+
+    switch (run->sub) {
+    case 0u: {
+        const uint8_t r = ccSvc_claimAndEvacuate(job->scene);
+
+        if (r != CC_RUN_DONE)
+            return r;
+        if (!gen_commitStillValid(job->track, job->scene)) {
+            ccSvc_release();
+            gen_commitEnd(job->track, job->scene, 0u);
+            return CC_RUN_DROP;
+        }
+        run->cursor = 0u;
+        run->aux = pat_rawFreeChunks(job->scene);
+        run->sub = 1u;
+        return CC_RUN_WAIT; }
+    case 1u: /* CHECK */
+        for (n = 0u; n < CC_SNAPSHOT_PER_TICK && run->cursor < NUM_STEPS; n++) {
+            uint8_t mode;
+            uint8_t live[PAT_RAW_BLOCK_MAX];
+            uint16_t entry;
+            const uint8_t step = (uint8_t)run->cursor++;
+            const uint8_t new_c = (uint8_t)(gen_commitBuildStep(
+                job->track, step, job->scene, block, &mode) / 4u);
+            const uint8_t old_c = (uint8_t)(pat_rawReadBlock(
+                job->scene, job->track, step, live, &entry) / 4u);
+
+            if (new_c > old_c) {
+                if (run->aux < new_c) {
+                    ccSvc_traceDropReason(AUTOSAVE_TRACE_CC_DROP_NO_ROOM, step);
+                    ccSvc_release();
+                    gen_commitEnd(job->track, job->scene, 0u);
+                    return CC_RUN_DROP;
+                }
+                run->aux = (uint16_t)(run->aux - new_c + old_c);
+            } else {
+                run->aux = (uint16_t)(run->aux + old_c - new_c);
+            }
+        }
+        if (run->cursor < NUM_STEPS)
+            return CC_RUN_WAIT;
+        run->sub = 2u;
+        run->cursor = 0u;
+        run->aux = 0u;
+        return CC_RUN_WAIT;
+    case 2u: /* PLACE */
+        for (n = 0u; n < CC_STEPS_PER_TICK && run->cursor < NUM_STEPS; n++) {
+            const uint8_t step = (uint8_t)run->cursor;
+            uint8_t mode;
+            uint8_t live[PAT_RAW_BLOCK_MAX];
+            uint16_t entry;
+            uint8_t bytes;
+            uint8_t old_bytes;
+
+            if ((run->aux & 1u) != 0u) {
+                if (ccSvc_swapReturnPending(job->scene, job->track, step) ==
+                    CC_RUN_WAIT)
+                    return CC_RUN_WAIT;
+                run->cursor++;
+                continue;
+            }
+            bytes = gen_commitBuildStep(job->track, step, job->scene, block,
+                                        &mode);
+            old_bytes = pat_rawReadBlock(job->scene, job->track, step, live,
+                                         &entry);
+            if (bytes > old_bytes) {
+                if (pat_rawPlace(job->scene, job->track, step, block, mode)) {
+                    run->cursor++;
+                    continue;
+                }
+                if (patSvc_exclusiveCompactStep(job->scene))
+                    return CC_RUN_WAIT;
+                ccTrace_anomaly(AUTOSAVE_TRACE_CC_ANOM_GROW_UNPLACEABLE,
+                                job->scene, job->track, step,
+                                (uint8_t)(bytes / 4u));
+                run->cursor++;
+                continue;
+            }
+            if (ccSvc_rewriteShrink(job->scene, job->track, step, block, bytes,
+                                    mode) == CC_RUN_WAIT)
+                return CC_RUN_WAIT;
+            run->cursor++;
+        }
+        if (run->cursor < NUM_STEPS)
+            return CC_RUN_WAIT;
+        run->sub = 3u;
+        return CC_RUN_WAIT;
+    default: /* FINISH */
+        gen_commitEnd(job->track, job->scene, 1u);
+        ccSvc_release();
+        ccSvc_patternChangedUi(job->scene, job->track);
+        return CC_RUN_DONE;
+    }
+}
+```
+
+`ccSvc_patternChangedUi()` (`:218–232`) repaints the STEP row only in VOICE/STEP mode.
+**Add** the Generator mode:
+
+```c
+    /* S106 P1: the Generator page repaints its output row. */
+    if (mode == SELECT_MODE_GEN)
+        menu_generatorRefreshLeds();
+```
+
+Add `#include "GeneratorEngine.h"` to `copyClearService.c`.
+
+### C-3 — `GeneratorEngine.c` — **Modify / Add** (replace the step-6 stubs with the commit functions)
+
+```c
+/*
+ * The generator commit (S106 P1; plan §5.5).
+ *
+ * gen_requestCommit(): refuses unless `scene` is the track's played Scene
+ *   and the active Scene (schedule SD2), the track's generator is on, ready,
+ *   not passing through and not held live (FQ2), and no commit is running;
+ *   then freezes the track (no rebuild, SD10) and queues the copy/clear job.
+ *   Returns 1 when queued.
+ * gen_commitStillValid(): the same tests at the job's start (a type change
+ *   or a Scene switch may have happened while the job was queued).
+ * gen_commitBuildStep(): one step's new block: trigger = the built bit;
+ *   specials = the built slots (after the type's commitStep()), skipping a
+ *   slot equal to its default (note 63, velocity 100, fill 100, condition
+ *   0); passthrough specials from the Pattern step; automation kept when
+ *   `ato` is on (G43). Returns the block bytes (0 = empty) and the trigger
+ *   mode.
+ * gen_commitEnd(): ok sets the generator off (G42) and requests the track;
+ *   always unfreezes.
+ * Context: foreground (the menu, the copy/clear service).
+ */
+uint8_t gen_requestCommit(uint8_t track, uint8_t scene)
+{
+    const uint8_t bit = (uint8_t)(1u << track);
+    cc_job_t job;
+
+    if (track >= NUM_TRACKS || gen_freezeMask != 0u ||
+        scene != scene_getActiveIndex() ||
+        !gen_commitStillValid(track, scene))
+        return 0u;
+    memset(&job, 0, sizeof(job));
+    job.op = CC_JOB_GEN_COMMIT;
+    job.kind = CC_KIND_TRACK;
+    job.scene = scene;
+    job.track = track;
+    gen_freezeMask |= bit;
+    if (ccSvc_enqueue(&job) == 0u) {
+        gen_freezeMask &= (uint8_t)~bit;
+        return 0u;
+    }
+    return 1u;
+}
+
+uint8_t gen_commitRunning(void)
+{
+    return (uint8_t)(gen_freezeMask != 0u);
+}
+
+uint8_t gen_commitStillValid(uint8_t track, uint8_t scene)
+{
+    const uint8_t bit = (uint8_t)(1u << track);
+
+    return (uint8_t)(track < NUM_TRACKS &&
+                     seq_getTrackPlayedScene(track) == scene &&
+                     (gen_activeMask & bit) != 0u &&
+                     (gen_readyMask & bit) != 0u &&
+                     (gen_passMask & bit) == 0u &&
+                     (gen_liveMask & bit) == 0u);
+}
+
+uint8_t gen_commitBuildStep(uint8_t track, uint8_t step, uint8_t scene,
+                            uint8_t out[PAT_RAW_BLOCK_MAX],
+                            uint8_t *trigger_mode)
+{
+    const gen_type_desc_t *d = gen_typeDesc(gen_builtType[track]);
+    const uint8_t on = (uint8_t)((gen_trig[track][step >> 3u] >> (step & 7u)) & 1u);
+    pat_step_specials_t live;
+    pat_step_specials_t sp;
+    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+    uint8_t block[PAT_RAW_BLOCK_MAX];
+    uint8_t spec[GEN_SPECIAL_SLOTS];
+    uint16_t entry;
+    uint8_t count = 0u;
+    uint8_t k;
+
+    memset(&live, 0, sizeof(live));
+    if (pat_rawReadBlock(scene, track, step, block, &entry) != 0u)
+        count = pat_rawDecode(block, &live, autos, PAT_BLOCK_AUTO_COUNT_MASK);
+    if (!scene_getGenAto(scene, track))
+        count = 0u;                                /* G43: blank automation */
+    (void)gen_readStep(track, step, 0u, &sp);     /* defaults + built slots */
+    sp.flags = 0u;
+    if (on) {
+        memcpy(spec, gen_spec[track][step], GEN_SPECIAL_SLOTS);
+        if (d->commitStep)
+            d->commitStep(step, spec);
+        for (k = 0u; k < GEN_SPECIAL_SLOTS; k++) {
+            const uint8_t b = d->special_bit[k];
+            const uint8_t v = spec[k];
+            const uint8_t isDefault =
+                (b == PAT_SPECIAL_NOTE_BIT && v == PAT_DEFAULT_NOTE) ||
+                (b == PAT_SPECIAL_VEL_BIT && v == PAT_DEFAULT_VELOCITY) ||
+                (b == PAT_SPECIAL_FILL_BIT && v >= 100u) ||
+                (b == PAT_SPECIAL_COND_BIT && v == 0u);
+
+            gen_applySpecial(&sp, b, v);
+            if (isDefault)
+                sp.flags &= (uint8_t)~b;
+        }
+    }
+    /* Passthrough specials keep the Pattern step's values (G43). */
+    if (d->passthrough_bits & live.flags & PAT_SPECIAL_ROLL_BIT)   sp.roll = live.roll;
+    if (d->passthrough_bits & live.flags & PAT_SPECIAL_TIMING_BIT) sp.timing = live.timing;
+    if (d->passthrough_bits & live.flags & PAT_SPECIAL_RHYTHM_BIT) sp.rhythm = live.rhythm;
+    sp.flags |= (uint8_t)(d->passthrough_bits & live.flags);
+    *trigger_mode = on ? PAT_RAW_TRIGGER_ON : PAT_RAW_TRIGGER_OFF;
+    if (sp.flags == 0u && count == 0u)
+        return 0u;
+    return pat_rawEncode(out, sp.flags, &sp, autos, count);
+}
+
+void gen_commitEnd(uint8_t track, uint8_t scene, uint8_t ok)
+{
+    if (track >= NUM_TRACKS)
+        return;
+    if (ok)
+        scene_setGenType(scene, track, GEN_TYPE_OFF);   /* G42 */
+    gen_freezeMask &= (uint8_t)~(1u << track);
+    gen_requestMask |= (uint8_t)(1u << track);
+}
+```
+
+Add `#include "copyClearService.h"` and `#include "copyClearSession.h"` (for
+`CC_KIND_TRACK`) to `GeneratorEngine.c`. `gen_applySpecial()` is the static from G-2.
+
+`GeneratorEngine.h` gains:
+
+```c
+uint8_t gen_commitStillValid(uint8_t track, uint8_t scene);
+uint8_t gen_commitBuildStep(uint8_t track, uint8_t step, uint8_t scene,
+                            uint8_t out[PAT_RAW_BLOCK_MAX],
+                            uint8_t *trigger_mode);
+void gen_commitEnd(uint8_t track, uint8_t scene, uint8_t ok);
+```
+
+### C-4 — `GeneratorEngine.c` `gen_rebuildTrack()` — **No change** (verified)
+
+The freeze test is already in G-2 (`if ((gen_freezeMask & bit) != 0u) return;`).
+
+### C-5 — `CC_KIND_TRACK` — **No change** (verified)
+
+`CC_KIND_TRACK` is defined in `copyClearSession.h:59`. `copyClearService.h:24` includes
+that header, so `GeneratorEngine.c` needs only `#include "copyClearService.h"` (drop the
+separate `copyClearSession.h` include named in C-3).
+
+### C-6 — host test `gen_commit` — **Add** (`tools/dsp_test/modules/gen_commit.c`)
+
+Built over the host PatternData/PatternStackService fakes the copy/clear tests use.
+
+Laws:
+- **GC-1:** after a commit, `pat_isStepActive()` and `pat_readStepSpecials()` on every step
+  equal what `gen_readStep()` played before the commit.
+- **GC-2:** with `ato` on, every step's automation entries are kept.
+- **GC-3:** with `ato` off, none remain.
+- **GC-4:** roll, timing and rhythm are cleared (the arp passes none).
+- **GC-5:** the type is off afterwards.
+- **GC-6:** a pool with too little room drops the job with the Pattern unchanged.
+- **GC-7:** a commit requested with the active Scene not the played Scene is refused.
+
+Break proof: skipping the CHECK phase fails GC-6 (a partial rewrite).
+
+---
+
+## 11. Gates and host tests
+
+### 11.1 Host tests (each step's own laws; all added to `tools/dsp_test/Makefile` `all`)
+
+| Test | Step | Laws |
+|---|---|---|
+| `seq_scenemask` (new) | 1 | **SM-1:** dirty bit set and restored for index 41 and 62. **SM-2:** `seq_clearSceneAutomationBit(41)` clears it. **Break:** the 32-bit mask fails SM-1. |
+| `scene_targets` (new) | 2 | **ST-1:** 63 rows, lanes at 35..62, `sceneModTarget_genLaneId(t, l) == 419 + 4t + l`. **ST-2:** no SHUFFLE row. **ST-3:** `menu_seqCellToTrackTarget(2, t)` is invalid. |
+| `autosave_layout` (existing suite + new laws) | 3 | **AS-1:** the static asserts compile. **AS-2:** a getter/apply round trip of cells 76..166. **AS-3:** a version-3 record is rejected. |
+| `gen_engine` (new) | 4 | **GE-1:** off everywhere = no routed read. **GE-2:** a switch clears ready and the step does not fire until `gen_buildNow()` (G10). **GE-3:** a Pattern edit keeps ready and rebuilds within one service pass (G11). **GE-4:** field get/set round trip, including the split fields. **GE-5:** field-wise Morph (ordered step, zero-off switch at 50 %). **GE-6:** `ato` off zeroes the automation count, pass-through included (FQ5). |
+| `gen_arp` (new) | 8 | **GA-1:** every direction × octave 0..3 × interval set matches a reference sequence (the plan's §6.4 rules; u-d turns not repeated). **GA-2:** window cut by the next input and wrapped at length. **GA-3:** `leg`/`sus` inputs keep the position. **GA-4:** condition = input's at k = 0, `lst` after. **GA-5:** all intervals off → pass. **GA-6:** live folding (d 13..36) and press-order limit 3. **GA-7:** velocity patterns never exceed the input. |
+| `notemode_test` (extend; `tools/midi_test/`) | 8, 9 | **NM-ARP1:** MNM_ARP precedence. **NM-ARP2:** no direct trigger. **NM-ARP3:** the input hit is reported. **NM-LEG1..3** (L-14). `notemode_host.h` gains stubs for `scene_getGenType()`, `gen_passMask`, `arp_liveSet()`, `arp_liveRelease()`, `instrumentManager_colloidNoteHeld()`, `seq_captureTrackTime()` and `liveRec_markLegato()`. |
+| `seq_rolltypes` (new) | 7, 9 | K-6, L-14 |
+| `colloid` (extend) | 9 | CL-LEG1..3 |
+| `gen_commit` (new) | 10 | C-6 |
+
+### 11.2 ELF gates (after every step; B-1 baselines)
+
+| Gate | Expectation |
+|---|---|
+| `elf_p4_check P4BASE=baselines/s106p1/p4base` | Every oscillator and mixer loop exact at every step |
+| `elf_s099_check S099BASE=baselines/s106p1/engines` | Engine loops exact. Step 9 changes `Colloid_triggerVoice` (now a wrapper), which is not in the S099 list; `Colloid_calcVoiceAsync` must stay exact. |
+| `elf_symdump.py --compare` (`isr.txt`) | `TIM3_IRQHandler`: changes at steps 1, 5, 7, 9 only (the routed reads, the rate tests, the hold). `audio_check_and_render`, `voiceControl_processPending`: changes at step 9 only (the legato strip); otherwise exact. `mixer_calcNextSampleBlock`: exact at every step. |
+| `link_budget.py` | SRAM1 within §0.3; flash Est. +10..14 KB against 42,884 B headroom; ITCM unchanged (no ITCM code) |
+
+### 11.3 Device checks (for you, after step 10)
+
+- SHIFT+MODE STEP opens the page and MODE3 blinks.
+- `gen` click-in shows `Generatr Type` / `Arpegtr arp`; click-out commits and the cells
+  appear; `off` shows `gen` only.
+- With all intervals `off` the track plays its Pattern. `in1` = `0` (root) plays the arp
+  of every active step.
+- A Scene switch plays the arp from the first step, with none silent.
+- Holding SEQ steps and turning `in1`: the automation underlines, and the arp follows on
+  playback.
+- With `ato` off, the track's own automation (voice parameters) stops; a lane automated
+  from another track still applies.
+- A MIDI chord on the track plays one note per step; release returns to the Pattern arp.
+- On a Colloid track, `leg` and `sus` steps sound as specified, and legato playing
+  records `leg`.
+- `cmt` → `ok` rewrites the track and sets the generator off; playback is identical.
+
+---
+
+## 12. Statements made out of date (for you to act on)
+
+The plan's §11 list stands. In addition:
+- `MIDI_SPEC.md`:
+  - Learn rows `scn,<lane>,<type>:<field>` (schedule SD6);
+  - `MNM_ARP` records input hits (SD4);
+  - the STEP `shu` cell has no MIDI address (SD3).
+- `MENU_UI_SPEC.md`:
+  - the Generator page's SELECT 1/2 layout (SD1);
+  - SHIFT+SELECT selects the viewed bar in mode 6;
+  - SEQ press in mode 6 never toggles a step.
+- `PATTERN_DYNAMIC_STACK.md` §6.1:
+  - the step read is `seq_stepRead()`;
+  - `ato` gates `seq_queueStepAutomations()`;
+  - the roll value classes (`SEQ_ROLL_IS_RATE()`).
+- `COLLOID_MODULE_REFERENCE.md`:
+  - `Colloid_triggerVoiceLegato()`;
+  - the sustain hold (`instrumentManager_gateHold[]`, +64 samples, SD8).
+- `STORAGE_SRAM_MANIFEST.md`: the §0.3 rows, including the five new objects.
+- `MEMORY.md` §Sequencer/Timing: the F1 fix (the Scene restore bitmap is 64-bit).
